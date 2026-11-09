@@ -1,0 +1,6 @@
+approval_decided {
+  approval_id: "01JC0V0000000000000000APR1"
+  state: APPROVAL_STATE_APPROVED
+  decider: APPROVAL_DECIDER_USER
+  remember: REMEMBER_SCOPE_FOREVER
+}

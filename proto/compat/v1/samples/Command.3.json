@@ -1,0 +1,13 @@
+{
+  "commandId": "01JC0K0000000000000000CMD3",
+  "setApprovalMode": {
+    "target": {
+      "member": {
+        "conversationId": "01JC0C0000000000000000CNV1",
+        "assistantId": "01JC0A0000000000000000AST1"
+      }
+    },
+    "mode": "APPROVAL_MODE_MANUAL",
+    "followSupervisor": true
+  }
+}

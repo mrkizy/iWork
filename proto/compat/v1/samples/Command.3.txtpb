@@ -1,0 +1,11 @@
+command_id: "01JC0K0000000000000000CMD3"
+set_approval_mode {
+  target {
+    member {
+      conversation_id: "01JC0C0000000000000000CNV1"
+      assistant_id: "01JC0A0000000000000000AST1"
+    }
+  }
+  mode: APPROVAL_MODE_MANUAL
+  follow_supervisor: true
+}

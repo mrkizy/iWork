@@ -1,0 +1,19 @@
+quota_observed {
+  runtime_id: "01JC0X0000000000000000RTM1"
+  windows: [{
+    window: "five_hour"
+    used_pct: 38
+    resets_at {
+      seconds: 1762010000
+      nanos: 123000000
+    }
+    observed_at {
+      seconds: 1762001200
+      nanos: 123000000
+    }
+  }]
+  observed_at {
+    seconds: 1762001200
+    nanos: 123000000
+  }
+}

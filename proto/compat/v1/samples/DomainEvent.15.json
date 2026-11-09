@@ -1,0 +1,16 @@
+{
+  "conversationCreated": {
+    "conversation": {
+      "id": "01JC0C0000000000000000CNV1",
+      "assistantDm": {
+        "assistantId": "01JC0A0000000000000000AST1",
+        "contextProjectId": "01JC0P0000000000000000PRJ1"
+      },
+      "state": "CONVERSATION_STATE_DELETING",
+      "lastReadSeq": "7",
+      "unread": 1,
+      "approvalMode": "APPROVAL_MODE_MANUAL",
+      "updatedAt": "2025-11-01T12:31:40.123Z"
+    }
+  }
+}

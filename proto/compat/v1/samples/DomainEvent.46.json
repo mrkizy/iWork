@@ -1,0 +1,14 @@
+{
+  "quotaObserved": {
+    "runtimeId": "01JC0X0000000000000000RTM1",
+    "windows": [
+      {
+        "window": "five_hour",
+        "usedPct": 38,
+        "resetsAt": "2025-11-01T15:13:20.123Z",
+        "observedAt": "2025-11-01T12:46:40.123Z"
+      }
+    ],
+    "observedAt": "2025-11-01T12:46:40.123Z"
+  }
+}

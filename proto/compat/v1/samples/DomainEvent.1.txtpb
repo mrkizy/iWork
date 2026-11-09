@@ -1,0 +1,31 @@
+project_added {
+  project {
+    id: "01JC0P0000000000000000PRJ1"
+    root_path: "/Users/me/code/iwork"
+    vcs_kind: "vcs-a"
+    name: "iwork"
+    pinned: true
+    last_active_at {
+      seconds: 1762000000
+      nanos: 123000000
+    }
+    path_status: PATH_STATUS_OK
+    settings {
+      default_approval_mode: APPROVAL_MODE_AUTO
+      default_model {
+        model_id: "opus"
+        effort: "high"
+      }
+      ai_review {
+        enabled: true
+        runtime_id: "01JC0X0000000000000000RTM1"
+        model {
+          model_id: "opus"
+          effort: "high"
+        }
+        timeout_secs: 60
+      }
+    }
+    unread: 3
+  }
+}

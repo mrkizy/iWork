@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "iWork",
+  "version": "0.1.0",
+  "identifier": "dev.iwork.client",
+  "build": {
+    "beforeBuildCommand": "node scripts/refuse-bare-build.ts",
+    "beforeBundleCommand": "node scripts/refuse-bare-build.ts"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "iWork",
+        "width": 800,
+        "height": 600
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

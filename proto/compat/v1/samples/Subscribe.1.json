@@ -1,0 +1,9 @@
+{
+  "subscriptionId": 3,
+  "scope": {
+    "conversation": {
+      "conversationId": "01JC0C0000000000000000CNV1"
+    }
+  },
+  "fromSeq": "900"
+}

@@ -1,0 +1,7 @@
+conversation_model_changed {
+  conversation_id: "01JC0C0000000000000000CNV1"
+  model {
+    model_id: "opus"
+    effort: "high"
+  }
+}

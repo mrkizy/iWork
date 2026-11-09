@@ -1,0 +1,15 @@
+tool_call_started {
+  turn_id: "01JC0T0000000000000000TRN1"
+  tool_call_id: "tool-1"
+  tool_name: "Edit"
+  action {
+    kind: ACTION_KIND_WRITE
+    target {
+      paths {
+        paths: ["/tmp/a.txt", "/tmp/b.txt"]
+      }
+    }
+    tool_name: "Edit"
+    raw_summary: "\346\224\271\344\270\244\344\270\252\346\226\207\344\273\266"
+  }
+}

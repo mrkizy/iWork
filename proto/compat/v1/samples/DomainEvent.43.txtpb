@@ -1,0 +1,22 @@
+attachment_stored {
+  attachment {
+    id: "01JC0F0000000000000000ATT1"
+    conversation_id: "01JC0C0000000000000000CNV1"
+    sha256: "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+    size: 1024
+    mime: "image/png"
+    name: "\346\210\252\345\233\276.png"
+    origin {
+      pasted {
+        sha256: "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+        area: ARTIFACT_AREA_ATTACHMENTS
+        size: 1024
+      }
+    }
+    needs_confirmation: true
+    created_at {
+      seconds: 1762001100
+      nanos: 123000000
+    }
+  }
+}

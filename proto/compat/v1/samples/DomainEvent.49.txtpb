@@ -1,0 +1,11 @@
+local_config_imported {
+  runtime_id: "01JC0X0000000000000000RTM1"
+  items: [{
+    id: "mcp:github"
+    kind: LOCAL_CONFIG_KIND_MCP
+    name: "github"
+    description: "GitHub MCP"
+    source: "~/.config/runtime-a/mcp.json"
+    imported: true
+  }]
+}

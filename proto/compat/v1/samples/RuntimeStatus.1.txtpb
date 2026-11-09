@@ -1,0 +1,16 @@
+runtime_id: "01JC0X0000000000000000RTM1"
+kind: "runtime-a"
+display_name: "Runtime A"
+cli_path: "/usr/local/bin/runtime-a"
+cli_version: "2.1.0"
+adapter_version: "0.1.0"
+state: RUNTIME_STATE_READY_VERIFIED
+login {
+  logged_in: true
+  auth_method: "oauth"
+  subscription_type: "max"
+  login_expires_at {
+    seconds: 1763000000
+    nanos: 123000000
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "messageAppended": {
+    "message": {
+      "id": "01JC0M0000000000000000MSG1",
+      "conversationId": "01JC0C0000000000000000CNV1",
+      "author": {
+        "assistant": {
+          "assistantId": "01JC0A0000000000000000AST1",
+          "nameSnapshot": "审查员"
+        }
+      },
+      "contextProjectId": "01JC0P0000000000000000PRJ1",
+      "status": "MESSAGE_STATUS_STREAMING",
+      "body": {
+        "inlineText": "正在看……"
+      },
+      "attachmentIds": [
+        "01JC0F0000000000000000ATT1"
+      ],
+      "createdAt": "2025-11-01T12:33:20.123Z",
+      "turnId": "01JC0T0000000000000000TRN1"
+    }
+  }
+}

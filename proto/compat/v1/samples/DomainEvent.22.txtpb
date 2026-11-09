@@ -1,0 +1,23 @@
+message_appended {
+  message {
+    id: "01JC0M0000000000000000MSG1"
+    conversation_id: "01JC0C0000000000000000CNV1"
+    author {
+      assistant {
+        assistant_id: "01JC0A0000000000000000AST1"
+        name_snapshot: "\345\256\241\346\237\245\345\221\230"
+      }
+    }
+    context_project_id: "01JC0P0000000000000000PRJ1"
+    status: MESSAGE_STATUS_STREAMING
+    body {
+      inline_text: "\346\255\243\345\234\250\347\234\213\342\200\246\342\200\246"
+    }
+    attachment_ids: ["01JC0F0000000000000000ATT1"]
+    created_at {
+      seconds: 1762000400
+      nanos: 123000000
+    }
+    turn_id: "01JC0T0000000000000000TRN1"
+  }
+}

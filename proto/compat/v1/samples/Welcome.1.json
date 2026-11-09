@@ -1,0 +1,11 @@
+{
+  "sessionId": "session-1",
+  "serverVersion": "0.1.0",
+  "capabilities": [
+    "resume",
+    "chunk-upload"
+  ],
+  "headSeq": "9007199254740993",
+  "protocolMajor": 1,
+  "protocolMinor": 2
+}

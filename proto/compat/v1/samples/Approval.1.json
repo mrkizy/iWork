@@ -1,0 +1,40 @@
+{
+  "id": "01JC0V0000000000000000APR1",
+  "turnId": "01JC0T0000000000000000TRN1",
+  "conversationId": "01JC0C0000000000000000CNV1",
+  "kind": "APPROVAL_KIND_OUTSIDE_SANDBOX",
+  "action": {
+    "kind": "ACTION_KIND_OUTSIDE_SANDBOX",
+    "target": {
+      "command": {
+        "program": "npm",
+        "subcommand": "publish",
+        "argv": [
+          "npm",
+          "publish",
+          "--access=public"
+        ]
+      }
+    },
+    "toolName": "Bash",
+    "rawSummary": "npm publish --access=public",
+    "outOfBounds": true,
+    "bypassSandboxRequested": true,
+    "opaqueScript": true
+  },
+  "matchedRuleIds": [
+    "01JC0R0000000000000000RXE1"
+  ],
+  "rulesetVersion": "2026.11.1",
+  "state": "APPROVAL_STATE_PENDING",
+  "review": "REVIEW_STATE_IN_PROGRESS",
+  "reviewReason": "等待审查",
+  "offeredRemember": [
+    "REMEMBER_SCOPE_ONCE",
+    "REMEMBER_SCOPE_PROJECT"
+  ],
+  "rememberLabel": "本项目内 `npm publish …` 不再问",
+  "requestedAt": "2025-11-01T12:38:20.123Z",
+  "decidedAt": "2025-11-01T12:40:00.123Z",
+  "reviewId": "01JC0V0000000000000000RVW1"
+}

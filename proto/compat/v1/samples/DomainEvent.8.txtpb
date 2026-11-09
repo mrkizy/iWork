@@ -1,0 +1,13 @@
+clone_finished {
+  job_id: "01JC0J0000000000000000JB01"
+  error {
+    code: ERROR_CODE_CLONE_FAILED
+    message: "\345\205\213\351\232\206\345\244\261\350\264\245"
+    retryable: true
+    details: [{
+      key: "path"
+      value: "/Users/me/code/x"
+    }]
+  }
+  path: "/Users/me/code/x"
+}

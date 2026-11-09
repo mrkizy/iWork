@@ -1,0 +1,328 @@
+// 命令：客户端 → 后台，改变状态。命令只返回受理结果与事件 seq，不返回状态（设计 3.4）。
+//
+// 兼容规则：字段只增不改号；删字段先 `reserved` 编号与名字（同一主版本内只标 deprecated 不删）；
+// 枚举值同理；不改 oneof 字段的类型。全文见 proto/compat/README.md，由 tests/compat.rs 检查。
+syntax = "proto3";
+
+package iwork.v1;
+
+import "iwork/v1/common.proto";
+import "iwork/v1/model.proto";
+
+// 命令信封。oneof 编号按功能分段：对话 10–29、审批 30–49、助手 50–69、项目 70–99、附件 100–109、
+// 亲手执行 110–119、规则与清单 120–139、运行时与导入 140–159、设置与进程 160–179。编号一经分配不动。
+message Command {
+  // ULID，客户端生成，幂等键：同一 command_id 重发返回旧结果（CommandAccepted.replayed）。
+  string command_id = 1;
+  oneof kind {
+    // 对话 10–29
+    SendMessage send_message = 10;
+    CancelTurn cancel_turn = 11;
+    CancelAll cancel_all = 12;
+    ResumeTurn resume_turn = 13;
+    AbandonTurn abandon_turn = 14;
+    SetConversationModel set_conversation_model = 15;
+    MarkRead mark_read = 16;
+    SwitchDmProject switch_dm_project = 17;
+    DeleteConversation delete_conversation = 18;
+    CreateConversation create_conversation = 19;
+
+    // 审批 30–49
+    DecideApproval decide_approval = 30;
+    SetApprovalMode set_approval_mode = 31;
+
+    // 助手 50–69
+    CreateAssistant create_assistant = 50;
+    UpdateAssistant update_assistant = 51;
+    DeleteAssistant delete_assistant = 52;
+    ResetAssistant reset_assistant = 53;
+
+    // 项目 70–99
+    AddProject add_project = 70;
+    CreateProject create_project = 71;
+    InitRepository init_repository = 72;
+    CloneRepository clone_repository = 73;
+    SetProjectsRoot set_projects_root = 74;
+    RelocateProject relocate_project = 75;
+    PinProject pin_project = 76;
+    RemoveProject remove_project = 77;
+    ConfirmAgentsMdDraft confirm_agents_md_draft = 78;
+    UpdateProjectSettings update_project_settings = 79;
+
+    // 附件 100–109
+    UploadAttachment upload_attachment = 100;
+    ConfirmCredentialAttachment confirm_credential_attachment = 101;
+
+    // 亲手执行 110–119
+    ExecuteUserAction execute_user_action = 110;
+    DismissUserAction dismiss_user_action = 111;
+    StopUserAction stop_user_action = 112;
+    ConfirmUserActionEnded confirm_user_action_ended = 113;
+
+    // 规则与清单 120–139
+    RevokeRule revoke_rule = 120;
+    AddSecurityListEntry add_security_list_entry = 121;
+    RemoveSecurityListEntry remove_security_list_entry = 122;
+
+    // 运行时与导入 140–159
+    ImportLocalConfig import_local_config = 140;
+    SetMcpSecret set_mcp_secret = 141;
+    DismissLocalImportPrompt dismiss_local_import_prompt = 142;
+    RedetectRuntime redetect_runtime = 143;
+
+    // 设置与进程 160–179
+    SetPlayfulUi set_playful_ui = 160;
+    SetAutostart set_autostart = 161;
+    ShutdownDaemon shutdown_daemon = 162;
+    // 163 预留给 T04「升级重启」若需要命令；用到时再定义。
+  }
+}
+
+// 命令受理结果。状态变化一律经事件到达（设计 3.4）。
+message CommandAccepted {
+  uint64 first_seq = 1;
+  uint64 last_seq = 2;
+  // 幂等重发命中旧结果（设计 5.2）。
+  bool replayed = 3;
+}
+
+// ---------- 对话 ----------
+
+message SendMessage {
+  string conversation_id = 1;
+  string text = 2;
+  repeated string attachment_ids = 3;
+}
+
+message CancelTurn {
+  string turn_id = 1;
+}
+
+// 取消本对话全部进行中的回合（需求 FR12）。
+message CancelAll {
+  string conversation_id = 1;
+}
+
+// 中断后「继续」。
+message ResumeTurn {
+  string turn_id = 1;
+}
+
+// 中断后「放弃」：回合取消，其待审批作废（需求 12）。
+message AbandonTurn {
+  string turn_id = 1;
+}
+
+// 下一轮生效（设计 9.6 第 3 条）。
+message SetConversationModel {
+  string conversation_id = 1;
+  ModelSelection model = 2;
+}
+
+message MarkRead {
+  string conversation_id = 1;
+  uint64 up_to_seq = 2;
+}
+
+message SwitchDmProject {
+  string conversation_id = 1;
+  // 未设置表示切回纯私聊。
+  optional string project_id = 2;
+}
+
+message DeleteConversation {
+  string conversation_id = 1;
+}
+
+message CreateConversation {
+  string project_id = 1;
+}
+
+// ---------- 审批 ----------
+
+message DecideApproval {
+  string approval_id = 1;
+  ApprovalDecision decision = 2;
+  // 只在允许时有意义；不在卡片 offered_remember 里的范围被拒绝。
+  RememberScope remember = 3;
+}
+
+// 档位切换（需求 FR11）。follow_supervisor = true 时成员恢复跟随 iWork 对话的档位，此时 mode 不看。
+message SetApprovalMode {
+  ApprovalModeTarget target = 1;
+  ApprovalMode mode = 2;
+  bool follow_supervisor = 3;
+}
+
+// ---------- 助手 ----------
+
+message CreateAssistant {
+  AssistantConfig config = 1;
+}
+
+message UpdateAssistant {
+  string assistant_id = 1;
+  AssistantConfig config = 2;
+  // 乐观并发：与当前版本不符返回 CONFLICT（需求 10.1）。
+  uint32 expected_version = 3;
+}
+
+message DeleteAssistant {
+  string assistant_id = 1;
+}
+
+// 只对内置 iWork（需求 AC21）。
+message ResetAssistant {
+  string assistant_id = 1;
+}
+
+// ---------- 项目 ----------
+
+message AddProject {
+  string path = 1;
+}
+
+message CreateProject {
+  string name = 1;
+  // 未设置时用项目根目录设置。
+  optional string parent_dir = 2;
+}
+
+message InitRepository {
+  string path = 1;
+}
+
+message CloneRepository {
+  string url = 1;
+  optional string parent_dir = 2;
+  optional string name = 3;
+}
+
+message SetProjectsRoot {
+  string path = 1;
+}
+
+// 项目 id 与新路径下 .iwork/project.toml 不一致时返回 PROJECT_ID_MISMATCH（设计 8.2）。
+message RelocateProject {
+  string project_id = 1;
+  string new_path = 2;
+}
+
+message PinProject {
+  string project_id = 1;
+  bool pinned = 2;
+}
+
+message RemoveProject {
+  string project_id = 1;
+}
+
+message ConfirmAgentsMdDraft {
+  string card_id = 1;
+  DraftDecision decision = 2;
+}
+
+// 只带要改的部分。default_approval_mode 只许 MANUAL / AUTO（APPROVAL_MODE_NOT_ALLOWED）。
+message UpdateProjectSettings {
+  string project_id = 1;
+  optional ApprovalMode default_approval_mode = 2;
+  ModelSelection default_model = 3;
+  AiReviewSettings ai_review = 4;
+}
+
+// ---------- 附件 ----------
+
+// 本机文件直接传路径，由后台自己读取与复制；粘贴的内存数据先用 Chunk 帧上传，再按 upload_id 引用（设计 3.7）。
+message UploadAttachment {
+  string conversation_id = 1;
+  string name = 2;
+  string mime = 3;
+  oneof source {
+    string local_path = 4;
+    string upload_id = 5;
+  }
+}
+
+message ConfirmCredentialAttachment {
+  string attachment_id = 1;
+}
+
+// ---------- 亲手执行（只接受来自客户端连接的请求，设计 7.2a；没有「记住」字段） ----------
+
+message ExecuteUserAction {
+  string card_id = 1;
+  // 必须与卡片的提议哈希一致（USER_ACTION_HASH_MISMATCH）。
+  bytes proposal_hash = 2;
+}
+
+message DismissUserAction {
+  string card_id = 1;
+}
+
+// 只对本次后台服务进程里起的、仍持有句柄的 EXECUTING 卡片有效。
+message StopUserAction {
+  string card_id = 1;
+}
+
+// 结果未知（UNKNOWN）的卡片由用户核对后确认结束；这是 UNKNOWN 的唯一出口。
+message ConfirmUserActionEnded {
+  string card_id = 1;
+}
+
+// ---------- 规则与清单 ----------
+
+message RevokeRule {
+  string rule_id = 1;
+}
+
+// 用户条目只接受全局或某个项目的范围；校验失败返回 SECURITY_LIST_ENTRY_REJECTED 与原因（设计 7.2c）。
+message AddSecurityListEntry {
+  SecurityList list = 1;
+  string value = 2;
+  Scope scope = 3;
+}
+
+// entry_id 就是清单条目的规则 id（Rule.id）。
+message RemoveSecurityListEntry {
+  string entry_id = 1;
+}
+
+// ---------- 运行时与导入 ----------
+
+message ImportLocalConfig {
+  string runtime_id = 1;
+  repeated string item_ids = 2;
+}
+
+// 安全：value 是整个协议里唯一携带密钥的字段。iwork-app 受理后直接交给 SecretStore（系统钥匙串），
+// 不进事件（McpSecretSet 只带 key_name）、不进日志、不进命令幂等表的结果；调试模式的 JSON 帧日志也必须遮掉它。
+// 不得在别处新增携带密钥的字段。
+message SetMcpSecret {
+  string mcp_server_id = 1;
+  string key_name = 2;
+  string value = 3;
+}
+
+// 不导入也记下「已提示」，之后不再弹（设计 9.5 第 3 条）。
+message DismissLocalImportPrompt {
+  string runtime_id = 1;
+}
+
+message RedetectRuntime {
+  string runtime_id = 1;
+}
+
+// ---------- 设置与进程 ----------
+
+message SetPlayfulUi {
+  bool enabled = 1;
+}
+
+message SetAutostart {
+  bool enabled = 1;
+}
+
+// 完全退出 iWork（设计 4）。cancel_running = false 且有进行中的回合时由客户端先确认。
+message ShutdownDaemon {
+  bool cancel_running = 1;
+}

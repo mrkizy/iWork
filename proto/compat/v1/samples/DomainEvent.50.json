@@ -1,0 +1,6 @@
+{
+  "mcpSecretSet": {
+    "mcpServerId": "mcp:github",
+    "keyName": "GITHUB_TOKEN"
+  }
+}

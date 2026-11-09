@@ -1,0 +1,63 @@
+// 随会话下发给桥接（iwork-bridge-claude、iwork-fake-agent）的类型（设计 2、7.0、7.2b）。
+// 桥接只依赖本文件与 common.proto：不需要知道命令与视图，客户端协议改动不会让桥接重编。
+// 这里只放抽象约束；翻译成厂商设置项是适配器的事，核心不写厂商特例。
+//
+// 兼容规则：字段只增不改号；删字段先 `reserved` 编号与名字（同一主版本内只标 deprecated 不删）；
+// 枚举值同理；不改 oneof 字段的类型。全文见 proto/compat/README.md，由 tests/compat.rs 检查。
+syntax = "proto3";
+
+package iwork.v1;
+
+import "iwork/v1/common.proto";
+
+// 沙箱抽象约束（设计 7.0 表）。系统底线三档相同；只写白名单只在手动、自动档生效，全开档放开为 anywhere。
+message SessionConstraints {
+  // 禁读禁写：凭据目录、iWork 数据目录。
+  repeated string deny_read_write = 1;
+  // 只读区：数据目录下的 attachments/、imports/。
+  repeated string read_only = 2;
+  AllowWrite allow_write = 3;
+  // 需凭据命令清单：在沙箱外运行。
+  repeated CommandPattern excluded_commands = 4;
+  // 清单外命令被挡后可请求沙箱外重试（手动、自动档为 true，全开档为 false）。
+  bool allow_unsandboxed_retry = 5;
+  NetworkPolicy network = 6;
+}
+
+message AllowWrite {
+  oneof kind {
+    WritablePaths whitelist = 1;
+    // 全开档：可写任何位置，底线目录仍禁读禁写（deny_read_write 更具体，优先生效）。
+    AnywhereWritable anywhere = 2;
+  }
+}
+
+message WritablePaths {
+  repeated string paths = 1;
+}
+
+message AnywhereWritable {}
+
+// 程序名 + 可选子命令，匹配规则同设计 7.1。
+message CommandPattern {
+  string program = 1;
+  optional string subcommand = 2;
+}
+
+// 联网不受控（需求 v1.38），目前只有 OPEN；以后要收紧只能加值。
+enum NetworkPolicy {
+  NETWORK_POLICY_UNSPECIFIED = 0;
+  NETWORK_POLICY_OPEN = 1;
+}
+
+// 本次会话可用的工具（设计 7.2b）。7.1 永久禁用的工具（云端定时、会话内定时等）任何会话都不提供，不在这里表达。
+message SessionToolSet {
+  repeated ToolGroup enabled_groups = 1;
+  // 是否提供不属于四个分组、自身无副作用的工具（子代理、TodoWrite 等）。AI 审查回合为 false。
+  bool include_always_on = 2;
+}
+
+// 本次会话显式传入的模型：配置隔离后不传就是 CLI 内置默认，不允许这种状态（设计 9.6 第 6 条）。
+message SessionModel {
+  ModelSelection model = 1;
+}

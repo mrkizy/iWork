@@ -1,0 +1,18 @@
+turn_finished {
+  turn_id: "01JC0T0000000000000000TRN1"
+  state: TURN_STATE_COMPLETED
+  usage {
+    input_tokens: 1200
+    output_tokens: 340
+    cache_read_tokens: 5000
+    cache_write_tokens: 60
+    cost_usd: 0.25
+  }
+  celebrate: true
+  change_summary {
+    files_changed: 2
+    insertions: 30
+    deletions: 4
+    paths: ["src/a.rs", "src/b.rs"]
+  }
+}

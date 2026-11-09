@@ -1,0 +1,24 @@
+security_list_entry_added {
+  rule {
+    id: "01JC0E0000000000000000ENT1"
+    layer: RULE_LAYER_CREDENTIAL_COMMANDS
+    matcher {
+      program_subcommand {
+        program: "terraform"
+        subcommand: "apply"
+      }
+    }
+    effect: RULE_EFFECT_OUTSIDE_SANDBOX
+    source {
+      user {}
+    }
+    scope {
+      global {}
+    }
+    created_at {
+      seconds: 1762001000
+      nanos: 123000000
+    }
+    label: "terraform apply"
+  }
+}

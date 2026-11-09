@@ -1,0 +1,26 @@
+turn_queued {
+  turn {
+    id: "01JC0T0000000000000000TRN1"
+    conversation_id: "01JC0C0000000000000000CNV1"
+    assistant_id: "01JC0A0000000000000000AST1"
+    assistant_version: 4
+    runtime_id: "01JC0X0000000000000000RTM1"
+    model {
+      model_id: "opus"
+      effort: "high"
+    }
+    runtime_session_id: "sess-1"
+    state: TURN_STATE_INTERRUPTED
+    state_reason: "\345\256\241\346\211\271\347\255\211\345\276\205\345\210\260\344\270\212\351\231\220"
+    started_at {
+      seconds: 1762000500
+      nanos: 123000000
+    }
+    ended_at {
+      seconds: 1762000600
+      nanos: 123000000
+    }
+    kind: TURN_KIND_ASSISTANT
+    interrupt_reason: INTERRUPT_REASON_APPROVAL_WAIT_LIMIT
+  }
+}

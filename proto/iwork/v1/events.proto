@@ -1,0 +1,537 @@
+// 事件：持久事件 DomainEvent 与不落盘的流式增量 TransientEvent（设计 3.4、3.5、5.2）。
+//
+// DomainEvent 只在这里定义一次：它既是 events 表 payload 的编码，也是推给客户端的 Event 帧载荷
+// （T01 方案 3.6、ADR-0003）。iwork-domain 的 DomainEvent 枚举与它同名一一对应，靠 iwork-app 的穷举对拍测试绑定。
+//
+// 兼容规则：字段只增不改号；删字段先 `reserved` 编号与名字（同一主版本内只标 deprecated 不删）；
+// 枚举值同理；不改 oneof 字段的类型。全文见 proto/compat/README.md，由 tests/compat.rs 检查。
+// 事件已经写进用户的数据库，改号会让旧事件被错读——这是全仓最不能改的一份文件。
+//
+// 每条事件后面的「流」是 events 表的 stream_kind（括号里是 stream_id 取自哪个字段），存储按流补发，订阅按流过滤。
+syntax = "proto3";
+
+package iwork.v1;
+
+import "google/protobuf/timestamp.proto";
+import "iwork/v1/common.proto";
+import "iwork/v1/model.proto";
+
+// 持久事件。oneof 编号按功能分段：项目 10–29、助手 30–49、对话与消息 50–79、回合 80–109、
+// 审批 110–129、亲手执行 130–139、规则与清单 140–159、附件 160–169、运行时与额度 170–189、
+// 导入 190–199、设置与系统 200–219。分段只为好读，编号一经分配不动。
+message DomainEvent {
+  oneof event {
+    // 项目 10–29
+    ProjectAdded project_added = 10;
+    ProjectUpdated project_updated = 11;
+    ProjectRelocated project_relocated = 12;
+    ProjectPathStatusChanged project_path_status_changed = 13;
+    ProjectRemoved project_removed = 14;
+    ProjectSettingsUpdated project_settings_updated = 15;
+    RepositoryInitialized repository_initialized = 16;
+    CloneFinished clone_finished = 17;
+    AgentsMdDraftProposed agents_md_draft_proposed = 18;
+    AgentsMdDraftDecided agents_md_draft_decided = 19;
+
+    // 助手 30–49
+    AssistantCreated assistant_created = 30;
+    AssistantUpdated assistant_updated = 31;
+    AssistantDeleted assistant_deleted = 32;
+    AssistantReset assistant_reset = 33;
+
+    // 对话与消息 50–79
+    ConversationCreated conversation_created = 50;
+    ConversationDeleting conversation_deleting = 51;
+    ConversationDeleted conversation_deleted = 52;
+    ConversationModelChanged conversation_model_changed = 53;
+    ApprovalModeChanged approval_mode_changed = 54;
+    DmProjectSwitched dm_project_switched = 55;
+    ConversationRead conversation_read = 56;
+    MessageAppended message_appended = 60;
+    MessageCompleted message_completed = 61;
+
+    // 回合 80–109
+    TurnQueued turn_queued = 80;
+    TurnStateChanged turn_state_changed = 81;
+    TurnFinished turn_finished = 82;
+    TurnModelReported turn_model_reported = 83;
+    ToolCallStarted tool_call_started = 84;
+    ToolCallFinished tool_call_finished = 85;
+
+    // 审批 110–129
+    ApprovalRequested approval_requested = 110;
+    ApprovalReviewUpdated approval_review_updated = 111;
+    ApprovalDecided approval_decided = 112;
+    ApprovalVoided approval_voided = 113;
+    ApprovalEvaluated approval_evaluated = 114;
+    RuleRemembered rule_remembered = 115;
+    RuleRevoked rule_revoked = 116;
+    RulesDeleted rules_deleted = 117;
+    // T01 方案表里写作「111a」，那不是合法编号；取审批段的下一个空号 118。它属于 audit 流。
+    ApprovalStaleResultDropped approval_stale_result_dropped = 118;
+
+    // 亲手执行 130–139
+    UserActionProposed user_action_proposed = 130;
+    UserActionStateChanged user_action_state_changed = 131;
+
+    // 规则与清单 140–159
+    SecurityListEntryAdded security_list_entry_added = 140;
+    SecurityListEntryRemoved security_list_entry_removed = 141;
+
+    // 附件 160–169
+    AttachmentStored attachment_stored = 160;
+    AttachmentConfirmed attachment_confirmed = 161;
+
+    // 运行时与额度 170–189
+    RuntimeUpdated runtime_updated = 170;
+    QuotaObserved quota_observed = 171;
+    UsageReported usage_reported = 172;
+
+    // 导入 190–199
+    LocalImportPrompted local_import_prompted = 190;
+    LocalConfigImported local_config_imported = 191;
+    McpSecretSet mcp_secret_set = 192;
+
+    // 设置与系统 200–219
+    GlobalSettingsChanged global_settings_changed = 200;
+    RecoveryCompleted recovery_completed = 201;
+  }
+}
+
+// ---------- 项目（流：project） ----------
+
+// 流：project（project.id）。设计 9.3。
+message ProjectAdded {
+  Project project = 1;
+}
+
+// 流：project（project_id）。只带变了的字段。需求 FR19。
+message ProjectUpdated {
+  string project_id = 1;
+  optional string name = 2;
+  optional bool pinned = 3;
+  google.protobuf.Timestamp last_active_at = 4;
+}
+
+// 流：project（project_id）。设计 8.2。
+message ProjectRelocated {
+  string project_id = 1;
+  string new_path = 2;
+}
+
+// 流：project（project_id）。设计 8.2。
+message ProjectPathStatusChanged {
+  string project_id = 1;
+  PathStatus path_status = 2;
+}
+
+// 流：project（project_id）。需求 FR19。
+message ProjectRemoved {
+  string project_id = 1;
+}
+
+// 流：project（project_id）。带改动后的完整设置：只带变更字段时表达不了「清空默认模型」。设计 9.6、7.2。
+message ProjectSettingsUpdated {
+  string project_id = 1;
+  ProjectSettings settings = 2;
+}
+
+// 流：project（path；此时项目还没登记，没有 id）。设计 9.3 第 2 步。
+message RepositoryInitialized {
+  string path = 1;
+}
+
+// 流：project（job_id）。设计 9.3 第 3 步。
+message CloneFinished {
+  string job_id = 1;
+  bool ok = 2;
+  // ok = false 时必有。
+  Error error = 3;
+  // ok = true 时必有：克隆到的目录。
+  optional string path = 4;
+}
+
+// 流：project（project_id）。设计 9.3 第 4 步。
+message AgentsMdDraftProposed {
+  string card_id = 1;
+  string project_id = 2;
+  ArtifactRef content_artifact = 3;
+}
+
+// 流：project（project_id）。
+message AgentsMdDraftDecided {
+  string card_id = 1;
+  string project_id = 2;
+  DraftDecision decision = 3;
+}
+
+// ---------- 助手（流：assistant） ----------
+
+// 流：assistant（assistant.id）。设计 9.1a。
+message AssistantCreated {
+  Assistant assistant = 1;
+}
+
+// 流：assistant（assistant_id）。
+message AssistantUpdated {
+  string assistant_id = 1;
+  uint32 version = 2;
+  AssistantConfig config = 3;
+}
+
+// 流：assistant（assistant_id）。
+message AssistantDeleted {
+  string assistant_id = 1;
+  string name_snapshot = 2;
+}
+
+// 流：assistant（assistant_id）。只对内置 iWork（需求 AC21）。
+// 带重置后的完整配置：重建投影时不能去读「当前程序里的内置默认值」，那会随程序版本变。
+message AssistantReset {
+  string assistant_id = 1;
+  uint32 version = 2;
+  AssistantConfig config = 3;
+}
+
+// ---------- 对话与消息（流：conversation） ----------
+
+// 流：conversation（conversation.id）。设计 9.0。
+message ConversationCreated {
+  Conversation conversation = 1;
+}
+
+// 流：conversation（conversation_id）。
+message ConversationDeleting {
+  string conversation_id = 1;
+}
+
+// 流：conversation（conversation_id）。
+message ConversationDeleted {
+  string conversation_id = 1;
+}
+
+// 流：conversation（conversation_id）。界面的「已切换为 X」系统记录由此渲染，不另发消息事件（设计 9.6 第 3 条）。
+message ConversationModelChanged {
+  string conversation_id = 1;
+  ModelSelection model = 2;
+}
+
+// 流：conversation（target 里的 conversation_id；target 是项目时为 project 流的 project_id）。需求 FR11。
+message ApprovalModeChanged {
+  ApprovalModeTarget target = 1;
+  // 未设置表示恢复跟随（成员不再单独设置）。
+  optional ApprovalMode mode = 2;
+  ApprovalModeChangeCause cause = 3;
+}
+
+enum ApprovalModeChangeCause {
+  APPROVAL_MODE_CHANGE_CAUSE_UNSPECIFIED = 0;
+  APPROVAL_MODE_CHANGE_CAUSE_USER = 1;
+  // 私聊切换项目，全开失效（需求 FR11）。
+  APPROVAL_MODE_CHANGE_CAUSE_PROJECT_SWITCH = 2;
+  APPROVAL_MODE_CHANGE_CAUSE_NEW_CONVERSATION = 3;
+}
+
+// 流：conversation（conversation_id）。分隔线由此渲染（设计 9.1）。
+message DmProjectSwitched {
+  string conversation_id = 1;
+  // 未设置表示切回纯私聊。
+  optional string project_id = 2;
+}
+
+// 流：conversation（conversation_id）。设计 9.1。
+message ConversationRead {
+  string conversation_id = 1;
+  uint64 last_read_seq = 2;
+}
+
+// 流：conversation（message.conversation_id）。助手消息此时 status = STREAMING、正文为空（设计 3.4、3.5）。
+message MessageAppended {
+  Message message = 1;
+}
+
+// 流：conversation（conversation_id）。消息结束时写入完整内容（设计 3.5）。
+message MessageCompleted {
+  string conversation_id = 1;
+  string message_id = 2;
+  MessageBody body = 3;
+  // COMPLETED / INTERRUPTED / FAILED 之一。
+  MessageStatus status = 4;
+}
+
+// ---------- 回合（流：turn） ----------
+
+// 流：turn（turn.id）。设计 6.4。
+message TurnQueued {
+  Turn turn = 1;
+}
+
+// 流：turn（turn_id）。
+message TurnStateChanged {
+  string turn_id = 1;
+  TurnState from = 2;
+  TurnState to = 3;
+  // 给人看的说明，如失败原因。
+  optional string reason = 4;
+  // to = INTERRUPTED 时必有。
+  optional InterruptReason interrupt_reason = 5;
+  // from = INTERRUPTED 时必有：续接或放弃时，领域状态 Interrupted{reason} 往返不能丢原因。
+  optional InterruptReason from_interrupt_reason = 6;
+}
+
+// 流：turn（turn_id）。celebrate：正常结束且有改动时盖「搞定」章（设计 9.7 第 2 条）。
+message TurnFinished {
+  string turn_id = 1;
+  TurnState state = 2;
+  Usage usage = 3;
+  bool celebrate = 4;
+  ChangeSummary change_summary = 5;
+}
+
+// 流：turn（turn_id）。CLI 实际报告的模型，与请求的不一致时以它为准（设计 9.6 第 4 条）。
+message TurnModelReported {
+  string turn_id = 1;
+  ModelSelection model = 2;
+}
+
+// 流：turn（turn_id）。ui-m1.md 第 04 页「工具活动」。
+message ToolCallStarted {
+  string turn_id = 1;
+  string tool_call_id = 2;
+  string tool_name = 3;
+  ActionSummary action = 4;
+}
+
+// 流：turn（turn_id）。大段输出只带制品引用（设计 3.7）。
+message ToolCallFinished {
+  string turn_id = 1;
+  string tool_call_id = 2;
+  bool ok = 3;
+  ArtifactRef output_artifact = 4;
+}
+
+// ---------- 审批（流：approval；求值与过期结果为 audit 流；规则为 rule 流） ----------
+
+// 流：approval（approval.id）。设计 7.2、7.3。
+message ApprovalRequested {
+  Approval approval = 1;
+}
+
+// 流：approval（approval_id）。审查身份与 ABANDONED 都落盘，重建后才能判「迟到结果作废」（T01 方案 4.3）。
+message ApprovalReviewUpdated {
+  string approval_id = 1;
+  string review_id = 2;
+  // IN_PROGRESS / PASSED / FAILED / TIMED_OUT / ERRORED / ABANDONED 之一。
+  ReviewState review = 3;
+  optional string reason = 4;
+}
+
+// 流：approval（approval_id）。
+message ApprovalDecided {
+  string approval_id = 1;
+  // APPROVED / DENIED 之一。
+  ApprovalState state = 2;
+  ApprovalDecider decider = 3;
+  // 只有用户允许时才有。
+  optional RememberScope remember = 4;
+}
+
+// 流：approval（approval_id）。
+message ApprovalVoided {
+  string approval_id = 1;
+  VoidReason reason = 2;
+}
+
+// 流：audit（turn_id）。每次求值写一条，放行也记（设计 7.4）。
+message ApprovalEvaluated {
+  string turn_id = 1;
+  ActionSummary action = 2;
+  repeated string matched_rule_ids = 3;
+  string ruleset_version = 4;
+  Verdict verdict = 5;
+  // 命中的层（领域 Evaluation.layer_hit）。
+  RuleLayer layer_hit = 6;
+  uint32 duration_ms = 7;
+}
+
+// 流：audit（approval_id）。迟到或对不上号的 AI 审查结果被丢弃。投影不读它、不改审批表（T01 方案 4.3）。
+message ApprovalStaleResultDropped {
+  string approval_id = 1;
+  string review_id = 2;
+  // 被丢弃的结果：PASSED / FAILED / ERRORED / TIMED_OUT 之一。
+  ReviewState result = 3;
+  StaleReason why = 4;
+}
+
+// 审查结果作废的原因，对应三条生效条件（T01 方案 4.3）。
+enum StaleReason {
+  STALE_REASON_UNSPECIFIED = 0;
+  // 结果的 review_id 不是当前进行中的这一次。
+  STALE_REASON_REVIEW_ID_MISMATCH = 1;
+  // 审批已不在 PENDING + IN_PROGRESS（超时转交、用户已决定、模式切换已放行）。
+  STALE_REASON_NOT_IN_PROGRESS = 2;
+  // 当前有效档位不是自动。
+  STALE_REASON_MODE_NOT_AUTO = 3;
+}
+
+// 流：rule（rule.id）。设计 7.3。
+message RuleRemembered {
+  Rule rule = 1;
+}
+
+// 流：rule（rule_id）。需求 FR11。
+message RuleRevoked {
+  string rule_id = 1;
+}
+
+// 流：rule。删除对话或助手时连带删掉的规则（设计 9.0、9.1a）。
+message RulesDeleted {
+  repeated string rule_ids = 1;
+  RulesDeletedCause cause = 2;
+}
+
+enum RulesDeletedCause {
+  RULES_DELETED_CAUSE_UNSPECIFIED = 0;
+  RULES_DELETED_CAUSE_CONVERSATION_DELETED = 1;
+  RULES_DELETED_CAUSE_ASSISTANT_DELETED = 2;
+}
+
+// ---------- 亲手执行（流：approval） ----------
+
+// 流：approval（card.id）。设计 7.2a。
+message UserActionProposed {
+  UserActionCard card = 1;
+}
+
+// 流：approval（card_id）。不记进程身份：崩溃后不核对、不停止（T01 方案第 8 节已知限制）。
+message UserActionStateChanged {
+  string card_id = 1;
+  UserActionState state = 2;
+  // DONE 时必有。
+  ExitStatus exit = 3;
+  // FAILED / UNKNOWN 时必有。
+  optional string error = 4;
+  // 输出只给用户；进入 DONE / UNKNOWN 时带上已收到的输出。
+  ArtifactRef output_artifact = 5;
+  // VOIDED 时必有。
+  optional VoidReason void_reason = 6;
+}
+
+// ---------- 安全清单（流：rule） ----------
+
+// 流：rule（rule.id）。设计 7.2c。清单条目就是规则条目，layer 标出属于哪张清单。
+message SecurityListEntryAdded {
+  Rule rule = 1;
+}
+
+// 流：rule（entry_id）。entry_id 就是被删清单条目的规则 id（Rule.id）。
+message SecurityListEntryRemoved {
+  string entry_id = 1;
+}
+
+// ---------- 附件（流：conversation） ----------
+
+// 流：conversation（attachment.conversation_id）。设计 9.2。
+message AttachmentStored {
+  Attachment attachment = 1;
+}
+
+// 流：conversation（conversation_id）。
+message AttachmentConfirmed {
+  string conversation_id = 1;
+  string attachment_id = 2;
+}
+
+// ---------- 运行时与额度（流：runtime） ----------
+
+// 流：runtime（runtime.runtime_id）。登录信息只含 LoginInfo 的四个字段（AGENTS.md 安全不变量）。
+message RuntimeUpdated {
+  RuntimeStatus runtime = 1;
+}
+
+// 流：runtime（runtime_id）。设计 9.4。
+message QuotaObserved {
+  string runtime_id = 1;
+  repeated QuotaWindow windows = 2;
+  google.protobuf.Timestamp observed_at = 3;
+}
+
+// 流：runtime（runtime_id）。
+message UsageReported {
+  string runtime_id = 1;
+  string turn_id = 2;
+  Usage usage = 3;
+}
+
+// ---------- 导入（流：runtime） ----------
+
+// 流：runtime（runtime_id）。记下「已提示」，之后不再提示（设计 9.5 第 3 条）。
+message LocalImportPrompted {
+  string runtime_id = 1;
+}
+
+// 流：runtime（runtime_id）。
+message LocalConfigImported {
+  string runtime_id = 1;
+  repeated LocalConfigItem items = 2;
+}
+
+// 流：runtime（mcp_server_id）。只带键名，不带值：密钥直通钥匙串，不进事件、不进日志（设计 9.5 第 4 条）。
+message McpSecretSet {
+  string mcp_server_id = 1;
+  string key_name = 2;
+}
+
+// ---------- 设置与系统 ----------
+
+// 流：settings。只带变了的字段。
+message GlobalSettingsChanged {
+  optional bool playful_ui = 1;
+  optional bool autostart = 2;
+  optional string projects_root = 3;
+}
+
+// 流：system。崩溃恢复完成（设计 4）。
+message RecoveryCompleted {
+  repeated string interrupted_turn_ids = 1;
+}
+
+// ---------- 不落盘的流式增量 ----------
+
+// 不落盘、不带 seq（设计 3.5）。客户端按 (id, offset) 去重。
+message TransientEvent {
+  oneof event {
+    MessageDelta message_delta = 1;
+    ToolOutputDelta tool_output_delta = 2;
+    CloneProgress clone_progress = 3;
+    SubscriptionLagging subscription_lagging = 4;
+  }
+}
+
+message MessageDelta {
+  string message_id = 1;
+  // text 在整条消息正文里的起始位置（UTF-8 字节）。
+  uint64 offset = 2;
+  string text = 3;
+}
+
+message ToolOutputDelta {
+  string tool_call_id = 1;
+  // text 在整段输出里的起始位置（UTF-8 字节）。
+  uint64 offset = 2;
+  string text = 3;
+}
+
+message CloneProgress {
+  string job_id = 1;
+  string phase = 2;
+  // 0–100。
+  uint32 percent = 3;
+  string text = 4;
+}
+
+// 发送队列满，本订阅落后；客户端用 last_seq 重新订阅（设计 3.5）。
+message SubscriptionLagging {
+  uint32 subscription_id = 1;
+  uint64 last_seq = 2;
+}

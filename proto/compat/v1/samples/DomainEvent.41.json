@@ -1,0 +1,23 @@
+{
+  "securityListEntryAdded": {
+    "rule": {
+      "id": "01JC0E0000000000000000ENT1",
+      "layer": "RULE_LAYER_CREDENTIAL_COMMANDS",
+      "matcher": {
+        "programSubcommand": {
+          "program": "terraform",
+          "subcommand": "apply"
+        }
+      },
+      "effect": "RULE_EFFECT_OUTSIDE_SANDBOX",
+      "source": {
+        "user": {}
+      },
+      "scope": {
+        "global": {}
+      },
+      "createdAt": "2025-11-01T12:43:20.123Z",
+      "label": "terraform apply"
+    }
+  }
+}

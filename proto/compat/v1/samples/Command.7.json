@@ -1,0 +1,10 @@
+{
+  "commandId": "01JC0K0000000000000000CMD7",
+  "addSecurityListEntry": {
+    "list": "SECURITY_LIST_SENSITIVE_DIRS",
+    "value": "~/secrets",
+    "scope": {
+      "projectId": "01JC0P0000000000000000PRJ1"
+    }
+  }
+}

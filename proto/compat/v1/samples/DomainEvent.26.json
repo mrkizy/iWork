@@ -1,0 +1,23 @@
+{
+  "turnFinished": {
+    "turnId": "01JC0T0000000000000000TRN1",
+    "state": "TURN_STATE_COMPLETED",
+    "usage": {
+      "inputTokens": "1200",
+      "outputTokens": "340",
+      "cacheReadTokens": "5000",
+      "cacheWriteTokens": "60",
+      "costUsd": 0.25
+    },
+    "celebrate": true,
+    "changeSummary": {
+      "filesChanged": 2,
+      "insertions": 30,
+      "deletions": 4,
+      "paths": [
+        "src/a.rs",
+        "src/b.rs"
+      ]
+    }
+  }
+}

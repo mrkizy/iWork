@@ -1,0 +1,22 @@
+{
+  "turnQueued": {
+    "turn": {
+      "id": "01JC0T0000000000000000TRN1",
+      "conversationId": "01JC0C0000000000000000CNV1",
+      "assistantId": "01JC0A0000000000000000AST1",
+      "assistantVersion": 4,
+      "runtimeId": "01JC0X0000000000000000RTM1",
+      "model": {
+        "modelId": "opus",
+        "effort": "high"
+      },
+      "runtimeSessionId": "sess-1",
+      "state": "TURN_STATE_INTERRUPTED",
+      "stateReason": "审批等待到上限",
+      "startedAt": "2025-11-01T12:35:00.123Z",
+      "endedAt": "2025-11-01T12:36:40.123Z",
+      "kind": "TURN_KIND_ASSISTANT",
+      "interruptReason": "INTERRUPT_REASON_APPROVAL_WAIT_LIMIT"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "iwork-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.18.0",
+  "scripts": {
+    "gen": "buf generate",
+    "typecheck": "pnpm gen && tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "test": "pnpm gen && vitest run",
+    "dev": "vite",
+    "build": "vite build",
+    "tauri": "node scripts/tauri.ts"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "2.16.0",
+    "solid-js": "1.9.17"
+  },
+  "devDependencies": {
+    "@bufbuild/buf": "1.75.0",
+    "@bufbuild/protoc-gen-es": "2.16.0",
+    "@tauri-apps/cli": "2.12.4",
+    "@types/node": "26.6.5",
+    "typescript": "6.0.3",
+    "vite": "8.3.5",
+    "vite-plugin-solid": "2.11.14",
+    "vitest": "5.0.5"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "requestId": "7",
+  "command": {
+    "commandId": "01JC0K0000000000000000CMD1",
+    "sendMessage": {
+      "conversationId": "01JC0C0000000000000000CNV1",
+      "text": "帮我看看这个改动",
+      "attachmentIds": [
+        "01JC0F0000000000000000ATT1"
+      ]
+    }
+  }
+}

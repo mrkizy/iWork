@@ -1,0 +1,579 @@
+// 查询与事件共用的实体视图（设计 5.3）。事件载荷直接嵌这些消息，所以它们也是持久格式的一部分。
+//
+// 兼容规则：字段只增不改号；删字段先 `reserved` 编号与名字（同一主版本内只标 deprecated 不删）；
+// 枚举值同理；不改 oneof 字段的类型。全文见 proto/compat/README.md，由 tests/compat.rs 检查。
+syntax = "proto3";
+
+package iwork.v1;
+
+import "google/protobuf/timestamp.proto";
+import "iwork/v1/common.proto";
+
+// ---------- 项目 ----------
+
+message Project {
+  // ULID；与工作区 .iwork/project.toml 的 id 一致（设计 8.2）。
+  string id = 1;
+  string root_path = 2;
+  // 不透明字符串，版本控制的种类名只在 VcsProvider 实现里出现。
+  string vcs_kind = 3;
+  string name = 4;
+  bool pinned = 5;
+  google.protobuf.Timestamp last_active_at = 6;
+  PathStatus path_status = 7;
+  ProjectSettings settings = 8;
+  uint32 unread = 9;
+}
+
+message ProjectSettings {
+  // 只会是 MANUAL 或 AUTO：项目默认不能设为全开（需求 FR11）。
+  ApprovalMode default_approval_mode = 1;
+  // 未设置表示用助手自己的默认模型。
+  ModelSelection default_model = 2;
+  AiReviewSettings ai_review = 3;
+}
+
+// AI 审查设置（设计 7.2、9.6 第 8 条）。
+message AiReviewSettings {
+  bool enabled = 1;
+  // 未设置表示与 iWork 相同。
+  optional string runtime_id = 2;
+  // 未设置表示与 iWork 相同。
+  ModelSelection model = 3;
+  // 审查超时，默认 60 秒。
+  uint32 timeout_secs = 4;
+}
+
+// ---------- 助手 ----------
+
+message Assistant {
+  string id = 1;
+  // 内置助手 iWork。
+  bool builtin = 2;
+  // 当前配置版本；写入携带 expected_version（需求 10.1）。
+  uint32 version = 3;
+  AssistantConfig config = 4;
+  google.protobuf.Timestamp updated_at = 5;
+}
+
+// 助手的一个配置版本（设计 9.1a）。
+message AssistantConfig {
+  string name = 1;
+  Avatar avatar = 2;
+  string prompt = 3;
+  string runtime_id = 4;
+  ModelSelection model = 5;
+  repeated ToolGroup disabled_groups = 6;
+}
+
+message Avatar {
+  string initial = 1;
+  string color = 2;
+}
+
+// ---------- 对话与消息 ----------
+
+message Conversation {
+  string id = 1;
+  oneof kind {
+    ProjectConversation project = 2;
+    AssistantDm assistant_dm = 3;
+  }
+  ConversationState state = 4;
+  uint64 last_read_seq = 5;
+  uint32 unread = 6;
+  // 本对话临时改选的模型与思考强度；未设置表示用助手默认（设计 9.6 第 1 条）。
+  ModelSelection model_override = 7;
+  // 对话级档位切换；未设置表示用项目默认（需求 FR11）。
+  optional ApprovalMode approval_mode = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+// 项目对话：属于一个项目。
+message ProjectConversation {
+  string project_id = 1;
+}
+
+// 助手私聊：可以选一个项目作为上下文，不选即纯私聊（设计 9.1）。
+message AssistantDm {
+  string assistant_id = 1;
+  optional string context_project_id = 2;
+}
+
+message Message {
+  string id = 1;
+  string conversation_id = 2;
+  Author author = 3;
+  optional string context_project_id = 4;
+  MessageStatus status = 5;
+  // 助手消息在 STREAMING 期间为空，结束时由 MessageCompleted 写入。
+  MessageBody body = 6;
+  repeated string attachment_ids = 7;
+  google.protobuf.Timestamp created_at = 8;
+  // 助手消息所属回合。
+  optional string turn_id = 9;
+}
+
+message Author {
+  oneof kind {
+    UserAuthor user = 1;
+    AssistantAuthor assistant = 2;
+    SystemAuthor system = 3;
+  }
+}
+
+message UserAuthor {}
+
+message SystemAuthor {}
+
+message AssistantAuthor {
+  string assistant_id = 1;
+  // 发言时的名字快照：助手改名或删除后历史消息仍显示当时的名字（设计 9.1a）。
+  string name_snapshot = 2;
+}
+
+message MessageBody {
+  oneof content {
+    string inline_text = 1;
+    // 长正文放制品存储。
+    ArtifactRef artifact = 2;
+  }
+}
+
+// ---------- 回合 ----------
+
+message Turn {
+  string id = 1;
+  string conversation_id = 2;
+  string assistant_id = 3;
+  uint32 assistant_version = 4;
+  string runtime_id = 5;
+  ModelSelection model = 6;
+  optional string runtime_session_id = 7;
+  TurnState state = 8;
+  // 失败等状态的说明文字（给人看）。
+  optional string state_reason = 9;
+  google.protobuf.Timestamp started_at = 10;
+  google.protobuf.Timestamp ended_at = 11;
+  TurnKind kind = 12;
+  // state = INTERRUPTED 时必有：两种中断的后续去向不同（T01 方案 4.3）。
+  optional InterruptReason interrupt_reason = 13;
+}
+
+// 回合种类（设计 7.2b）：系统回合由 iWork 自己发起，工具集与审批规则不同。
+enum TurnKind {
+  TURN_KIND_UNSPECIFIED = 0;
+  TURN_KIND_ASSISTANT = 1;
+  TURN_KIND_SYSTEM_AI_REVIEW = 2;
+  TURN_KIND_SYSTEM_AGENTS_MD_DRAFT = 3;
+}
+
+// 回合产生的改动摘要（设计 9.7 第 2 条）。
+message ChangeSummary {
+  uint32 files_changed = 1;
+  uint32 insertions = 2;
+  uint32 deletions = 3;
+  repeated string paths = 4;
+}
+
+// ---------- 审批档位 ----------
+
+// 档位切换的作用对象。命令 SetApprovalMode 与事件 ApprovalModeChanged 共用。
+message ApprovalModeTarget {
+  oneof kind {
+    string conversation_id = 1;
+    MemberTarget member = 2;
+    string project_id = 3;
+  }
+}
+
+// 项目对话里的某个成员（成员单独设置优先，需求 FR11）。
+message MemberTarget {
+  string conversation_id = 1;
+  string assistant_id = 2;
+}
+
+// ---------- 动作与审批 ----------
+
+// 归一后的动作（设计 7.1）。审批卡片、工具活动、审计都用它；字段与领域 Action 一一对应，往返无损。
+message ActionSummary {
+  ActionKind kind = 1;
+  ActionTarget target = 2;
+  // 原始工具名，只用于审计与显示；判定只看 kind + target（需求 AC05）。
+  string tool_name = 3;
+  // 命令文字或补丁摘要。
+  string raw_summary = 4;
+  bool out_of_bounds = 5;
+  bool bypass_sandbox_requested = 6;
+  // 「执行脚本」类：命令带起的脚本内容不可见。
+  bool opaque_script = 7;
+}
+
+enum ActionKind {
+  ACTION_KIND_UNSPECIFIED = 0;
+  ACTION_KIND_READ = 1;
+  ACTION_KIND_WRITE = 2;
+  ACTION_KIND_EXECUTE = 3;
+  ACTION_KIND_OUTSIDE_SANDBOX = 4;
+  ACTION_KIND_WRITE_AUTORUN_CONFIG = 5;
+  ACTION_KIND_DELETE = 6;
+  ACTION_KIND_PUSH = 7;
+  ACTION_KIND_PUBLISH = 8;
+  ACTION_KIND_NETWORK = 9;
+  ACTION_KIND_MCP_CALL = 10;
+  ACTION_KIND_UNCLASSIFIED = 11;
+}
+
+message ActionTarget {
+  oneof kind {
+    string path = 1;
+    PathList paths = 2;
+    CommandTarget command = 3;
+    string tool_name = 4;
+    string remote = 5;
+    NoTarget none = 6;
+  }
+}
+
+message PathList {
+  repeated string paths = 1;
+}
+
+message CommandTarget {
+  string program = 1;
+  optional string subcommand = 2;
+  repeated string argv = 3;
+}
+
+message NoTarget {}
+
+// 动作指纹 = 动作类型 + 归一后的目标（需求 AC05）。目标用结构化的 ActionTarget，不另定一套字符串编码。
+message ActionFingerprint {
+  ActionKind kind = 1;
+  ActionTarget target = 2;
+}
+
+message Approval {
+  string id = 1;
+  string turn_id = 2;
+  string conversation_id = 3;
+  // 沙箱外执行是询问的一种（设计第 7 节）。
+  ApprovalKind kind = 4;
+  ActionSummary action = 5;
+  repeated string matched_rule_ids = 6;
+  string ruleset_version = 7;
+  ApprovalState state = 8;
+  ReviewState review = 9;
+  optional string review_reason = 10;
+  // 必问与清单外沙箱外执行时为空（设计 7.3 第 2 条）。
+  repeated RememberScope offered_remember = 11;
+  // 如「本项目内 `npm test …` 不再问」，由后台生成，网页只显示。
+  string remember_label = 12;
+  google.protobuf.Timestamp requested_at = 13;
+  google.protobuf.Timestamp decided_at = 14;
+  // 当前（或最近一次）AI 审查的身份，与 review 一起落盘：重建投影后迟到的审查结果仍能判作废（T01 方案 4.3）。
+  optional string review_id = 15;
+}
+
+enum ApprovalKind {
+  APPROVAL_KIND_UNSPECIFIED = 0;
+  APPROVAL_KIND_ASK = 1;
+  APPROVAL_KIND_OUTSIDE_SANDBOX = 2;
+}
+
+// 求值结果固定五种（需求第 9 章），不得新增。用于审计事件 ApprovalEvaluated。
+message Verdict {
+  oneof kind {
+    VerdictAllow allow = 1;
+    AskReason ask = 2;
+    DenyReason deny = 3;
+    // 拒绝 + 亲手执行提议。
+    UserActionProposal user_action = 4;
+    // 询问的一种：批准后在沙箱外运行。
+    AskReason outside_sandbox = 5;
+  }
+}
+
+message VerdictAllow {}
+
+enum AskReason {
+  ASK_REASON_UNSPECIFIED = 0;
+  ASK_REASON_DEFAULT = 1;
+  ASK_REASON_OUT_OF_BOUNDS = 2;
+  ASK_REASON_MUST_ASK = 3;
+  ASK_REASON_UNCLASSIFIED = 4;
+  ASK_REASON_MCP_NOT_READ_ONLY = 5;
+  ASK_REASON_UNPARSABLE_COMMAND = 6;
+  ASK_REASON_FORCED_AFTER_DENIAL = 7;
+}
+
+message DenyReason {
+  oneof kind {
+    string baseline_rule_id = 1;
+    ActionFingerprint denial_memory = 2;
+    ToolDisabled tool_disabled = 3;
+    string deny_rule_id = 4;
+    SystemTurnOutOfToolSet system_turn_out_of_tool_set = 5;
+    ToolSetExcluded tool_set_excluded = 6;
+  }
+}
+
+message ToolDisabled {}
+
+message SystemTurnOutOfToolSet {}
+
+message ToolSetExcluded {}
+
+// 亲手执行提议的内容：单个简单命令，或单个文件补丁（设计 7.2a 第 1 条）。
+message UserActionProposal {
+  oneof content {
+    CommandProposal command = 1;
+    PatchProposal patch = 2;
+  }
+}
+
+message CommandProposal {
+  string command = 1;
+  string cwd = 2;
+}
+
+message PatchProposal {
+  string path = 1;
+  string old_text = 2;
+  string new_text = 3;
+}
+
+// 亲手执行卡片（设计 7.2a）。不记进程身份（pid）：崩溃后不核对、不停止，见 T01 方案第 8 节已知限制。
+message UserActionCard {
+  string id = 1;
+  string turn_id = 2;
+  string conversation_id = 3;
+  oneof content {
+    CommandProposal command = 4;
+    PatchProposal patch = 5;
+  }
+  string reason = 6;
+  // 提议哈希；ExecuteUserAction 必须带同一个值（USER_ACTION_HASH_MISMATCH）。
+  bytes proposal_hash = 7;
+  UserActionState state = 8;
+  ExitStatus exit = 9;
+  // 输出只给用户（设计 7.2a 第 5 条），经 ReadArtifact 读取。
+  ArtifactRef output_artifact = 10;
+  // FAILED / UNKNOWN 时的原因。
+  optional string error = 11;
+  // VOIDED 时的原因。
+  optional VoidReason void_reason = 12;
+}
+
+// ---------- 规则与安全清单 ----------
+
+// 规则条目（需求第 9 章：安全规则以带 id 的规则条目实现）。
+// 安全清单的条目也是规则条目，不另设消息（设计 7.2c）：layer 标出属于哪张清单
+// （CREDENTIAL_COMMANDS / SENSITIVE_DIRS / WRITABLE_DIRS），清单的值放在 matcher 里
+// （命令清单用 program_subcommand，目录清单用 path_under），内置条目的 source 是 builtin。
+message Rule {
+  string id = 1;
+  RuleLayer layer = 2;
+  RuleMatcher matcher = 3;
+  RuleEffect effect = 4;
+  RuleSource source = 5;
+  Scope scope = 6;
+  google.protobuf.Timestamp created_at = 7;
+  // 给人看的说明，如「本项目内 `npm test …` 不再问」。
+  string label = 8;
+}
+
+enum RuleLayer {
+  RULE_LAYER_UNSPECIFIED = 0;
+  RULE_LAYER_BASELINE = 1;
+  RULE_LAYER_DENIAL_MEMORY = 2;
+  RULE_LAYER_TOOL_CONFIG = 3;
+  RULE_LAYER_USER_DENY = 4;
+  RULE_LAYER_MUST_ASK = 5;
+  RULE_LAYER_REMEMBERED = 6;
+  RULE_LAYER_PROJECT_ALLOW = 7;
+  RULE_LAYER_DEFAULT = 8;
+  RULE_LAYER_CREDENTIAL_COMMANDS = 9;
+  RULE_LAYER_AUTORUN_CONFIG = 10;
+  RULE_LAYER_SENSITIVE_DIRS = 11;
+  RULE_LAYER_WRITABLE_CACHE = 12;
+  RULE_LAYER_WRITABLE_DIRS = 13;
+  RULE_LAYER_REJECT_LIST = 14;
+}
+
+message RuleMatcher {
+  oneof kind {
+    string path_under = 1;
+    string path_is = 2;
+    ProgramSubcommand program_subcommand = 3;
+    string tool_name = 4;
+    ActionKind action_kind_is = 5;
+    AnyMatcher any = 6;
+  }
+}
+
+message ProgramSubcommand {
+  string program = 1;
+  optional string subcommand = 2;
+}
+
+message AnyMatcher {}
+
+// 没有任何取值能把底线变成放行：USER_ACTION_ELIGIBLE 只表示「拒绝，且允许生成亲手执行卡片」。
+enum RuleEffect {
+  RULE_EFFECT_UNSPECIFIED = 0;
+  RULE_EFFECT_ALLOW = 1;
+  RULE_EFFECT_ASK = 2;
+  RULE_EFFECT_DENY = 3;
+  RULE_EFFECT_USER_ACTION_ELIGIBLE = 4;
+  RULE_EFFECT_OUTSIDE_SANDBOX = 5;
+}
+
+message RuleSource {
+  oneof kind {
+    BuiltinRuleSource builtin = 1;
+    RememberedRuleSource remembered = 2;
+    ProjectConfigRuleSource project_config = 3;
+    UserRuleSource user = 4;
+  }
+}
+
+message BuiltinRuleSource {
+  string ruleset_version = 1;
+}
+
+message RememberedRuleSource {
+  string approval_id = 1;
+  // 做出「记住」决定的主体，与事件信封的 actor 同一种写法。
+  string by = 2;
+}
+
+message ProjectConfigRuleSource {}
+
+message UserRuleSource {}
+
+// ---------- 附件 ----------
+
+message Attachment {
+  string id = 1;
+  string conversation_id = 2;
+  // 内容的 SHA-256，小写十六进制。
+  string sha256 = 3;
+  uint64 size = 4;
+  string mime = 5;
+  string name = 6;
+  AttachmentOrigin origin = 7;
+  // 疑似凭据文件，需用户确认后才附加（设计 9.2 第 3a 条）。
+  bool needs_confirmation = 8;
+  google.protobuf.Timestamp created_at = 9;
+}
+
+message AttachmentOrigin {
+  oneof kind {
+    // 仓库内文件，直接引用路径。
+    string repo_path = 1;
+    ArtifactRef copied = 2;
+    ArtifactRef pasted = 3;
+    // 用户确认附加的凭据文件：内容存 PRIVATE 区，不经 ReadArtifact 读出。
+    ArtifactRef credential_inline = 4;
+  }
+}
+
+// ---------- 运行时、模型、额度 ----------
+
+message RuntimeStatus {
+  string runtime_id = 1;
+  // 不透明字符串，厂商名只在适配器里出现。
+  string kind = 2;
+  string display_name = 3;
+  optional string cli_path = 4;
+  optional string cli_version = 5;
+  string adapter_version = 6;
+  RuntimeState state = 7;
+  LoginInfo login = 8;
+}
+
+enum RuntimeState {
+  RUNTIME_STATE_UNSPECIFIED = 0;
+  RUNTIME_STATE_MISSING = 1;
+  RUNTIME_STATE_NOT_LOGGED_IN = 2;
+  RUNTIME_STATE_READY_VERIFIED = 3;
+  RUNTIME_STATE_READY_UNVERIFIED = 4;
+  RUNTIME_STATE_INCOMPATIBLE = 5;
+}
+
+// 登录信息：只有这四个字段，是 AGENTS.md 允许保存的全部。
+// 不得新增邮箱、账号名、组织等任何字段；需要时交产品负责人决定（安全不变量）。
+message LoginInfo {
+  bool logged_in = 1;
+  string auth_method = 2;
+  string subscription_type = 3;
+  google.protobuf.Timestamp login_expires_at = 4;
+}
+
+message ModelOption {
+  string model_id = 1;
+  string display_name = 2;
+}
+
+// 一个额度窗口（设计 9.4）。上报了哪些窗口就有哪些。
+message QuotaWindow {
+  // 窗口类型，运行时给的不透明字符串（如 5 小时、7 天）。
+  string window = 1;
+  // 使用率百分比，0–100。
+  uint32 used_pct = 2;
+  google.protobuf.Timestamp resets_at = 3;
+  google.protobuf.Timestamp observed_at = 4;
+}
+
+// ---------- 待处理 ----------
+
+message PendingItem {
+  oneof item {
+    Approval approval = 1;
+    UserActionCard user_action = 2;
+    AgentsMdDraftCard agents_md_draft = 3;
+    ResumeCard resume = 4;
+  }
+}
+
+// 添加项目后由系统回合生成的 AGENTS.md 草稿（设计 9.3 第 4 步）。
+message AgentsMdDraftCard {
+  string card_id = 1;
+  string project_id = 2;
+  ArtifactRef content = 3;
+  google.protobuf.Timestamp proposed_at = 4;
+}
+
+// 回合中断后的「继续 / 放弃」卡片（设计 4）。
+message ResumeCard {
+  string turn_id = 1;
+  string conversation_id = 2;
+  InterruptReason reason = 3;
+}
+
+// ---------- 本机导入与设置 ----------
+
+message LocalConfigItem {
+  // 后台给的稳定 id，ImportLocalConfig 按它勾选。
+  string id = 1;
+  LocalConfigKind kind = 2;
+  string name = 3;
+  string description = 4;
+  // 来源目录或配置文件，给人看。
+  string source = 5;
+  bool imported = 6;
+}
+
+enum LocalConfigKind {
+  LOCAL_CONFIG_KIND_UNSPECIFIED = 0;
+  LOCAL_CONFIG_KIND_MCP = 1;
+  LOCAL_CONFIG_KIND_SKILL = 2;
+  LOCAL_CONFIG_KIND_PLUGIN = 3;
+}
+
+message GlobalSettings {
+  bool playful_ui = 1;
+  bool autostart = 2;
+  string projects_root = 3;
+}

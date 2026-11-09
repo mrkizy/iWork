@@ -1,0 +1,9 @@
+{
+  "conversationModelChanged": {
+    "conversationId": "01JC0C0000000000000000CNV1",
+    "model": {
+      "modelId": "opus",
+      "effort": "high"
+    }
+  }
+}

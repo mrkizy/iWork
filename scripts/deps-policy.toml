@@ -1,0 +1,96 @@
+# crate 依赖方向的唯一真值，由 scripts/check-deps.sh 读取（规则说明见 docs/adr/0005）。
+#
+# 只用 TOML 的一个小子集（脚本用 jq 解析）：`[workspace]`、`[crates.<名字>]` 两种表头，
+# 值只有 "字符串" 或 ["字符串", ...]（可跨行）；注释用 #。写出子集以外的东西脚本会报错退出 2。
+#
+# 每个工作区 crate 必须有一节，多一节少一节都报错。各键：
+#   internal          必填。normal + build 依赖的传递闭包里允许出现的全部工作区 crate
+#   direct            可选。直接依赖（normal + build）里允许的外部 crate；不写 = 不限
+#   direct_dev        可选。直接 dev 依赖里允许的外部 crate；不写 = 不限
+#   deny_transitive   可选。传递禁用查到哪一层：
+#                       "normal_build"（默认）只查会链接进产物的闭包；
+#                       "normal_build_dev" 连本 crate 的 dev 依赖闭包一起查（测试也必须是纯的）；
+#                       "none" 不查（只有组合入口 daemon 用）
+#   transitive_exempt 可选。本 crate 本来就该有的框架；它们本身和它们带进来的依赖都不算违规
+
+[workspace]
+# 传递禁用：I/O 与框架类 crate，出现在闭包里就违规
+io_and_framework = [
+    "tokio", "async-std", "smol", "mio",
+    "rusqlite", "sqlx", "gix", "git2",
+    "agent-client-protocol", "tauri",
+    "hyper", "reqwest", "keyring", "notify-rust",
+]
+
+[crates.iwork-proto]
+internal = []
+direct = ["prost", "prost-types", "bytes", "prost-build", "protox"]
+
+[crates.iwork-domain]
+internal = []
+direct = ["ulid", "thiserror"]
+direct_dev = ["proptest"]
+deny_transitive = "normal_build_dev"
+
+[crates.iwork-ports]
+internal = ["iwork-domain"]
+direct = ["thiserror"]
+direct_dev = ["pollster"]
+deny_transitive = "normal_build_dev"
+
+[crates.iwork-core]
+internal = ["iwork-domain", "iwork-ports"]
+direct = ["thiserror"]
+
+[crates.iwork-app]
+internal = ["iwork-core", "iwork-ports", "iwork-proto", "iwork-domain"]
+
+[crates.iwork-store]
+internal = ["iwork-ports", "iwork-domain"]
+transitive_exempt = ["rusqlite"]
+
+[crates.iwork-agent-acp]
+internal = ["iwork-ports", "iwork-domain", "iwork-proto"]
+transitive_exempt = ["agent-client-protocol", "tokio"]
+
+[crates.iwork-vcs-git]
+internal = ["iwork-ports", "iwork-domain"]
+transitive_exempt = ["gix", "tokio"]
+
+[crates.iwork-host]
+internal = ["iwork-ports", "iwork-domain"]
+transitive_exempt = ["keyring", "tokio"]
+
+[crates.iwork-ipc]
+internal = ["iwork-proto"]
+transitive_exempt = ["tokio"]
+
+[crates.iwork-daemon]
+internal = [
+    "iwork-domain", "iwork-ports", "iwork-proto", "iwork-core", "iwork-app",
+    "iwork-store", "iwork-agent-acp", "iwork-vcs-git", "iwork-host", "iwork-ipc",
+]
+deny_transitive = "none"
+
+[crates.iwork-bridge-claude]
+internal = ["iwork-proto", "iwork-claude-hook"]
+transitive_exempt = ["agent-client-protocol", "tokio"]
+
+[crates.iwork-claude-hook]
+internal = []
+direct = ["serde", "serde_json"]
+
+[crates.iwork-client-core]
+internal = ["iwork-ipc", "iwork-proto"]
+transitive_exempt = ["tokio"]
+
+[crates.iwork-client]
+internal = ["iwork-client-core", "iwork-ipc", "iwork-proto"]
+transitive_exempt = ["tokio", "tauri"]
+
+[crates.iwork-fake-agent]
+internal = ["iwork-proto"]
+transitive_exempt = ["agent-client-protocol", "tokio"]
+
+[crates.iwork-bench]
+internal = []

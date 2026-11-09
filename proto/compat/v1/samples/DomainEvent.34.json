@@ -1,0 +1,41 @@
+{
+  "approvalEvaluated": {
+    "turnId": "01JC0T0000000000000000TRN1",
+    "action": {
+      "kind": "ACTION_KIND_OUTSIDE_SANDBOX",
+      "target": {
+        "command": {
+          "program": "npm",
+          "subcommand": "publish",
+          "argv": [
+            "npm",
+            "publish",
+            "--access=public"
+          ]
+        }
+      },
+      "toolName": "Bash",
+      "rawSummary": "npm publish --access=public",
+      "outOfBounds": true,
+      "bypassSandboxRequested": true,
+      "opaqueScript": true
+    },
+    "matchedRuleIds": [
+      "01JC0R0000000000000000RXE1",
+      "01JC0R0000000000000000BSE1"
+    ],
+    "rulesetVersion": "2026.11.1",
+    "verdict": {
+      "deny": {
+        "denialMemory": {
+          "kind": "ACTION_KIND_DELETE",
+          "target": {
+            "path": "/Users/me/code/iwork/build"
+          }
+        }
+      }
+    },
+    "layerHit": "RULE_LAYER_DENIAL_MEMORY",
+    "durationMs": 3
+  }
+}

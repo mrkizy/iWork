@@ -1,0 +1,6 @@
+# 固定到实施时（2026-11-09）的最新 stable；edition 2024 要求 ≥ 1.85。
+# 升级：改这一行，跑一遍全部 CI 检查后单独提交。
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

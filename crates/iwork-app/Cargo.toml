@@ -1,0 +1,19 @@
+[package]
+name = "iwork-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+iwork-core.workspace = true
+iwork-ports.workspace = true
+iwork-proto.workspace = true
+iwork-domain.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

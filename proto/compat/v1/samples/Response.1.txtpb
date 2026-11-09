@@ -1,0 +1,12 @@
+error {
+  code: ERROR_CODE_PROTOCOL_VERSION_MISMATCH
+  message: "\345\215\217\350\256\256\344\270\273\347\211\210\346\234\254\344\270\215\344\270\200\350\207\264"
+  retryable: true
+  details: [{
+    key: "server_major"
+    value: "2"
+  }, {
+    key: "client_major"
+    value: "1"
+  }]
+}

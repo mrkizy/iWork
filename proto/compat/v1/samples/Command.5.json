@@ -1,0 +1,9 @@
+{
+  "commandId": "01JC0K0000000000000000CMD5",
+  "uploadAttachment": {
+    "conversationId": "01JC0C0000000000000000CNV1",
+    "name": "日志.txt",
+    "mime": "text/plain",
+    "uploadId": "upload-1"
+  }
+}

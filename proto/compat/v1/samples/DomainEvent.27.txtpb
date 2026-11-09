@@ -1,0 +1,7 @@
+turn_model_reported {
+  turn_id: "01JC0T0000000000000000TRN1"
+  model {
+    model_id: "opus"
+    effort: "high"
+  }
+}

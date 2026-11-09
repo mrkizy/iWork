@@ -1,0 +1,2 @@
+enabled_groups: [TOOL_GROUP_READ_AND_SEARCH, TOOL_GROUP_EDIT_FILES]
+include_always_on: true

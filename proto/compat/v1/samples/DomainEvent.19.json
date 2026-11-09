@@ -1,0 +1,9 @@
+{
+  "approvalModeChanged": {
+    "target": {
+      "conversationId": "01JC0C0000000000000000CNV1"
+    },
+    "mode": "APPROVAL_MODE_FULL_ACCESS",
+    "cause": "APPROVAL_MODE_CHANGE_CAUSE_PROJECT_SWITCH"
+  }
+}
