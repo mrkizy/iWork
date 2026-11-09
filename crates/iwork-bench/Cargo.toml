@@ -8,6 +8,19 @@ publish.workspace = true
 
 [dependencies]
 
+[dev-dependencies]
+iwork-core.workspace = true
+iwork-domain.workspace = true
+iwork-ports.workspace = true
+iwork-host.workspace = true
+iwork-shell.workspace = true
+serde_json.workspace = true
+
 [[bench]]
 name = "placeholder"
+harness = false
+
+# T07：审批求值热路径（方案第 10 节）
+[[bench]]
+name = "approval"
 harness = false

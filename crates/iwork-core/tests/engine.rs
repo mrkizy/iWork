@@ -942,7 +942,10 @@ async fn snapshot_pins_excluded_commands() {
         label: "terraform apply".into(),
         applies_in: Default::default(),
     };
-    let old = Arc::new(b.engine.decider_for(keys_with(std::slice::from_ref(&tf), assistant())));
+    let old = Arc::new(
+        b.engine
+            .decider_for(keys_with(std::slice::from_ref(&tf), assistant())),
+    );
     b.engine
         .on_event(
             Seq(50),

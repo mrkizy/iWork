@@ -326,27 +326,34 @@ fn analyze_bash(a: &mut Analysis, input: &ToolInput, boundaries: &Boundaries) {
     }
 }
 
-fn pending_paths(a: &Analysis) -> impl Iterator<Item = &str> {
-    let structured = a
-        .structured
-        .as_ref()
-        .map(|(_, s)| s.as_slice())
-        .unwrap_or(&[]);
-    structured
-        .iter()
-        .chain(&a.fallback)
-        .filter_map(|p| match &p.target {
-            PendingTarget::Path(w) => Some(w.as_str()),
-            _ => None,
-        })
+fn paths_of(pending: &[PendingAction]) -> impl Iterator<Item = &str> {
+    pending.iter().filter_map(|p| match &p.target {
+        PendingTarget::Path(w) => Some(w.as_str()),
+        _ => None,
+    })
 }
 
-/// 第二段（I/O）：解析出现的全部路径词。
+/// 第二段（I/O）：解析出现的路径词。兜底动作的候选只在归类失败或有路径解析不了时才解析
+/// （它们只在那时用得上；热路径上省掉大部分 lstat）。
 pub fn gather_path_facts(a: &Analysis, cwd: &CanonicalPath, fs: &impl PathResolver) -> PathFacts {
     let mut facts = PathFacts::default();
-    for w in pending_paths(a) {
+    let resolve = |facts: &mut PathFacts, w: &str| {
         if !facts.resolved.contains_key(w) {
             facts.resolved.insert(w.to_owned(), fs.resolve(cwd, w));
+        }
+    };
+    let need_fallback = match &a.structured {
+        Ok((_, pending)) => {
+            for w in paths_of(pending) {
+                resolve(&mut facts, w);
+            }
+            facts.resolved.values().any(Result::is_err)
+        }
+        Err(_) => true,
+    };
+    if need_fallback {
+        for w in paths_of(&a.fallback) {
+            resolve(&mut facts, w);
         }
     }
     facts

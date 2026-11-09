@@ -24,13 +24,10 @@ pub fn matches(
 ) -> bool {
     let ancestor_too = entry_layer == RuleLayer::Baseline && action.kind == ActionKind::Delete;
     match m {
-        RuleMatcher::PathUnder(dir) => any_path(&action.target, |p| fs.is_under(p, &canon(dir))),
-        RuleMatcher::PathIs(want) => {
-            let want = canon(want);
-            any_path(&action.target, |p| {
-                fs.same_path(p, &want) || (ancestor_too && fs.is_under(&want, p))
-            })
-        }
+        RuleMatcher::PathUnder(dir) => any_path(&action.target, |p| fs.is_under(p, dir)),
+        RuleMatcher::PathIs(want) => any_path(&action.target, |p| {
+            fs.same_path(p, want) || (ancestor_too && fs.is_under(want, p))
+        }),
         RuleMatcher::ProgramSubcommand {
             program,
             subcommand,
@@ -71,10 +68,6 @@ pub fn path_of(m: &RuleMatcher) -> Option<&Path> {
         RuleMatcher::All(ms) => ms.iter().find_map(path_of),
         _ => None,
     }
-}
-
-fn canon(p: &Path) -> CanonicalPath {
-    CanonicalPath(p.to_path_buf())
 }
 
 fn any_path(target: &ActionTarget, f: impl Fn(&CanonicalPath) -> bool) -> bool {

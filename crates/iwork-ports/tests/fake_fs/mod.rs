@@ -170,13 +170,17 @@ impl PathResolver for FakeFs {
         Ok(CanonicalPath(current))
     }
 
-    fn same_path(&self, a: &CanonicalPath, b: &CanonicalPath) -> bool {
-        self.components_eq(&a.0, &b.0)
+    fn same_path<A: AsRef<Path> + ?Sized, B: AsRef<Path> + ?Sized>(&self, a: &A, b: &B) -> bool {
+        self.components_eq(a.as_ref(), b.as_ref())
     }
 
-    fn is_under(&self, child: &CanonicalPath, dir: &CanonicalPath) -> bool {
-        let dir: Vec<_> = dir.0.components().collect();
-        let child: Vec<_> = child.0.components().collect();
+    fn is_under<A: AsRef<Path> + ?Sized, B: AsRef<Path> + ?Sized>(
+        &self,
+        child: &A,
+        dir: &B,
+    ) -> bool {
+        let dir: Vec<_> = dir.as_ref().components().collect();
+        let child: Vec<_> = child.as_ref().components().collect();
         child.len() >= dir.len()
             && dir
                 .iter()

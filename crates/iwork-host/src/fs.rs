@@ -44,10 +44,15 @@ impl OsPathResolver {
     }
 
     fn eq_name(&self, a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
-        if self.case_insensitive {
-            a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
-        } else {
-            a == b
+        if a == b {
+            return true;
+        }
+        if !self.case_insensitive {
+            return false;
+        }
+        match (a.to_str(), b.to_str()) {
+            (Some(x), Some(y)) if x.is_ascii() && y.is_ascii() => x.eq_ignore_ascii_case(y),
+            _ => a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase(),
         }
     }
 }
@@ -89,6 +94,39 @@ fn parts(p: &Path) -> Vec<Part> {
     out
 }
 
+/// 尾段没有 `..` 时：最深的已存在上级（解析后）接上不存在的尾段。走不了快路径返回 `None`。
+fn existing_ancestor(joined: &Path) -> Option<Result<PathBuf, PathResolveError>> {
+    if joined.components().any(|c| c == Component::ParentDir) {
+        return None;
+    }
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut cur = joined;
+    while let Some(parent) = cur.parent() {
+        tail.push(cur.file_name()?);
+        if let Ok(real) = parent.canonicalize() {
+            let first = real.join(tail.last()?);
+            // 紧接着的分量必须确实不存在：存在（含悬空链接）就交给慢路径
+            match std::fs::symlink_metadata(&first) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                _ => return None,
+            }
+            let mut out = strip_verbatim(real);
+            for name in tail.iter().rev() {
+                out.push(name);
+            }
+            return Some(if out.to_str().is_some() {
+                Ok(out)
+            } else {
+                Err(PathResolveError::NotUtf8 {
+                    raw: joined.display().to_string(),
+                })
+            });
+        }
+        cur = parent;
+    }
+    None
+}
+
 /// Windows 的 `canonicalize` 返回 `\\?\C:\…`；去掉前缀，与规则里的路径写法一致。
 fn strip_verbatim(p: PathBuf) -> PathBuf {
     #[cfg(windows)]
@@ -122,6 +160,21 @@ impl PathResolver for OsPathResolver {
         } else {
             (cwd.0.clone(), raw)
         };
+        // 快路径：整条路径已存在时 realpath 就是逐分量、先解析链接的同一个顺序，一次系统调用链完成
+        let joined = current.join(rest);
+        if let Ok(real) = joined.canonicalize() {
+            let real = strip_verbatim(real);
+            return if real.to_str().is_some() {
+                Ok(CanonicalPath(real))
+            } else {
+                Err(PathResolveError::NotUtf8 { raw: err_raw() })
+            };
+        }
+        // 第二条快路径：目标还不存在（将要写的文件）。尾段没有 `..` 时，找最深的已存在上级一次解析，
+        // 再确认紧接着的分量确实不存在（悬空的符号链接也算存在，交给逐分量的慢路径）
+        if let Some(found) = existing_ancestor(&joined) {
+            return found.map(CanonicalPath);
+        }
         let mut queue: VecDeque<Part> = parts(Path::new(rest)).into();
         let mut missing = false;
         let mut hops = 0;
@@ -170,21 +223,27 @@ impl PathResolver for OsPathResolver {
         Ok(CanonicalPath(current))
     }
 
-    fn same_path(&self, a: &CanonicalPath, b: &CanonicalPath) -> bool {
-        let (a, b): (Vec<_>, Vec<_>) = (a.0.components().collect(), b.0.components().collect());
-        a.len() == b.len()
-            && a.iter()
-                .zip(&b)
-                .all(|(x, y)| self.eq_name(x.as_os_str(), y.as_os_str()))
+    fn same_path<A: AsRef<Path> + ?Sized, B: AsRef<Path> + ?Sized>(&self, a: &A, b: &B) -> bool {
+        let (mut a, mut b) = (a.as_ref().components(), b.as_ref().components());
+        loop {
+            match (a.next(), b.next()) {
+                (None, None) => return true,
+                (Some(x), Some(y)) if self.eq_name(x.as_os_str(), y.as_os_str()) => {}
+                _ => return false,
+            }
+        }
     }
 
-    fn is_under(&self, child: &CanonicalPath, dir: &CanonicalPath) -> bool {
-        let dir: Vec<_> = dir.0.components().collect();
-        let child: Vec<_> = child.0.components().collect();
-        child.len() >= dir.len()
-            && dir
-                .iter()
-                .zip(&child)
-                .all(|(d, c)| self.eq_name(d.as_os_str(), c.as_os_str()))
+    fn is_under<A: AsRef<Path> + ?Sized, B: AsRef<Path> + ?Sized>(
+        &self,
+        child: &A,
+        dir: &B,
+    ) -> bool {
+        let mut child = child.as_ref().components();
+        dir.as_ref().components().all(|d| {
+            child
+                .next()
+                .is_some_and(|c| self.eq_name(d.as_os_str(), c.as_os_str()))
+        })
     }
 }

@@ -1819,6 +1819,14 @@ dependencies = [
 [[package]]
 name = "iwork-bench"
 version = "0.1.0"
+dependencies = [
+ "iwork-core",
+ "iwork-domain",
+ "iwork-host",
+ "iwork-ports",
+ "iwork-shell",
+ "serde_json",
+]
 
 [[package]]
 name = "iwork-bridge-claude"

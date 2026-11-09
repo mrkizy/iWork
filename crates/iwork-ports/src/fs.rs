@@ -3,6 +3,8 @@
 //! 审批求值是纯函数，但符号链接、大小写是磁盘上的事实，只能经这个端口取来当输入。
 //! 同步：它在 hook 的热路径上，一次调用只做几次 lstat。
 
+use std::path::Path;
+
 use iwork_domain::action::CanonicalPath;
 
 /// 路径解析与比较。
@@ -18,9 +20,14 @@ use iwork_domain::action::CanonicalPath;
 pub trait PathResolver: Send + Sync {
     fn resolve(&self, cwd: &CanonicalPath, raw: &str) -> Result<CanonicalPath, PathResolveError>;
     /// 两条规范路径在这个文件系统上是否指同一处（大小写不敏感时忽略大小写）。
-    fn same_path(&self, a: &CanonicalPath, b: &CanonicalPath) -> bool;
+    /// 收 `AsRef<Path>`：规则条目里的路径与动作目标都能直接传，求值热路径上不必为比较分配。
+    fn same_path<A: AsRef<Path> + ?Sized, B: AsRef<Path> + ?Sized>(&self, a: &A, b: &B) -> bool;
     /// `child` 是否在 `dir` 之下（含相等）；按 `same_path` 的规则逐分量比。
-    fn is_under(&self, child: &CanonicalPath, dir: &CanonicalPath) -> bool;
+    fn is_under<A: AsRef<Path> + ?Sized, B: AsRef<Path> + ?Sized>(
+        &self,
+        child: &A,
+        dir: &B,
+    ) -> bool;
 }
 
 /// 解析失败。调用方一律按「解析不了」处理（询问，不猜）。

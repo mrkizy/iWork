@@ -6,6 +6,12 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CanonicalPath(pub PathBuf);
 
+impl AsRef<std::path::Path> for CanonicalPath {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
 /// 动作类型（技术设计 7.1 表）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ActionKind {
