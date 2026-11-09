@@ -11,12 +11,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iwork_ipc::client::{Client, ClientConfig, ConnectError, Incoming, IncomingItem};
-use iwork_ipc::peer::{
-    ImageId, Manifest, PeerIdentity, SelfIdentity, SignerIdentity, UserId,
-};
+use iwork_ipc::peer::{ImageId, Manifest, PeerIdentity, SelfIdentity, SignerIdentity, UserId};
 use iwork_ipc::server::{
-    ChunkRefused, ConnectionContext, EventSource, Published, Publisher, ReplayPage,
-    RequestHandler, RoutedEvent, Server, ServerConfig, SourceError,
+    ChunkRefused, ConnectionContext, EventSource, Published, Publisher, ReplayPage, RequestHandler,
+    RoutedEvent, Server, ServerConfig, SourceError,
 };
 use iwork_ipc::transport::Endpoint;
 use iwork_ipc::transport::memory::{self, MemoryConnector};
@@ -35,7 +33,10 @@ pub const CLIENT_IMAGE: u8 = 0xC1;
 pub const SERVER_IMAGE: u8 = 0x51;
 
 pub fn manifest(images: &[u8]) -> Manifest {
-    let entries: Vec<String> = images.iter().map(|b| format!("\"{}\"", image(*b))).collect();
+    let entries: Vec<String> = images
+        .iter()
+        .map(|b| format!("\"{}\"", image(*b)))
+        .collect();
     Manifest::parse(&format!(
         r#"{{"manifest_version":1,"app_version":"1.0.0","binaries":{{"iwork":[{}]}}}}"#,
         entries.join(",")
@@ -134,15 +135,19 @@ pub fn sidebar() -> pb::SubscriptionScope {
 
 pub fn conversation(id: &str) -> pb::SubscriptionScope {
     pb::SubscriptionScope {
-        kind: Some(pb::subscription_scope::Kind::Conversation(pb::ConversationScope {
-            conversation_id: id.into(),
-        })),
+        kind: Some(pb::subscription_scope::Kind::Conversation(
+            pb::ConversationScope {
+                conversation_id: id.into(),
+            },
+        )),
     }
 }
 
 pub fn covers(scopes: &[pb::SubscriptionScope], entity: &str) -> bool {
     let r = route_of(entity);
-    scopes.iter().any(|s| scope_keys(s).iter().any(|k| k.covers(&r)))
+    scopes
+        .iter()
+        .any(|s| scope_keys(s).iter().any(|k| k.covers(&r)))
 }
 
 #[derive(Default)]
@@ -198,7 +203,9 @@ impl World {
     }
 
     pub fn op_at(&self, seq: u64) -> Op {
-        self.state.lock().unwrap().events[seq as usize - 1].1.clone()
+        self.state.lock().unwrap().events[seq as usize - 1]
+            .1
+            .clone()
     }
 
     /// seq 时刻的投影：实体 → 值。
@@ -263,7 +270,13 @@ impl EventSource for WorldSource {
         scope_keys(scope)
     }
 
-    async fn replay(&self, keys: &[StreamKey], from: u64, to: u64, limit: usize) -> Result<ReplayPage, SourceError> {
+    async fn replay(
+        &self,
+        keys: &[StreamKey],
+        from: u64,
+        to: u64,
+        limit: usize,
+    ) -> Result<ReplayPage, SourceError> {
         self.replay_calls.fetch_add(1, Ordering::SeqCst);
         self.world.delay().await;
         let st = self.world.state.lock().unwrap();
@@ -282,16 +295,24 @@ impl EventSource for WorldSource {
         Ok(ReplayPage { events, next_from })
     }
 
-    async fn snapshot(&self, scopes: &[pb::SubscriptionScope]) -> Result<(pb::Snapshot, u64), SourceError> {
+    async fn snapshot(
+        &self,
+        scopes: &[pb::SubscriptionScope],
+    ) -> Result<(pb::Snapshot, u64), SourceError> {
         self.snapshot_calls.fetch_add(1, Ordering::SeqCst);
         self.world.delay().await;
         let s = self.world.head();
         let tear = std::mem::take(&mut *self.world.snapshot_tear_once.lock().unwrap());
-        let mut results: Vec<pb::QueryResult> =
-            scopes.iter().map(|_| pb::QueryResult { seq: s, kind: None }).collect();
+        let mut results: Vec<pb::QueryResult> = scopes
+            .iter()
+            .map(|_| pb::QueryResult { seq: s, kind: None })
+            .collect();
         if tear {
             // 两部分之间夹着一次提交：后一部分看到更新的 seq。
-            results.push(pb::QueryResult { seq: s + 1, kind: None });
+            results.push(pb::QueryResult {
+                seq: s + 1,
+                kind: None,
+            });
         }
         Ok((pb::Snapshot { results }, s))
     }
@@ -341,10 +362,15 @@ impl RequestHandler for TestHandler {
             }
             Some(pb::request::Body::Query(q)) => {
                 let kind = q.kind.expect("ipc 已校验非空");
-                if iwork_proto::routing::query_lane(&kind) == iwork_proto::routing::QueryLane::SideQuery {
+                if iwork_proto::routing::query_lane(&kind)
+                    == iwork_proto::routing::QueryLane::SideQuery
+                {
                     let d = *self.side_query_delay.lock().unwrap();
                     tokio::time::sleep(d).await;
-                    pb::response::Body::Result(pb::QueryResult { seq: self.world.head(), kind: None })
+                    pb::response::Body::Result(pb::QueryResult {
+                        seq: self.world.head(),
+                        kind: None,
+                    })
                 } else if let pb::query::Kind::GetConversation(g) = &kind
                     && g.conversation_id == "missing"
                 {
@@ -406,7 +432,13 @@ pub struct Harness {
 }
 
 pub fn start(cfg: ServerConfig) -> Harness {
-    start_with(cfg, World::default(), server_own(), client_peer(), Arc::new(|_| server_peer()))
+    start_with(
+        cfg,
+        World::default(),
+        server_own(),
+        client_peer(),
+        Arc::new(|_| server_peer()),
+    )
 }
 
 pub fn start_with(
@@ -419,7 +451,8 @@ pub fn start_with(
     let handler = TestHandler::new(world.clone());
     let source = WorldSource::new(world.clone());
     let (server, publisher) = Server::new(cfg, server_identity, handler.clone(), source.clone());
-    let (listener, connector) = memory::endpoint("test", client_seen_by_server, server_seen_by_client);
+    let (listener, connector) =
+        memory::endpoint("test", client_seen_by_server, server_seen_by_client);
     let endpoint = Endpoint::Memory("test".into());
     let shutdown = CancellationToken::new();
     let server = tokio::spawn(server.serve(listener, shutdown.clone()));
@@ -538,7 +571,10 @@ struct Visitor<'a>(&'a mut BTreeMap<String, String>);
 
 impl tracing::field::Visit for Visitor<'_> {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.0.insert(field.name().to_owned(), format!("{value:?}").trim_matches('"').to_owned());
+        self.0.insert(
+            field.name().to_owned(),
+            format!("{value:?}").trim_matches('"').to_owned(),
+        );
     }
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         self.0.insert(field.name().to_owned(), value.to_owned());
@@ -566,7 +602,10 @@ impl tracing::Subscriber for CaptureSubscriber {
 }
 
 /// 世界里实体集合 `members` 是否完全一致（视图对拍用）。
-pub fn visible(p: &BTreeMap<String, u64>, scopes: &[pb::SubscriptionScope]) -> BTreeMap<String, u64> {
+pub fn visible(
+    p: &BTreeMap<String, u64>,
+    scopes: &[pb::SubscriptionScope],
+) -> BTreeMap<String, u64> {
     p.iter()
         .filter(|(e, _)| covers(scopes, e))
         .map(|(e, v)| (e.clone(), *v))

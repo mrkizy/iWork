@@ -321,7 +321,9 @@ mod tests {
         let o = persisted(7, 10);
         let mut mine = BytesMut::new();
         o.encode(&mut mine);
-        let Outbound::Persisted { ids, event } = &o else { unreachable!() };
+        let Outbound::Persisted { ids, event } = &o else {
+            unreachable!()
+        };
         let mut theirs = BytesMut::new();
         crate::frame::encode_frame(
             &crate::frame::Frame::Event(pb::Event {
@@ -355,7 +357,10 @@ mod tests {
     fn responses_are_never_refused() {
         let mut b = ConnectionBudget::new(100, 10);
         for _ in 0..50 {
-            b.push_response(pb::Response { request_id: 1, body: None });
+            b.push_response(pb::Response {
+                request_id: 1,
+                body: None,
+            });
         }
         assert!(b.used() > b.limit());
         assert_eq!(b.push_live(persisted(1, 0)), Push::Overflow);
@@ -368,7 +373,11 @@ mod tests {
         assert_eq!(b.reserve_buffer(one), Push::Queued);
         assert_eq!(b.reserve_buffer(one), Push::Queued);
         assert_eq!(b.reserve_buffer(one), Push::Queued);
-        assert_eq!(b.reserve_buffer(one), Push::Overflow, "缓冲也只能用到实时上限");
+        assert_eq!(
+            b.reserve_buffer(one),
+            Push::Overflow,
+            "缓冲也只能用到实时上限"
+        );
         assert_eq!(b.used(), one * 3);
         b.move_buffered_to_queue(persisted(1, 100), one);
         b.release_buffer(one);
@@ -382,7 +391,11 @@ mod tests {
         let first = delta("m", 0, "ab", &[1]);
         let mut b = ConnectionBudget::new(first.encoded_len() + 2, 1);
         assert_eq!(b.push_live(first), Push::Queued);
-        assert_eq!(b.push_live(delta("m", 2, "cd", &[1])), Push::Queued, "满了就合并");
+        assert_eq!(
+            b.push_live(delta("m", 2, "cd", &[1])),
+            Push::Queued,
+            "满了就合并"
+        );
         assert_eq!(texts(&b), ["abcd"]);
         assert_eq!(b.used(), b.queue[0].0.encoded_len(), "合并后字节重算");
         // offset 不连续、订阅集合不同、别的消息：都不合并 → 溢出。
@@ -404,14 +417,22 @@ mod tests {
         while b.push_live(delta("f", k * 10, "q", &[9])) == Push::Queued {
             k += 1;
         }
-        assert_eq!(b.push_live(delta("m", 1, "b", &[1])), Push::Overflow, "中间隔着持久事件不合并");
+        assert_eq!(
+            b.push_live(delta("m", 1, "b", &[1])),
+            Push::Overflow,
+            "中间隔着持久事件不合并"
+        );
         let mut b = ConnectionBudget::new(200, 1);
         b.push_live(delta("m", 0, "a", &[1]));
         b.push_live(delta("n", 0, "z", &[1]));
         while b.push_live(delta("n", b.queue.len() as u64 + 100, "q", &[2])) == Push::Queued {}
         let before = texts(&b);
         assert_eq!(before[0], "a");
-        assert_eq!(b.push_live(delta("m", 1, "b", &[1])), Push::Queued, "隔着别的瞬时事件可以合并");
+        assert_eq!(
+            b.push_live(delta("m", 1, "b", &[1])),
+            Push::Queued,
+            "隔着别的瞬时事件可以合并"
+        );
         assert_eq!(texts(&b)[0], "ab");
     }
 
@@ -421,7 +442,10 @@ mod tests {
         let first = delta("m", 0, &big, &[1]);
         let mut b = ConnectionBudget::new(first.encoded_len() + 1, 1);
         assert_eq!(b.push_live(first), Push::Queued);
-        assert_eq!(b.push_live(delta("m", MAX_CHUNK_DATA as u64, "y", &[1])), Push::Overflow);
+        assert_eq!(
+            b.push_live(delta("m", MAX_CHUNK_DATA as u64, "y", &[1])),
+            Push::Overflow
+        );
     }
 
     #[test]
