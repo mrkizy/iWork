@@ -170,7 +170,7 @@ CREATE TABLE approvals (
   conversation_id TEXT    NOT NULL,
   state           TEXT    NOT NULL,                -- pending|approved|denied|voided（主状态的真值在这三列，不在快照里）
   decider         TEXT,                            -- approved 时：user|mode_switch|ai_review
-  void_reason     TEXT,                            -- voided 时：turn_cancelled|conversation_deleted|turn_abandoned_after_interrupt|assistant_deleted
+  void_reason     TEXT,                            -- voided 时：turn_cancelled|conversation_deleted|turn_abandoned_after_interrupt|assistant_deleted|turn_failed
   review_phase    TEXT    NOT NULL,                -- not_reviewed|in_progress|passed|failed|errored|timed_out|abandoned
   awaits_user     INTEGER NOT NULL,                -- Approval::awaits_user()
   requested_seq   INTEGER NOT NULL,

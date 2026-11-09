@@ -12,7 +12,7 @@ use rusqlite::params;
 
 use super::{Cx, projects};
 use crate::snapshot::{decode_conversation, encode_conversation};
-use crate::sql::{ColumnText, seq_val};
+use crate::sql::ColumnText;
 
 /// `(kind, project_id, assistant_id, context_project_id)` 四列。
 fn kind_columns(
@@ -51,7 +51,7 @@ pub(super) fn created<C: EventCodec + ?Sized>(
             assistant_id,
             context_project_id,
             c.state.to_text(),
-            seq_val(c.last_read_seq),
+            cx.seq_arg("last_read_seq", c.last_read_seq)?,
             c.approval_mode.map(ApprovalMode::to_text),
             c.updated_at.0,
             encode_conversation(cx.codec, c)?,
@@ -87,7 +87,7 @@ pub(super) fn modify<C: EventCodec + ?Sized>(
             assistant_id,
             context_project_id,
             c.state.to_text(),
-            seq_val(c.last_read_seq),
+            cx.seq_arg("last_read_seq", c.last_read_seq)?,
             c.approval_mode.map(ApprovalMode::to_text),
             c.updated_at.0,
             encode_conversation(cx.codec, &c)?,

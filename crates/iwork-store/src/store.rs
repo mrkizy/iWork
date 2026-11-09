@@ -292,7 +292,7 @@ impl<C: EventCodec + 'static> StoragePort for SqliteStore<C> {
             let head: i64 = conn
                 .query_row("SELECT COALESCE(MAX(seq), 0) FROM events", [], |r| r.get(0))
                 .map_err(sql_err)?;
-            Ok(seq_col(head))
+            seq_col("events", "seq", head)
         })
     }
 
@@ -414,7 +414,7 @@ fn read_events<C: EventCodec>(
     limit: usize,
 ) -> Result<Vec<StoredEvent>, StorageError> {
     let mut sql = String::from("SELECT seq, type, payload, actor, at FROM events WHERE seq > ?");
-    let mut args: Vec<rusqlite::types::Value> = vec![seq_val(from).into()];
+    let mut args: Vec<rusqlite::types::Value> = vec![seq_val("read_events 的 from", from)?.into()];
     if let EventFilter::Streams(selectors) = filter {
         if selectors.is_empty() {
             return Ok(Vec::new());
@@ -451,7 +451,7 @@ fn read_events<C: EventCodec>(
     for row in rows {
         let (seq, kind, payload, actor, at) = row.map_err(sql_err)?;
         out.push(StoredEvent {
-            seq: seq_col(seq),
+            seq: seq_col("events", "seq", seq)?,
             at: Timestamp(at),
             actor: Actor(actor),
             event: codec.decode(&kind, &payload)?,

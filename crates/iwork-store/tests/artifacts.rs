@@ -558,3 +558,39 @@ fn private_area_permissions() {
     assert_eq!(mode(file.parent().unwrap()), 0o700);
     assert_eq!(mode(&w.env.dir.area(ArtifactArea::Private)), 0o700);
 }
+
+/// 第 1 轮审查 1/F-3：启动恢复时探测文件失败（这里是前缀目录没了执行权限）不能当成「文件不存在」：
+/// 登记与 pin 都保留，返回点名路径的错误；权限恢复后再恢复一次，什么都没丢。
+#[cfg(unix)]
+#[test]
+fn recover_keeps_data_when_probe_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = world();
+    let r = block(w.art.put_bytes(ArtifactArea::Artifacts, b"pinned".to_vec())).unwrap();
+    block(w.art.retain(&r)).unwrap();
+    let prefix = objects(&w.env, ArtifactArea::Artifacts)[0]
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let set_mode =
+        |m| std::fs::set_permissions(&prefix, std::fs::Permissions::from_mode(m)).unwrap();
+    set_mode(0o600);
+    let err = block(w.art.recover());
+    set_mode(0o700);
+    match err {
+        Err(ArtifactError::Io { path, .. }) => {
+            assert!(path.starts_with(&prefix), "点名路径：{path:?}")
+        }
+        other => panic!("探测失败应报错：{other:?}"),
+    }
+    assert_eq!(rows(&w.env), 1, "登记还在");
+    assert_eq!(
+        scalar(&w.env.db(), "SELECT pins FROM artifact_objects"),
+        1,
+        "pin 还在"
+    );
+
+    let report = block(w.art.recover()).unwrap();
+    assert_eq!((report.rows_removed, report.files_removed), (0, 0));
+    assert_eq!(block(w.art.read_range(&r, 0..6)).unwrap(), b"pinned");
+}

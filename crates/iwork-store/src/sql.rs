@@ -90,6 +90,7 @@ column_text!(VoidReason, "VoidReason" {
     (VoidReason::ConversationDeleted) => "conversation_deleted",
     (VoidReason::TurnAbandonedAfterInterrupt) => "turn_abandoned_after_interrupt",
     (VoidReason::AssistantDeleted) => "assistant_deleted",
+    (VoidReason::TurnFailed) => "turn_failed",
 });
 column_text!(ReviewPhase, "ReviewPhase" {
     (ReviewPhase::NotReviewed) => "not_reviewed",
@@ -226,13 +227,19 @@ pub(crate) fn parse_sha(text: &str) -> Option<Sha256> {
     Some(Sha256(out))
 }
 
-/// `Seq` ↔ INTEGER。SQLite 的整数是有符号 64 位；seq 从 1 递增，远到不了上限。
-pub(crate) fn seq_val(seq: Seq) -> i64 {
-    i64::try_from(seq.0).expect("seq 超出 i64")
+/// `Seq` → INTEGER。`Seq` 是公开的 `u64`，调用方给的值（补发游标、已读位置）可能超出 SQLite 的
+/// 有符号 64 位整数：返回点名的错误，不能 panic（panic 会带走读线程或写线程）。
+pub(crate) fn seq_val(what: &str, seq: Seq) -> Result<i64, StorageError> {
+    i64::try_from(seq.0).map_err(|_| StorageError::Io {
+        message: format!("{what} 的值 {} 超出存储范围（最大 {}）", seq.0, i64::MAX),
+    })
 }
 
-pub(crate) fn seq_col(value: i64) -> Seq {
-    Seq(u64::try_from(value).expect("库里的 seq 是负数"))
+/// INTEGER → `Seq`。库里出现负数只可能是被手改，点名表与列。
+pub(crate) fn seq_col(table: &str, column: &str, value: i64) -> Result<Seq, StorageError> {
+    u64::try_from(value)
+        .map(Seq)
+        .map_err(|_| bad_column(table, column, value))
 }
 
 /// 无符号计数 ↔ INTEGER（大小、token 数）。超过 i64 的值在 SQLite 里存不下，按错误报。

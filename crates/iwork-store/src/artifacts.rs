@@ -28,7 +28,7 @@ use sha2::Digest;
 use crate::data_dir::{ALL_AREAS, DataDir};
 use crate::reader::ReaderPool;
 use crate::reply::{self, Reply};
-use crate::sql::{ColumnText, parse_sha, sha_text, sql_err, u64_val};
+use crate::sql::{ColumnText, parse_sha, sha_text, sql_err, u64_col, u64_val};
 use crate::store::SqliteStore;
 use crate::writer::WriterHandle;
 
@@ -307,7 +307,11 @@ impl<G: IdGenerator, K: Clock> Inner<G, K> {
                         message: format!("artifact_objects.sha256 的值 {hex:?} 不合法"),
                     });
                 };
-                if !self.object_path(area, &sha).exists() {
+                // 只有确认不存在才算「有行无文件」；探测本身失败（权限、I/O）时什么都不删，
+                // 返回点名路径的错误——把探测失败当成不存在会误删登记、进而误删文件
+                let path = self.object_path(area, &sha);
+                let present = path.try_exists().map_err(|e| io_err(&path, e))?;
+                if !present {
                     if *referenced {
                         tracing::error!(sha256 = %hex, area = area_text, "被引用的制品文件不见了，内容已丢失");
                         report.missing_referenced += 1;
@@ -456,7 +460,9 @@ impl<G: IdGenerator + 'static, K: Clock + 'static> ArtifactStore for FsArtifactS
                 })
                 .await
                 .map_err(|e| storage_err(&root, e))?;
-            let size = size.ok_or(ArtifactError::NotFound { sha256: r.sha256 })? as u64;
+            let size = size.ok_or(ArtifactError::NotFound { sha256: r.sha256 })?;
+            let size =
+                u64_col("artifact_objects", "size", size).map_err(|e| storage_err(&root, e))?;
             if range.start > range.end || range.end > size {
                 return Err(ArtifactError::RangeInvalid {
                     sha256: r.sha256,
@@ -631,7 +637,7 @@ fn gc_in_tx(
             }
             exec("RELEASE gc")?;
             report.removed += 1;
-            report.freed_bytes += size as u64;
+            report.freed_bytes += u64_col("artifact_objects", "size", size)?;
         }
         Ok(report)
     };
@@ -645,8 +651,14 @@ fn gc_in_tx(
             Ok(r)
         }
         Err(e) => {
-            if !conn.is_autocommit() {
-                let _ = exec("ROLLBACK");
+            // 回滚失败不吞：带上两个错误返回；遗留的事务由写线程收尾时再回滚，仍不行就标写连接失效
+            if !conn.is_autocommit()
+                && let Err(rb) = exec("ROLLBACK")
+            {
+                tracing::error!(error = %e, rollback_error = %rb, "回收事务失败且回滚也失败");
+                return Err(StorageError::Io {
+                    message: format!("{e}；回滚也失败：{rb}"),
+                });
             }
             Err(e)
         }

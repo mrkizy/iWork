@@ -52,10 +52,16 @@ impl<C: EventCodec> Projector for SqliteProjector<C> {
     type Tx = WriteTx;
 
     fn project(&self, tx: &mut WriteTx, seq: Seq, event: &DomainEvent) -> Result<(), StorageError> {
+        let seq_sql =
+            crate::sql::seq_val("事件 seq", seq).map_err(|e| StorageError::Projection {
+                seq,
+                message: e.to_string(),
+            })?;
         let cx = Cx {
             conn: &tx.conn,
             codec: self.codec.as_ref(),
             seq,
+            seq_sql,
             env: &tx.envelope,
         };
         dispatch(&cx, event)?;
@@ -131,13 +137,20 @@ pub(crate) struct Cx<'a, C: ?Sized> {
     pub(crate) conn: &'a Connection,
     pub(crate) codec: &'a C,
     pub(crate) seq: Seq,
+    /// `seq` 的 SQL 值，构造时已校验过范围
+    seq_sql: i64,
     pub(crate) env: &'a Envelope,
 }
 
 impl<C: ?Sized> Cx<'_, C> {
     /// 当前 seq 的 SQL 值（写 `updated_seq` 等列）。
     pub(crate) fn seq(&self) -> i64 {
-        crate::sql::seq_val(self.seq)
+        self.seq_sql
+    }
+
+    /// 事件里带的 seq（如已读位置）→ SQL 值；超出范围是这条事件不合法，命令回滚、写线程照常。
+    pub(crate) fn seq_arg(&self, what: &str, value: Seq) -> Result<i64, StorageError> {
+        crate::sql::seq_val(what, value).map_err(|e| self.invalid(e.to_string()))
     }
 
     pub(crate) fn exec<P: Params>(&self, sql: &str, params: P) -> Result<usize, StorageError> {

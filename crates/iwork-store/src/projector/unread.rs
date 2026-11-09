@@ -11,7 +11,7 @@ use iwork_ports::store::{EventCodec, StorageError};
 use rusqlite::{OptionalExtension, params};
 
 use super::{Cx, conversations};
-use crate::sql::{seq_val, sql_err};
+use crate::sql::sql_err;
 
 /// 这条事件是否计入某个对话的未读；计入时返回对话 ID 的文本。
 fn counted_in<C: EventCodec + ?Sized>(
@@ -69,7 +69,7 @@ pub(super) fn conversation_read<C: EventCodec + ?Sized>(
          + (SELECT COUNT(*) FROM user_actions WHERE conversation_id = ?1 AND proposed_seq > ?2) \
          + (SELECT COUNT(*) FROM turns WHERE conversation_id = ?1 AND interrupted_seq > ?2), \
          updated_seq = ?3 WHERE id = ?1",
-        params![id, seq_val(e.last_read_seq), cx.seq()],
+        params![id, cx.seq_arg("last_read_seq", e.last_read_seq)?, cx.seq()],
     )?;
     Ok(())
 }

@@ -10,7 +10,7 @@ mod support;
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -51,13 +51,23 @@ fn events_for(n: u128) -> Vec<DomainEvent> {
     events
 }
 
+/// 子进程怎么跑：正常是一直提交直到被杀；另外两种只给对照测试用，模拟「子进程没进提交循环就退了」。
+const MODE_ENV: &str = "IWORK_STORE_CRASH_MODE";
+const MODE_EXIT_BEFORE_READY: &str = "exit_before_ready";
+const MODE_EXIT_AFTER_READY: &str = "exit_after_ready";
+
 /// 子进程入口。没有环境变量时什么都不做（正常跑测试时它是个空测试）。
+/// 打开存储后先写一行 `READY <轮次>` 握手，再进提交循环。
 #[test]
 fn crash_child() {
     let Some(root) = std::env::var_os(CHILD_ENV) else {
         return;
     };
     let round: u64 = std::env::var(ROUND_ENV).unwrap().parse().unwrap();
+    let mode = std::env::var(MODE_ENV).unwrap_or_default();
+    if mode == MODE_EXIT_BEFORE_READY {
+        return;
+    }
     let env = Env::new();
     let dir = DataDir::from_root(PathBuf::from(root));
     let codec = Arc::new(iwork_app::codec::ProtoEventCodec);
@@ -72,6 +82,14 @@ fn crash_child() {
         .expect("子进程打开存储"),
     );
     let out = Arc::new(std::sync::Mutex::new(std::io::stdout()));
+    {
+        let mut out = out.lock().unwrap();
+        writeln!(out, "READY {round}").unwrap();
+        out.flush().unwrap();
+    }
+    if mode == MODE_EXIT_AFTER_READY {
+        return;
+    }
     let handles: Vec<_> = (0..WRITERS)
         .map(|w| {
             let (store, out) = (store.clone(), out.clone());
@@ -105,6 +123,113 @@ impl Rng {
     }
 }
 
+type Acks = Vec<(u128, (u64, u64))>;
+
+/// 跑一轮：起子进程 → 等 `READY` 握手 → 再等 `delay` → 确认子进程还在跑 → kill → 收 ACK。
+/// 子进程没握手就退出、或被杀之前已经自己退出，都返回带退出状态与 stderr 的错误：
+/// 这样的一轮没有在提交中途被杀，不能算数。
+fn run_round(
+    exe: &Path,
+    root: &Path,
+    round: u64,
+    delay: Duration,
+    mode: &str,
+) -> Result<Acks, String> {
+    let mut child = Command::new(exe)
+        .args(["--exact", "crash_child", "--nocapture", "--test-threads=1"])
+        .env(CHILD_ENV, root)
+        .env(ROUND_ENV, round.to_string())
+        .env(MODE_ENV, mode)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("起子进程失败：{e}"))?;
+    let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+    let stdout = child.stdout.take().unwrap();
+    let out_reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if line_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut stderr = child.stderr.take().unwrap();
+    let err_reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut stderr, &mut s);
+        s
+    });
+    let early_exit = |child: &mut std::process::Child, what: &str| -> Option<String> {
+        let status = child.try_wait().ok().flatten()?;
+        Some(format!("第 {round} 轮子进程{what}就退出了（{status}）"))
+    };
+    // 握手
+    let mut acks: Acks = Vec::new();
+    let handshake_deadline = Instant::now() + Duration::from_secs(30);
+    let mut ready = false;
+    while !ready {
+        match line_rx.recv_timeout(Duration::from_millis(20)) {
+            // libtest 先打印 `test crash_child ... ` 不换行，握手串跟在它后面
+            Ok(line) => ready = line.ends_with(&format!("READY {round}")),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        if !ready && Instant::now() > handshake_deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "第 {round} 轮子进程 30 秒内没有握手；stderr：{}",
+                err_reader.join().unwrap_or_default()
+            ));
+        }
+    }
+    if !ready {
+        let msg = early_exit(&mut child, "在握手前")
+            .unwrap_or_else(|| format!("第 {round} 轮子进程关了 stdout 却没握手"));
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = out_reader.join();
+        return Err(format!(
+            "{msg}；stderr：{}",
+            err_reader.join().unwrap_or_default()
+        ));
+    }
+    std::thread::sleep(delay);
+    if let Some(msg) = early_exit(&mut child, "在被杀之前") {
+        let _ = out_reader.join();
+        return Err(format!(
+            "{msg}；stderr：{}",
+            err_reader.join().unwrap_or_default()
+        ));
+    }
+    child.kill().map_err(|e| format!("kill 失败：{e}"))?; // Unix 上是 SIGKILL
+    let status = child.wait().map_err(|e| format!("wait 失败：{e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if status.signal() != Some(9) {
+            return Err(format!(
+                "第 {round} 轮子进程不是被 SIGKILL 结束的（{status}）"
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = status;
+    out_reader
+        .join()
+        .map_err(|_| "读 stdout 的线程 panic".to_owned())?;
+    // 读到的 ACK 一定是子进程在 COMMIT 返回之后才写的；被杀时写了一半的行被 parse 丢掉
+    acks.extend(line_rx.try_iter().filter_map(|l| {
+        let mut it = l.strip_prefix("ACK ")?.split(' ');
+        let n: u128 = it.next()?.parse().ok()?;
+        let first: u64 = it.next()?.parse().ok()?;
+        let last: u64 = it.next()?.parse().ok()?;
+        Some((n, (first, last)))
+    }));
+    drop(err_reader);
+    Ok(acks)
+}
+
 #[test]
 fn kill_during_commits_never_loses_acknowledged_commands() {
     if std::env::var_os(CHILD_ENV).is_some() {
@@ -123,33 +248,10 @@ fn kill_during_commits_never_loses_acknowledged_commands() {
     let started = Instant::now();
 
     for round in 0..ROUNDS {
-        let mut child = Command::new(&exe)
-            .args(["--exact", "crash_child", "--nocapture", "--test-threads=1"])
-            .env(CHILD_ENV, env.dir.root())
-            .env(ROUND_ENV, round.to_string())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let stdout = child.stdout.take().unwrap();
-        let reader = std::thread::spawn(move || {
-            BufReader::new(stdout)
-                .lines()
-                .map_while(Result::ok)
-                .filter_map(|l| {
-                    let mut it = l.strip_prefix("ACK ")?.split(' ');
-                    let n: u128 = it.next()?.parse().ok()?;
-                    let first: u64 = it.next()?.parse().ok()?;
-                    let last: u64 = it.next()?.parse().ok()?;
-                    Some((n, (first, last)))
-                })
-                .collect::<Vec<_>>()
-        });
-        std::thread::sleep(Duration::from_millis(10 + rng.next() % 191));
-        child.kill().unwrap(); // Unix 上是 SIGKILL
-        child.wait().unwrap();
-        // 读到的 ACK 一定是子进程在 COMMIT 返回之后才写的；被杀时写了一半的行被 parse 丢掉
-        acked.extend(reader.join().unwrap());
+        let delay = Duration::from_millis(10 + rng.next() % 191);
+        let acks = run_round(&exe, env.dir.root(), round, delay, "")
+            .unwrap_or_else(|e| panic!("种子 {seed}：{e}"));
+        acked.extend(acks);
 
         let t = Instant::now();
         let full = round % FULL_CHECK_EVERY == 0 || round + 1 == ROUNDS;
@@ -166,6 +268,24 @@ fn kill_during_commits_never_loses_acknowledged_commands() {
         acked.len()
     );
     eprintln!("crash_injection：{ROUNDS} 轮，用时 {:?}", started.elapsed());
+}
+
+/// 对照（第 1 轮审查 1/F-7）：子进程没进提交循环就退出的一轮，`run_round` 必须报错，
+/// 不能当成一次有效的提交中途崩溃。
+#[test]
+fn child_that_exits_early_is_not_counted_as_a_round() {
+    if std::env::var_os(CHILD_ENV).is_some() {
+        return;
+    }
+    let exe = std::env::current_exe().unwrap();
+    let env = Env::new();
+    for mode in [MODE_EXIT_BEFORE_READY, MODE_EXIT_AFTER_READY] {
+        let r = run_round(&exe, env.dir.root(), 0, Duration::from_millis(300), mode);
+        let err = r.expect_err(mode);
+        assert!(err.contains("退出"), "{mode}：{err}");
+    }
+    // 正常模式能跑通一轮（对照：判定不是一律失败）
+    run_round(&exe, env.dir.root(), 1, Duration::from_millis(50), "").expect("正常一轮");
 }
 
 /// 重启后的断言；`full` 时再加重建逐表比对。返回 `MAX(seq)`。

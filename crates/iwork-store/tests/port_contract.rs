@@ -240,3 +240,66 @@ fn wal_truncates_after_maintenance() {
     );
     assert!(after < before, "截短了：{before} → {after}");
 }
+
+/// 第 1 轮审查 1/F-4：`Seq` 是公开的 u64，超出 SQLite 整数范围的补发游标与已读位置要按错误返回，
+/// 不能 panic 带走读线程或写线程；之后正常读写照常。
+#[test]
+fn out_of_range_seq_is_an_error_and_store_keeps_working() {
+    use iwork_domain::event::ConversationRead;
+    let env = Env::new();
+    let store = env.open();
+    block(store.commit(cmd(
+        1,
+        vec![
+                added(1),
+                iwork_domain::event::ConversationCreated {
+                    conversation: project_conversation(10, 1),
+                }
+                .into(),
+            ],
+    )))
+    .unwrap();
+
+    // 比读线程数（默认 2）多几次：每次都只是一个错误
+    for _ in 0..5 {
+        let err = block(store.read_events(EventFilter::All, Seq(u64::MAX), 1));
+        assert!(
+            matches!(&err, Err(StorageError::Io { message }) if message.contains("超出存储范围")),
+            "{err:?}"
+        );
+    }
+    assert_eq!(block(store.head_seq()), Ok(Seq(2)), "读线程都还在");
+
+    let read = |seq| -> DomainEvent {
+        ConversationRead {
+            conversation_id: cid(10),
+            last_read_seq: seq,
+        }
+        .into()
+    };
+    let err = block(store.commit(cmd(2, vec![read(Seq(u64::MAX))])));
+    assert!(
+        matches!(err, Err(StorageError::Projection { seq: Seq(3), .. })),
+        "{err:?}"
+    );
+    let mut c = project_conversation(11, 1);
+    c.last_read_seq = Seq(u64::MAX);
+    let err = block(store.commit(cmd(
+        3,
+        vec![iwork_domain::event::ConversationCreated { conversation: c }.into()],
+    )));
+    assert!(
+        matches!(err, Err(StorageError::Projection { .. })),
+        "{err:?}"
+    );
+
+    // 写线程还在，seq 没留洞
+    let ok = block(store.commit(cmd(4, vec![read(Seq(2))]))).unwrap();
+    assert_eq!(ok.last_seq, Seq(3));
+    assert_eq!(
+        block(store.read_events(EventFilter::All, Seq(0), 10))
+            .unwrap()
+            .len(),
+        3
+    );
+}

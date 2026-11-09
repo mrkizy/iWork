@@ -252,3 +252,104 @@ fn append_after_whole_batch_rollback_is_contiguous() {
     let got: Vec<u64> = events.iter().map(|e| e.seq.0).collect();
     assert_eq!(got, vec![1, 2]);
 }
+
+// ---------- 独占操作的事务收尾（第 1 轮审查 1/F-5、1/F-2） ----------
+
+fn has_meta_key(env: &Env, key: &str) -> bool {
+    scalar(
+        &env.db(),
+        &format!("SELECT COUNT(*) FROM meta WHERE key = '{key}'"),
+    ) == 1
+}
+
+#[test]
+fn exclusive_error_with_open_tx_is_rolled_back_and_next_commit_works() {
+    let env = Env::new();
+    let store = env.open();
+    let r = block(store.writer.exclusive(|conn, _| {
+        conn.execute_batch("BEGIN IMMEDIATE; INSERT INTO meta VALUES ('leftover', 'x');")
+            .unwrap();
+        Err::<(), _>(StorageError::Io {
+            message: "注入：闭包失败".into(),
+        })
+    }));
+    assert!(
+        matches!(&r, Err(StorageError::Io { message }) if message.contains("注入：闭包失败")),
+        "保留闭包自己的错误：{r:?}"
+    );
+    assert!(!has_meta_key(&env, "leftover"), "遗留事务被回滚");
+    assert_eq!(
+        block(store.commit(cmd(1, vec![added(1)]))),
+        Ok(receipt(1, 1)),
+        "下一条照常"
+    );
+}
+
+#[test]
+fn exclusive_ok_with_open_tx_is_reported_as_error() {
+    let env = Env::new();
+    let store = env.open();
+    let r = block(store.writer.exclusive(|conn, _| {
+        conn.execute_batch("BEGIN IMMEDIATE; INSERT INTO meta VALUES ('leftover', 'x');")
+            .map_err(crate::sql::sql_err)
+    }));
+    assert!(
+        matches!(&r, Err(StorageError::Io { message }) if message.contains("事务仍未结束")),
+        "闭包说成功、但事务没提交：调用方不能拿到 Ok：{r:?}"
+    );
+    assert!(!has_meta_key(&env, "leftover"));
+    assert_eq!(
+        block(store.commit(cmd(1, vec![added(1)]))),
+        Ok(receipt(1, 1))
+    );
+}
+
+#[test]
+fn exclusive_leftover_that_cannot_roll_back_marks_store_unusable() {
+    let env = Env::new();
+    let store = env.open();
+    store.inject_fault(Fault::RollbackFails);
+    let r = block(store.writer.exclusive(|conn, _| {
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        Err::<(), _>(StorageError::Io {
+            message: "注入".into(),
+        })
+    }));
+    assert!(
+        matches!(&r, Err(StorageError::Io { message }) if message.contains("写连接已失效")),
+        "{r:?}"
+    );
+    let next = block(store.commit(cmd(1, vec![added(1)])));
+    assert!(
+        matches!(&next, Err(StorageError::Io { message }) if message.contains("写连接已失效")),
+        "不再复用这条写连接：{next:?}"
+    );
+}
+
+#[test]
+fn gc_commit_and_rollback_both_failing_is_reported_and_marks_store_unusable() {
+    use iwork_domain::common::ArtifactArea;
+    use iwork_ports::artifact::ArtifactStore;
+    let env = Env::new();
+    let store = env.open();
+    let art = env.artifacts(&store);
+    block(art.put_bytes(ArtifactArea::Artifacts, b"old".to_vec())).unwrap();
+    env.clock.advance(2 * 24 * 3600 * 1000);
+    store.inject_fault(Fault::DenyTxEnd);
+    let r = block(art.collect_garbage());
+    match &r {
+        Err(iwork_ports::artifact::ArtifactError::Io { message, .. }) => {
+            assert!(message.contains("回滚也失败"), "回滚错误不被吞：{message}");
+            assert!(
+                message.contains("写连接已失效"),
+                "写线程收尾也失败：{message}"
+            );
+        }
+        other => panic!("应报错：{other:?}"),
+    }
+    let next = block(store.commit(cmd(1, vec![added(1)])));
+    assert!(
+        matches!(&next, Err(StorageError::Io { message }) if message.contains("写连接已失效")),
+        "{next:?}"
+    );
+}

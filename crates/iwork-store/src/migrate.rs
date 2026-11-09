@@ -58,7 +58,7 @@ impl Default for OpenHooks {
 /// 探测结论。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Probe {
-    /// 库文件不存在或为 0 字节
+    /// 库文件不存在、为 0 字节，或首次初始化没提交（库里一个对象都没有）
     NewDatabase,
     /// 主版本相符、schema 不比程序新
     Existing { schema_version: u32 },
@@ -87,10 +87,13 @@ pub(crate) fn probe(
     let result = copy_db_files(&db, &probe_dir)
         .and_then(|copy| inspect_copy(dir, &copy, program_major, now, migrations));
     // 副本连接已在 inspect_copy 里关掉；清理失败不改变探测结论（方案 2.2 第 2 步最后一条）
-    if probe_dir.exists()
-        && let Err(e) = (hooks.remove_probe_dir)(&probe_dir)
-    {
-        tracing::warn!(path = %probe_dir.display(), error = %e, "删除探测副本失败，下次启动再试");
+    // 不先问「在不在」：探测失败会被当成不在而漏删。直接删，不存在不算错
+    match (hooks.remove_probe_dir)(&probe_dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::warn!(path = %probe_dir.display(), error = %e, "删除探测副本失败，下次启动再试");
+        }
     }
     result
 }
@@ -253,6 +256,16 @@ fn inspect_copy(
             message: format!("{} 不是 iWork 数据库（读不出表结构：{e}）", db.display()),
         })?;
     if !has_meta {
+        // 首次初始化没提交（建库事务回滚，或进程在提交前被杀）：WAL 已切、文件头已写出，所以不是
+        // 0 字节，但库里一个对象都没有。没有任何数据可丢，按新库重新初始化（方案 2.2）。
+        // 有别的对象却没有 meta 的，才是外来的库，照旧拒绝
+        let objects: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_schema", [], |r| r.get(0))
+            .map_err(sql_err)?;
+        if objects == 0 {
+            tracing::warn!(path = %db.display(), "上次首次初始化没有完成，按新库重新初始化");
+            return Ok(Probe::NewDatabase);
+        }
         return Err(StorageError::Io {
             message: format!("{} 不是 iWork 数据库（无 meta 表）", db.display()),
         });

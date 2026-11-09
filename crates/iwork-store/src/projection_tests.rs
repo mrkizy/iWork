@@ -371,7 +371,7 @@ fn approval_terminal_states_online_and_rebuilt() {
         };
         push(ApprovalState::Voided { reason }, Some(ev.into()), n);
     }
-    assert_eq!(expected.len(), 1 + 3 + 1 + 4, "全部九种状态");
+    assert_eq!(expected.len(), 1 + 3 + 1 + 5, "全部十种状态");
     for (id, a) in &expected {
         assert_eq!(&load_approval(&env, *id), a, "在线读取 {:?}", a.state);
     }

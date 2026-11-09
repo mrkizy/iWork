@@ -80,8 +80,13 @@ where
     }
 }
 
-/// 独占一批、自己管事务的操作（GC、启动恢复、checkpoint）。
-pub(crate) type ExclusiveFn = Box<dyn FnOnce(&Connection, Timestamp) + Send>;
+/// 独占一批、自己管事务的操作（GC、启动恢复、checkpoint）。闭包执行完不直接回复，而是交回一个
+/// 「送出结果」的函数：写线程先确认事务已结束（没结束就回滚，回滚不了就标失效），再把收尾的结论
+/// 一并送出。这样闭包遗留的事务既不会污染下一批，也不会让调用方拿到一个其实已被回滚的 `Ok`。
+pub(crate) type ExclusiveFn = Box<dyn FnOnce(&Connection, Timestamp) -> Deliver + Send>;
+
+/// 送出独占操作的结果；参数是写线程收尾时发现的问题（没有就是 `None`）。
+pub(crate) type Deliver = Box<dyn FnOnce(Option<StorageError>) + Send>;
 
 pub(crate) enum WriteOp {
     Commit(CommitRequest, Responder<CommitReceipt>),
@@ -115,6 +120,8 @@ pub(crate) enum Fault {
     /// 跳过 `skip` 次事件插入后，下一次插入时用 progress_handler 中断语句
     /// （SQLITE_INTERRUPT：显式事务里的 DML 被中断，SQLite 自动回滚整个事务）
     InterruptEventInsert { skip: u32 },
+    /// 从此刻起本连接上的 COMMIT 与 ROLLBACK 一律被 authorizer 拒绝（BEGIN、SAVEPOINT 照常）
+    DenyTxEnd,
 }
 
 /// 写线程与外界共享的计数（测试与基准读）。
@@ -181,7 +188,18 @@ impl WriterHandle {
         F: FnOnce(&Connection, Timestamp) -> Result<T, StorageError> + Send + 'static,
     {
         self.request(|reply: Responder<T>| {
-            WriteOp::Exclusive(Box::new(move |conn, now| reply.send(f(conn, now))))
+            WriteOp::Exclusive(Box::new(move |conn, now| {
+                let result = f(conn, now);
+                Box::new(move |cleanup: Option<StorageError>| {
+                    reply.send(match (cleanup, result) {
+                        (None, r) => r,
+                        (Some(e), Ok(_)) => Err(e),
+                        (Some(e), Err(orig)) => Err(StorageError::Io {
+                            message: format!("{orig}；{e}"),
+                        }),
+                    })
+                })
+            }))
         })
     }
 
@@ -244,7 +262,7 @@ fn durable_next_seq(conn: &Connection) -> Result<u64, StorageError> {
             r.get(0)
         })
         .map_err(sql_err)?;
-    Ok(seq_col(next).0)
+    Ok(seq_col("events", "seq", next)?.0)
 }
 
 struct Writer<C, P, K> {
@@ -350,8 +368,32 @@ where
                     // f 捕获的发送端随 f 一起 drop，调用方得到「写线程已退出」类错误
                     drop(f);
                 } else {
-                    f(&self.tx.conn, self.clock.now());
+                    let deliver = f(&self.tx.conn, self.clock.now());
+                    let cleanup = match self.end_leftover_tx("独占操作") {
+                        Ok(false) => None,
+                        Ok(true) => Some(StorageError::Io {
+                            message: "独占操作返回时事务仍未结束，已回滚，本次操作未生效".into(),
+                        }),
+                        Err(e) => Some(e),
+                    };
+                    deliver(cleanup);
                 }
+            }
+            #[cfg(test)]
+            WriteOp::Fault(Fault::DenyTxEnd) => {
+                use rusqlite::hooks::{AuthAction, Authorization, TransactionOperation as Op};
+                self.tx
+                    .conn
+                    .authorizer(Some(|ctx: rusqlite::hooks::AuthContext<'_>| {
+                        match ctx.action {
+                            AuthAction::Transaction {
+                                // rusqlite 把 COMMIT 归为 Unknown
+                                operation: Op::Unknown | Op::Rollback,
+                            } => Authorization::Deny,
+                            _ => Authorization::Allow,
+                        }
+                    }))
+                    .expect("装 authorizer");
             }
             #[cfg(test)]
             WriteOp::Fault(f) => self.faults.push(f),
@@ -379,6 +421,8 @@ where
             return;
         }
         if let Err(e) = self.exec("BEGIN IMMEDIATE") {
+            // 连接若意外还在事务里，回滚掉或标失效，不让下一批接着撞同一个错误
+            let e = self.end_leftover_tx("开批").err().unwrap_or(e);
             items.into_iter().for_each(|i| i.finish(Some(&e)));
             return;
         }
@@ -462,8 +506,8 @@ where
             .map_err(sql_err)?;
         if let Some((first, last)) = previous {
             return Ok(CommitReceipt {
-                first_seq: seq_col(first),
-                last_seq: seq_col(last),
+                first_seq: seq_col("commands", "first_seq", first)?,
+                last_seq: seq_col("commands", "last_seq", last)?,
                 replayed: true,
             });
         }
@@ -484,7 +528,7 @@ where
                 "INSERT INTO events(seq, stream_kind, stream_id, type, payload, command_id, actor, at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
-                    seq_val(seq),
+                    seq_val("事件 seq", seq)?,
                     stream_kind.to_text(),
                     stream_id.map(|s| s.0),
                     encoded.kind,
@@ -521,7 +565,12 @@ where
             .conn
             .execute(
                 "INSERT INTO commands(command_id, first_seq, last_seq, at) VALUES (?1, ?2, ?3, ?4)",
-                params![command_id, seq_val(Seq(first)), seq_val(Seq(last)), now.0],
+                params![
+                    command_id,
+                    seq_val("first_seq", Seq(first))?,
+                    seq_val("last_seq", Seq(last))?,
+                    now.0
+                ],
             )
             .map_err(sql_err)?;
         Ok(CommitReceipt {
@@ -588,27 +637,36 @@ where
     /// 重建投影（方案 2.9）：一个事务里清登记表的投影表，按 seq 重放全部事件。
     fn rebuild(&mut self) -> Result<RebuildReport, StorageError> {
         self.exec("BEGIN IMMEDIATE")?;
-        match self.replay_all() {
-            Ok(report) => match self.exec("COMMIT") {
-                Ok(()) => Ok(report),
-                Err(e) => {
-                    self.recover_after_failed_exclusive();
-                    Err(e)
-                }
+        let result = self
+            .replay_all()
+            .and_then(|report| self.exec("COMMIT").map(|()| report));
+        match result {
+            Ok(report) => Ok(report),
+            Err(e) => match self.end_leftover_tx("重建") {
+                Ok(_) => Err(e),
+                Err(broken) => Err(StorageError::Io {
+                    message: format!("{e}；{broken}"),
+                }),
             },
-            Err(e) => {
-                self.recover_after_failed_exclusive();
-                Err(e)
-            }
         }
     }
 
-    fn recover_after_failed_exclusive(&mut self) {
-        if !self.tx.conn.is_autocommit()
-            && let Err(e) = self.rollback()
-        {
-            tracing::error!(error = %e, "重建回滚失败，写连接标为失效");
-            self.broken = true;
+    /// 确保写连接不在事务里：在就回滚。返回 `Ok(true)` 表示确实有遗留事务、已回滚；
+    /// 回滚失败时写连接标为失效（之后的写请求一律立即失败，由 T04 整体重启），返回失效错误。
+    fn end_leftover_tx(&mut self, what: &str) -> Result<bool, StorageError> {
+        if self.tx.conn.is_autocommit() {
+            return Ok(false);
+        }
+        match self.rollback() {
+            Ok(()) => {
+                tracing::warn!(what, "写连接上有遗留事务，已回滚");
+                Ok(true)
+            }
+            Err(e) => {
+                tracing::error!(what, error = %e, "遗留事务回滚失败，写连接标为失效");
+                self.broken = true;
+                Err(broken())
+            }
         }
     }
 
@@ -656,14 +714,15 @@ where
                     actor: Actor(actor),
                     command_id: id_col("events", "command_id", &command_id)?,
                 };
-                self.projector.project(&mut self.tx, seq_col(seq), &event)?;
+                self.projector
+                    .project(&mut self.tx, seq_col("events", "seq", seq)?, &event)?;
                 count += 1;
                 last = seq;
             }
         }
         Ok(RebuildReport {
             events: count,
-            last_seq: seq_col(last),
+            last_seq: seq_col("events", "seq", last)?,
         })
     }
 
