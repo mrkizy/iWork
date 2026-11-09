@@ -9,3 +9,6 @@ publish.workspace = true
 [dependencies]
 iwork-domain.workspace = true
 iwork-ports.workspace = true
+thiserror.workspace = true
+futures-channel.workspace = true
+futures-core.workspace = true

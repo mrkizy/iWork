@@ -1,0 +1,35 @@
+# ADR-0006 回合编排放在 iwork-core，新增 LivePublisher 端口与无运行时信箱
+
+- 状态：已采纳（2026-11-09，T05；supervisor 确认）
+- 依据：任务卡 `docs/tasks/M1/T05.md` 范围第 6 项；技术设计 3.5、6.1、6.4；ADR-0002、ADR-0005
+
+## 背景
+
+T05 要交付回合编排的最小闭环：开会话或续接 → prompt → 流式事件入库与推送 → 结束。做的时候存储（T02）、通信（T03）、daemon 组合（T04）都还是空壳，SendMessage 命令处理与真正的推送接不上。
+
+编排一个回合时要同时等三路输入：运行时的更新流、权限请求（适配器在别的任务里调 `PermissionHandler`）、用户的取消。回合状态必须只有一个写入方，而且写进事件日志的顺序要与运行时的实际顺序一致（「工具调用开始」在「等待审批」之前）。`iwork-core` 不能依赖 tokio（ADR-0005 的传递禁用清单）。
+
+流式正文是不落盘的增量（技术设计 3.5），要有一个往外推的出口；现有端口里没有。
+
+## 决定
+
+1. **回合编排在 `iwork-core::turn`**，对 `AgentPort`、`StoragePort`、`Clock`、`IdGenerator`、`LivePublisher` 泛型，不绑定运行时。闭环测试用内存存储 + 真 ACP 客户端 + 假运行时进程。SendMessage 命令本身（app 层）与订阅推送的接线留给 T04 / T10。
+2. **单写者靠结构保证**：权限处理方（`PermissionGate`）与取消句柄（`TurnCanceller`）都不改回合状态，只往会话线的信箱里发信号，由 `SessionLine::run_turn` 的循环按到达顺序处理；权限两步（开始等 / 有结果）都带回执，状态写进存储后才回，运行时因此不会在状态落盘前继续。循环同时等更新流与信箱，**同时就绪时先处理更新**；适配器保证调用 `PermissionHandler` 之前，此前到达的更新已在更新流里（ACP 的派发循环逐条同步处理通知），两者合起来保证事件顺序。
+3. **`iwork-core` 的直接依赖白名单加 `futures-channel`、`futures-core`**：信箱用 `futures-channel` 的无界 mpsc 与 oneshot，等待用 `futures-core::Stream::poll_next` 加手写的 `poll_fn`。两个 crate 只是数据结构与 trait，不含运行时、不做 I/O，不在 ADR-0005 的传递禁用清单里。
+4. **新增端口 `iwork-ports::live::LivePublisher`**，只有一个同步方法 `message_delta(MessageDelta)`。同步且不阻塞：背压由推送方自己做（合并相邻增量、标记落后），不让回合等它；增量丢了也能恢复（消息结束写完整正文，期间每 500ms 有检查点）。按 T01 方案第 5 节「端口由第一个需要它的卡加」，只加不改既有签名。
+5. **审批桩在 `iwork-core`**：`PermissionDecider` 是判定方接口（`decide` 判定一次请求，`void_pending` 在回合取消或失败时作废它挂着的审批），`StubDecider` 是全部放行 / 全部拒绝可切换的桩。T07 用真实审批引擎实现同一接口。
+6. **运行时进程中途退出（后台服务还活着）→ 回合 `Failed`**（原因 `ProcessExited`，可原样重试）。回合转换表补一行 `(WaitingApproval, Failed) → Failed`：等审批时出错与运行中出错是同一件事，不经过一条假的「审批有结果」。`Interrupted(Crash)` 只给后台服务重启后发现进程已不在的情况。回合失败时挂着的审批以新增的 `VoidReason::TurnFailed` 作废（需求第 12 章作废条件补「所属回合失败」，待产品负责人确认）。
+
+## 备选
+
+- **编排放在 daemon**：daemon 能用 tokio，写起来省事；但业务规则（回合状态推进、审批作废时机）会落进组合入口，违反分层。
+- **core 依赖 tokio**：违反 ADR-0005，core 的纯函数测试也会被运行时绑住。
+- **手写信箱**：几十行 `Mutex<VecDeque>` + `Waker`，等于重写 `futures-channel`，还要自己证明唤醒不丢。
+- **权限处理方直接写状态**：会有两个写入方；而且处理方被调用时，编排可能还没消费到前面的「工具调用开始」，事件顺序会乱。
+- **不加转换表行，等审批时崩溃走 `ProcessLost → Interrupted(Crash)`**：与「Interrupted 只表示后台服务重启」的语义冲突。
+
+## 影响
+
+- `SessionLine` 对端口泛型，T04 组合时落实具体类型；T07 替换 `StubDecider`，不改编排。
+- 跑一个回合的调用方必须持有 `SessionLine` 的 `&mut`：同一条会话线上的回合天然串行。
+- `iwork-core` 的依赖白名单变宽了两项；以后要再加依赖照样改 `scripts/deps-policy.toml` 并写理由。
