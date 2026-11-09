@@ -27,7 +27,10 @@ pub(crate) fn baseline(repo_root: &RepoRoot) -> Result<BaselineRef, VcsError> {
 /// 工作区相对 HEAD 的改动，暂存区与工作区合成一个结果，每个路径一条。
 pub(crate) fn status(repo_root: &RepoRoot) -> Result<WorkspaceStatus, VcsError> {
     const OP: &str = "status";
-    let repo = open(repo_root, OP)?.repo;
+    let Opened {
+        repo,
+        external_filters,
+    } = open(repo_root, OP)?;
     let mut by_path: BTreeMap<BString, (Option<ChangeKind>, Option<ChangeKind>)> = BTreeMap::new();
     for item in status_items(&repo, None, Renames::AsConfigured, OP)? {
         match item {
@@ -48,6 +51,15 @@ pub(crate) fn status(repo_root: &RepoRoot) -> Result<WorkspaceStatus, VcsError> 
                 }
             }
         }
+    }
+    // gix 看不到或不能信的改动，按同一判定补上（与 diff 共用，见 changes_gix_cannot_judge）
+    let mut worktree = Worktree::new(&repo, repo_root, external_filters, OP)?;
+    for path in worktree.changes_gix_cannot_judge()? {
+        by_path
+            .entry(path)
+            .or_default()
+            .1
+            .get_or_insert(ChangeKind::Modified);
     }
     let changed = by_path
         .into_iter()
@@ -80,8 +92,10 @@ pub(crate) fn diff(repo_root: &RepoRoot, range: &DiffRange) -> Result<Diff, VcsE
             let tree = repo
                 .find_tree(base_tree)
                 .map_err(|e| failed(OP, format!("读基线树失败：{e}")))?;
-            // 以基线树作比较起点跑一遍 status，得到可能变了的路径；逐个比
-            let mut candidates = BTreeSet::new();
+            let mut worktree = Worktree::new(&repo, repo_root, external_filters, OP)?;
+            // 以基线树作比较起点跑一遍 status，得到可能变了的路径，再补上 gix 判断不了的；逐个比
+            let mut candidates: BTreeSet<BString> =
+                worktree.changes_gix_cannot_judge()?.into_iter().collect();
             for item in status_items(&repo, Some(base_tree), Renames::Off, OP)? {
                 if let Item::TreeIndex(gix::diff::index::Change::Rewrite {
                     source_location, ..
@@ -91,7 +105,6 @@ pub(crate) fn diff(repo_root: &RepoRoot, range: &DiffRange) -> Result<Diff, VcsE
                 }
                 candidates.insert(item.location().to_owned());
             }
-            let mut worktree = Worktree::new(&repo, repo_root, external_filters, OP)?;
             for path in candidates {
                 let rel = to_path(path.as_ref());
                 let old = match tree
@@ -223,6 +236,7 @@ struct Worktree<'repo> {
     filter: gix::filter::Pipeline<'repo>,
     index: gix::worktree::IndexPersistedOrInMemory,
     caps: gix::fs::Capabilities,
+    stat_options: gix::index::entry::stat::Options,
     /// 配置过的外部过滤器名，和查 `filter` 属性用的属性栈；没有配置任何过滤器时为 `None`
     external: Option<(
         BTreeSet<BString>,
@@ -245,6 +259,9 @@ impl<'repo> Worktree<'repo> {
         let caps = repo
             .filesystem_options()
             .map_err(|e| failed(op, format!("读文件系统配置失败：{e}")))?;
+        let stat_options = repo
+            .stat_options()
+            .map_err(|e| failed(op, format!("读 stat 配置失败：{e}")))?;
         let external = if external_filters.is_empty() {
             None
         } else {
@@ -262,6 +279,7 @@ impl<'repo> Worktree<'repo> {
             filter,
             index,
             caps,
+            stat_options,
             external,
             op,
         })
@@ -330,6 +348,53 @@ impl<'repo> Worktree<'repo> {
             }
             iwork_rootfs::EntryKind::Other => Ok(WorktreeSide::Absent),
         }
+    }
+
+    /// gix 的 status 看不到或不能信的已跟踪路径（相对暂存区）。`status` 与 `diff` 都用它，判定只有这一份：
+    ///
+    /// - **需要外部过滤器的文件**：后台不运行外部程序，原始字节和存储内容相同也不能说明没改动（存储的是过滤后的
+    ///   内容）。所以只看暂存区记的 stat（时间戳、大小等）：变了就列为「可能有改动」，差异里标「内容比较不支持」。
+    /// - **子模块指向的提交**：gix 的子模块扫描已关掉（见 [`status_items`]，它会用子模块自己的配置跑 status），
+    ///   这里只比较检出的提交与暂存区记录的提交，相当于 `--ignore-submodules=dirty`。
+    fn changes_gix_cannot_judge(&mut self) -> Result<Vec<BString>, VcsError> {
+        use gix::index::entry::{Mode, Stage, Stat};
+        let op = self.op;
+        let entries: Vec<(BString, Mode, Stat, ObjectId)> = self
+            .index
+            .entries()
+            .iter()
+            .filter(|e| e.stage() == Stage::Unconflicted)
+            .map(|e| (e.path(&self.index).to_owned(), e.mode, e.stat, e.id))
+            .collect();
+        let mut out = Vec::new();
+        for (path, mode, stat, id) in entries {
+            let rel = to_path(path.as_ref());
+            let kind = match iwork_rootfs::inspect(self.root, &rel) {
+                Ok(kind) => kind,
+                // 上级目录被换成链接：路径已不在，gix 会报删除
+                Err(iwork_rootfs::RootedError::ThroughSymlink { .. }) => continue,
+                Err(e) => return Err(failed(op, e.to_string())),
+            };
+            let changed = if mode == Mode::COMMIT {
+                self.checked_out_submodule_head(&rel, kind)?
+                    .is_some_and(|head| head != id)
+            } else if matches!(kind, iwork_rootfs::EntryKind::File { .. })
+                && (mode == Mode::FILE || mode == Mode::FILE_EXECUTABLE)
+                && self.external_driver(&rel)?.is_some()
+            {
+                let on_disk = gix::index::fs::Metadata::from_path_no_follow(&self.root.join(&rel))
+                    .map_err(|e| failed(op, format!("{}：{e}", rel.display())))?;
+                let on_disk = Stat::from_fs(&on_disk)
+                    .map_err(|e| failed(op, format!("{} 的时间戳无法表示：{e}", rel.display())))?;
+                !stat.matches(&on_disk, self.stat_options)
+            } else {
+                false
+            };
+            if changed {
+                out.push(path);
+            }
+        }
+        Ok(out)
     }
 
     /// `rel` 的 `filter` 属性指向一个配置过的外部过滤器时返回它的名字。
@@ -406,8 +471,8 @@ impl<'repo> Worktree<'repo> {
             Ok(_) => {}
             Err(e) => return Err(failed(op, e.to_string())),
         }
-        let sub = gix::open(self.root.join(rel))
-            .map_err(|e| failed(op, format!("打开子模块 {} 失败：{e}", rel.display())))?;
+        // 与父仓库一样经 open 打开：子模块自己的配置也要先去掉外部过滤器，只读 HEAD
+        let sub = open(&RepoRoot(self.root.join(rel)), op)?.repo;
         sub.head_id()
             .map(|id| Some(id.detach()))
             .map_err(|e| failed(op, format!("读子模块 {} 的 HEAD 失败：{e}", rel.display())))
@@ -455,7 +520,10 @@ fn status_items(
         .status(gix::progress::Discard)
         .map_err(|e| failed(op, e.to_string()))?
         .untracked_files(UntrackedFiles::Files)
-        .index_worktree_rewrites(None);
+        .index_worktree_rewrites(None)
+        // 不扫描子模块内部：gix 会用子模块自己未清理的配置跑 status（可能运行外部过滤器）。子模块指向的
+        // 提交变化由 Worktree::changes_gix_cannot_judge 自己比较
+        .index_worktree_submodules(None);
     if renames == Renames::Off {
         platform =
             platform.tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled);

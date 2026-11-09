@@ -1002,3 +1002,142 @@ async fn gitlink_without_checkout_uses_the_index_value() {
         "{p}"
     );
 }
+
+// ---------- 审查第 3 轮回归（2/F-1 子模块、3/F-1 外部过滤的「没改动」判断） ----------
+
+/// 2/F-1：子模块自己配置的 clean 过滤器，在顶层 status 与 diff 里都不执行；子模块提交变化仍显示。
+#[cfg(unix)]
+#[tokio::test]
+async fn submodule_filters_never_run_and_commit_changes_still_show() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let lib = f.repo_with_commit(
+        "sm-lib",
+        &[(".gitattributes", "*.t filter=x\n"), ("a.t", "1\n")],
+    );
+    let sup = f.repo_with_commit("sm-super", &[("s", "1\n")]);
+    let url = format!("file://{}", lib.display());
+    f.git(
+        &sup,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "--quiet",
+            "add",
+            &url,
+            "deps/lib",
+        ],
+    );
+    f.git(&sup, &["commit", "--quiet", "-m", "add submodule"]);
+    let root = RepoRoot(sup.clone());
+    let base = f.vcs().baseline(&root).await.unwrap();
+
+    let sub = sup.join("deps/lib");
+    f.git(&sub, &["config", "user.name", "T"]);
+    f.git(&sub, &["config", "user.email", "t@example.invalid"]);
+    let old_id = f.git(&sub, &["rev-parse", "HEAD"]);
+    write(&sub.join("b"), "x\n");
+    f.commit_all(&sub, "bump");
+    let new_id = f.git(&sub, &["rev-parse", "HEAD"]);
+
+    // 子模块里配一个会留哨兵的 clean 过滤器，再改动受它管的文件
+    let sentinel = f.root().join("SUBMODULE-FILTER-RAN");
+    let script = f.root().join("sm-filter.sh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch '{}'\ncat\n", sentinel.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    f.git(
+        &sub,
+        &["config", "filter.x.clean", script.to_str().unwrap()],
+    );
+    write(&sub.join("a.t"), "2\n");
+
+    let status = f.vcs().status(&root).await.unwrap();
+    assert!(!sentinel.exists(), "status 执行了子模块的过滤器");
+    assert!(
+        status
+            .changed
+            .iter()
+            .any(|c| c.path == Path::new("deps/lib") && c.change == ChangeKind::Modified),
+        "子模块提交变化要显示：{status:?}"
+    );
+
+    let diff = f
+        .vcs()
+        .diff(&root, DiffRange::WorkspaceSince(base))
+        .await
+        .unwrap();
+    assert!(!sentinel.exists(), "diff 执行了子模块的过滤器");
+    let p = &patch_of(&diff, "deps/lib").patch;
+    assert!(
+        p.ends_with(&format!(
+            "-Subproject commit {old_id}\n+Subproject commit {new_id}\n"
+        )),
+        "{p}"
+    );
+}
+
+/// 3/F-1：需要外部过滤器的文件，工作区内容恰好与存储内容等长等值（rot13 反例），git 报 M；
+/// iWork 不能凭原始字节相同判成没改动，要列为「可能有改动，内容比较不支持」。
+#[tokio::test]
+async fn externally_filtered_file_is_never_judged_unchanged_by_raw_bytes() {
+    let f = Fixture::new();
+    let repo = f.repo_with_commit("rot", &[(".gitattributes", "*.r filter=rot\n")]);
+    f.git(
+        &repo,
+        &["config", "filter.rot.clean", "tr a-zA-Z n-za-mN-ZA-M"],
+    );
+    f.git(
+        &repo,
+        &["config", "filter.rot.smudge", "tr a-zA-Z n-za-mN-ZA-M"],
+    );
+    write(&repo.join("x.r"), "hello\n");
+    write(&repo.join("calm.r"), "quiet\n");
+    f.commit_all(&repo, "rot13 stored"); // 存储内容是 "uryyb\n"
+    assert_eq!(f.git(&repo, &["cat-file", "-p", "HEAD:x.r"]), "uryyb");
+    let root = RepoRoot(repo.clone());
+    let base = f.vcs().baseline(&root).await.unwrap();
+
+    // 工作区改成与存储内容逐字节相同（git 过滤后是 "hello" → 不同 → M）
+    write(&repo.join("x.r"), "uryyb\n");
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(repo.join("x.r"))
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    assert!(
+        f.git(&repo, &["status", "--porcelain"]).contains("M x.r"),
+        "前提：git 报 M"
+    );
+
+    let status = f.vcs().status(&root).await.unwrap();
+    assert!(
+        status
+            .changed
+            .iter()
+            .any(|c| c.path == Path::new("x.r") && c.change == ChangeKind::Modified),
+        "{status:?}"
+    );
+    assert!(
+        !status.changed.iter().any(|c| c.path == Path::new("calm.r")),
+        "没动过的不列：{status:?}"
+    );
+
+    let diff = f
+        .vcs()
+        .diff(&root, DiffRange::WorkspaceSince(base))
+        .await
+        .unwrap();
+    assert!(
+        patch_of(&diff, "x.r").patch.contains("not supported"),
+        "{}",
+        patch_of(&diff, "x.r").patch
+    );
+    assert!(!diff.files.iter().any(|d| d.path == Path::new("calm.r")));
+}

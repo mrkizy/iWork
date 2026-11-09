@@ -149,13 +149,9 @@ async fn same_repo_via_subdir_worktree_and_symlink_is_the_existing_project() {
             "side",
         ],
     );
-    let mut aliases = vec![repo.join("src"), wt];
-    #[cfg(unix)]
-    {
-        let link = env.root().join("app-link");
-        std::os::unix::fs::symlink(&repo, &link).unwrap();
-        aliases.push(link);
-    }
+    let aliases = [repo.join("src"), wt]
+        .into_iter()
+        .chain(symlink_alias(&env.root().join("app-link"), &repo));
     for path in aliases {
         assert_eq!(
             resolve_add(&env.vcs(), &FsProjectMarkerStore, &known, &path).await,
@@ -164,6 +160,18 @@ async fn same_repo_via_subdir_worktree_and_symlink_is_the_existing_project() {
             path.display()
         );
     }
+}
+
+/// 指向 `target` 的符号链接（只在 unix 上建；Windows 建链接要特权，不测这一种写法）。
+#[cfg(unix)]
+fn symlink_alias(link: &Path, target: &Path) -> Option<PathBuf> {
+    std::os::unix::fs::symlink(target, link).unwrap();
+    Some(link.to_owned())
+}
+
+#[cfg(not(unix))]
+fn symlink_alias(_link: &Path, _target: &Path) -> Option<PathBuf> {
+    None
 }
 
 /// macOS 默认的盘大小写不敏感，不同大小写是同一个目录，要认成已有项目。
