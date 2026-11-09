@@ -250,6 +250,7 @@ fn approval() -> Approval {
         requested_at: ts(1_762_000_700),
         decided_at: ts(1_762_000_800),
         review_id: Some(s(REVIEW)),
+        call: None,
     }
 }
 
@@ -296,6 +297,7 @@ fn rule() -> Rule {
         }),
         created_at: ts(1_762_000_900),
         label: s("本项目内 `npm test …` 不再问"),
+        applies_in: vec![],
     }
 }
 
@@ -319,6 +321,7 @@ fn security_list_rule() -> Rule {
         }),
         created_at: ts(1_762_001_000),
         label: s("terraform apply"),
+        applies_in: vec![],
     }
 }
 
@@ -645,6 +648,38 @@ pub fn approval_full() -> Approval {
     approval()
 }
 
+/// T07 Q8：带完整调用记录的待审批。
+pub fn approval_with_call() -> Approval {
+    Approval {
+        id: s(APPROVAL),
+        turn_id: s(TURN),
+        conversation_id: s(CONVERSATION),
+        kind: ApprovalKind::OutsideSandbox.into(),
+        action: Some(action_paths()),
+        matched_rule_ids: vec![s(RULE)],
+        ruleset_version: s("m1-1"),
+        state: ApprovalState::Pending.into(),
+        review: ReviewState::NotReviewed.into(),
+        review_reason: None,
+        offered_remember: vec![RememberScope::Once.into()],
+        remember_label: s("只能允许一次"),
+        requested_at: ts(1_762_001_200),
+        decided_at: None,
+        review_id: None,
+        call: Some(ApprovalCallRecord {
+            tool_name: s("Bash"),
+            cwd: s("/Users/me/proj"),
+            shape: CallShape::Compound.into(),
+            placement: SandboxPlacement::Ambiguous.into(),
+            bypass_sandbox_requested: true,
+            actions: vec![action_command(), action_paths()],
+            representative: 1,
+            raw_input_digest: Bytes::from_static(&PROPOSAL_HASH),
+            normalized_digest: Bytes::from_static(&[0x5a; 32]),
+        }),
+    }
+}
+
 pub fn turn_full() -> Turn {
     turn()
 }
@@ -655,6 +690,38 @@ pub fn user_action_card_full() -> UserActionCard {
 
 pub fn rule_full() -> Rule {
     rule()
+}
+
+/// T07 Q1：组合条件、按标记匹配、只在部分档位生效。
+pub fn rule_composite() -> Rule {
+    Rule {
+        id: s(RULE),
+        layer: RuleLayer::Default.into(),
+        matcher: Some(RuleMatcher {
+            kind: Some(rule_matcher::Kind::All(AllMatcher {
+                matchers: vec![
+                    RuleMatcher {
+                        kind: Some(rule_matcher::Kind::ActionKindIs(ActionKind::Write.into())),
+                    },
+                    RuleMatcher {
+                        kind: Some(rule_matcher::Kind::Flag(ActionFlag::OutOfBounds.into())),
+                    },
+                ],
+            })),
+        }),
+        effect: RuleEffect::Ask.into(),
+        source: Some(RuleSource {
+            kind: Some(rule_source::Kind::Builtin(BuiltinRuleSource {
+                ruleset_version: s("m1-1"),
+            })),
+        }),
+        scope: Some(Scope {
+            kind: Some(scope::Kind::Global(GlobalScope {})),
+        }),
+        created_at: ts(1_762_001_100),
+        label: s("default.write.oob"),
+        applies_in: vec![ApprovalMode::Manual.into(), ApprovalMode::Auto.into()],
+    }
 }
 
 pub fn runtime_status_full() -> RuntimeStatus {
@@ -1035,6 +1102,37 @@ pub fn ev_approval_evaluated() -> DomainEvent {
         verdict: Some(verdict_deny()),
         layer_hit: RuleLayer::DenialMemory.into(),
         duration_ms: 3,
+        snapshot_lists_seq: 0,
+        live_rules_seq: 0,
+        sub_actions: vec![],
+        call_shape: 0,
+    }))
+}
+
+/// T07 Q10：审计带两个规则游标、全部子动作与调用形状。
+pub fn ev_approval_evaluated_with_call() -> DomainEvent {
+    ev(E::ApprovalEvaluated(ApprovalEvaluated {
+        turn_id: s(TURN),
+        action: Some(action_command()),
+        matched_rule_ids: vec![s(RULE)],
+        ruleset_version: s("m1-1"),
+        verdict: Some(verdict_deny()),
+        layer_hit: RuleLayer::Baseline.into(),
+        duration_ms: 1,
+        snapshot_lists_seq: 41,
+        live_rules_seq: 57,
+        sub_actions: vec![action_command(), action_paths()],
+        call_shape: CallShape::Compound.into(),
+    }))
+}
+
+/// T07 Q9：后台服务重启，进行中的审查失去执行者。
+pub fn ev_approval_review_abandoned_executor_lost() -> DomainEvent {
+    ev(E::ApprovalReviewUpdated(ApprovalReviewUpdated {
+        approval_id: s(APPROVAL),
+        review_id: s(REVIEW),
+        review: ReviewState::Abandoned.into(),
+        reason: Some(s("后台服务重启，审查中止")),
     }))
 }
 

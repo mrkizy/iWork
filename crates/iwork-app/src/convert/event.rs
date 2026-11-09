@@ -198,6 +198,10 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
             verdict: Some(verdict_to_proto(&e.verdict)?),
             layer_hit: rule_layer_to_proto(e.layer_hit),
             duration_ms: e.duration_ms,
+            snapshot_lists_seq: e.snapshot_lists_seq.0,
+            live_rules_seq: e.live_rules_seq.0,
+            sub_actions: actions_to_proto(&e.sub_actions)?,
+            call_shape: e.call_shape.map_or(0, call_shape_to_proto),
         }),
         DomainEvent::RuleRemembered(e) => P::RuleRemembered(pb::RuleRemembered {
             rule: Some(rule_to_proto(&e.rule)?),
@@ -719,6 +723,14 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
                 verdict: verdict_from_proto(K, e.verdict.as_ref())?,
                 layer_hit: rule_layer_from_proto(K, "layer_hit", e.layer_hit)?,
                 duration_ms: e.duration_ms,
+                snapshot_lists_seq: iwork_domain::id::Seq(e.snapshot_lists_seq),
+                live_rules_seq: iwork_domain::id::Seq(e.live_rules_seq),
+                sub_actions: actions_from_proto(K, &e.sub_actions)?,
+                // T07 之前的审计事件不带形状（未指定 = 0）
+                call_shape: match e.call_shape {
+                    0 => None,
+                    v => Some(call_shape_from_proto(K, "call_shape", v)?),
+                },
             }
             .into()
         }

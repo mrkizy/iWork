@@ -5,9 +5,13 @@
 //! 由 [`Approval::apply`] 填进去。AI 审查结果先过三条生效条件，不满足的是 `Stale`
 //! （预料之中的乱序，丢弃并审计），不是表外转换（程序缺陷）。
 
-use crate::action::Action;
+use std::collections::BTreeSet;
+
+use crate::action::{
+    Action, ActionFingerprint, CallShapeKind, CanonicalPath, SandboxPlacement, ToolRef,
+};
 use crate::approval_mode::{ApprovalMode, RememberScope};
-use crate::common::Timestamp;
+use crate::common::{Sha256, Timestamp};
 use crate::id::{ApprovalId, ConversationId, ReviewId, RuleId, TurnId};
 use crate::machine::{IllegalTransition, Transition, finite_enum, lookup};
 use crate::rule::RuleSetVersion;
@@ -70,6 +74,8 @@ finite_enum! {
         AiReviewTimedOut,
         /// 有效档位切回手动：手动档不经 AI 审查，进行中的审查作废、转问用户
         ModeChangedToManual,
+        /// 进行中的审查失去执行者（后台服务崩溃重启）：放弃、转问用户（T07 Q9）
+        AiReviewAbandoned,
     }
 }
 
@@ -153,6 +159,7 @@ pub const APPROVAL_TRANSITIONS: &[Transition<ApprovalState, ApprovalTriggerKind>
     (A::Pending, AT::AiReviewErrored, A::Pending),
     (A::Pending, AT::AiReviewTimedOut, A::Pending),
     (A::Pending, AT::ModeChangedToManual, A::Pending),
+    (A::Pending, AT::AiReviewAbandoned, A::Pending),
 ];
 
 pub const APPROVAL_MACHINE: &str = "approval";
@@ -192,6 +199,8 @@ finite_enum! {
         Errored,
         TimedOut,
         ModeChangedToManual,
+        /// 审查回合失去执行者（T07 Q9）
+        ExecutorLost,
     }
 }
 
@@ -207,6 +216,7 @@ pub const REVIEW_TRANSITIONS: &[Transition<ReviewPhase, ReviewTrigger>] = &[
     (R::InProgress, RT::Errored, R::Errored),
     (R::InProgress, RT::TimedOut, R::TimedOut),
     (R::InProgress, RT::ModeChangedToManual, R::Abandoned),
+    (R::InProgress, RT::ExecutorLost, R::Abandoned),
 ];
 
 pub const REVIEW_MACHINE: &str = "approval_review";
@@ -233,6 +243,7 @@ impl ApprovalTriggerKind {
             AT::AiReviewErrored => Some(RT::Errored),
             AT::AiReviewTimedOut => Some(RT::TimedOut),
             AT::ModeChangedToManual => Some(RT::ModeChangedToManual),
+            AT::AiReviewAbandoned => Some(RT::ExecutorLost),
         }
     }
 
@@ -250,12 +261,35 @@ impl ApprovalTriggerKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ReviewState {
     NotReviewed,
-    InProgress { review_id: ReviewId },
-    Passed { review_id: ReviewId },
-    Failed { review_id: ReviewId, reason: String },
-    Errored { review_id: ReviewId },
-    TimedOut { review_id: ReviewId },
-    Abandoned { review_id: ReviewId },
+    InProgress {
+        review_id: ReviewId,
+    },
+    Passed {
+        review_id: ReviewId,
+    },
+    Failed {
+        review_id: ReviewId,
+        reason: String,
+    },
+    Errored {
+        review_id: ReviewId,
+    },
+    TimedOut {
+        review_id: ReviewId,
+    },
+    Abandoned {
+        review_id: ReviewId,
+        reason: AbandonReason,
+    },
+}
+
+/// 进行中的审查为什么被放弃。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AbandonReason {
+    /// 有效档位切回手动
+    ModeChangedToManual,
+    /// 审查回合失去执行者：后台服务在审查进行中崩溃重启（T07 Q9）
+    ExecutorLost,
 }
 
 impl ReviewState {
@@ -279,7 +313,7 @@ impl ReviewState {
             | Self::Failed { review_id, .. }
             | Self::Errored { review_id }
             | Self::TimedOut { review_id }
-            | Self::Abandoned { review_id } => Some(*review_id),
+            | Self::Abandoned { review_id, .. } => Some(*review_id),
         }
     }
 }
@@ -287,16 +321,35 @@ impl ReviewState {
 /// 审批触发（带载荷）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ApprovalTrigger {
-    UserAllow { remember: RememberScope },
+    UserAllow {
+        remember: RememberScope,
+    },
     UserDeny,
     ModeSwitchAllows,
-    Void { reason: VoidReason },
-    AiReviewStarted { review_id: ReviewId },
-    AiReviewPassed { review_id: ReviewId },
-    AiReviewFailed { review_id: ReviewId, reason: String },
-    AiReviewErrored { review_id: ReviewId },
-    AiReviewTimedOut { review_id: ReviewId },
+    Void {
+        reason: VoidReason,
+    },
+    AiReviewStarted {
+        review_id: ReviewId,
+    },
+    AiReviewPassed {
+        review_id: ReviewId,
+    },
+    AiReviewFailed {
+        review_id: ReviewId,
+        reason: String,
+    },
+    AiReviewErrored {
+        review_id: ReviewId,
+    },
+    AiReviewTimedOut {
+        review_id: ReviewId,
+    },
     ModeChangedToManual,
+    /// 恢复时发现审查进行中但没有执行者（T07 Q9）。`review_id` 必须是当前进行中的那次
+    AiReviewAbandoned {
+        review_id: ReviewId,
+    },
 }
 
 impl ApprovalTrigger {
@@ -312,6 +365,7 @@ impl ApprovalTrigger {
             Self::AiReviewErrored { .. } => AT::AiReviewErrored,
             Self::AiReviewTimedOut { .. } => AT::AiReviewTimedOut,
             Self::ModeChangedToManual => AT::ModeChangedToManual,
+            Self::AiReviewAbandoned { .. } => AT::AiReviewAbandoned,
         }
     }
 
@@ -322,7 +376,8 @@ impl ApprovalTrigger {
             | Self::AiReviewPassed { review_id }
             | Self::AiReviewFailed { review_id, .. }
             | Self::AiReviewErrored { review_id }
-            | Self::AiReviewTimedOut { review_id } => Some(*review_id),
+            | Self::AiReviewTimedOut { review_id }
+            | Self::AiReviewAbandoned { review_id } => Some(*review_id),
             Self::UserAllow { .. }
             | Self::UserDeny
             | Self::ModeSwitchAllows
@@ -339,6 +394,32 @@ pub enum ApprovalKind {
     OutsideSandbox,
 }
 
+/// 恢复与复查所需的最小调用记录（T07 Q8、方案 6.2）。全部是归一后的值，不含原始 JSON 全文。
+///
+/// 指纹集合不单独存，由 `actions` 算（[`ApprovalCallRecord::fingerprints`]），一处真值。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ApprovalCallRecord {
+    pub tool: ToolRef,
+    pub cwd: CanonicalPath,
+    pub shape: CallShapeKind,
+    pub placement: SandboxPlacement,
+    pub bypass_sandbox_requested: bool,
+    /// 全部子动作，保持顺序；代表动作是 `actions[representative]`
+    pub actions: Vec<Action>,
+    pub representative: u32,
+    /// sha256(工具名 ‖ 规范化 JSON)：防文字层面的改写
+    pub raw_input_digest: Sha256,
+    /// sha256(有序子动作 ‖ 形状 ‖ 沙箱位置 ‖ cwd)：防同文字不同解析
+    pub normalized_digest: Sha256,
+}
+
+impl ApprovalCallRecord {
+    /// 全部子动作的指纹，去重（拒绝记忆按它工作）。
+    pub fn fingerprints(&self) -> BTreeSet<ActionFingerprint> {
+        self.actions.iter().map(Action::fingerprint).collect()
+    }
+}
+
 /// 审批实体。状态只经 [`Approval::apply`] 改变。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Approval {
@@ -346,7 +427,11 @@ pub struct Approval {
     pub turn_id: TurnId,
     pub conversation_id: ConversationId,
     pub kind: ApprovalKind,
+    /// 代表动作，给卡片展示
     pub action: Action,
+    /// 被审批调用的完整记录（T07 Q8）。旧事件没有：拒绝记忆退化为只记 `action`，恢复后不发一次性放行
+    /// 装箱：记录有几百字节，审批常被整条放进集合与枚举
+    pub call: Option<Box<ApprovalCallRecord>>,
     pub matched_rules: Vec<RuleId>,
     pub ruleset_version: RuleSetVersion,
     pub state: ApprovalState,
@@ -414,6 +499,16 @@ impl Approval {
         ctx: &ApprovalContext,
     ) -> Result<Applied, ApprovalApplyError> {
         let kind = trigger.kind();
+        if let ApprovalTrigger::AiReviewAbandoned { review_id } = trigger
+            && self.review.review_id() != Some(review_id)
+            && self.review.phase() == R::InProgress
+        {
+            return Err(ApprovalApplyError::Stale {
+                trigger: kind,
+                review_id,
+                why: StaleReason::ReviewIdMismatch,
+            });
+        }
         if kind.is_review_result() {
             let review_id = trigger
                 .review_id()
@@ -449,6 +544,14 @@ impl Approval {
         self.state = state;
         self.review = review;
         Ok(applied)
+    }
+
+    /// 被审批调用的全部子动作指纹；没有调用记录的旧审批只有代表动作（T07 方案 6.2）。
+    pub fn fingerprints(&self) -> BTreeSet<ActionFingerprint> {
+        match &self.call {
+            Some(call) => call.fingerprints(),
+            None => BTreeSet::from([self.action.fingerprint()]),
+        }
     }
 
     /// 是否计入「待你处理」：待审批且不在 AI 审查中（审查中用户还没被问到）。
@@ -496,6 +599,11 @@ impl Approval {
                     .review
                     .review_id()
                     .expect("REVIEW_TRANSITIONS 只允许 InProgress 收到 ModeChangedToManual，它一定有 review_id"),
+                reason: AbandonReason::ModeChangedToManual,
+            },
+            ApprovalTrigger::AiReviewAbandoned { review_id } => ReviewState::Abandoned {
+                review_id: *review_id,
+                reason: AbandonReason::ExecutorLost,
             },
             ApprovalTrigger::UserAllow { .. }
             | ApprovalTrigger::UserDeny

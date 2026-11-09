@@ -4,10 +4,10 @@ mod support;
 
 use iwork_domain::action::{Action, ActionFlags, ActionKind, ActionTarget, ToolRef};
 use iwork_domain::approval::{
-    self, APPROVAL_MACHINE, APPROVAL_TRANSITIONS, Applied, Approval, ApprovalApplyError,
-    ApprovalContext, ApprovalKind, ApprovalState, ApprovalTrigger, ApprovalTriggerKind, Decider,
-    REVIEW_MACHINE, REVIEW_TRANSITIONS, ReviewPhase, ReviewState, ReviewTrigger, StaleReason,
-    VoidReason,
+    self, APPROVAL_MACHINE, APPROVAL_TRANSITIONS, AbandonReason, Applied, Approval,
+    ApprovalApplyError, ApprovalContext, ApprovalKind, ApprovalState, ApprovalTrigger,
+    ApprovalTriggerKind, Decider, REVIEW_MACHINE, REVIEW_TRANSITIONS, ReviewPhase, ReviewState,
+    ReviewTrigger, StaleReason, VoidReason,
 };
 use iwork_domain::approval_mode::{ApprovalMode, RememberScope};
 use iwork_domain::common::Timestamp;
@@ -41,6 +41,7 @@ fn pending() -> Approval {
             raw_summary: "npm test".into(),
             flags: ActionFlags::default(),
         },
+        call: None,
         matched_rules: vec![],
         ruleset_version: RuleSetVersion("1".into()),
         state: A::Pending,
@@ -77,9 +78,9 @@ fn stale(trigger: ApprovalTriggerKind, r: ReviewId, why: StaleReason) -> Approva
 
 #[test]
 fn approval_table_forward() {
-    assert_eq!(APPROVAL_TRANSITIONS.len(), 14, "对照：表行数");
+    assert_eq!(APPROVAL_TRANSITIONS.len(), 15, "对照：表行数");
     assert_eq!(check_forward(approval::next, APPROVAL_TRANSITIONS), vec![]);
-    assert_eq!(REVIEW_TRANSITIONS.len(), 6, "对照：表行数");
+    assert_eq!(REVIEW_TRANSITIONS.len(), 7, "对照：表行数");
     assert_eq!(
         check_forward(approval::next_review, REVIEW_TRANSITIONS),
         vec![]
@@ -150,7 +151,13 @@ fn approval_scenarios() {
             review_changed: true
         }
     );
-    assert_eq!(a.review, ReviewState::Abandoned { review_id: r1 });
+    assert_eq!(
+        a.review,
+        ReviewState::Abandoned {
+            review_id: r1,
+            reason: AbandonReason::ModeChangedToManual
+        }
+    );
     assert!(a.awaits_user());
     let before = a.clone();
     assert!(matches!(
@@ -321,6 +328,66 @@ fn approval_scenarios_more() {
     );
 }
 
+/// 审查失去执行者（T07 Q9）：后台服务在审查进行中崩溃，恢复时放弃、转问用户；旧审查的迟到结果作废。
+#[test]
+fn approval_review_abandoned_on_executor_lost() {
+    let r1 = review_id(1);
+    let mut a = reviewing(r1);
+    assert!(!a.awaits_user());
+    let applied = a
+        .apply(Tr::AiReviewAbandoned { review_id: r1 }, &AUTO)
+        .unwrap();
+    assert_eq!(
+        applied,
+        Applied {
+            state_changed: false,
+            review_changed: true
+        }
+    );
+    assert_eq!(a.state, A::Pending);
+    assert_eq!(
+        a.review,
+        ReviewState::Abandoned {
+            review_id: r1,
+            reason: AbandonReason::ExecutorLost
+        }
+    );
+    assert!(a.awaits_user());
+    assert_eq!(
+        a.apply(Tr::AiReviewPassed { review_id: r1 }, &AUTO),
+        Err(stale(
+            ApprovalTriggerKind::AiReviewPassed,
+            r1,
+            StaleReason::NotInProgress
+        ))
+    );
+
+    // 不对号的放弃作废，审批不变
+    let mut a = reviewing(r1);
+    let before = a.clone();
+    assert_eq!(
+        a.apply(
+            Tr::AiReviewAbandoned {
+                review_id: review_id(2)
+            },
+            &AUTO
+        ),
+        Err(stale(
+            ApprovalTriggerKind::AiReviewAbandoned,
+            review_id(2),
+            StaleReason::ReviewIdMismatch
+        ))
+    );
+    assert_eq!(a, before);
+
+    // 没在审查中：表外转换（程序缺陷）
+    let mut a = pending();
+    assert!(matches!(
+        a.apply(Tr::AiReviewAbandoned { review_id: r1 }, &AUTO),
+        Err(ApprovalApplyError::IllegalReviewTransition(_))
+    ));
+}
+
 fn any_review_id() -> impl Strategy<Value = ReviewId> {
     // 只取三个值，让「对号」与「不对号」都常出现
     (0u128..3).prop_map(review_id)
@@ -341,6 +408,7 @@ fn any_trigger() -> impl Strategy<Value = ApprovalTrigger> {
         any_review_id().prop_map(|review_id| Tr::AiReviewErrored { review_id }),
         any_review_id().prop_map(|review_id| Tr::AiReviewTimedOut { review_id }),
         Just(Tr::ModeChangedToManual),
+        any_review_id().prop_map(|review_id| Tr::AiReviewAbandoned { review_id }),
     ]
 }
 

@@ -69,10 +69,10 @@ sample_types! {
         b::query_result_read_artifact,
         b::query_result_pending,
     ],
-    Approval => [b::approval_full],
+    Approval => [b::approval_full, b::approval_with_call],
     Turn => [b::turn_full],
     UserActionCard => [b::user_action_card_full],
-    Rule => [b::rule_full],
+    Rule => [b::rule_full, b::rule_composite],
     RuntimeStatus => [b::runtime_status_full],
     Error => [b::error],
     SessionConstraints => [b::session_constraints],
@@ -140,6 +140,8 @@ sample_types! {
         b::ev_recovery_completed,
         // 以下是后加的样本：只能追加在末尾，编号才不会挪动
         b::ev_approval_voided_turn_failed,
+        b::ev_approval_evaluated_with_call,
+        b::ev_approval_review_abandoned_executor_lost,
     ],
 }
 

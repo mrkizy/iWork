@@ -3,11 +3,12 @@
 use std::path::PathBuf;
 
 use iwork_domain::action::{
-    Action, ActionFingerprint, ActionFlags, ActionKind, ActionTarget, CanonicalPath, ToolRef,
+    Action, ActionFingerprint, ActionFlag, ActionFlags, ActionKind, ActionTarget, CallShapeKind,
+    CanonicalPath, SandboxPlacement, ToolRef,
 };
 use iwork_domain::approval::{
-    Approval, ApprovalKind, ApprovalState, Decider, ReviewPhase, ReviewState, StaleReason,
-    VoidReason,
+    AbandonReason, Approval, ApprovalCallRecord, ApprovalKind, ApprovalState, Decider, ReviewPhase,
+    ReviewState, StaleReason, VoidReason,
 };
 use iwork_domain::approval_mode::{ApprovalMode, ProjectDefaultMode, RememberScope};
 use iwork_domain::assistant::{Assistant, AssistantConfig, AssistantVersion, Avatar};
@@ -405,14 +406,69 @@ pub fn started_review_state() -> impl Strategy<Value = ReviewState> + Clone {
             .prop_map(|(review_id, reason)| ReviewState::Failed { review_id, reason }),
         review_id().prop_map(|review_id| ReviewState::Errored { review_id }),
         review_id().prop_map(|review_id| ReviewState::TimedOut { review_id }),
-        review_id().prop_map(|review_id| ReviewState::Abandoned { review_id }),
+        (
+            review_id(),
+            pick(vec![
+                AbandonReason::ModeChangedToManual,
+                AbandonReason::ExecutorLost
+            ])
+        )
+            .prop_map(|(review_id, reason)| ReviewState::Abandoned { review_id, reason }),
     ]
+}
+
+fn call_shape() -> impl Strategy<Value = CallShapeKind> + Clone {
+    pick(vec![
+        CallShapeKind::Tool,
+        CallShapeKind::SingleSimpleCommand,
+        CallShapeKind::Compound,
+        CallShapeKind::Unparsable,
+    ])
+}
+
+fn call_record() -> impl Strategy<Value = ApprovalCallRecord> + Clone {
+    (
+        text(),
+        canonical(),
+        call_shape(),
+        pick(vec![
+            SandboxPlacement::Inside,
+            SandboxPlacement::Outside,
+            SandboxPlacement::Ambiguous,
+        ]),
+        any::<bool>(),
+        prop::collection::vec(action(), 1..4),
+        any::<u32>(),
+        sha(),
+        sha(),
+    )
+        .prop_map(
+            |(tool, cwd, shape, placement, bypass, actions, rep, raw, norm)| {
+                let representative = rep % actions.len() as u32;
+                ApprovalCallRecord {
+                    tool: ToolRef(tool),
+                    cwd,
+                    shape,
+                    placement,
+                    bypass_sandbox_requested: bypass,
+                    actions,
+                    representative,
+                    raw_input_digest: raw,
+                    normalized_digest: norm,
+                }
+            },
+        )
 }
 
 /// `ApprovalRequested` 带的审批：待审批（或已拒绝，proto 消息也装得下）。
 fn approval() -> impl Strategy<Value = Approval> + Clone {
     (
-        (approval_id(), turn_id(), conversation_id()),
+        (
+            approval_id(),
+            turn_id(),
+            conversation_id(),
+            proptest::option::of(call_record().prop_map(Box::new)),
+        ),
         pick(vec![ApprovalKind::Ask, ApprovalKind::OutsideSandbox]),
         action(),
         prop::collection::vec(rule_id(), 0..3),
@@ -425,7 +481,7 @@ fn approval() -> impl Strategy<Value = Approval> + Clone {
     )
         .prop_map(
             |(
-                (id, turn_id, conversation_id),
+                (id, turn_id, conversation_id, call),
                 kind,
                 action,
                 matched_rules,
@@ -442,6 +498,7 @@ fn approval() -> impl Strategy<Value = Approval> + Clone {
                     conversation_id,
                     kind,
                     action,
+                    call,
                     matched_rules,
                     ruleset_version: RuleSetVersion(version),
                     state,
@@ -562,7 +619,17 @@ fn rule() -> impl Strategy<Value = RuleEntry> + Clone {
         text().prop_map(RuleMatcher::ToolName),
         action_kind().prop_map(RuleMatcher::ActionKindIs),
         Just(RuleMatcher::Any),
+        pick(vec![
+            ActionFlag::OutOfBounds,
+            ActionFlag::BypassSandboxRequested,
+            ActionFlag::OpaqueScript
+        ])
+        .prop_map(RuleMatcher::Flag),
     ];
+    // 组合条件可以嵌套：叶子之上再套两层 All
+    let matcher = matcher.prop_recursive(2, 8, 3, |inner| {
+        prop::collection::vec(inner, 0..3).prop_map(RuleMatcher::All)
+    });
     let source = prop_oneof![
         text().prop_map(|v| RuleSource::Builtin {
             ruleset_version: RuleSetVersion(v)
@@ -583,17 +650,21 @@ fn rule() -> impl Strategy<Value = RuleEntry> + Clone {
         rule_scope(),
         ts(),
         text(),
+        prop::collection::btree_set(approval_mode(), 0..3),
     )
         .prop_map(
-            |(id, layer, matcher, effect, source, scope, created_at, label)| RuleEntry {
-                id,
-                layer,
-                matcher,
-                effect,
-                source,
-                scope,
-                created_at,
-                label,
+            |(id, layer, matcher, effect, source, scope, created_at, label, applies_in)| {
+                RuleEntry {
+                    id,
+                    layer,
+                    matcher,
+                    effect,
+                    source,
+                    scope,
+                    created_at,
+                    label,
+                    applies_in,
+                }
             },
         )
 }
@@ -1145,6 +1216,12 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                     verdict(),
                     rule_layer(),
                     any::<u32>(),
+                    (
+                        any::<u64>(),
+                        any::<u64>(),
+                        prop::collection::vec(action(), 0..3),
+                        proptest::option::of(call_shape()),
+                    ),
                 )
                     .prop_map(
                         |(
@@ -1155,6 +1232,7 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                             verdict,
                             layer_hit,
                             duration_ms,
+                            (snapshot_lists_seq, live_rules_seq, sub_actions, call_shape),
                         )| ApprovalEvaluated {
                             turn_id,
                             action,
@@ -1163,6 +1241,10 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                             verdict,
                             layer_hit,
                             duration_ms,
+                            snapshot_lists_seq: Seq(snapshot_lists_seq),
+                            live_rules_seq: Seq(live_rules_seq),
+                            sub_actions,
+                            call_shape,
                         },
                     ),
             ),

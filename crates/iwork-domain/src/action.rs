@@ -53,6 +53,46 @@ pub struct ActionFlags {
     pub opaque_script: bool,
 }
 
+/// 规则按标记匹配时用的标记名（[`crate::rule::RuleMatcher::Flag`]），与 [`ActionFlags`] 的字段一一对应。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ActionFlag {
+    OutOfBounds,
+    BypassSandboxRequested,
+    OpaqueScript,
+}
+
+impl ActionFlags {
+    /// 这个标记是否为真。
+    pub fn has(&self, flag: ActionFlag) -> bool {
+        match flag {
+            ActionFlag::OutOfBounds => self.out_of_bounds,
+            ActionFlag::BypassSandboxRequested => self.bypass_sandbox_requested,
+            ActionFlag::OpaqueScript => self.opaque_script,
+        }
+    }
+}
+
+/// 一次调用的形状（T07 方案 3.1）。决定能否生成亲手执行卡片、能否放行规则与记住。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CallShapeKind {
+    /// 非 Bash 工具：恰好一个动作
+    Tool,
+    /// 恰好一个简单命令，全部词字面
+    SingleSimpleCommand,
+    /// 多个简单命令，且每个都归类成功
+    Compound,
+    /// 解析不了：三档询问、不记住、不审查
+    Unparsable,
+}
+
+/// 命令会在沙箱里还是沙箱外运行（T07 方案 3.7）。`Ambiguous` 按沙箱外求值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SandboxPlacement {
+    Inside,
+    Outside,
+    Ambiguous,
+}
+
 /// 一次工具调用归一后的动作。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Action {

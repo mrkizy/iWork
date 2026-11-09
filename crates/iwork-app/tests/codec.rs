@@ -189,6 +189,7 @@ fn pending_approval() -> Approval {
                 ..ActionFlags::default()
             },
         },
+        call: None,
         matched_rules: vec![],
         ruleset_version: RuleSetVersion("2026.11".into()),
         state: ApprovalState::Pending,

@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use crate::action::Action;
+use crate::action::{Action, CallShapeKind};
 use crate::approval::{Approval, ApprovalState, ReviewPhase, ReviewState, StaleReason, VoidReason};
 use crate::approval_mode::{ApprovalMode, RememberScope};
 use crate::assistant::{Assistant, AssistantConfig};
@@ -350,6 +350,14 @@ pub struct ApprovalEvaluated {
     pub verdict: Verdict,
     pub layer_hit: RuleLayer,
     pub duration_ms: u32,
+    /// 会话快照读取三张安全清单时 `rule` 流的游标（T07 Q10）
+    pub snapshot_lists_seq: Seq,
+    /// 活规则缓存最后应用的 `rule` 流游标（T07 Q10）
+    pub live_rules_seq: Seq,
+    /// 全部子动作（`action` 是其中的代表动作）
+    pub sub_actions: Vec<Action>,
+    /// T07 之前的审计事件没有，为 `None`
+    pub call_shape: Option<CallShapeKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

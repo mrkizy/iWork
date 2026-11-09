@@ -352,6 +352,13 @@ message ApprovalEvaluated {
   // 命中的层（领域 Evaluation.layer_hit）。
   RuleLayer layer_hit = 6;
   uint32 duration_ms = 7;
+  // 会话快照读取三张安全清单时 rule 流的游标；与 live_rules_seq 分别记、不取最大（T07 Q10）。
+  uint64 snapshot_lists_seq = 8;
+  // 活规则缓存最后应用的 rule 流游标（T07 Q10）。
+  uint64 live_rules_seq = 9;
+  // 全部子动作；action 是其中的代表动作（T07 Q10）。
+  repeated ActionSummary sub_actions = 10;
+  CallShape call_shape = 11;
 }
 
 // 流：audit（approval_id）。迟到或对不上号的 AI 审查结果被丢弃。投影不读它、不改审批表（T01 方案 4.3）。
