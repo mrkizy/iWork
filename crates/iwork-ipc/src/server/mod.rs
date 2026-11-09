@@ -81,8 +81,12 @@ impl ServerConfig {
 /// 连接登记表与发布水位：`Publisher` 与各连接共享。
 pub(crate) struct Hub {
     conns: Mutex<HashMap<u64, Arc<ConnShared>>>,
-    /// 已发布的最高持久事件 seq。交接要等它追上读事务看到的 S（方案 2.8「交接」第 4 步）。
+    /// 发布水位：已发布的最高持久事件 seq 与启动基线（存储 head）的较大者。
+    /// 交接要等它追上读事务看到的 S（方案 2.8「交接」第 4 步）。
     published_head: watch::Sender<u64>,
+    /// 最后一次经 `publish` 发布的 seq，只用来查乱序。不能用水位查：基线可能已经包含「已提交、还没发布」的事件，
+    /// 它们随后的正常发布会被误报。
+    last_published: AtomicU64,
     next_conn_id: AtomicU64,
 }
 
@@ -91,6 +95,7 @@ impl Hub {
         Self {
             conns: Mutex::new(HashMap::new()),
             published_head: watch::Sender::new(0),
+            last_published: AtomicU64::new(0),
             next_conn_id: AtomicU64::new(1),
         }
     }
@@ -128,11 +133,14 @@ impl Publisher {
         match p {
             Published::Persisted(e) => {
                 let seq = e.seq();
-                let head = *self.hub.published_head.borrow();
-                if seq <= head {
+                let last = self.hub.last_published.fetch_max(seq, Ordering::SeqCst);
+                if seq <= last {
                     // 乱序发布会让游标跳过事件。修在调用方；这里照常投递（可能重复，不丢）。
-                    tracing::error!(target: "iwork_ipc", seq, published_head = head, "持久事件乱序发布");
-                    debug_assert!(seq > head, "持久事件乱序发布：seq {seq} ≤ 已发布 {head}");
+                    tracing::error!(target: "iwork_ipc", seq, last_published = last, "持久事件乱序发布");
+                    debug_assert!(
+                        seq > last,
+                        "持久事件乱序发布：seq {seq} ≤ 上一次发布的 {last}"
+                    );
                 }
                 for conn in self.hub.connections() {
                     conn.on_persisted(&e);

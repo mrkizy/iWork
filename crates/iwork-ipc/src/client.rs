@@ -426,7 +426,11 @@ impl Client {
             limit,
         };
         tokio::spawn(read_loop(reader, Arc::clone(&inner), incoming_tx));
-        let client = Client { inner, out: out_tx, welcome };
+        let client = Client {
+            inner,
+            out: out_tx,
+            welcome,
+        };
         Ok((client, Incoming { rx: in_rx, space }))
     }
 
@@ -448,6 +452,7 @@ impl Client {
     }
 
     /// 会写视图的查询：future 只说完成 / 失败；结果以 [`IncomingItem::ViewResult`] 从 `Incoming` 按到达顺序出来。
+    /// 结果先排进 `Incoming` 再唤醒 future，所以等这个 future 时必须有人在读 `Incoming`（`Incoming` 满了读任务会停）。
     pub async fn view_query(&self, query: pb::Query) -> Result<(), ClientError> {
         if query.kind.as_ref().map(query_lane) != Some(QueryLane::ViewQuery) {
             return Err(ClientError::WrongLane);

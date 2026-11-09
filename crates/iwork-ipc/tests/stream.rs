@@ -18,9 +18,10 @@ fn subscribed(item: &IncomingItem) -> &pb::Subscribed {
 
 fn event_ids(item: &IncomingItem) -> (u64, Vec<u32>) {
     match item {
-        IncomingItem::Event(pb::Event { subscription_ids, body: Some(pb::event::Body::Persisted(p)) }) => {
-            (p.seq, subscription_ids.clone())
-        }
+        IncomingItem::Event(pb::Event {
+            subscription_ids,
+            body: Some(pb::event::Body::Persisted(p)),
+        }) => (p.seq, subscription_ids.clone()),
         other => panic!("期望持久事件，得到 {other:?}"),
     }
 }
@@ -58,7 +59,14 @@ async fn subscribe_from_zero_gets_snapshot_then_live() {
 async fn first_subscribe_with_cursor_resumes_without_snapshot() {
     let h = start(server_cfg());
     for i in 1..=10 {
-        h.upsert(if i % 2 == 0 { "project:p1" } else { "conversation:c9" }, i);
+        h.upsert(
+            if i % 2 == 0 {
+                "project:p1"
+            } else {
+                "conversation:c9"
+            },
+            i,
+        );
     }
     let (client, mut inc) = h.connect_ok().await;
     // 重连：游标 4，侧栏范围。
@@ -81,13 +89,24 @@ async fn subscribe_ahead_of_head_or_beyond_limit_gets_snapshot() {
     }
     let (c1, mut i1) = h.connect_ok().await;
     c1.subscribe(1, sidebar(), 99).await.unwrap();
-    assert_eq!(subscribed(&next_item(&mut i1).await).snapshot_seq, 20, "超前的游标走快照");
+    assert_eq!(
+        subscribed(&next_item(&mut i1).await).snapshot_seq,
+        20,
+        "超前的游标走快照"
+    );
     let (c2, mut i2) = h.connect_ok().await;
     c2.subscribe(1, sidebar(), 10).await.unwrap();
-    assert_eq!(subscribed(&next_item(&mut i2).await).snapshot_seq, 20, "落后超过 replay_limit 走快照");
+    assert_eq!(
+        subscribed(&next_item(&mut i2).await).snapshot_seq,
+        20,
+        "落后超过 replay_limit 走快照"
+    );
     let (c3, mut i3) = h.connect_ok().await;
     c3.subscribe(1, sidebar(), 16).await.unwrap();
-    assert!(subscribed(&next_item(&mut i3).await).snapshot.is_none(), "对照：落后 4 条续传");
+    assert!(
+        subscribed(&next_item(&mut i3).await).snapshot.is_none(),
+        "对照：落后 4 条续传"
+    );
     assert_eq!(take_seqs(&mut i3, 4).await, vec![17, 18, 19, 20]);
 }
 
@@ -163,7 +182,10 @@ async fn unsubscribe_narrows_filter_without_touching_cursor() {
     client.unsubscribe(1).await.unwrap();
     h.upsert("conversation:c1", 5);
     client.subscribe(3, conversation("c1"), 4).await.unwrap();
-    assert!(subscribed(&next_item(&mut inc).await).snapshot.is_none(), "退订到空后游标仍在，续传");
+    assert!(
+        subscribed(&next_item(&mut inc).await).snapshot.is_none(),
+        "退订到空后游标仍在，续传"
+    );
     assert_eq!(next_persisted(&mut inc).await, 5);
 }
 
@@ -181,7 +203,10 @@ async fn unsubscribe_unknown_is_not_found() {
 async fn empty_scope_is_invalid_argument() {
     let h = start(server_cfg());
     let (client, _inc) = h.connect_ok().await;
-    match client.subscribe(1, pb::SubscriptionScope::default(), 0).await {
+    match client
+        .subscribe(1, pb::SubscriptionScope::default(), 0)
+        .await
+    {
         Err(ClientError::Server(e)) => assert_eq!(e.code(), pb::ErrorCode::InvalidArgument),
         other => panic!("{other:?}"),
     }
@@ -214,9 +239,15 @@ async fn resubscribe_same_id_with_cursor_resumes_other_from_takes_snapshot() {
     h.upsert("conversation:c1", 1);
     assert_eq!(next_persisted(&mut inc).await, 1);
     client.subscribe(1, conversation("c1"), 1).await.unwrap();
-    assert!(subscribed(&next_item(&mut inc).await).snapshot.is_none(), "from == cursor：续传");
+    assert!(
+        subscribed(&next_item(&mut inc).await).snapshot.is_none(),
+        "from == cursor：续传"
+    );
     client.subscribe(1, conversation("c1"), 0).await.unwrap();
-    assert!(subscribed(&next_item(&mut inc).await).snapshot.is_some(), "from ≠ cursor：快照");
+    assert!(
+        subscribed(&next_item(&mut inc).await).snapshot.is_some(),
+        "from ≠ cursor：快照"
+    );
 }
 
 #[tokio::test]
@@ -227,15 +258,34 @@ async fn snapshot_is_single_read_transaction_or_retried() {
     let (client, mut inc) = h.connect_ok().await;
     client.subscribe(1, sidebar(), 0).await.unwrap();
     let s = subscribed(&next_item(&mut inc).await).clone();
-    assert!(s.snapshot.unwrap().results.iter().all(|r| r.seq == s.snapshot_seq), "客户端看不到两个 seq 的拼接");
-    assert_eq!(h.source.snapshot_calls.load(Ordering::SeqCst), 2, "撕裂的那次被丢弃重取");
+    assert!(
+        s.snapshot
+            .unwrap()
+            .results
+            .iter()
+            .all(|r| r.seq == s.snapshot_seq),
+        "客户端看不到两个 seq 的拼接"
+    );
+    assert_eq!(
+        h.source.snapshot_calls.load(Ordering::SeqCst),
+        2,
+        "撕裂的那次被丢弃重取"
+    );
 }
 
 /// 同一次读到的多条同 from_seq 的 Subscribe 合并成一次续传，过滤是并集。
 #[tokio::test]
 async fn subscribes_in_one_read_merge_into_one_resume() {
     let h = start(server_cfg());
-    for (i, e) in ["conversation:c1", "conversation:c2", "project:p1", "conversation:c3"].iter().enumerate() {
+    for (i, e) in [
+        "conversation:c1",
+        "conversation:c2",
+        "project:p1",
+        "conversation:c3",
+    ]
+    .iter()
+    .enumerate()
+    {
         h.upsert(e, i as u64);
     }
     let (client, mut inc) = h.connect_ok().await;
@@ -261,7 +311,11 @@ async fn subscribes_in_one_read_merge_into_one_resume() {
     }
     assert_eq!(seqs, vec![2, 4]);
     assert_eq!(h.source.snapshot_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(h.source.replay_calls.load(Ordering::SeqCst), 1, "一次补发覆盖并集");
+    assert_eq!(
+        h.source.replay_calls.load(Ordering::SeqCst),
+        1,
+        "一次补发覆盖并集"
+    );
 }
 
 /// 续传结束后才到的 Subscribe，from_seq 已不等于游标 → 快照（正确但多做一次）。
@@ -286,7 +340,10 @@ async fn too_many_scopes_is_protocol_violation() {
     let h = start(cfg);
     let (client, mut inc) = h.connect_ok().await;
     for i in 0..3 {
-        client.subscribe(i, conversation(&format!("c{i}")), 0).await.unwrap();
+        client
+            .subscribe(i, conversation(&format!("c{i}")), 0)
+            .await
+            .unwrap();
         next_item(&mut inc).await;
     }
     let _ = client.subscribe(9, conversation("c9"), 0).await;
@@ -311,7 +368,13 @@ async fn view_query_result_sits_at_its_seq_in_stream() {
     }
     let (world, publisher) = (h.world.clone(), h.publisher.clone());
     *h.handler.after_read.lock().unwrap() = Some(Box::new(move || {
-        world.commit_publish(&publisher, Op::Upsert { entity: "conversation:c1".into(), value: 11 });
+        world.commit_publish(
+            &publisher,
+            Op::Upsert {
+                entity: "conversation:c1".into(),
+                value: 11,
+            },
+        );
     }));
     client.view_query(get_conversation("c1")).await.unwrap();
     let mut order = Vec::new();
@@ -321,7 +384,10 @@ async fn view_query_result_sits_at_its_seq_in_stream() {
             item => order.push(format!("E{}", event_ids(&item).0)),
         }
     }
-    let expect: Vec<String> = (1..=10).map(|i| format!("E{i}")).chain(["R10".into(), "E11".into()]).collect();
+    let expect: Vec<String> = (1..=10)
+        .map(|i| format!("E{i}"))
+        .chain(["R10".into(), "E11".into()])
+        .collect();
     assert_eq!(order, expect);
 }
 
@@ -332,7 +398,10 @@ async fn handover_waits_for_published_head() {
     let (client, mut inc) = h.connect_ok().await;
     client.subscribe(1, conversation("c1"), 0).await.unwrap();
     next_item(&mut inc).await;
-    let late = h.world.commit(Op::Upsert { entity: "conversation:c1".into(), value: 1 });
+    let late = h.world.commit(Op::Upsert {
+        entity: "conversation:c1".into(),
+        value: 1,
+    });
     let publisher = h.publisher.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -340,7 +409,9 @@ async fn handover_waits_for_published_head() {
     });
     client.view_query(get_conversation("c1")).await.unwrap();
     assert_eq!(next_persisted(&mut inc).await, 1);
-    assert!(matches!(next_item(&mut inc).await, IncomingItem::ViewResult { result, .. } if result.seq == 1));
+    assert!(
+        matches!(next_item(&mut inc).await, IncomingItem::ViewResult { result, .. } if result.seq == 1)
+    );
 }
 
 #[tokio::test]
@@ -364,11 +435,22 @@ async fn committed_but_never_published_fails_handover() {
     let (client, mut inc) = h.connect_ok().await;
     client.subscribe(1, conversation("c1"), 0).await.unwrap();
     next_item(&mut inc).await;
-    h.world.commit(Op::Upsert { entity: "conversation:c1".into(), value: 1 }); // 永不发布
+    h.world.commit(Op::Upsert {
+        entity: "conversation:c1".into(),
+        value: 1,
+    }); // 永不发布
     assert!(client.view_query(get_conversation("c1")).await.is_err());
-    assert!(matches!(next_item(&mut inc).await, IncomingItem::Closed(_)), "迟到的结果不出现，连接被关");
+    assert!(
+        matches!(next_item(&mut inc).await, IncomingItem::Closed(_)),
+        "迟到的结果不出现，连接被关"
+    );
     let failed = audit.events("connection_failed");
-    assert!(failed.iter().any(|e| e["cause"] == "PublishStalled" && e["level"] == "ERROR"), "{failed:?}");
+    assert!(
+        failed
+            .iter()
+            .any(|e| e["cause"] == "PublishStalled" && e["level"] == "ERROR"),
+        "{failed:?}"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -381,12 +463,20 @@ async fn read_never_returns_fails_handover_without_buffer_pressure() {
     *h.world.read_hangs.lock().unwrap() = true;
     assert!(client.view_query(get_conversation("c1")).await.is_err());
     assert!(matches!(next_item(&mut inc).await, IncomingItem::Closed(_)));
-    assert!(audit.events("connection_failed").iter().any(|e| e["cause"] == "HandoverTimeout"));
+    assert!(
+        audit
+            .events("connection_failed")
+            .iter()
+            .any(|e| e["cause"] == "HandoverTimeout")
+    );
     // 新连接不受影响。
     *h.world.read_hangs.lock().unwrap() = false;
     let (c2, mut i2) = h.connect_ok().await;
     c2.subscribe(1, conversation("c1"), 0).await.unwrap();
-    assert!(matches!(next_item(&mut i2).await, IncomingItem::Subscribed { .. }));
+    assert!(matches!(
+        next_item(&mut i2).await,
+        IncomingItem::Subscribed { .. }
+    ));
 }
 
 /// 非空库重启、零新增提交：第一次交接立即成功（发布水位以库里的 head 为基线）。
@@ -394,13 +484,24 @@ async fn read_never_returns_fails_handover_without_buffer_pressure() {
 async fn published_head_baseline_from_store() {
     let world = World::default();
     for i in 1..=5 {
-        world.commit(Op::Upsert { entity: "conversation:c1".into(), value: i });
+        world.commit(Op::Upsert {
+            entity: "conversation:c1".into(),
+            value: i,
+        });
     }
-    let h = start_with(server_cfg(), world, server_own(), client_peer(), std::sync::Arc::new(|_| server_peer()));
+    let h = start_with(
+        server_cfg(),
+        world,
+        server_own(),
+        client_peer(),
+        std::sync::Arc::new(|_| server_peer()),
+    );
     let (client, mut inc) = h.connect_ok().await;
     let t = tokio::time::Instant::now();
     client.view_query(get_conversation("c1")).await.unwrap();
-    assert!(matches!(next_item(&mut inc).await, IncomingItem::ViewResult { result, .. } if result.seq == 5));
+    assert!(
+        matches!(next_item(&mut inc).await, IncomingItem::ViewResult { result, .. } if result.seq == 5)
+    );
     assert!(t.elapsed() < Duration::from_secs(1), "没有等交接超时");
     client.subscribe(1, sidebar(), 0).await.unwrap();
     assert_eq!(subscribed(&next_item(&mut inc).await).snapshot_seq, 5);
@@ -452,7 +553,36 @@ async fn handover_fifo_serializes_snapshot_and_view_queries() {
 #[should_panic(expected = "乱序发布")]
 async fn publish_out_of_order_is_reported() {
     let h = start(server_cfg());
-    let e2 = h.world.commit(Op::Upsert { entity: "project:p".into(), value: 2 });
-    h.publisher.publish(iwork_ipc::server::Published::Persisted(e2.clone()));
-    h.publisher.publish(iwork_ipc::server::Published::Persisted(e2));
+    let e2 = h.world.commit(Op::Upsert {
+        entity: "project:p".into(),
+        value: 2,
+    });
+    h.publisher
+        .publish(iwork_ipc::server::Published::Persisted(e2.clone()));
+    h.publisher
+        .publish(iwork_ipc::server::Published::Persisted(e2));
+}
+
+/// 已提交、未发布的事件被启动基线读到，随后的正常发布不能被当成乱序（基线与「最后发布」是两回事）。
+#[tokio::test]
+async fn publish_after_baseline_is_not_reported_out_of_order() {
+    let world = World::default();
+    let e1 = world.commit(Op::Upsert {
+        entity: "project:p1".into(),
+        value: 1,
+    });
+    let h = start_with(
+        server_cfg(),
+        world,
+        server_own(),
+        client_peer(),
+        std::sync::Arc::new(|_| server_peer()),
+    );
+    let (client, mut inc) = h.connect_ok().await; // 连上说明 serve 已经设好基线
+    client.subscribe(1, sidebar(), 1).await.unwrap();
+    next_item(&mut inc).await;
+    h.publisher
+        .publish(iwork_ipc::server::Published::Persisted(e1));
+    assert_eq!(h.upsert("project:p1", 2), 2);
+    assert_eq!(next_persisted(&mut inc).await, 2);
 }
