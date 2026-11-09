@@ -19,6 +19,7 @@ use std::ffi::OsStr;
 use std::fs::{self, Metadata, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 根目录下一个路径是什么。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,19 +227,43 @@ pub fn replace_file(root: &Path, rel: &Path, contents: &[u8]) -> Result<(), Root
         })?
         .to_string_lossy()
         .into_owned();
-    let tmp = path.with_file_name(format!(".{file_name}.iwork-tmp-{}", std::process::id()));
-    let result = OpenOptions::new()
+    // 进程号区分进程，进程内递增计数区分同一进程里的并发调用，名字不会撞
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(
+        ".{file_name}.iwork-tmp-{}-{seq}",
+        std::process::id()
+    ));
+    replace_file_via(root, rel, contents, &tmp)
+}
+
+/// 临时文件名里的进程内序号。
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 经临时文件 `tmp` 替换 `rel`。只有这次调用自己独占创建成功的临时文件才由它清理：
+/// `tmp` 已存在（不管是谁的）时直接返回错误，绝不删它。
+fn replace_file_via(
+    root: &Path,
+    rel: &Path,
+    contents: &[u8],
+    tmp: &Path,
+) -> Result<(), RootedError> {
+    let path = root.join(rel);
+    let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&tmp)
-        .and_then(|mut f| {
-            f.write_all(contents)?;
-            f.sync_all()
-        })
-        .and_then(|()| fs::rename(&tmp, &path));
+        .open(tmp)
+        .map_err(|e| io(tmp, e))?;
+    // 从这里起临时文件归这次调用所有，失败时由它删
+    let result = file
+        .write_all(contents)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            fs::rename(tmp, &path)
+        });
     if let Err(e) = result {
-        // 临时文件是这次新建的，失败时删掉；删不掉也只是留一个临时文件，以写入的错误为准
-        let _ = fs::remove_file(&tmp);
+        // 删不掉只会留下一个本次调用建的临时文件，以写入或改名的错误为准
+        let _ = fs::remove_file(tmp);
         return Err(io(&path, e));
     }
     Ok(())
@@ -330,6 +355,54 @@ mod tests {
             "OUTSIDE"
         );
         assert!(!outside.path().join("new").exists());
+    }
+
+    /// 2/F-2：临时文件名撞上一个原本就存在的文件时，替换失败，但那个文件不能被删。
+    #[test]
+    fn pre_existing_temp_file_is_never_deleted() {
+        let d = tmp();
+        let root = d.path();
+        fs::write(root.join("target"), "old").unwrap();
+        fs::write(root.join("someone-elses"), "keep me").unwrap();
+
+        let r = replace_file_via(
+            root,
+            Path::new("target"),
+            b"new",
+            &root.join("someone-elses"),
+        );
+        assert!(r.is_err(), "临时文件名被占用时应失败");
+        assert_eq!(
+            fs::read_to_string(root.join("someone-elses")).unwrap(),
+            "keep me"
+        );
+        assert_eq!(fs::read_to_string(root.join("target")).unwrap(), "old");
+    }
+
+    /// 2/F-2：同一进程里并发替换同一个目标，临时文件不会互相碰撞。
+    #[test]
+    fn concurrent_replacements_in_one_process_do_not_collide() {
+        let d = tmp();
+        let root = d.path().to_path_buf();
+        let threads: Vec<_> = (0..16)
+            .map(|i| {
+                let root = root.clone();
+                std::thread::spawn(move || {
+                    replace_file(&root, Path::new("shared"), format!("v{i}").as_bytes())
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap().expect("每次替换都应成功");
+        }
+        let content = fs::read_to_string(root.join("shared")).unwrap();
+        assert!(content.starts_with('v'), "{content}");
+        let leftovers: Vec<_> = fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != "shared")
+            .collect();
+        assert!(leftovers.is_empty(), "不留临时文件：{leftovers:?}");
     }
 
     #[cfg(unix)]

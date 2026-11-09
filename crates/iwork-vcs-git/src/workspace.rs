@@ -11,11 +11,11 @@ use iwork_ports::vcs::{
     BaselineRef, ChangeKind, ChangedPath, Diff, DiffRange, RepoRoot, VcsError, WorkspaceStatus,
 };
 
-use crate::patch::{EntryMode, Side, file_diff};
+use crate::patch::{EntryMode, Side, file_diff, unsupported_diff};
 
 /// 当前基线：HEAD 指向的提交。还没有任何提交时用空树，这样相对它的差异就是全部文件。
 pub(crate) fn baseline(repo_root: &RepoRoot) -> Result<BaselineRef, VcsError> {
-    let repo = open(repo_root, "baseline")?;
+    let repo = open(repo_root, "baseline")?.repo;
     let id = match repo.head_id() {
         Ok(id) => id.detach(),
         Err(_) if head_is_unborn(&repo, "baseline")? => repo.empty_tree().id,
@@ -27,7 +27,7 @@ pub(crate) fn baseline(repo_root: &RepoRoot) -> Result<BaselineRef, VcsError> {
 /// 工作区相对 HEAD 的改动，暂存区与工作区合成一个结果，每个路径一条。
 pub(crate) fn status(repo_root: &RepoRoot) -> Result<WorkspaceStatus, VcsError> {
     const OP: &str = "status";
-    let repo = open(repo_root, OP)?;
+    let repo = open(repo_root, OP)?.repo;
     let mut by_path: BTreeMap<BString, (Option<ChangeKind>, Option<ChangeKind>)> = BTreeMap::new();
     for item in status_items(&repo, None, Renames::AsConfigured, OP)? {
         match item {
@@ -63,12 +63,16 @@ pub(crate) fn status(repo_root: &RepoRoot) -> Result<WorkspaceStatus, VcsError> 
 
 /// 按范围出差异。
 ///
-/// 两侧都换成 git 内部的表示再比较：工作区的普通文件过 gix 的内容过滤（换行转换、编码、配置的
-/// clean 过滤器，与 `git diff` 一致；过滤器失败时报错，不生成错误的差异）。工作区一侧读文件时路径上
-/// 任何一级都不跟随符号链接（`iwork-rootfs`）。不做改名检测：改名就是源路径删除加目标路径新增。
+/// 两侧都换成 git 内部的表示再比较：工作区的普通文件过 gix 进程内的内容转换（换行、编码、ident）。
+/// 后台读操作不运行任何外部程序（见 [`open`]）：要靠外部过滤程序（`filter=<driver>`，例如 LFS）才能比较的
+/// 文件只标注「不支持」。工作区一侧读文件时路径上任何一级都不跟随符号链接（`iwork-rootfs`）。
+/// 不做改名检测：改名就是源路径删除加目标路径新增。
 pub(crate) fn diff(repo_root: &RepoRoot, range: &DiffRange) -> Result<Diff, VcsError> {
     const OP: &str = "diff";
-    let repo = open(repo_root, OP)?;
+    let Opened {
+        repo,
+        external_filters,
+    } = open(repo_root, OP)?;
     let mut files = Vec::new();
     match range {
         DiffRange::WorkspaceSince(base) => {
@@ -87,7 +91,7 @@ pub(crate) fn diff(repo_root: &RepoRoot, range: &DiffRange) -> Result<Diff, VcsE
                 }
                 candidates.insert(item.location().to_owned());
             }
-            let mut worktree = Worktree::new(&repo, repo_root, OP)?;
+            let mut worktree = Worktree::new(&repo, repo_root, external_filters, OP)?;
             for path in candidates {
                 let rel = to_path(path.as_ref());
                 let old = match tree
@@ -97,8 +101,15 @@ pub(crate) fn diff(repo_root: &RepoRoot, range: &DiffRange) -> Result<Diff, VcsE
                     Some(entry) => tree_side(&repo, entry.mode().kind(), entry.object_id(), OP)?,
                     None => None,
                 };
-                let new = worktree.side(&rel, old.as_ref())?;
-                files.extend(file_diff(rel, old.as_ref(), new.as_ref()));
+                match worktree.side(&rel, old.as_ref())? {
+                    WorktreeSide::Absent => files.extend(file_diff(rel, old.as_ref(), None)),
+                    WorktreeSide::Present(new) => {
+                        files.extend(file_diff(rel, old.as_ref(), Some(&new)));
+                    }
+                    WorktreeSide::NeedsExternalFilter { mode, driver } => {
+                        files.push(unsupported_diff(rel, old.as_ref(), mode, driver.as_ref()));
+                    }
+                }
             }
         }
         DiffRange::Between { from, to } => {
@@ -195,12 +206,29 @@ fn tree_side(
     }))
 }
 
-/// 读工作区一侧：不跟随链接，普通文件过内容过滤。
+/// 工作区里一个路径的样子。
+enum WorktreeSide {
+    Absent,
+    Present(Side),
+    /// 普通文件，但要靠外部过滤程序 `driver` 才能比较内容
+    NeedsExternalFilter {
+        mode: EntryMode,
+        driver: BString,
+    },
+}
+
+/// 读工作区一侧：不跟随链接，普通文件过进程内的内容转换。
 struct Worktree<'repo> {
     root: &'repo Path,
     filter: gix::filter::Pipeline<'repo>,
     index: gix::worktree::IndexPersistedOrInMemory,
     caps: gix::fs::Capabilities,
+    /// 配置过的外部过滤器名，和查 `filter` 属性用的属性栈；没有配置任何过滤器时为 `None`
+    external: Option<(
+        BTreeSet<BString>,
+        gix::AttributeStack<'repo>,
+        gix::attrs::search::Outcome,
+    )>,
     op: &'static str,
 }
 
@@ -208,38 +236,50 @@ impl<'repo> Worktree<'repo> {
     fn new(
         repo: &'repo Repository,
         root: &'repo RepoRoot,
+        external_filters: BTreeSet<BString>,
         op: &'static str,
     ) -> Result<Self, VcsError> {
         let (filter, index) = repo
             .filter_pipeline(None)
-            .map_err(|e| failed(op, format!("准备内容过滤失败：{e}")))?;
+            .map_err(|e| failed(op, format!("准备内容转换失败：{e}")))?;
         let caps = repo
             .filesystem_options()
             .map_err(|e| failed(op, format!("读文件系统配置失败：{e}")))?;
+        let external = if external_filters.is_empty() {
+            None
+        } else {
+            let attrs = repo
+                .attributes_only(
+                    &index,
+                    gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
+                )
+                .map_err(|e| failed(op, format!("读 .gitattributes 失败：{e}")))?;
+            let outcome = attrs.selected_attribute_matches(["filter"]);
+            Some((external_filters, attrs, outcome))
+        };
         Ok(Self {
             root: root.0.as_path(),
             filter,
             index,
             caps,
+            external,
             op,
         })
     }
 
-    /// `rel` 在工作区里的样子；`old` 是基线一侧，用来在不认执行位的文件系统上沿用原 mode、
-    /// 判断目录是不是子模块。
-    fn side(&mut self, rel: &Path, old: Option<&Side>) -> Result<Option<Side>, VcsError> {
+    /// `rel` 在工作区里的样子；`old` 是基线一侧，用来在不认执行位的文件系统上沿用原 mode。
+    fn side(&mut self, rel: &Path, old: Option<&Side>) -> Result<WorktreeSide, VcsError> {
         let op = self.op;
         let kind = match iwork_rootfs::inspect(self.root, rel) {
             Ok(kind) => kind,
             // 上级目录被换成了链接：按 git 的看法，这个路径在工作区里已经不存在（链接本身另算一个路径）
-            Err(iwork_rootfs::RootedError::ThroughSymlink { .. }) => return Ok(None),
+            Err(iwork_rootfs::RootedError::ThroughSymlink { .. }) => {
+                return Ok(WorktreeSide::Absent);
+            }
             Err(e) => return Err(failed(op, e.to_string())),
         };
         match kind {
             iwork_rootfs::EntryKind::File { executable } => {
-                let raw = iwork_rootfs::read_file(self.root, rel)
-                    .map_err(|e| failed(op, e.to_string()))?
-                    .unwrap_or_default();
                 let mode = if self.caps.executable_bit {
                     if executable {
                         EntryMode::Executable
@@ -252,7 +292,13 @@ impl<'repo> Worktree<'repo> {
                         _ => EntryMode::Regular,
                     }
                 };
-                Ok(Some(Side {
+                if let Some(driver) = self.external_driver(rel)? {
+                    return Ok(WorktreeSide::NeedsExternalFilter { mode, driver });
+                }
+                let raw = iwork_rootfs::read_file(self.root, rel)
+                    .map_err(|e| failed(op, e.to_string()))?
+                    .unwrap_or_default();
+                Ok(WorktreeSide::Present(Side {
                     mode,
                     data: self.convert_to_git(rel, &raw)?,
                 }))
@@ -260,7 +306,7 @@ impl<'repo> Worktree<'repo> {
             iwork_rootfs::EntryKind::Symlink => {
                 let target = iwork_rootfs::read_link(self.root, rel)
                     .map_err(|e| failed(op, e.to_string()))?;
-                Ok(Some(Side {
+                Ok(WorktreeSide::Present(Side {
                     mode: EntryMode::Symlink,
                     data: gix::path::into_bstr(target)
                         .map_err(|e| {
@@ -270,73 +316,98 @@ impl<'repo> Worktree<'repo> {
                         .into(),
                 }))
             }
-            iwork_rootfs::EntryKind::Dir
-                if old.is_some_and(|s| s.mode == EntryMode::Gitlink)
-                    || self.is_gitlink_in_index(rel) =>
-            {
-                self.submodule_head(rel).map(|id| id.map(Side::gitlink))
+            iwork_rootfs::EntryKind::Dir | iwork_rootfs::EntryKind::Missing => {
+                // 子模块引用以暂存区为准：没检出（未初始化、已 deinit、目录不在）时用暂存区里记的提交；
+                // 暂存区里也没有这个条目，才是真的删掉了
+                let Some(staged) = self.index_gitlink(rel) else {
+                    return Ok(WorktreeSide::Absent);
+                };
+                let id = match self.checked_out_submodule_head(rel, kind)? {
+                    Some(head) => head,
+                    None => staged,
+                };
+                Ok(WorktreeSide::Present(Side::gitlink(id)))
             }
-            iwork_rootfs::EntryKind::Dir
-            | iwork_rootfs::EntryKind::Missing
-            | iwork_rootfs::EntryKind::Other => Ok(None),
+            iwork_rootfs::EntryKind::Other => Ok(WorktreeSide::Absent),
         }
     }
 
+    /// `rel` 的 `filter` 属性指向一个配置过的外部过滤器时返回它的名字。
+    fn external_driver(&mut self, rel: &Path) -> Result<Option<BString>, VcsError> {
+        let op = self.op;
+        let Some((names, attrs, outcome)) = self.external.as_mut() else {
+            return Ok(None);
+        };
+        attrs
+            .at_path(rel, None)
+            .map_err(|e| failed(op, format!("读 {} 的属性失败：{e}", rel.display())))?
+            .matching_attributes(outcome);
+        Ok(outcome
+            .iter_selected()
+            .find_map(|m| match m.assignment.state {
+                gix::attrs::StateRef::Value(v) if names.contains(v.as_bstr()) => {
+                    Some(v.as_bstr().to_owned())
+                }
+                _ => None,
+            }))
+    }
+
     fn convert_to_git(&mut self, rel: &Path, raw: &[u8]) -> Result<Vec<u8>, VcsError> {
+        use gix::filter::plumbing::pipeline::convert::ToGitOutcome;
         use std::io::Read;
         let op = self.op;
         let outcome = self
             .filter
             .convert_to_git(raw, rel, &self.index)
-            .map_err(|e| failed(op, format!("{} 内容过滤失败：{e}", rel.display())))?;
+            .map_err(|e| failed(op, format!("{} 内容转换失败：{e}", rel.display())))?;
         let mut out = Vec::new();
         match outcome {
-            gix::filter::plumbing::pipeline::convert::ToGitOutcome::Unchanged(mut r) => {
-                r.read_to_end(&mut out)
-            }
-            gix::filter::plumbing::pipeline::convert::ToGitOutcome::Process(mut r) => {
-                r.read_to_end(&mut out)
-            }
-            gix::filter::plumbing::pipeline::convert::ToGitOutcome::Buffer(b) => {
+            ToGitOutcome::Unchanged(mut r) => r.read_to_end(&mut out),
+            ToGitOutcome::Buffer(b) => {
                 out.extend_from_slice(b);
                 Ok(b.len())
             }
+            // 只有外部过滤程序才产出这种结果；open 已去掉全部外部过滤器，走到这里说明那道闸失效了
+            ToGitOutcome::Process(_) => {
+                return Err(failed(
+                    op,
+                    format!("{} 意外地经过了外部过滤程序，拒绝使用结果", rel.display()),
+                ));
+            }
         }
-        .map_err(|e| failed(op, format!("{} 内容过滤失败：{e}", rel.display())))?;
+        .map_err(|e| failed(op, format!("{} 内容转换失败：{e}", rel.display())))?;
         Ok(out)
     }
 
-    fn is_gitlink_in_index(&self, rel: &Path) -> bool {
-        let Ok(key) = gix::path::into_bstr(rel) else {
-            // 转不成 git 路径的名字不可能在暂存区里
-            return false;
-        };
+    /// 暂存区里 `rel` 是子模块引用时返回它记录的提交。
+    fn index_gitlink(&self, rel: &Path) -> Option<ObjectId> {
+        // 转不成 git 路径的名字不可能在暂存区里
+        let key = gix::path::into_bstr(rel).ok()?;
         let key = gix::path::to_unix_separators_on_windows(key);
         self.index
             .entry_by_path(key.as_ref())
-            .is_some_and(|e| e.mode == gix::index::entry::Mode::COMMIT)
+            .filter(|e| e.mode == gix::index::entry::Mode::COMMIT)
+            .map(|e| e.id)
     }
 
-    /// 子模块当前检出的提交；子模块还没初始化（空目录）时为 `None`。
-    fn submodule_head(&self, rel: &Path) -> Result<Option<ObjectId>, VcsError> {
+    /// 子模块已检出时返回它当前的提交；没检出（目录不在，或里面没有 `.git`）返回 `None`。
+    fn checked_out_submodule_head(
+        &self,
+        rel: &Path,
+        kind: iwork_rootfs::EntryKind,
+    ) -> Result<Option<ObjectId>, VcsError> {
         let op = self.op;
-        let dir = self.root.join(rel);
-        let sub = match gix::open(&dir) {
-            Ok(sub) => sub,
-            Err(_)
-                if std::fs::read_dir(&dir)
-                    .map(|mut d| d.next().is_none())
-                    .unwrap_or(false) =>
-            {
-                return Ok(None);
-            }
-            Err(e) => {
-                return Err(failed(
-                    op,
-                    format!("打开子模块 {} 失败：{e}", rel.display()),
-                ));
-            }
-        };
+        if kind != iwork_rootfs::EntryKind::Dir {
+            return Ok(None);
+        }
+        let dot_git = rel.join(".git");
+        match iwork_rootfs::inspect(self.root, &dot_git) {
+            Ok(iwork_rootfs::EntryKind::Missing) => return Ok(None),
+            Ok(_) => {}
+            Err(e) => return Err(failed(op, e.to_string())),
+        }
+        let sub = gix::open(self.root.join(rel))
+            .map_err(|e| failed(op, format!("打开子模块 {} 失败：{e}", rel.display())))?;
         sub.head_id()
             .map(|id| Some(id.detach()))
             .map_err(|e| failed(op, format!("读子模块 {} 的 HEAD 失败：{e}", rel.display())))
@@ -399,13 +470,67 @@ fn status_items(
         .collect()
 }
 
-fn open(repo_root: &RepoRoot, op: &'static str) -> Result<Repository, VcsError> {
+/// 为后台读操作打开的仓库。
+struct Opened {
+    repo: Repository,
+    /// 配置里有、但已从这个仓库实例里去掉的外部过滤器名
+    external_filters: BTreeSet<BString>,
+}
+
+/// 打开仓库做读操作（`baseline`、`status`、`diff` 都经这里，配置只有这一份）。
+///
+/// 后台读操作绝不启动外部程序：仓库配置（含 `.git/config`，Agent 的脚本可能写过它）里的 `filter.<name>.clean`
+/// / `smudge` / `process` 会让 gix 在比较内容时以后台服务的权限、在沙箱外运行任意程序。所以打开后从
+/// **内存里的**配置删掉全部 `filter.*` 节（不改磁盘上的配置），只留进程内的换行、编码等转换；删掉的名字
+/// 记下来，用于把需要它们的文件标成「不支持比较」。删完再确认过滤管线里确实没有外部驱动，否则报错（失败即关闭）。
+fn open(repo_root: &RepoRoot, op: &'static str) -> Result<Opened, VcsError> {
     if !repo_root.0.exists() {
         return Err(VcsError::PathMissing {
             path: repo_root.0.clone(),
         });
     }
-    gix::open(&repo_root.0).map_err(|e| failed(op, format!("{}：{e}", repo_root.0.display())))
+    let mut repo = gix::open(&repo_root.0)
+        .map_err(|e| failed(op, format!("{}：{e}", repo_root.0.display())))?;
+    let external_filters = remove_external_filters(&mut repo, op)?;
+    Ok(Opened {
+        repo,
+        external_filters,
+    })
+}
+
+fn remove_external_filters(
+    repo: &mut Repository,
+    op: &'static str,
+) -> Result<BTreeSet<BString>, VcsError> {
+    let mut names = BTreeSet::new();
+    let mut config = repo.config_snapshot_mut();
+    let ids: Vec<_> = config
+        .sections_and_ids_by_name("filter")
+        .into_iter()
+        .flatten()
+        .map(|(section, id)| {
+            if let Some(name) = section.header().subsection_name() {
+                names.insert(name.to_owned());
+            }
+            id
+        })
+        .collect();
+    for id in ids {
+        config.remove_section_by_id(id);
+    }
+    config
+        .commit()
+        .map_err(|e| failed(op, format!("去掉外部过滤器配置失败：{e}")))?;
+    let left = gix::filter::Pipeline::options(repo)
+        .map_err(|e| failed(op, format!("读过滤配置失败：{e}")))?
+        .drivers;
+    if !left.is_empty() {
+        return Err(failed(
+            op,
+            format!("仍有 {} 个外部过滤器没能去掉，拒绝读取", left.len()),
+        ));
+    }
+    Ok(names)
 }
 
 fn head_is_unborn(repo: &Repository, op: &'static str) -> Result<bool, VcsError> {

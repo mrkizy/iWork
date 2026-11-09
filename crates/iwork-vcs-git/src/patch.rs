@@ -128,6 +128,43 @@ pub(crate) fn file_diff(path: PathBuf, old: Option<&Side>, new: Option<&Side>) -
     })
 }
 
+/// 已存内容在「不支持比较」说明里最多展示多少字节（LFS 指针只有一百多字节）。
+const STORED_PREVIEW_LIMIT: usize = 1024;
+
+/// 工作区里这个文件要靠外部过滤程序（`filter=<driver>`，例如 LFS）才能换成可比较的内容，而后台读操作
+/// 不运行外部程序：不比较内容，只写明不支持，并在已存内容是短文本时（例如 LFS 指针）把它列出来。
+/// 增删行数为 0，不能当成「没有改动」，也不生成假差异。
+pub(crate) fn unsupported_diff(
+    path: PathBuf,
+    old: Option<&Side>,
+    new_mode: EntryMode,
+    driver: &BStr,
+) -> FileDiff {
+    let mut patch = match old {
+        None => format!("new file mode {new_mode}\n"),
+        Some(o) if o.mode != new_mode => format!("old mode {}\nnew mode {new_mode}\n", o.mode),
+        Some(_) => String::new(),
+    };
+    patch.push_str(&format!(
+        "Content comparison not supported: filter={driver} needs an external program, which iWork does not run when reading changes\n"
+    ));
+    if let Some(stored) = old
+        .map(|o| o.data.as_slice())
+        .filter(|d| d.len() <= STORED_PREVIEW_LIMIT && !is_binary(d))
+        .and_then(|d| std::str::from_utf8(d).ok())
+    {
+        for line in stored.lines() {
+            patch.push_str(&format!("stored {line}\n"));
+        }
+    }
+    FileDiff {
+        path,
+        insertions: 0,
+        deletions: 0,
+        patch,
+    }
+}
+
 fn is_binary(data: &[u8]) -> bool {
     data[..data.len().min(BINARY_SNIFF_LEN)].contains(&0)
 }
@@ -189,6 +226,35 @@ mod tests {
         let d = file_diff("run".into(), Some(&regular(b"x\n")), Some(&exe)).expect("mode differs");
         assert_eq!(d.patch, "old mode 100644\nnew mode 100755\n");
         assert_eq!((d.insertions, d.deletions), (0, 0));
+    }
+
+    #[test]
+    fn unsupported_note_lists_the_stored_pointer() {
+        let stored =
+            regular(b"version https://git-lfs.github.com/spec/v1\noid sha256:ab\nsize 3\n");
+        let d = unsupported_diff(
+            "big.bin".into(),
+            Some(&stored),
+            EntryMode::Regular,
+            BStr::new("lfs"),
+        );
+        assert!(
+            d.patch
+                .starts_with("Content comparison not supported: filter=lfs"),
+            "{}",
+            d.patch
+        );
+        assert!(
+            d.patch.ends_with("stored oid sha256:ab\nstored size 3\n"),
+            "{}",
+            d.patch
+        );
+        assert_eq!((d.insertions, d.deletions), (0, 0));
+        let new = unsupported_diff("n.bin".into(), None, EntryMode::Regular, BStr::new("lfs"));
+        assert!(
+            new.patch
+                .starts_with("new file mode 100644\nContent comparison not supported")
+        );
     }
 
     #[test]

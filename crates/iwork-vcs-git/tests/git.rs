@@ -761,51 +761,244 @@ async fn diff_applies_eol_conversion_before_comparing() {
     assert!(d.patch.contains("-two\n+TWO\n"), "{}", d.patch);
 }
 
-/// F-7：配置了清理过滤器（clean）的文件按 git 的方式先过滤再比较；过滤器失败时报错，不生成错误的差异。
+// ---------- 审查第 2 轮回归（2/F-1、2/F-3） ----------
+
+/// 2/F-1：读操作（status、已跟踪与未跟踪文件的 diff）绝不启动仓库配置里的外部过滤程序；
+/// 需要外部过滤器的文件在差异里明确标注「不支持」，不生成假差异。
+#[cfg(unix)]
 #[tokio::test]
-async fn diff_runs_configured_clean_filters_and_fails_loudly_when_they_fail() {
+async fn reads_never_launch_external_filter_programs() {
+    use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     let repo = f.repo_with_commit(
-        "filtered",
-        &[(".gitattributes", "*.up filter=upper\n*.req filter=broken\n")],
+        "no-exec",
+        &[(
+            ".gitattributes",
+            "*.cl filter=cleaner\n*.pr filter=proc\n*.txt eol=crlf\n",
+        )],
     );
-    f.git(&repo, &["config", "filter.upper.clean", "tr a-z A-Z"]);
-    f.git(&repo, &["config", "filter.upper.smudge", "cat"]);
-    write(&repo.join("x.up"), "hello\nworld\n");
-    f.commit_all(&repo, "filtered file");
+    write(&repo.join("tracked.cl"), "one\n");
+    write(&repo.join("eol.txt"), "a\r\nb\r\nc\r\n");
+    f.commit_all(&repo, "files before filters exist");
     let root = RepoRoot(repo.clone());
     let base = f.vcs().baseline(&root).await.unwrap();
-    write(&repo.join("x.up"), "hello\nthere\n");
 
-    let ws = f
+    // Agent 能写 .git/config 的前提下配置两种外部过滤器；程序一旦运行就留下哨兵
+    let sentinel = f.root().join("FILTER-RAN");
+    let script = f.root().join("filter.sh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\ntouch '{}'\ncat\n", sentinel.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let script = script.to_str().unwrap();
+    f.git(&repo, &["config", "filter.cleaner.clean", script]);
+    f.git(&repo, &["config", "filter.proc.process", script]);
+    f.git(&repo, &["config", "filter.proc.required", "true"]);
+
+    write(&repo.join("tracked.cl"), "two\n");
+    write(&repo.join("untracked.pr"), "new\n");
+    write(&repo.join("untracked.cl"), "new\n");
+    write(&repo.join("eol.txt"), "a\r\nB\r\nc\r\n");
+
+    let status = f.vcs().status(&root).await.unwrap();
+    assert!(!sentinel.exists(), "status 启动了外部过滤程序");
+    assert!(
+        status
+            .changed
+            .iter()
+            .any(|c| c.path == Path::new("tracked.cl")),
+        "需要过滤器的已跟踪文件不能报成没有改动：{status:?}"
+    );
+
+    let diff = f
         .vcs()
-        .diff(&root, DiffRange::WorkspaceSince(base.clone()))
+        .diff(&root, DiffRange::WorkspaceSince(base))
         .await
         .unwrap();
-    let d = patch_of(&ws, "x.up");
-    assert!(d.patch.contains("-WORLD\n+THERE\n"), "{}", d.patch);
-    assert_eq!((d.insertions, d.deletions), (1, 1));
+    assert!(!sentinel.exists(), "diff 启动了外部过滤程序");
+    for path in ["tracked.cl", "untracked.pr", "untracked.cl"] {
+        let d = patch_of(&diff, path);
+        assert!(d.patch.contains("not supported"), "{path}: {}", d.patch);
+        assert_eq!((d.insertions, d.deletions), (0, 0), "{path}");
+    }
+    // 对照：进程内的换行转换照常
+    let eol = patch_of(&diff, "eol.txt");
+    assert_eq!((eol.insertions, eol.deletions), (1, 1), "{}", eol.patch);
+}
 
-    // 必需的过滤器跑不起来：报错
+/// 2/F-1：LFS 文件工作区一侧不做指针转换，标注不支持并显示已存的指针；提交之间照常比较指针。
+#[tokio::test]
+async fn lfs_pointers_are_shown_not_converted() {
+    let f = Fixture::new();
+    let repo = f.repo_with_commit("lfs", &[(".gitattributes", "*.bin filter=lfs\n")]);
+    let pointer = |oid: &str, size: u32| {
+        format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n")
+    };
+    // 直接提交指针文本（模拟 LFS 已存的指针；测试里没有配置 lfs 过滤器，不会转换）
+    write(&repo.join("big.bin"), &pointer(&"a".repeat(64), 10));
+    f.commit_all(&repo, "pointer v1");
+    let root = RepoRoot(repo.clone());
+    let v1 = f.vcs().baseline(&root).await.unwrap();
+    write(&repo.join("big.bin"), &pointer(&"b".repeat(64), 20));
+    f.commit_all(&repo, "pointer v2");
+    let v2 = f.vcs().baseline(&root).await.unwrap();
+
+    // 用户配置了 lfs（来自全局配置），工作区里是真实内容
     f.git(
         &repo,
+        &["config", "filter.lfs.clean", "git-lfs clean -- %f"],
+    );
+    f.git(&repo, &["config", "filter.lfs.required", "true"]);
+    write(&repo.join("big.bin"), "real binary-ish content\n");
+    let ws = f
+        .vcs()
+        .diff(&root, DiffRange::WorkspaceSince(v2.clone()))
+        .await
+        .unwrap();
+    let d = patch_of(&ws, "big.bin");
+    assert!(d.patch.contains("not supported"), "{}", d.patch);
+    assert!(
+        d.patch.contains(&format!("oid sha256:{}", "b".repeat(64))),
+        "显示已存的指针：{}",
+        d.patch
+    );
+    assert!(!d.patch.contains("real binary-ish content"));
+
+    let between = f
+        .vcs()
+        .diff(&root, DiffRange::Between { from: v1, to: v2 })
+        .await
+        .unwrap();
+    let p = &patch_of(&between, "big.bin").patch;
+    assert!(p.contains("-size 10\n") && p.contains("+size 20\n"), "{p}");
+}
+
+/// 2/F-3：子模块引用从 A 更新到 B 后，未初始化 / 已 deinit / 目录不存在都按索引里的 B 比较；
+/// 只有索引里也没有这个条目才算删除。
+#[tokio::test]
+async fn gitlink_without_checkout_uses_the_index_value() {
+    struct Setup {
+        sup: std::path::PathBuf,
+        base: BaselineRef,
+        expected_update: String,
+        old_id: String,
+    }
+    async fn setup(f: &Fixture, name: &str) -> Setup {
+        let lib = f.repo_with_commit(&format!("{name}-lib"), &[("l", "1\n")]);
+        let sup = f.repo_with_commit(name, &[("s", "1\n")]);
+        let url = format!("file://{}", lib.display());
+        f.git(
+            &sup,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "--quiet",
+                "add",
+                &url,
+                "deps/lib",
+            ],
+        );
+        f.git(&sup, &["commit", "--quiet", "-m", "add submodule"]);
+        let base = f.vcs().baseline(&RepoRoot(sup.clone())).await.unwrap();
+        let sub = sup.join("deps/lib");
+        let old_id = f.git(&sub, &["rev-parse", "HEAD"]);
+        f.git(&sub, &["config", "user.name", "T"]);
+        f.git(&sub, &["config", "user.email", "t@example.invalid"]);
+        write(&sub.join("l"), "2\n");
+        f.commit_all(&sub, "bump");
+        let new_id = f.git(&sub, &["rev-parse", "HEAD"]);
+        f.commit_all(&sup, "bump submodule");
+        Setup {
+            expected_update: format!("-Subproject commit {old_id}\n+Subproject commit {new_id}\n"),
+            sup,
+            base,
+            old_id,
+        }
+    }
+    let f = Fixture::new();
+
+    // 已 deinit：只剩空目录
+    let s = setup(&f, "deinit").await;
+    f.git(
+        &s.sup,
+        &["submodule", "--quiet", "deinit", "--force", "deps/lib"],
+    );
+    let d = f
+        .vcs()
+        .diff(
+            &RepoRoot(s.sup.clone()),
+            DiffRange::WorkspaceSince(s.base.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(
+        patch_of(&d, "deps/lib").patch.ends_with(&s.expected_update),
+        "deinit: {}",
+        patch_of(&d, "deps/lib").patch
+    );
+
+    // 目录不存在
+    std::fs::remove_dir(s.sup.join("deps/lib")).unwrap();
+    let d = f
+        .vcs()
+        .diff(
+            &RepoRoot(s.sup.clone()),
+            DiffRange::WorkspaceSince(s.base.clone()),
+        )
+        .await
+        .unwrap();
+    assert!(
+        patch_of(&d, "deps/lib").patch.ends_with(&s.expected_update),
+        "missing dir: {}",
+        patch_of(&d, "deps/lib").patch
+    );
+
+    // 未初始化：不带子模块地克隆超级项目
+    let s2 = setup(&f, "uninit").await;
+    let clone = f.root().join("uninit-clone");
+    f.git(
+        &f.root(),
         &[
-            "config",
-            "filter.broken.clean",
-            "iwork-no-such-filter-program",
+            "clone",
+            "--quiet",
+            s2.sup.to_str().unwrap(),
+            clone.to_str().unwrap(),
         ],
     );
-    f.git(&repo, &["config", "filter.broken.required", "true"]);
-    write(&repo.join("y.req"), "data\n");
-    let err = f.vcs().diff(&root, DiffRange::WorkspaceSince(base)).await;
+    let d = f
+        .vcs()
+        .diff(
+            &RepoRoot(clone.clone()),
+            DiffRange::WorkspaceSince(s2.base.clone()),
+        )
+        .await
+        .unwrap();
     assert!(
-        matches!(
-            err,
-            Err(VcsError::Failed {
-                operation: "diff",
-                ..
-            })
-        ),
-        "{err:?}"
+        patch_of(&d, "deps/lib")
+            .patch
+            .ends_with(&s2.expected_update),
+        "uninit: {}",
+        patch_of(&d, "deps/lib").patch
+    );
+
+    // 真的删除：索引里也没有了
+    let s3 = setup(&f, "removed").await;
+    f.git(&s3.sup, &["rm", "--quiet", "deps/lib"]);
+    let d = f
+        .vcs()
+        .diff(
+            &RepoRoot(s3.sup.clone()),
+            DiffRange::WorkspaceSince(s3.base.clone()),
+        )
+        .await
+        .unwrap();
+    let p = &patch_of(&d, "deps/lib").patch;
+    assert!(p.starts_with("deleted file mode 160000\n"), "{p}");
+    assert!(
+        p.ends_with(&format!("-Subproject commit {}\n", s3.old_id)),
+        "{p}"
     );
 }
