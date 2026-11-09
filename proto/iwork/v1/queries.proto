@@ -141,9 +141,9 @@ message ListLocalConfigResult {
 
 message ListSecurityLists {}
 
-// 三张清单的条目放在一起，按 SecurityListEntry.list 区分；builtin 与 scope 在条目上。
+// 三张清单的条目放在一起，都是规则条目：按 Rule.layer 区分清单，内置看 source 是否为 builtin，范围在 scope。
 message ListSecurityListsResult {
-  repeated SecurityListEntry entries = 1;
+  repeated Rule rules = 1;
 }
 
 message GetSettings {

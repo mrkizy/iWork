@@ -182,11 +182,6 @@ define_id!(
     "rule"
 );
 define_id!(
-    /// 安全清单条目。
-    SecurityEntryId,
-    "security_entry"
-);
-define_id!(
     /// 附件。
     AttachmentId,
     "attachment"

@@ -419,12 +419,12 @@ message UserActionStateChanged {
 
 // ---------- 安全清单（流：rule） ----------
 
-// 流：rule（entry.id）。设计 7.2c。
+// 流：rule（rule.id）。设计 7.2c。清单条目就是规则条目，layer 标出属于哪张清单。
 message SecurityListEntryAdded {
-  SecurityListEntry entry = 1;
+  Rule rule = 1;
 }
 
-// 流：rule（entry_id）。
+// 流：rule（entry_id）。entry_id 就是被删清单条目的规则 id（Rule.id）。
 message SecurityListEntryRemoved {
   string entry_id = 1;
 }

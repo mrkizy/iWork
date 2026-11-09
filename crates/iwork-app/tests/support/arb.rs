@@ -29,7 +29,7 @@ use iwork_domain::rule::{
 use iwork_domain::runtime::{
     LocalConfigItem, LocalConfigKind, LoginInfo, QuotaWindow, Runtime, RuntimeKind, RuntimeState,
 };
-use iwork_domain::security_list::{SecurityList, SecurityListEntry};
+use iwork_domain::security_list::SecurityList;
 use iwork_domain::turn::{Turn, TurnKind, TurnState};
 use iwork_domain::user_action::{ExitStatus, Proposal, UserActionCard, UserActionState};
 use proptest::prelude::*;
@@ -51,7 +51,6 @@ arb_id!(turn_id, TurnId);
 arb_id!(approval_id, ApprovalId);
 arb_id!(user_action_id, UserActionId);
 arb_id!(rule_id, RuleId);
-arb_id!(security_entry_id, SecurityEntryId);
 arb_id!(attachment_id, AttachmentId);
 arb_id!(runtime_id, RuntimeId);
 arb_id!(job_id, JobId);
@@ -616,7 +615,7 @@ fn verdict() -> impl Strategy<Value = Verdict> + Clone {
     let deny = prop_oneof![
         rule_id().prop_map(DenyReason::Baseline),
         (action_kind(), action_target()).prop_map(|(kind, target)| DenyReason::DenialMemory(
-            ActionFingerprint { kind, target }
+            ActionFingerprint::new(kind, target)
         )),
         Just(DenyReason::ToolDisabled),
         rule_id().prop_map(DenyReason::DenyRule),
@@ -1240,36 +1239,25 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
         ),
         (
             "security_list_entry_added",
+            // 清单条目就是规则条目：取清单层的规则
             boxed(
                 (
-                    security_entry_id(),
+                    rule(),
                     pick(vec![
                         SecurityList::CredentialCommands,
                         SecurityList::SensitiveDirs,
                         SecurityList::WritableDirs,
                     ]),
-                    text(),
-                    rule_scope(),
-                    any::<bool>(),
-                    ts(),
                 )
-                    .prop_map(|(id, list, value, scope, builtin, created_at)| {
-                        SecurityListEntryAdded {
-                            entry: SecurityListEntry {
-                                id,
-                                list,
-                                value,
-                                scope,
-                                builtin,
-                                created_at,
-                            },
-                        }
+                    .prop_map(|(mut rule, list)| {
+                        rule.layer = list.layer();
+                        SecurityListEntryAdded { rule }
                     }),
             ),
         ),
         (
             "security_list_entry_removed",
-            boxed(security_entry_id().prop_map(|entry_id| SecurityListEntryRemoved { entry_id })),
+            boxed(rule_id().prop_map(|entry_id| SecurityListEntryRemoved { entry_id })),
         ),
         (
             "attachment_stored",
@@ -1396,6 +1384,92 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                         interrupted_turn_ids,
                     }
                 }),
+            ),
+        ),
+    ]
+}
+
+/// 比 [`event_strategies`] 更宽的生成器：故意包含 proto 装不下、或语义上不该出现的值
+/// （回合结束在非终态、额度超过 100、审批请求带已决定的状态……），用来验证
+/// 「编码成功的值一定能无损解回；装不下的值在编码边界就报错」。
+pub fn boundary_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
+    vec![
+        (
+            "turn_finished",
+            boxed((turn_id(), turn_state(), usage(), any::<bool>()).prop_map(
+                |(turn_id, state, usage, celebrate)| TurnFinished {
+                    turn_id,
+                    state,
+                    usage,
+                    celebrate,
+                    change_summary: None,
+                },
+            )),
+        ),
+        (
+            "quota_observed",
+            boxed((runtime_id(), text(), any::<u8>(), ts()).prop_map(
+                |(runtime_id, window, used_pct, at)| QuotaObserved {
+                    runtime_id,
+                    windows: vec![QuotaWindow {
+                        window,
+                        used_pct,
+                        resets_at: None,
+                        observed_at: at,
+                    }],
+                    observed_at: at,
+                },
+            )),
+        ),
+        (
+            "approval_requested",
+            boxed(
+                (approval(), pick(ApprovalState::all())).prop_map(|(mut approval, state)| {
+                    approval.state = state;
+                    ApprovalRequested { approval }
+                }),
+            ),
+        ),
+        (
+            "approval_review_updated",
+            boxed(
+                (approval_id(), review_state()).prop_map(|(approval_id, review)| {
+                    ApprovalReviewUpdated {
+                        approval_id,
+                        review,
+                    }
+                }),
+            ),
+        ),
+        (
+            "approval_decided",
+            boxed(
+                (approval_id(), pick(ApprovalState::all())).prop_map(|(approval_id, state)| {
+                    ApprovalDecided {
+                        approval_id,
+                        state,
+                        remember: None,
+                    }
+                }),
+            ),
+        ),
+        (
+            "message_completed",
+            boxed(
+                (
+                    conversation_id(),
+                    message_id(),
+                    body(),
+                    pick(MessageStatus::all()),
+                )
+                    .prop_map(|(conversation_id, message_id, body, status)| {
+                        MessageCompleted {
+                            conversation_id,
+                            message_id,
+                            body,
+                            status,
+                        }
+                    }),
             ),
         ),
     ]

@@ -67,28 +67,51 @@ pub struct Action {
 /// 「动作类型 + 目标」：识别「同一个动作」的键（需求 AC05）。
 ///
 /// 用户拒绝过的动作在本对话内、下一条用户消息之前不得以任何方式绕过；换工具、换成员、
-/// 换运行时都算同一个动作，所以指纹里不含工具名、摘要和标记。
+/// 换运行时、换一种写法表达同一个目标都算同一个动作，所以指纹里不含工具名、摘要和标记，
+/// 目标先归一再比较。字段私有：只能经 [`ActionFingerprint::new`] 构造，保证同一个动作只有一种表示。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ActionFingerprint {
-    pub kind: ActionKind,
-    pub target: ActionTarget,
+    kind: ActionKind,
+    target: ActionTarget,
+}
+
+impl ActionFingerprint {
+    /// 归一目标后构造指纹。归一规则（只对路径集合）：
+    /// - 排序、去重：列出的顺序与重复不影响；
+    /// - 去重后只剩一条 → 当单路径 `Path`：一个文件不管用单路径还是单元素集合表达都是同一个目标；
+    /// - 空集合 → `None`：没有目标。
+    ///
+    /// 不另造一个 `NormalizedTarget` 类型：归一后的值仍是 `ActionTarget`，proto 的
+    /// `ActionFingerprint.target` 原样能装，不用改协议。
+    pub fn new(kind: ActionKind, target: ActionTarget) -> Self {
+        let target = match target {
+            ActionTarget::Paths(mut paths) => {
+                paths.sort();
+                paths.dedup();
+                match paths.len() {
+                    0 => ActionTarget::None,
+                    1 => ActionTarget::Path(paths.remove(0)),
+                    _ => ActionTarget::Paths(paths),
+                }
+            }
+            other => other,
+        };
+        Self { kind, target }
+    }
+
+    pub fn kind(&self) -> ActionKind {
+        self.kind
+    }
+
+    /// 归一后的目标。
+    pub fn target(&self) -> &ActionTarget {
+        &self.target
+    }
 }
 
 impl Action {
-    /// 算动作指纹。多路径目标按路径排序去重，路径列出的顺序不同也是同一个动作。
+    /// 算动作指纹，见 [`ActionFingerprint::new`]。
     pub fn fingerprint(&self) -> ActionFingerprint {
-        let target = match &self.target {
-            ActionTarget::Paths(paths) => {
-                let mut paths = paths.clone();
-                paths.sort();
-                paths.dedup();
-                ActionTarget::Paths(paths)
-            }
-            other => other.clone(),
-        };
-        ActionFingerprint {
-            kind: self.kind,
-            target,
-        }
+        ActionFingerprint::new(self.kind, self.target.clone())
     }
 }

@@ -22,9 +22,17 @@ impl EventCodec for ProtoEventCodec {
             kind: event.kind(),
             message: e.to_string(),
         })?;
+        let payload = proto.encode_to_vec();
+        // 原则：编码成功的值，自己一定能解回（convert 在编码边界拒绝装不下的值）。
+        // 调试构建里每次核对一遍，违反即是 convert 的缺陷；发布构建不付这次解码的代价。
+        debug_assert!(
+            self.decode(event.kind(), &payload).is_ok(),
+            "事件 {} 编得进去却解不回来",
+            event.kind()
+        );
         Ok(EncodedEvent {
             kind: event.kind(),
-            payload: proto.encode_to_vec(),
+            payload,
         })
     }
 

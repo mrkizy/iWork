@@ -282,6 +282,7 @@ message AddSecurityListEntry {
   Scope scope = 3;
 }
 
+// entry_id 就是清单条目的规则 id（Rule.id）。
 message RemoveSecurityListEntry {
   string entry_id = 1;
 }

@@ -368,6 +368,9 @@ message UserActionCard {
 // ---------- 规则与安全清单 ----------
 
 // 规则条目（需求第 9 章：安全规则以带 id 的规则条目实现）。
+// 安全清单的条目也是规则条目，不另设消息（设计 7.2c）：layer 标出属于哪张清单
+// （CREDENTIAL_COMMANDS / SENSITIVE_DIRS / WRITABLE_DIRS），清单的值放在 matcher 里
+// （命令清单用 program_subcommand，目录清单用 path_under），内置条目的 source 是 builtin。
 message Rule {
   string id = 1;
   RuleLayer layer = 2;
@@ -448,16 +451,6 @@ message RememberedRuleSource {
 message ProjectConfigRuleSource {}
 
 message UserRuleSource {}
-
-// 安全清单条目（设计 7.2c）。内置条目不可删。
-message SecurityListEntry {
-  string id = 1;
-  SecurityList list = 2;
-  string value = 3;
-  Scope scope = 4;
-  bool builtin = 5;
-  google.protobuf.Timestamp created_at = 6;
-}
 
 // ---------- 附件 ----------
 

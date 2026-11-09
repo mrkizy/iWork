@@ -11,9 +11,11 @@ pub struct SecretName(pub String);
 ///
 /// - `Debug` 只打印 `<redacted>`；不实现 `Display`、不实现序列化、不实现 `Clone`，
 ///   防止它随日志、事件或诊断包出去，也少一份内存副本。
-/// - 释放时把字节清零。方案写的是 zeroize crate，但 ports 的依赖白名单只有 thiserror，
-///   所以手写：`fill(0)` 后用 `black_box` 防止编译器把这次写入当死存储优化掉。这是尽力而为：
-///   构造前调用方手里的副本、`Vec` 扩容留下的旧缓冲区都不在清零范围内。
+/// - 释放时尽力覆盖当前 `Vec` 里的有效字节：`fill(0)` 后把引用交给 `black_box`。
+///   `black_box` 只是给优化器的提示，**不保证**优化后的程序一定执行这次清零，所以这不等同于
+///   zeroize crate 的易失写入（ports 的依赖白名单只有 thiserror，没有引入它）。
+///   覆盖范围也只是当前缓冲区的有效长度：构造前调用方手里的副本、`Vec` 扩容留下的旧缓冲区、
+///   容量里长度以外的字节都不在其中。需要更强保证时由持有密钥的实现（T10 的钥匙串）自行处理。
 pub struct SecretValue(Vec<u8>);
 
 impl SecretValue {

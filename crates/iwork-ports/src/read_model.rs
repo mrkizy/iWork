@@ -11,7 +11,6 @@ use iwork_domain::message::Message;
 use iwork_domain::project::Project;
 use iwork_domain::rule::RuleEntry;
 use iwork_domain::runtime::{QuotaWindow, Runtime};
-use iwork_domain::security_list::SecurityListEntry;
 use iwork_domain::settings::GlobalSettings;
 use iwork_domain::turn::{InterruptReason, Turn};
 use iwork_domain::user_action::UserActionCard;
@@ -102,9 +101,9 @@ pub trait ReadModelPort: Send + Sync {
         &self,
         project: Option<ProjectId>,
     ) -> impl Future<Output = Result<Vec<RuleEntry>, StorageError>> + Send;
-    fn security_lists(
-        &self,
-    ) -> impl Future<Output = Result<Vec<SecurityListEntry>, StorageError>> + Send;
+    /// 三张安全清单的全部条目。清单条目就是规则条目，按 `RuleEntry::security_list()` 分清单，
+    /// 内置看 `RuleEntry::is_builtin()`；不另存清单视图。
+    fn security_lists(&self) -> impl Future<Output = Result<Vec<RuleEntry>, StorageError>> + Send;
     fn settings(&self) -> impl Future<Output = Result<GlobalSettings, StorageError>> + Send;
     /// `ReadArtifact` 的范围校验：引用是否被某条消息、工具调用、附件或卡片引用。
     fn artifact_is_referenced(

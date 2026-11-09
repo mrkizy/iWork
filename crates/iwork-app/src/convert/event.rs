@@ -11,6 +11,8 @@ use iwork_domain::event::{
 };
 use iwork_domain::event::{McpServerId, ToolCallId};
 use iwork_domain::id::{ReviewId, Seq, TurnId};
+use iwork_domain::message::MessageStatus;
+use iwork_domain::turn::TurnState;
 use iwork_proto::pb;
 use iwork_proto::pb::domain_event::Event as P;
 
@@ -123,7 +125,7 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
             conversation_id: e.conversation_id.to_string(),
             message_id: e.message_id.to_string(),
             body: Some(message_body_to_proto(&e.body)),
-            status: message_status_to_proto(e.status),
+            status: completed_status_to_proto(e.status)?,
         }),
         DomainEvent::TurnQueued(e) => P::TurnQueued(pb::TurnQueued {
             turn: Some(turn_to_proto(&e.turn)),
@@ -142,8 +144,7 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
         }
         DomainEvent::TurnFinished(e) => P::TurnFinished(pb::TurnFinished {
             turn_id: e.turn_id.to_string(),
-            // 结束状态是终态，不会带中断原因
-            state: turn_state_to_proto(e.state).0,
+            state: finished_state_to_proto(e.state)?,
             usage: Some(usage_to_proto(&e.usage)),
             celebrate: e.celebrate,
             change_summary: e
@@ -232,7 +233,7 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
         }
         DomainEvent::SecurityListEntryAdded(e) => {
             P::SecurityListEntryAdded(pb::SecurityListEntryAdded {
-                entry: Some(security_entry_to_proto(&e.entry)),
+                rule: Some(rule_to_proto(&e.rule)?),
             })
         }
         DomainEvent::SecurityListEntryRemoved(e) => {
@@ -252,7 +253,11 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
         }),
         DomainEvent::QuotaObserved(e) => P::QuotaObserved(pb::QuotaObserved {
             runtime_id: e.runtime_id.to_string(),
-            windows: e.windows.iter().map(quota_window_to_proto).collect(),
+            windows: e
+                .windows
+                .iter()
+                .map(quota_window_to_proto)
+                .collect::<R<_>>()?,
             observed_at: Some(timestamp_to_proto(e.observed_at)),
         }),
         DomainEvent::UsageReported(e) => P::UsageReported(pb::UsageReported {
@@ -287,6 +292,58 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
         }),
     };
     Ok(pb::DomainEvent { event: Some(e) })
+}
+
+/// 消息结局只能是完成、中断、失败（`Sent` 是用户与系统消息的创建状态，`Streaming` 还没结束）。
+/// 两个方向同样严格：编得进去的一定解得回来。
+fn completed_status_to_proto(status: MessageStatus) -> R<i32> {
+    match status {
+        MessageStatus::Completed | MessageStatus::Interrupted | MessageStatus::Failed => {
+            Ok(message_status_to_proto(status))
+        }
+        MessageStatus::Sent | MessageStatus::Streaming => Err(ConvertError::InvalidValue {
+            kind: "MessageCompleted",
+            field: "status",
+            reason: format!("消息结局不能是 {status:?}"),
+        }),
+    }
+}
+
+fn completed_status_from_proto(value: i32) -> R<MessageStatus> {
+    match message_status_from_proto("MessageCompleted", "status", value) {
+        Ok(s @ (MessageStatus::Completed | MessageStatus::Interrupted | MessageStatus::Failed)) => {
+            Ok(s)
+        }
+        _ => Err(ConvertError::UnsupportedEnum {
+            kind: "MessageCompleted",
+            field: "status",
+            value,
+        }),
+    }
+}
+
+/// 回合结束事件只带终态（完成、取消、失败）。proto 的 `TurnFinished` 没有中断原因字段，
+/// 中断也不是结束；所以非终态在编码时就拒绝，解码同样只认终态——编得进去的一定解得回来。
+fn finished_state_to_proto(state: TurnState) -> R<i32> {
+    if !state.is_terminal() {
+        return Err(ConvertError::InvalidValue {
+            kind: "TurnFinished",
+            field: "state",
+            reason: format!("回合结束只能是终态，不能是 {state:?}"),
+        });
+    }
+    Ok(turn_state_to_proto(state).0)
+}
+
+fn finished_state_from_proto(state: i32) -> R<TurnState> {
+    match turn_state_from_proto("TurnFinished", "state", "state", state, None) {
+        Ok(s) if s.is_terminal() => Ok(s),
+        _ => Err(ConvertError::UnsupportedEnum {
+            kind: "TurnFinished",
+            field: "state",
+            value: state,
+        }),
+    }
 }
 
 /// 克隆结果：成功 ↔ `ok = true` + `path`；失败 ↔ `ok = false` + `error`（错误码
@@ -560,13 +617,17 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
             )?)?,
         }
         .into(),
-        P::MessageCompleted(e) => ev::MessageCompleted {
-            conversation_id: parse_id("MessageCompleted", "conversation_id", &e.conversation_id)?,
-            message_id: parse_id("MessageCompleted", "message_id", &e.message_id)?,
-            body: message_body_from_proto(e.body.as_ref())?,
-            status: message_status_from_proto("MessageCompleted", "status", e.status)?,
+        P::MessageCompleted(e) => {
+            const K: &str = "MessageCompleted";
+            ev::MessageCompleted {
+                conversation_id: parse_id(K, "conversation_id", &e.conversation_id)?,
+                message_id: parse_id(K, "message_id", &e.message_id)?,
+                // 完成消息必须带正文（可以是显式的空串）
+                body: message_body_from_proto(required(K, "body", e.body.as_ref())?)?,
+                status: completed_status_from_proto(e.status)?,
+            }
+            .into()
         }
-        .into(),
         P::TurnQueued(e) => ev::TurnQueued {
             turn: turn_from_proto(required("TurnQueued", "turn", e.turn.as_ref())?)?,
         }
@@ -591,7 +652,7 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
             const K: &str = "TurnFinished";
             ev::TurnFinished {
                 turn_id: parse_id(K, "turn_id", &e.turn_id)?,
-                state: turn_state_from_proto(K, "state", "state", e.state, None)?,
+                state: finished_state_from_proto(e.state)?,
                 usage: usage_from_proto(required(K, "usage", e.usage.as_ref())?),
                 celebrate: e.celebrate,
                 change_summary: e.change_summary.as_ref().map(change_summary_from_proto),
@@ -710,11 +771,7 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
             .into()
         }
         P::SecurityListEntryAdded(e) => ev::SecurityListEntryAdded {
-            entry: security_entry_from_proto(required(
-                "SecurityListEntryAdded",
-                "entry",
-                e.entry.as_ref(),
-            )?)?,
+            rule: rule_from_proto(required("SecurityListEntryAdded", "rule", e.rule.as_ref())?)?,
         }
         .into(),
         P::SecurityListEntryRemoved(e) => ev::SecurityListEntryRemoved {

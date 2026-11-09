@@ -27,7 +27,7 @@ use iwork_domain::rule::{
 use iwork_domain::runtime::{
     LocalConfigItem, LocalConfigKind, LoginInfo, QuotaWindow, Runtime, RuntimeKind, RuntimeState,
 };
-use iwork_domain::security_list::{SecurityList, SecurityListEntry};
+use iwork_domain::security_list::SecurityList;
 use iwork_domain::turn::{InterruptReason, Turn, TurnKind, TurnState};
 use iwork_domain::user_action::{ExitStatus, Proposal, UserActionCard, UserActionState};
 use iwork_proto::pb;
@@ -700,15 +700,17 @@ pub fn message_body_to_proto(b: &MessageBody) -> pb::MessageBody {
     }
 }
 
-/// 正文缺失（流式期间的助手消息）解成空的内联正文。
-pub fn message_body_from_proto(b: Option<&pb::MessageBody>) -> R<MessageBody> {
-    Ok(match b.and_then(|b| b.content.as_ref()) {
-        None => MessageBody::Inline(String::new()),
-        Some(pb::message_body::Content::InlineText(text)) => MessageBody::Inline(text.clone()),
-        Some(pb::message_body::Content::Artifact(r)) => {
-            MessageBody::Artifact(artifact_ref_from_proto(r)?)
-        }
-    })
+/// `MessageBody` 在，`content` 就必须在：缺了是写坏的数据，点名报错，不当成空串。
+/// 显式的空内联正文 `Inline("")` 合法。
+pub fn message_body_from_proto(b: &pb::MessageBody) -> R<MessageBody> {
+    Ok(
+        match required("MessageBody", "content", b.content.as_ref())? {
+            pb::message_body::Content::InlineText(text) => MessageBody::Inline(text.clone()),
+            pb::message_body::Content::Artifact(r) => {
+                MessageBody::Artifact(artifact_ref_from_proto(r)?)
+            }
+        },
+    )
 }
 
 pub fn message_to_proto(m: &Message) -> pb::Message {
@@ -738,21 +740,35 @@ pub fn message_to_proto(m: &Message) -> pb::Message {
 
 pub fn message_from_proto(m: &pb::Message) -> R<Message> {
     const K: &str = "Message";
-    let author = required(K, "author", m.author.as_ref().and_then(|a| a.kind.as_ref()))?;
+    let author = match required(K, "author", m.author.as_ref().and_then(|a| a.kind.as_ref()))? {
+        pb::author::Kind::User(_) => Author::User,
+        pb::author::Kind::System(_) => Author::System,
+        pb::author::Kind::Assistant(a) => Author::Assistant {
+            id: parse_id("AssistantAuthor", "assistant_id", &a.assistant_id)?,
+            name_snapshot: a.name_snapshot.clone(),
+        },
+    };
+    let status = message_status_from_proto(K, "status", m.status)?;
+    // 只有流式中的助手消息允许没有正文（正文结束时由 MessageCompleted 写入）；其余缺正文点名报错
+    let body = match (&m.body, &author, status) {
+        (Some(body), _, _) => message_body_from_proto(body)?,
+        (None, Author::Assistant { .. }, MessageStatus::Streaming) => {
+            MessageBody::Inline(String::new())
+        }
+        (None, _, _) => {
+            return Err(ConvertError::MissingField {
+                kind: K,
+                field: "body",
+            });
+        }
+    };
     Ok(Message {
         id: parse_id(K, "id", &m.id)?,
         conversation_id: parse_id(K, "conversation_id", &m.conversation_id)?,
-        author: match author {
-            pb::author::Kind::User(_) => Author::User,
-            pb::author::Kind::System(_) => Author::System,
-            pb::author::Kind::Assistant(a) => Author::Assistant {
-                id: parse_id("AssistantAuthor", "assistant_id", &a.assistant_id)?,
-                name_snapshot: a.name_snapshot.clone(),
-            },
-        },
+        author,
         context_project_id: parse_opt_id(K, "context_project_id", m.context_project_id.as_deref())?,
-        status: message_status_from_proto(K, "status", m.status)?,
-        body: message_body_from_proto(m.body.as_ref())?,
+        status,
+        body,
         attachments: parse_ids(K, "attachment_ids", &m.attachment_ids)?,
         created_at: required_timestamp(K, "created_at", m.created_at.as_ref())?,
         turn_id: parse_opt_id(K, "turn_id", m.turn_id.as_deref())?,
@@ -1061,8 +1077,8 @@ pub fn user_action_card_from_proto(c: &pb::UserActionCard) -> R<UserActionCard> 
 
 pub fn fingerprint_to_proto(f: &ActionFingerprint) -> R<pb::ActionFingerprint> {
     Ok(pb::ActionFingerprint {
-        kind: action_kind_to_proto(f.kind),
-        target: Some(action_target_to_proto(&f.target)?),
+        kind: action_kind_to_proto(f.kind()),
+        target: Some(action_target_to_proto(f.target())?),
     })
 }
 
@@ -1113,10 +1129,10 @@ pub fn verdict_from_proto(kind: &'static str, v: Option<&pb::Verdict>) -> R<Verd
                     D::BaselineRuleId(id) => {
                         DenyReason::Baseline(parse_id("DenyReason", "baseline_rule_id", id)?)
                     }
-                    D::DenialMemory(f) => DenyReason::DenialMemory(ActionFingerprint {
-                        kind: action_kind_from_proto("ActionFingerprint", "kind", f.kind)?,
-                        target: action_target_from_proto("ActionFingerprint", f.target.as_ref())?,
-                    }),
+                    D::DenialMemory(f) => DenyReason::DenialMemory(ActionFingerprint::new(
+                        action_kind_from_proto("ActionFingerprint", "kind", f.kind)?,
+                        action_target_from_proto("ActionFingerprint", f.target.as_ref())?,
+                    )),
                     D::ToolDisabled(_) => DenyReason::ToolDisabled,
                     D::DenyRuleId(id) => {
                         DenyReason::DenyRule(parse_id("DenyReason", "deny_rule_id", id)?)
@@ -1253,29 +1269,6 @@ pub fn rule_from_proto(r: &pb::Rule) -> R<RuleEntry> {
     })
 }
 
-pub fn security_entry_to_proto(e: &SecurityListEntry) -> pb::SecurityListEntry {
-    pb::SecurityListEntry {
-        id: e.id.to_string(),
-        list: security_list_to_proto(e.list),
-        value: e.value.clone(),
-        scope: Some(scope_to_proto(&e.scope)),
-        builtin: e.builtin,
-        created_at: Some(timestamp_to_proto(e.created_at)),
-    }
-}
-
-pub fn security_entry_from_proto(e: &pb::SecurityListEntry) -> R<SecurityListEntry> {
-    const K: &str = "SecurityListEntry";
-    Ok(SecurityListEntry {
-        id: parse_id(K, "id", &e.id)?,
-        list: security_list_from_proto(K, "list", e.list)?,
-        value: e.value.clone(),
-        scope: scope_from_proto(K, e.scope.as_ref())?,
-        builtin: e.builtin,
-        created_at: required_timestamp(K, "created_at", e.created_at.as_ref())?,
-    })
-}
-
 // ---------- 附件 ----------
 
 pub fn attachment_to_proto(a: &Attachment) -> R<pb::Attachment> {
@@ -1386,21 +1379,30 @@ pub fn runtime_from_proto(r: &pb::RuntimeStatus) -> R<Runtime> {
     })
 }
 
-pub fn quota_window_to_proto(w: &QuotaWindow) -> pb::QuotaWindow {
-    pb::QuotaWindow {
+/// 使用率是 0–100 的百分比：两个方向都拒绝超过 100 的值（编得进去的一定解得回来）。
+const MAX_USED_PCT: u8 = 100;
+
+pub fn quota_window_to_proto(w: &QuotaWindow) -> R<pb::QuotaWindow> {
+    if w.used_pct > MAX_USED_PCT {
+        return Err(ConvertError::InvalidValue {
+            kind: "QuotaWindow",
+            field: "used_pct",
+            reason: format!("{} 不在 0–100 之间", w.used_pct),
+        });
+    }
+    Ok(pb::QuotaWindow {
         window: w.window.clone(),
         used_pct: u32::from(w.used_pct),
         resets_at: w.resets_at.map(timestamp_to_proto),
         observed_at: Some(timestamp_to_proto(w.observed_at)),
-    }
+    })
 }
 
-/// 使用率是 0–100 的百分比，超出报错。
 pub fn quota_window_from_proto(w: &pb::QuotaWindow) -> R<QuotaWindow> {
     const K: &str = "QuotaWindow";
     let used_pct = u8::try_from(w.used_pct)
         .ok()
-        .filter(|p| *p <= 100)
+        .filter(|p| *p <= MAX_USED_PCT)
         .ok_or_else(|| ConvertError::InvalidValue {
             kind: K,
             field: "used_pct",

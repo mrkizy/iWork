@@ -18,7 +18,6 @@ use iwork_domain::id::{CommandId, ConversationId, MessageId, ProjectId, RawUlid,
 use iwork_domain::project::{PathStatus, Project, ProjectSettings, VcsKind};
 use iwork_domain::rule::RuleEntry;
 use iwork_domain::runtime::{Runtime, RuntimeKind};
-use iwork_domain::security_list::SecurityListEntry;
 use iwork_domain::settings::GlobalSettings;
 use iwork_domain::user_action::ExitStatus;
 use iwork_ports::agent::{
@@ -683,7 +682,7 @@ impl ReadModelPort for FakeReadModel {
     async fn rules(&self, _project: Option<ProjectId>) -> Result<Vec<RuleEntry>, StorageError> {
         Ok(vec![])
     }
-    async fn security_lists(&self) -> Result<Vec<SecurityListEntry>, StorageError> {
+    async fn security_lists(&self) -> Result<Vec<RuleEntry>, StorageError> {
         Ok(vec![])
     }
     async fn settings(&self) -> Result<GlobalSettings, StorageError> {

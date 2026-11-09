@@ -47,7 +47,7 @@ pub enum DenyReason {
     ToolSetExcluded,
 }
 
-/// 规则所在的层。安全清单的三张清单也是条目（技术设计 7.2c）。
+/// 规则所在的层。安全清单的三张清单也是规则条目，属于哪张清单由层决定（技术设计 7.2c，见 [`crate::security_list`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuleLayer {
     Baseline,
@@ -58,10 +58,13 @@ pub enum RuleLayer {
     Remembered,
     ProjectAllow,
     Default,
+    /// 安全清单：需凭据命令（值在 `ProgramSubcommand` 里）
     CredentialCommands,
     AutorunConfig,
+    /// 安全清单：敏感目录（值在 `PathUnder` 里）
     SensitiveDirs,
     WritableCache,
+    /// 安全清单：可写目录（值在 `PathUnder` 里）
     WritableDirs,
     /// 安全清单的拒收名单
     RejectList,

@@ -299,16 +299,26 @@ fn rule() -> Rule {
     }
 }
 
-fn security_entry() -> SecurityListEntry {
-    SecurityListEntry {
+/// 用户加进「需凭据的命令」清单的一条：清单条目就是规则条目。
+fn security_list_rule() -> Rule {
+    Rule {
         id: s(ENTRY),
-        list: SecurityList::CredentialCommands.into(),
-        value: s("terraform apply"),
+        layer: RuleLayer::CredentialCommands.into(),
+        matcher: Some(RuleMatcher {
+            kind: Some(rule_matcher::Kind::ProgramSubcommand(ProgramSubcommand {
+                program: s("terraform"),
+                subcommand: Some(s("apply")),
+            })),
+        }),
+        effect: RuleEffect::OutsideSandbox.into(),
+        source: Some(RuleSource {
+            kind: Some(rule_source::Kind::User(UserRuleSource {})),
+        }),
         scope: Some(Scope {
             kind: Some(scope::Kind::Global(GlobalScope {})),
         }),
-        builtin: true,
         created_at: ts(1_762_001_000),
+        label: s("terraform apply"),
     }
 }
 
@@ -1064,7 +1074,7 @@ pub fn ev_user_action_state_changed() -> DomainEvent {
 
 pub fn ev_security_list_entry_added() -> DomainEvent {
     ev(E::SecurityListEntryAdded(SecurityListEntryAdded {
-        entry: Some(security_entry()),
+        rule: Some(security_list_rule()),
     }))
 }
 

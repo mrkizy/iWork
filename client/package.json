@@ -10,7 +10,7 @@
     "test": "pnpm gen && vitest run",
     "dev": "vite",
     "build": "vite build",
-    "tauri": "tauri"
+    "tauri": "node scripts/tauri.ts"
   },
   "dependencies": {
     "@bufbuild/protobuf": "2.16.0",

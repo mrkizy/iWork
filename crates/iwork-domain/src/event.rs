@@ -18,13 +18,12 @@ use crate::common::{ArtifactRef, ModelSelection, Timestamp, Usage};
 use crate::conversation::Conversation;
 use crate::id::{
     ApprovalId, AssistantId, AttachmentId, ConversationId, JobId, MessageId, ProjectId, ReviewId,
-    RuleId, RuntimeId, SecurityEntryId, Seq, TurnId, UserActionId,
+    RuleId, RuntimeId, Seq, TurnId, UserActionId,
 };
 use crate::message::{Message, MessageBody, MessageStatus};
 use crate::project::{PathStatus, Project, ProjectSettings};
 use crate::rule::{RuleEntry, RuleLayer, RuleSetVersion, Verdict};
 use crate::runtime::{LocalConfigItem, QuotaWindow, Runtime};
-use crate::security_list::SecurityListEntry;
 use crate::turn::{Turn, TurnState};
 use crate::user_action::{UserActionCard, UserActionState};
 
@@ -398,14 +397,16 @@ pub struct UserActionStateChanged {
 
 // ---------- 载荷：安全清单 ----------
 
+/// 清单条目就是规则条目，`layer` 标出属于哪张清单（见 [`crate::security_list`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecurityListEntryAdded {
-    pub entry: SecurityListEntry,
+    pub rule: RuleEntry,
 }
 
+/// `entry_id` 是被删清单条目的规则 ID。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecurityListEntryRemoved {
-    pub entry_id: SecurityEntryId,
+    pub entry_id: RuleId,
 }
 
 // ---------- 载荷：附件 ----------
@@ -652,7 +653,7 @@ impl DomainEvent {
             Self::ApprovalStaleResultDropped(e) => (K::Audit, StreamId::of(e.approval_id)),
             Self::UserActionProposed(e) => (K::Approval, StreamId::of(e.card.id)),
             Self::UserActionStateChanged(e) => (K::Approval, StreamId::of(e.card_id)),
-            Self::SecurityListEntryAdded(e) => (K::Rule, StreamId::of(e.entry.id)),
+            Self::SecurityListEntryAdded(e) => (K::Rule, StreamId::of(e.rule.id)),
             Self::SecurityListEntryRemoved(e) => (K::Rule, StreamId::of(e.entry_id)),
             Self::AttachmentStored(e) => {
                 (K::Conversation, StreamId::of(e.attachment.conversation_id))
