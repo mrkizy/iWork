@@ -13,10 +13,13 @@ T05 要交付回合编排的最小闭环：开会话或续接 → prompt → 流
 
 ## 决定
 
-1. **回合编排在 `iwork-core::turn`**，对 `AgentPort`、`StoragePort`、`Clock`、`IdGenerator`、`LivePublisher` 泛型，不绑定运行时。闭环测试用内存存储 + 真 ACP 客户端 + 假运行时进程。SendMessage 命令本身（app 层）与订阅推送的接线留给 T04 / T10。
-2. **单写者靠结构保证**：权限处理方（`PermissionGate`）与取消句柄（`TurnCanceller`）都不改回合状态，只往会话线的信箱里发信号，由 `SessionLine::run_turn` 的循环按到达顺序处理；权限两步（开始等 / 有结果）都带回执，状态写进存储后才回，运行时因此不会在状态落盘前继续。循环同时等更新流与信箱，**同时就绪时先处理更新**；适配器保证调用 `PermissionHandler` 之前，此前到达的更新已在更新流里（ACP 的派发循环逐条同步处理通知），两者合起来保证事件顺序。
+1. **回合编排在 `iwork-core::turn`**，对 `AgentPort`、`StoragePort`、`Clock`、`IdGenerator`、`LivePublisher`、`Timer` 泛型，不绑定运行时。闭环测试用内存存储 + 真 ACP 客户端 + 假运行时进程。SendMessage 命令本身（app 层）与订阅推送的接线留给 T04 / T10。
+2. **单写者靠结构保证**：权限处理方（`PermissionGate`）与取消句柄（`TurnCanceller`）都不改回合状态，只往**当前回合的信箱**里发信号，由 `SessionLine::run_turn` 的循环处理。信箱随回合打开、随 `run_turn` 以任何方式返回而撤掉。
+   - **审批结果绑定回合**（审查 F-8）：「开始等审批」领一张全局不重复的票，交结果时凭票、并且只交给领票时的那个回合；编排只采纳「还在等审批、确有这张票」的结果，否则拒绝且不动计数。迟到的放行（上一回合的、取消中到达的）一律按拒绝答复运行时。权限两步都带回执，状态写进存储后才回。
+   - **输入的优先次序**（审查 F-9）：取消最先；然后是检查点定时；然后一般先更新、后权限信箱，连续处理 32 条更新后先让出一次执行权、再先看信箱，持续输出时取消与审批也不会被饿死。收到「开始等审批」时，先把此刻已就绪的更新处理完（最多 1024 条）再受理：适配器保证调用 `PermissionHandler` 之前，此前到达的更新已在更新流里（ACP 的派发循环逐条同步处理通知），两者合起来保证「工具调用开始」排在「等待审批」之前。回合结束前再看一眼有没有已收到的取消。
+   - **编排自己出错**（写不进存储、表外转换，审查 F-10）：先撤信箱（迟到回调被拒），再关闭会话（结束运行时），把原始错误交给上层，不重发 prompt。
 3. **`iwork-core` 的直接依赖白名单加 `futures-channel`、`futures-core`**：信箱用 `futures-channel` 的无界 mpsc 与 oneshot，等待用 `futures-core::Stream::poll_next` 加手写的 `poll_fn`。两个 crate 只是数据结构与 trait，不含运行时、不做 I/O，不在 ADR-0005 的传递禁用清单里。
-4. **新增端口 `iwork-ports::live::LivePublisher`**，只有一个同步方法 `message_delta(MessageDelta)`。同步且不阻塞：背压由推送方自己做（合并相邻增量、标记落后），不让回合等它；增量丢了也能恢复（消息结束写完整正文，期间每 500ms 有检查点）。按 T01 方案第 5 节「端口由第一个需要它的卡加」，只加不改既有签名。
+4. **新增端口 `iwork-ports::live::LivePublisher`**，只有一个同步方法 `message_delta(MessageDelta)`。同步且不阻塞：背压由推送方自己做（合并相邻增量、标记落后），不让回合等它；增量丢了也能恢复（消息结束写完整正文，期间有检查点）。**新增端口 `iwork-ports::clock::Timer`**（`sleep(Duration)`，审查 F-11）：最后一段正文之后即使再没有新更新（等工具、等审批），也在上次检查点之后最多 500ms 把未落盘的正文刷出去，满足技术设计 3.5「崩溃后最多丢 500ms 显示文字」；core 仍不引入运行时，实现由 daemon 注入。按 T01 方案第 5 节「端口由第一个需要它的卡加」，只加不改既有签名。
 5. **审批桩在 `iwork-core`**：`PermissionDecider` 是判定方接口（`decide` 判定一次请求，`void_pending` 在回合取消或失败时作废它挂着的审批），`StubDecider` 是全部放行 / 全部拒绝可切换的桩。T07 用真实审批引擎实现同一接口。
 6. **运行时进程中途退出（后台服务还活着）→ 回合 `Failed`**（原因 `ProcessExited`，可原样重试）。回合转换表补一行 `(WaitingApproval, Failed) → Failed`：等审批时出错与运行中出错是同一件事，不经过一条假的「审批有结果」。`Interrupted(Crash)` 只给后台服务重启后发现进程已不在的情况。回合失败时挂着的审批以新增的 `VoidReason::TurnFailed` 作废（需求第 12 章作废条件补「所属回合失败」，待产品负责人确认）。
 

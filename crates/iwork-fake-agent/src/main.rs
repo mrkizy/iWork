@@ -344,9 +344,24 @@ impl Ctx<'_> {
                 chunk,
                 count,
                 rate_per_sec,
+                stamp,
             } => {
-                let pieces = (0..*count).map(|_| chunk.clone());
+                let pieces = (0..*count).map(|_| {
+                    if *stamp {
+                        let nanos = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0);
+                        format!("{nanos}|{chunk}")
+                    } else {
+                        chunk.clone()
+                    }
+                });
                 Ok(cancelled(self.paced(pieces, *rate_per_sec).await?))
+            }
+            Step::Stderr { text } => {
+                eprintln!("{text}");
+                Ok(Flow::Done)
             }
             Step::ToolCall {
                 id,

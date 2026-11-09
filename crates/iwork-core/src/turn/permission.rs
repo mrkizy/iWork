@@ -2,13 +2,17 @@
 //!
 //! - [`PermissionDecider`] 是判定方。T07 的审批引擎实现它；在那之前用 [`StubDecider`]（全部放行 /
 //!   全部拒绝，可切换）。
-//! - [`PermissionGate`] 是交给适配器的 `PermissionHandler`：它先告诉回合编排「开始等审批」，
-//!   再问判定方，最后告诉编排「审批有结果了」，然后才把结果交回运行时。这样回合状态的
-//!   `Running → WaitingApproval → Running` 与运行时的实际顺序一致，而写状态的只有编排一处。
+//! - [`PermissionGate`] 是交给适配器的 `PermissionHandler`：它先告诉回合编排「开始等审批」并领一张
+//!   票，再问判定方，最后凭票告诉编排「审批有结果了」，编排认可后才把结果交回运行时。
+//!   写回合状态的只有编排一处。
+//!
+//! **审批结果绑定回合**：每个回合有自己的信箱（[`TurnSlot`]），回合结束即撤掉。领票时记下回合 id，
+//! 交结果时回合已换了、信箱已撤、票不在待处理集合里、或回合已不在等审批，一律按拒绝答复运行时，
+//! 不改任何计数。迟到的放行因此不会落到别的回合头上。
 
 use std::future::Future;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use futures_channel::{mpsc, oneshot};
 use iwork_domain::approval::VoidReason;
@@ -79,29 +83,72 @@ impl PermissionDecider for StubDecider {
     }
 }
 
-/// 编排收到的输入。权限两步都带回执：编排把状态变化写进存储之后才回，
-/// 运行时因此不会在状态落盘前继续往下走。
-#[derive(Debug)]
-pub(crate) enum Signal {
-    /// 回执是当前回合的 id；`None` 表示现在没有可以等审批的回合
-    PermissionAsked {
-        reply: oneshot::Sender<Option<TurnId>>,
-    },
-    PermissionDecided {
-        ack: oneshot::Sender<()>,
-    },
-    /// 只取消这一回合；到达时回合已换了就忽略
-    Cancel(TurnId),
+/// 一张审批票。进程内全局递增、永不重复：迟到的结果即使混进了别的回合的信箱，也对不上那个
+/// 回合的任何一张票。
+pub(crate) type Ticket = u64;
+
+static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn new_ticket() -> Ticket {
+    NEXT_TICKET.fetch_add(1, Ordering::Relaxed)
 }
 
-/// 交给适配器的权限处理方。任何一步联系不上编排（回合已结束）都答拒绝：失败即关闭。
+/// 回合编排从权限处理方收到的信号。都带回执：编排把状态变化写进存储之后才回，
+/// 运行时因此不会在状态落盘前继续。
+#[derive(Debug)]
+pub(crate) enum Signal {
+    /// 回执是票；`None` 表示现在不受理审批（如正在取消）
+    PermissionAsked {
+        reply: oneshot::Sender<Option<Ticket>>,
+    },
+    /// 回执 `true` 表示结果被采纳
+    PermissionDecided {
+        ticket: Ticket,
+        ack: oneshot::Sender<bool>,
+    },
+}
+
+/// 当前回合的信箱。会话线、权限处理方、取消句柄共用；回合结束时清空。
+#[derive(Debug, Default)]
+pub(crate) struct TurnSlot(Mutex<Option<TurnInbox>>);
+
+#[derive(Debug, Clone)]
+pub(crate) struct TurnInbox {
+    pub turn_id: TurnId,
+    pub signals: mpsc::UnboundedSender<Signal>,
+    pub cancel: mpsc::UnboundedSender<()>,
+}
+
+impl TurnSlot {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<TurnInbox>> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub fn open(&self, inbox: TurnInbox) {
+        *self.lock() = Some(inbox);
+    }
+
+    pub fn close(&self) {
+        *self.lock() = None;
+    }
+
+    /// 当前回合的信箱；`turn_id` 给了就必须是这个回合。
+    pub fn current(&self, turn_id: Option<TurnId>) -> Option<TurnInbox> {
+        self.lock()
+            .as_ref()
+            .filter(|inbox| turn_id.is_none_or(|id| inbox.turn_id == id))
+            .cloned()
+    }
+}
+
+/// 交给适配器的权限处理方。任何一步对不上号（回合已结束、已换、正在取消）都答拒绝：失败即关闭。
 #[derive(Debug)]
 pub struct PermissionGate<D> {
-    pub(crate) mailbox: mpsc::UnboundedSender<Signal>,
+    pub(crate) slot: Arc<TurnSlot>,
     pub(crate) decider: Arc<D>,
 }
 
-/// 回合已不在时的拒绝理由。
+/// 回合已不在、或已不接受审批结果时的拒绝理由。
 pub const TURN_GONE_MESSAGE: &str = "回合已结束，权限请求作废";
 
 fn turn_gone() -> PermissionDecision {
@@ -112,29 +159,36 @@ fn turn_gone() -> PermissionDecision {
 
 impl<D: PermissionDecider> PermissionHandler for PermissionGate<D> {
     async fn on_permission(&self, req: PermissionRequest) -> PermissionDecision {
+        let Some(inbox) = self.slot.current(None) else {
+            return turn_gone();
+        };
         let (reply, asked) = oneshot::channel();
-        if self
-            .mailbox
+        if inbox
+            .signals
             .unbounded_send(Signal::PermissionAsked { reply })
             .is_err()
         {
             return turn_gone();
         }
-        let Ok(Some(turn_id)) = asked.await else {
+        let Ok(Some(ticket)) = asked.await else {
             return turn_gone();
         };
-        let decision = self.decider.decide(turn_id, &req).await;
+        let decision = self.decider.decide(inbox.turn_id, &req).await;
+        // 判定期间回合可能已经结束、换成别的回合：只把结果交给领票时的那个回合
+        let Some(inbox) = self.slot.current(Some(inbox.turn_id)) else {
+            return turn_gone();
+        };
         let (ack, acked) = oneshot::channel();
-        if self
-            .mailbox
-            .unbounded_send(Signal::PermissionDecided { ack })
+        if inbox
+            .signals
+            .unbounded_send(Signal::PermissionDecided { ticket, ack })
             .is_err()
         {
             return turn_gone();
         }
         match acked.await {
-            Ok(()) => decision,
-            Err(_) => turn_gone(),
+            Ok(true) => decision,
+            _ => turn_gone(),
         }
     }
 }

@@ -38,6 +38,7 @@ struct Harness {
     clock: RealClock,
     ids: CountingIds,
     live: Deltas,
+    timer: TokioTimer,
 }
 
 impl Harness {
@@ -47,15 +48,17 @@ impl Harness {
             clock: RealClock::default(),
             ids: CountingIds::default(),
             live: Deltas::default(),
+            timer: TokioTimer,
         }
     }
 
-    fn ports(&self) -> TurnPorts<'_, MemStore, RealClock, CountingIds, Deltas> {
+    fn ports(&self) -> TurnPorts<'_, MemStore, RealClock, CountingIds, Deltas, TokioTimer> {
         TurnPorts {
             store: &self.store,
             clock: &self.clock,
             ids: &self.ids,
             live: &self.live,
+            timer: &self.timer,
         }
     }
 
@@ -202,11 +205,11 @@ async fn stub_can_be_switched_between_turns() {
 }
 
 /// 验收 2：运行中取消，运行时不理会取消（挂起）时 3 秒后结束整棵进程树，含它启动的子进程。
-#[cfg(unix)]
+/// Unix 查进程组，Windows 查 Job（Windows 只在 CI 上跑）。
 #[tokio::test(flavor = "multi_thread")]
 async fn cancel_kills_whole_process_tree_when_runtime_ignores_it() {
     let fake = Fake::new(&json!({ "turns": [{ "steps": [
-        { "type": "spawn_child", "program": "sleep", "args": ["600"] },
+        child_step(),
         { "type": "text", "text": "开始" },
         { "type": "hang" }
     ]}]}));
@@ -229,7 +232,7 @@ async fn cancel_kills_whole_process_tree_when_runtime_ignores_it() {
         .records()
         .iter()
         .find_map(|r| r["spawned_child"].as_u64())
-        .expect("假运行时启动了子进程") as i32;
+        .expect("假运行时启动了子进程") as u32;
     assert!(process_exists(child), "对照：取消前子进程活着");
 
     let cancelled_at = Instant::now();
@@ -264,13 +267,17 @@ async fn cancel_kills_whole_process_tree_when_runtime_ignores_it() {
     assert_eq!(fake.params_of("session/cancel").len(), 1);
 }
 
-/// 验收 2 的对照：配合取消的运行时立即以 cancelled 结束，不用等 3 秒。
+/// 验收 2（F-2）：运行时配合取消、很快答 cancelled，但它起的子进程还在跑：取消照样结束整棵树，
+/// 回合 Cancelled 时子进程已不在；会话随之失效，同一条会话线下一回合按会话 id 续接。
 #[tokio::test(flavor = "multi_thread")]
-async fn cooperative_cancel_ends_turn_quickly() {
+async fn cooperative_cancel_still_clears_children_and_next_turn_resumes() {
     let fake = Fake::new(&json!({ "turns": [{ "steps": [
+        child_step(),
         { "type": "text", "text": "开始" },
         { "type": "sleep", "ms": 60000 }
     ]}]}));
+    let healthy =
+        Fake::new(&json!({ "turns": [{ "steps": [{ "type": "text", "text": "续上了" }] }] }));
     let runtime = AcpRuntime::new(fake.launch.clone());
     let h = Arc::new(Harness::new());
     let mut line = SessionLine::new(Arc::new(StubDecider::allow_all()), None);
@@ -279,13 +286,138 @@ async fn cooperative_cancel_ends_turn_quickly() {
     let turn_id = plan.turn.id;
     let task = {
         let h = h.clone();
-        tokio::spawn(async move { line.run_turn(&runtime, h.ports(), plan).await.unwrap() })
+        tokio::spawn(async move {
+            let state = line.run_turn(&runtime, h.ports(), plan).await.unwrap();
+            (state, line)
+        })
     };
     wait_until(Duration::from_secs(10), || !h.live.all().is_empty()).await;
+    let child = fake
+        .records()
+        .iter()
+        .find_map(|r| r["spawned_child"].as_u64())
+        .expect("假运行时启动了子进程") as u32;
     let cancelled_at = Instant::now();
     canceller.cancel(turn_id);
-    assert_eq!(task.await.unwrap(), TurnState::Cancelled);
-    assert!(cancelled_at.elapsed() < Duration::from_secs(2));
+    let (state, mut line) = task.await.unwrap();
+
+    assert_eq!(state, TurnState::Cancelled);
+    assert!(
+        cancelled_at.elapsed() < Duration::from_secs(2),
+        "配合取消不用等满 3 秒"
+    );
+    assert!(!process_exists(child), "回合标为 Cancelled 时子进程已结束");
+    let session = line.session().expect("会话对象还在");
+    assert!(session.process_tree_is_empty().unwrap());
+
+    let state = line
+        .run_turn(
+            &AcpRuntime::new(healthy.launch.clone()),
+            h.ports(),
+            h.plan(healthy.dir.path(), "继续"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(state, TurnState::Completed);
+    assert_eq!(
+        healthy.params_of("session/load")[0]["sessionId"],
+        "fake-session-1"
+    );
+}
+
+/// F-3：运行时崩溃，但它起的子进程继承了 stdout、还拿着管道：读端收不到 EOF，
+/// 也要凭进程退出及时发现，回合 Failed，整棵树清空。
+#[tokio::test(flavor = "multi_thread")]
+async fn crash_with_child_holding_stdout_is_detected() {
+    let fake = Fake::new(&json!({ "turns": [{ "steps": [
+        child_step(),
+        { "type": "text", "text": "写到一半" },
+        { "type": "crash", "exit_code": 7 }
+    ]}]}));
+    let h = Harness::new();
+    let mut line = SessionLine::new(Arc::new(StubDecider::allow_all()), None);
+    let started = Instant::now();
+    let state = tokio::time::timeout(
+        Duration::from_secs(10),
+        line.run_turn(
+            &AcpRuntime::new(fake.launch.clone()),
+            h.ports(),
+            h.plan(fake.dir.path(), "干活"),
+        ),
+    )
+    .await
+    .expect("10 秒内必须发现崩溃")
+    .unwrap();
+    assert_eq!(state, TurnState::Failed);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let snapshot = h.store.snapshot();
+    let failed = &snapshot[snapshot.len() - 3];
+    assert!(failed.contains("运行时进程意外退出"), "{failed}");
+    let child = fake
+        .records()
+        .iter()
+        .find_map(|r| r["spawned_child"].as_u64())
+        .expect("假运行时启动了子进程") as u32;
+    wait_until(Duration::from_secs(2), || !process_exists(child)).await;
+}
+
+/// F-1：真实会话的诊断记录里没有正文、工具输入输出、stderr 内容，只有协议元数据。
+#[tokio::test(flavor = "multi_thread")]
+async fn diagnostics_of_a_real_session_carry_no_content() {
+    let fake = Fake::new(&json!({ "turns": [{ "steps": [
+        { "type": "stderr", "text": "TOKEN=stderr-secret-1" },
+        { "type": "text", "text": "正文里的秘密 body-secret-2" },
+        { "type": "tool_call", "id": "t1", "name": "Bash",
+          "input": { "command": "curl -H 'Authorization: input-secret-3'", "env": { "CUSTOM_AUTH": "env-secret-4" } } },
+        { "type": "permission", "tool_call_id": "t1",
+          "allowed": [ { "type": "tool_result", "id": "t1", "ok": true, "output": "output-secret-5" } ] }
+    ]}]}));
+    let session = iwork_ports::agent::AgentPort::open_session(
+        &AcpRuntime::new(fake.launch.clone()),
+        spec(fake.dir.path()),
+        AllowAll,
+    )
+    .await
+    .unwrap();
+    let mut updates = iwork_ports::agent::AgentSession::prompt(&session, text("hi"))
+        .await
+        .unwrap();
+    while iwork_ports::agent::UpdateStream::next(&mut updates)
+        .await
+        .is_some()
+    {}
+    // stderr 由另一个任务读，给它一点时间
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let log = session.raw_log().join("\n");
+    for secret in [
+        "stderr-secret-1",
+        "body-secret-2",
+        "input-secret-3",
+        "env-secret-4",
+        "output-secret-5",
+        "CUSTOM_AUTH",
+    ] {
+        assert!(!log.contains(secret), "{secret} 进了诊断：{log}");
+    }
+    // 对照：元数据确实记下了
+    assert!(log.contains("agent_message_chunk"), "{log}");
+    assert!(log.contains("session/request_permission"), "{log}");
+    assert!(log.contains("\"stream\":\"stderr\""), "{log}");
+}
+
+struct AllowAll;
+
+impl iwork_ports::agent::PermissionHandler for AllowAll {
+    async fn on_permission(
+        &self,
+        _req: iwork_ports::agent::PermissionRequest,
+    ) -> iwork_ports::agent::PermissionDecision {
+        iwork_ports::agent::PermissionDecision::Allow
+    }
 }
 
 /// 验收 3：运行时中途崩溃，回合 Failed、消息 Failed；后台服务这一侧照常工作：
@@ -376,8 +508,17 @@ async fn wait_until(limit: Duration, mut ok: impl FnMut() -> bool) {
     }
 }
 
+/// 一个长时间运行的子进程步骤。
+fn child_step() -> serde_json::Value {
+    if cfg!(windows) {
+        json!({ "type": "spawn_child", "program": "ping", "args": ["-n", "600", "127.0.0.1"] })
+    } else {
+        json!({ "type": "spawn_child", "program": "sleep", "args": ["600"] })
+    }
+}
+
 #[cfg(unix)]
-fn process_exists(pid: i32) -> bool {
+fn process_exists(pid: u32) -> bool {
     // 僵尸进程也算不存在：它已经结束，只等父进程回收
     let out = std::process::Command::new("ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])
@@ -386,4 +527,13 @@ fn process_exists(pid: i32) -> bool {
     let stat = String::from_utf8_lossy(&out.stdout);
     let stat = stat.trim();
     !stat.is_empty() && !stat.starts_with('Z')
+}
+
+#[cfg(windows)]
+fn process_exists(pid: u32) -> bool {
+    let out = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .output()
+        .expect("运行 tasklist");
+    String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
 }

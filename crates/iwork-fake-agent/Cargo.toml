@@ -19,3 +19,4 @@ iwork-core.workspace = true
 iwork-domain.workspace = true
 iwork-ports.workspace = true
 tempfile.workspace = true
+sysinfo.workspace = true

@@ -74,11 +74,18 @@ pub enum Step {
         chunk_chars: Option<usize>,
         rate_per_sec: Option<f64>,
     },
-    /// 把同一片正文重复输出 `count` 次（压测用）
+    /// 把同一片正文重复输出 `count` 次（压测用）。`stamp` 为真时每片前面加上发出时刻
+    /// （Unix 纪元起的纳秒数）和 `|`，接收方据此算延迟
     RepeatText {
         chunk: String,
         count: u64,
         rate_per_sec: Option<f64>,
+        #[serde(default)]
+        stamp: bool,
+    },
+    /// 往 stderr 写一行（检查后台服务不把它原样记下）
+    Stderr {
+        text: String,
     },
     /// 开始一次工具调用
     ToolCall {

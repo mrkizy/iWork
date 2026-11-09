@@ -1,9 +1,13 @@
 //! 回合编排的最小闭环（技术设计 6.4、3.5）：开会话或续接 → prompt → 把更新流转成领域事件写入存储、
 //! 把正文增量推出去 → 按回合转换表推进状态 → 结束。
 //!
-//! 回合状态只在这里写：运行时的更新、权限请求的两步、取消请求都汇到 [`SessionLine::run_turn`] 的
-//! 一个循环里按到达顺序处理（同时就绪时先处理更新：适配器保证权限请求之前的更新已在更新流里，
-//! 这样「工具调用开始」一定排在「等待审批」之前）。
+//! 回合状态只在 [`SessionLine::run_turn`] 的循环里写。它同时等四路输入，优先次序：
+//! 1. **取消**：最先处理，更新再多也不会被饿死；回合结束前还会再看一眼有没有已收到的取消；
+//! 2. **检查点定时**：上次检查点之后最多 500ms 把未落盘的正文刷出去，即使没有新的更新；
+//! 3. **更新流**与**权限信箱**：一般先更新、后信箱；连续处理 [`FAIR_BURST`] 条更新后先让出一次
+//!    执行权、再先看一次信箱。
+//!    收到「开始等审批」时，先把此刻已经就绪的更新处理完（最多 [`MAX_DRAIN`] 条）再受理：适配器
+//!    保证权限请求之前的更新已在更新流里，所以「工具调用开始」一定排在「等待审批」之前。
 //!
 //! 运行时进程意外退出（后台服务还活着）时回合怎么收尾：
 //! - `Running` 或 `WaitingApproval`：回合 `Failed`，原因是进程退出（`AgentError::ProcessExited`
@@ -12,11 +16,16 @@
 //!
 //! `Interrupted(Crash)` 只留给后台服务重启后发现进程已不在的情况（崩溃恢复，不在这里）。
 //! 进程退出后丢掉这条会话，下一回合用记下的运行时会话 id 续接。
+//!
+//! 编排自己出错（写不进存储、表外转换）时：先撤掉回合信箱（迟到的审批回调一律被拒），再关闭会话
+//! （结束运行时，免得工具继续改文件），然后把原始错误交给上层；不重发 prompt。
 
+use std::collections::BTreeSet;
 use std::future::{Future, poll_fn};
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use futures_channel::mpsc;
 use futures_core::Stream;
@@ -33,28 +42,36 @@ use iwork_ports::agent::{
     AgentError, AgentPort, AgentSession, AgentUpdate, ContentBlock, SessionSpec, TurnOutcome,
     UpdateStream,
 };
-use iwork_ports::clock::{Clock, IdGenerator, MonotonicInstant};
+use iwork_ports::clock::{Clock, IdGenerator, MonotonicInstant, Timer};
 use iwork_ports::live::{LivePublisher, MessageDelta};
 use iwork_ports::store::{CommitRequest, StorageError, StoragePort};
 
-use super::permission::{PermissionDecider, PermissionGate, Signal};
+use super::permission::{
+    PermissionDecider, PermissionGate, Signal, Ticket, TurnInbox, TurnSlot, new_ticket,
+};
 
 /// 回合编排写入的事件以它为 actor：这些事件由后台服务按运行时的输出产生，不是用户的命令。
 pub const ORCHESTRATOR_ACTOR: &str = "system";
 
 /// 流式正文的检查点间隔（技术设计 3.5：崩溃后最多丢这么久的显示文字）。
-pub const CHECKPOINT_INTERVAL_NANOS: u64 = 500_000_000;
+pub const CHECKPOINT_INTERVAL: Duration = Duration::from_millis(500);
+
+/// 连续处理这么多条更新后，先看一次权限信箱。
+pub const FAIR_BURST: u32 = 32;
+/// 受理「开始等审批」前最多先处理这么多条已就绪的更新。
+pub const MAX_DRAIN: u32 = 1024;
 
 /// 动作摘要最多保留的字符数。
 const SUMMARY_CHARS: usize = 200;
 
 /// 回合编排用到的端口。
-#[derive(Debug, Clone, Copy)]
-pub struct TurnPorts<'a, S, C, I, L> {
+#[derive(Debug)]
+pub struct TurnPorts<'a, S, C, I, L, T> {
     pub store: &'a S,
     pub clock: &'a C,
     pub ids: &'a I,
     pub live: &'a L,
+    pub timer: &'a T,
 }
 
 /// 一个回合要做什么。`turn` 处于 `Queued`，`TurnQueued` 已由受理命令的一方写入。
@@ -70,7 +87,7 @@ pub struct TurnPlan {
 }
 
 /// 编排失败：写不进存储，或碰到转换表外的转换（程序缺陷）。回合本身的失败不在这里，
-/// 而是回合以 `Failed` 等状态正常收尾。
+/// 而是回合以 `Failed` 等状态正常收尾。出这种错时会话已被关闭。
 #[derive(Debug, thiserror::Error)]
 pub enum TurnRunError {
     #[error(transparent)]
@@ -82,42 +99,50 @@ pub enum TurnRunError {
 /// 一条运行时会话线（技术设计 6.4）：一个对话（或「助手 × 项目」）对应一条，跨回合续接。
 pub struct SessionLine<A: AgentPort, D> {
     session: Option<A::Session>,
-    /// 最近一次的运行时会话 id；会话没了（进程退出、后台服务重启）时用它续接
+    /// 最近一次的运行时会话 id；会话没了（进程退出、取消后、后台服务重启）时用它续接
     resume: Option<String>,
-    mailbox: mpsc::UnboundedSender<Signal>,
-    inbox: mpsc::UnboundedReceiver<Signal>,
+    slot: Arc<TurnSlot>,
     decider: Arc<D>,
 }
 
 /// 取消某个回合的句柄，可在任何任务里用。
 #[derive(Debug, Clone)]
 pub struct TurnCanceller {
-    mailbox: mpsc::UnboundedSender<Signal>,
+    slot: Arc<TurnSlot>,
 }
 
 impl TurnCanceller {
     /// 请求取消。回合已经结束或换了就什么都不做。
     pub fn cancel(&self, turn_id: TurnId) {
-        let _ = self.mailbox.unbounded_send(Signal::Cancel(turn_id));
+        if let Some(inbox) = self.slot.current(Some(turn_id)) {
+            let _ = inbox.cancel.unbounded_send(());
+        }
+    }
+}
+
+/// 回合信箱的生命周期：回合开始时打开，函数以任何方式返回时撤掉。
+struct SlotGuard<'a>(&'a TurnSlot);
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        self.0.close();
     }
 }
 
 impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
     /// `resume`：已知的运行时会话 id（如后台服务重启前记下的），没有就新开。
     pub fn new(decider: Arc<D>, resume: Option<String>) -> Self {
-        let (mailbox, inbox) = mpsc::unbounded();
         Self {
             session: None,
             resume,
-            mailbox,
-            inbox,
+            slot: Arc::new(TurnSlot::default()),
             decider,
         }
     }
 
     pub fn canceller(&self) -> TurnCanceller {
         TurnCanceller {
-            mailbox: self.mailbox.clone(),
+            slot: self.slot.clone(),
         }
     }
 
@@ -131,11 +156,11 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         self.resume.as_deref()
     }
 
-    /// 跑一个回合，返回它停在的状态。
-    pub async fn run_turn<S, C, I, L>(
+    /// 跑一个回合，返回它停在的状态。返回 `Err` 时会话已关闭，回合信箱已撤。
+    pub async fn run_turn<S, C, I, L, T>(
         &mut self,
         agent: &A,
-        ports: TurnPorts<'_, S, C, I, L>,
+        ports: TurnPorts<'_, S, C, I, L, T>,
         plan: TurnPlan,
     ) -> Result<TurnState, TurnRunError>
     where
@@ -143,8 +168,31 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         C: Clock,
         I: IdGenerator,
         L: LivePublisher,
+        T: Timer,
     {
-        self.drain_stale_signals();
+        let result = self.run_turn_inner(agent, ports, plan).await;
+        if result.is_err()
+            && let Some(session) = self.session.take()
+        {
+            // 信箱已随 run_turn_inner 返回撤掉；关掉运行时，免得它在无人记录时继续动手
+            let _ = session.close().await;
+        }
+        result
+    }
+
+    async fn run_turn_inner<S, C, I, L, T>(
+        &mut self,
+        agent: &A,
+        ports: TurnPorts<'_, S, C, I, L, T>,
+        plan: TurnPlan,
+    ) -> Result<TurnState, TurnRunError>
+    where
+        S: StoragePort,
+        C: Clock,
+        I: IdGenerator,
+        L: LivePublisher,
+        T: Timer,
+    {
         let TurnPlan {
             turn,
             assistant_name,
@@ -152,7 +200,17 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             spec,
             blocks,
         } = plan;
+        let (signals_tx, mut signals) = mpsc::unbounded();
+        let (cancel_tx, mut cancels) = mpsc::unbounded();
+        self.slot.open(TurnInbox {
+            turn_id: turn.id,
+            signals: signals_tx,
+            cancel: cancel_tx,
+        });
+        let slot = self.slot.clone();
+        let _guard = SlotGuard(&slot);
         let decider = self.decider.clone();
+        let timer = ports.timer;
         let mut run = TurnRun::new(turn, ports, &*decider);
 
         let mut updates = match self.start(agent, spec, blocks).await {
@@ -164,27 +222,37 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         };
         run.started(assistant_name, context_project_id).await?;
 
-        let Self { session, inbox, .. } = self;
-        let session = session.as_ref().expect("start 成功后一定有会话");
+        let session = self.session.as_ref().expect("start 成功后一定有会话");
+        let mut sched = Scheduler::default();
         let end = loop {
             let mut next = pin!(updates.next());
             let update = loop {
-                match poll_fn(|cx| poll_input(next.as_mut(), inbox, cx)).await {
+                if sched.flush_timer.is_none()
+                    && let Some(delay) = run.checkpoint_delay()
+                {
+                    sched.flush_timer = Some(Box::pin(timer.sleep(delay)));
+                }
+                let input =
+                    poll_fn(|cx| sched.poll(next.as_mut(), &mut signals, &mut cancels, cx)).await;
+                match input {
                     Input::Update(update) => break update,
-                    Input::Signal(signal) => run.on_signal(signal, session).await?,
+                    Input::Cancel => run.on_cancel(session).await?,
+                    Input::FlushDue => run.checkpoint().await?,
+                    Input::Signal(signal) => run.on_signal(signal).await?,
                 }
             };
-            match update {
-                Some(update) => {
-                    if let Some(end) = run.on_update(update).await? {
-                        break end;
-                    }
+            let end = match update {
+                Some(update) => run.on_update(update).await?,
+                None => Some(End::Failed(AgentError::Protocol {
+                    message: "运行时的更新流在回合结束前断了".into(),
+                })),
+            };
+            if let Some(end) = end {
+                // 结束前先处理已经收到的取消：用户要的是停下
+                if cancels.try_recv().is_ok() {
+                    run.on_cancel(session).await?;
                 }
-                None => {
-                    break End::Failed(AgentError::Protocol {
-                        message: "运行时的更新流在回合结束前断了".into(),
-                    });
-                }
+                break end;
             }
         };
         let process_gone = matches!(&end, End::Failed(AgentError::ProcessExited { .. }));
@@ -193,11 +261,10 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             // 丢弃即结束进程树；下一回合按记下的 id 续接
             self.session = None;
         }
-        self.drain_stale_signals();
         Ok(run.turn.state)
     }
 
-    /// 确保有会话并发出 prompt。已有会话的进程退出了就续接一次再发。
+    /// 确保有会话并发出 prompt。已有会话的进程退出了（崩溃、取消时被结束）就续接一次再发。
     async fn start(
         &mut self,
         agent: &A,
@@ -212,7 +279,7 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         }
         spec.resume = self.resume.clone();
         let gate = PermissionGate {
-            mailbox: self.mailbox.clone(),
+            slot: self.slot.clone(),
             decider: self.decider.clone(),
         };
         let session = agent.open_session(spec, gate).await?;
@@ -220,38 +287,85 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         let session = self.session.insert(session);
         session.prompt(blocks).await
     }
-
-    /// 清掉不属于任何进行中回合的输入：等审批的答「没有回合」，取消请求丢弃。
-    fn drain_stale_signals(&mut self) {
-        while let Ok(signal) = self.inbox.try_recv() {
-            match signal {
-                Signal::PermissionAsked { reply } => {
-                    let _ = reply.send(None);
-                }
-                // 丢掉回执，权限处理方按「回合已结束」拒绝
-                Signal::PermissionDecided { .. } | Signal::Cancel(_) => {}
-            }
-        }
-    }
 }
 
 enum Input {
     Update(Option<AgentUpdate>),
+    Cancel,
+    FlushDue,
     Signal(Signal),
 }
 
-/// 同时等更新流和信箱，更新优先。信箱不会关闭：会话线自己持有一个发送端。
-fn poll_input<F: Future<Output = Option<AgentUpdate>>>(
-    next: Pin<&mut F>,
-    inbox: &mut mpsc::UnboundedReceiver<Signal>,
-    cx: &mut Context<'_>,
-) -> Poll<Input> {
-    if let Poll::Ready(update) = next.poll(cx) {
-        return Poll::Ready(Input::Update(update));
-    }
-    match Pin::new(inbox).poll_next(cx) {
-        Poll::Ready(Some(signal)) => Poll::Ready(Input::Signal(signal)),
-        Poll::Ready(None) | Poll::Pending => Poll::Pending,
+/// 多路输入的调度状态，见模块文档的优先次序。
+#[derive(Default)]
+struct Scheduler<'t> {
+    flush_timer: Option<Pin<Box<dyn Future<Output = ()> + Send + 't>>>,
+    /// 连续处理的更新条数
+    burst: u32,
+    /// 收到、还没受理的「开始等审批」，以及受理前已先处理的更新条数
+    deferred_ask: Option<Signal>,
+    drained: u32,
+    /// 这一轮连续更新之后是否已经让出过
+    yielded: bool,
+}
+
+impl Scheduler<'_> {
+    fn poll<F: Future<Output = Option<AgentUpdate>>>(
+        &mut self,
+        mut next: Pin<&mut F>,
+        signals: &mut mpsc::UnboundedReceiver<Signal>,
+        cancels: &mut mpsc::UnboundedReceiver<()>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Input> {
+        // 两个信箱的发送端在回合信箱里，回合结束前不会全部关闭；关闭了也只是不再有输入
+        if let Poll::Ready(Some(())) = Pin::new(cancels).poll_next(cx) {
+            return Poll::Ready(Input::Cancel);
+        }
+        if let Some(timer) = self.flush_timer.as_mut()
+            && timer.as_mut().poll(cx).is_ready()
+        {
+            self.flush_timer = None;
+            return Poll::Ready(Input::FlushDue);
+        }
+        loop {
+            if self.deferred_ask.is_some() {
+                if self.drained < MAX_DRAIN
+                    && let Poll::Ready(update) = next.as_mut().poll(cx)
+                {
+                    self.drained += 1;
+                    return Poll::Ready(Input::Update(update));
+                }
+                self.drained = 0;
+                return Poll::Ready(Input::Signal(self.deferred_ask.take().expect("刚检查过")));
+            }
+            let signal_first = self.burst >= FAIR_BURST;
+            if !signal_first && let Poll::Ready(update) = next.as_mut().poll(cx) {
+                self.burst += 1;
+                return Poll::Ready(Input::Update(update));
+            }
+            if signal_first && !self.yielded {
+                // 更新一直就绪时主动让出一次，别的任务（含运行时的其他会话）才有机会跑
+                self.yielded = true;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            self.yielded = false;
+            self.burst = 0;
+            match Pin::new(&mut *signals).poll_next(cx) {
+                Poll::Ready(Some(ask @ Signal::PermissionAsked { .. })) => {
+                    // 先把此刻已就绪的更新处理完再受理，下一轮循环走上面的分支
+                    self.deferred_ask = Some(ask);
+                    continue;
+                }
+                Poll::Ready(Some(signal)) => return Poll::Ready(Input::Signal(signal)),
+                Poll::Ready(None) | Poll::Pending => {}
+            }
+            if signal_first && let Poll::Ready(update) = next.as_mut().poll(cx) {
+                self.burst += 1;
+                return Poll::Ready(Input::Update(update));
+            }
+            return Poll::Pending;
+        }
     }
 }
 
@@ -262,28 +376,29 @@ enum End {
 }
 
 /// 一个进行中的回合：状态、正文、用量都在这里，只有它写事件。
-struct TurnRun<'a, S, C, I, L, D> {
+struct TurnRun<'a, S, C, I, L, T, D> {
     turn: Turn,
-    ports: TurnPorts<'a, S, C, I, L>,
+    ports: TurnPorts<'a, S, C, I, L, T>,
     decider: &'a D,
     message_id: Option<MessageId>,
     body: String,
     usage: Usage,
-    /// 还没答复的权限请求数；回到 0 才离开 `WaitingApproval`
-    pending_permissions: u32,
+    /// 已受理、还没有采纳结果的审批票；空了才离开 `WaitingApproval`
+    pending: BTreeSet<Ticket>,
     last_checkpoint: Option<MonotonicInstant>,
     checkpointed_len: usize,
 }
 
-impl<'a, S, C, I, L, D> TurnRun<'a, S, C, I, L, D>
+impl<'a, S, C, I, L, T, D> TurnRun<'a, S, C, I, L, T, D>
 where
     S: StoragePort,
     C: Clock,
     I: IdGenerator,
     L: LivePublisher,
+    T: Timer,
     D: PermissionDecider,
 {
-    fn new(turn: Turn, ports: TurnPorts<'a, S, C, I, L>, decider: &'a D) -> Self {
+    fn new(turn: Turn, ports: TurnPorts<'a, S, C, I, L, T>, decider: &'a D) -> Self {
         Self {
             turn,
             ports,
@@ -291,7 +406,7 @@ where
             message_id: None,
             body: String::new(),
             usage: Usage::default(),
-            pending_permissions: 0,
+            pending: BTreeSet::new(),
             last_checkpoint: None,
             checkpointed_len: 0,
         }
@@ -431,62 +546,86 @@ where
             offset,
             text,
         });
-        let now = self.ports.clock.monotonic();
-        let due = self
-            .last_checkpoint
-            .is_none_or(|last| now.0.saturating_sub(last.0) >= CHECKPOINT_INTERVAL_NANOS);
-        if due && self.body.len() > self.checkpointed_len {
-            self.ports
-                .store
-                .checkpoint_message(message_id, self.body.len() as u64, &self.body)
-                .await?;
-            self.last_checkpoint = Some(now);
-            self.checkpointed_len = self.body.len();
+        if self.checkpoint_delay() == Some(Duration::ZERO) {
+            self.checkpoint().await?;
         }
         Ok(())
     }
 
-    async fn on_signal<Sess: AgentSession>(
-        &mut self,
-        signal: Signal,
-        session: &Sess,
-    ) -> Result<(), TurnRunError> {
+    /// 有未落盘的正文时，离下一次检查点还有多久（已到期为 0）；没有就是 `None`。
+    fn checkpoint_delay(&self) -> Option<Duration> {
+        if self.body.len() <= self.checkpointed_len {
+            return None;
+        }
+        let Some(last) = self.last_checkpoint else {
+            return Some(Duration::ZERO);
+        };
+        let elapsed = Duration::from_nanos(self.ports.clock.monotonic().0.saturating_sub(last.0));
+        Some(CHECKPOINT_INTERVAL.saturating_sub(elapsed))
+    }
+
+    /// 把未落盘的正文写成检查点。
+    async fn checkpoint(&mut self) -> Result<(), TurnRunError> {
+        let Some(message_id) = self.message_id else {
+            return Ok(());
+        };
+        if self.body.len() <= self.checkpointed_len {
+            return Ok(());
+        }
+        self.ports
+            .store
+            .checkpoint_message(message_id, self.body.len() as u64, &self.body)
+            .await?;
+        self.last_checkpoint = Some(self.ports.clock.monotonic());
+        self.checkpointed_len = self.body.len();
+        Ok(())
+    }
+
+    async fn on_cancel<Sess: AgentSession>(&mut self, session: &Sess) -> Result<(), TurnRunError> {
+        if matches!(
+            self.turn.state,
+            TurnState::Running | TurnState::WaitingApproval
+        ) {
+            let events = self.step(TurnTrigger::Cancel, None).await?;
+            self.commit(events).await?;
+            // 等着的审批不再有结果可采纳
+            self.pending.clear();
+            // 通知发不出去也没关系：适配器到时结束进程树，更新流照样以取消收尾
+            let _ = session.cancel().await;
+        }
+        Ok(())
+    }
+
+    async fn on_signal(&mut self, signal: Signal) -> Result<(), TurnRunError> {
         match signal {
-            Signal::PermissionAsked { reply } => match self.turn.state {
-                TurnState::Running => {
-                    let events = self.step(TurnTrigger::PermissionAsked, None).await?;
-                    self.commit(events).await?;
-                    self.pending_permissions += 1;
-                    let _ = reply.send(Some(self.turn.id));
-                }
-                TurnState::WaitingApproval => {
-                    self.pending_permissions += 1;
-                    let _ = reply.send(Some(self.turn.id));
-                }
-                // 正在取消：不再受理新的权限请求，处理方按「回合已结束」拒绝
-                _ => {
+            Signal::PermissionAsked { reply } => {
+                let accept = match self.turn.state {
+                    TurnState::Running => {
+                        let events = self.step(TurnTrigger::PermissionAsked, None).await?;
+                        self.commit(events).await?;
+                        true
+                    }
+                    TurnState::WaitingApproval => true,
+                    // 正在取消：不再受理新的权限请求，处理方按「回合已结束」拒绝
+                    _ => false,
+                };
+                if accept {
+                    let ticket = new_ticket();
+                    self.pending.insert(ticket);
+                    let _ = reply.send(Some(ticket));
+                } else {
                     let _ = reply.send(None);
                 }
-            },
-            Signal::PermissionDecided { ack } => {
-                self.pending_permissions = self.pending_permissions.saturating_sub(1);
-                if self.turn.state == TurnState::WaitingApproval && self.pending_permissions == 0 {
+            }
+            Signal::PermissionDecided { ticket, ack } => {
+                // 只采纳这一回合、还在等审批、确有这张票的结果；否则拒绝且不动计数
+                let accepted =
+                    self.turn.state == TurnState::WaitingApproval && self.pending.remove(&ticket);
+                if accepted && self.pending.is_empty() {
                     let events = self.step(TurnTrigger::PermissionDecided, None).await?;
                     self.commit(events).await?;
                 }
-                let _ = ack.send(());
-            }
-            Signal::Cancel(turn_id) => {
-                let cancellable = matches!(
-                    self.turn.state,
-                    TurnState::Running | TurnState::WaitingApproval
-                );
-                if turn_id == self.turn.id && cancellable {
-                    let events = self.step(TurnTrigger::Cancel, None).await?;
-                    self.commit(events).await?;
-                    // 通知发不出去也没关系：适配器 3 秒后结束进程树，更新流照样以取消收尾
-                    let _ = session.cancel().await;
-                }
+                let _ = ack.send(accepted);
             }
         }
         Ok(())
@@ -498,6 +637,7 @@ where
         let state = self.turn.state;
         match end {
             End::Finished(TurnOutcome::Completed) => {
+                self.pending.clear();
                 if state == TurnState::WaitingApproval {
                     events.extend(self.step(TurnTrigger::PermissionDecided, None).await?);
                 }

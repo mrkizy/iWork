@@ -12,3 +12,6 @@ iwork-ports.workspace = true
 thiserror.workspace = true
 futures-channel.workspace = true
 futures-core.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

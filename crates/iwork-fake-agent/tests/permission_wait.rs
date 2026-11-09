@@ -78,6 +78,7 @@ struct Harness {
     clock: RealClock,
     ids: CountingIds,
     live: Deltas,
+    timer: TokioTimer,
 }
 
 fn start(fake: &Fake) -> Run {
@@ -86,6 +87,7 @@ fn start(fake: &Fake) -> Run {
         clock: RealClock::default(),
         ids: CountingIds::default(),
         live: Deltas::default(),
+        timer: TokioTimer,
     });
     let decider = Arc::new(Gated::new());
     let mut line = SessionLine::new(decider.clone(), None);
@@ -107,6 +109,7 @@ fn start(fake: &Fake) -> Run {
                 clock: &h.clock,
                 ids: &h.ids,
                 live: &h.live,
+                timer: &h.timer,
             };
             line.run_turn(&runtime, ports, plan).await.unwrap()
         })

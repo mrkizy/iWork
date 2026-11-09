@@ -16,7 +16,7 @@ use iwork_domain::message::MessageBody;
 use iwork_domain::session::{AllowWrite, NetworkPolicy, SessionConstraints, SessionToolSet};
 use iwork_domain::turn::{Turn, TurnKind, TurnState};
 use iwork_ports::agent::{ContentBlock, SessionSpec};
-use iwork_ports::clock::{Clock, IdGenerator, MonotonicInstant};
+use iwork_ports::clock::{Clock, IdGenerator, MonotonicInstant, Timer};
 use iwork_ports::live::{LivePublisher, MessageDelta};
 use iwork_ports::store::{
     CommitReceipt, CommitRequest, DeliveryState, EventFilter, OutboxId, OutboxItem, RebuildReport,
@@ -132,6 +132,16 @@ impl Clock for RealClock {
     }
     fn monotonic(&self) -> MonotonicInstant {
         MonotonicInstant(self.start.elapsed().as_nanos() as u64)
+    }
+}
+
+/// tokio 定时器。
+#[derive(Default)]
+pub struct TokioTimer;
+
+impl Timer for TokioTimer {
+    async fn sleep(&self, duration: std::time::Duration) {
+        tokio::time::sleep(duration).await;
     }
 }
 

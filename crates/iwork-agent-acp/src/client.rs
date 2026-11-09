@@ -5,7 +5,12 @@
 //! - `session/request_permission` 在派发循环外的任务里交给 [`PermissionHandler`]，不占住派发循环，
 //!   所以等审批期间其他消息照常处理，而且转给处理方之前，它之前到达的更新都已进了队列（顺序保证，
 //!   编排核心据此把「工具调用开始」排在「等待审批」之前）；
-//! - prompt 响应到达时推最后一条（结束或失败），然后关闭队列。
+//! - prompt 响应到达时推最后一条（结束或失败），然后关闭队列；
+//! - 等任何请求的响应时都同时等进程退出：进程的后代可能还拿着 stdout，读端收不到 EOF，
+//!   不能只靠连接断开发现崩溃；
+//! - 取消：发 `session/cancel`，等 prompt 结束（最多 3 秒），然后**总是**结束整棵进程树并确认清空，
+//!   才推「已取消」。运行时配合取消时它起的子进程也可能还在跑，取消的完成条件是整棵树没了；
+//!   会话随之失效，下一回合按运行时会话 id 续接。
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -25,16 +30,20 @@ use iwork_ports::agent::{
     RuntimeCapabilities, SessionSpec, TurnOutcome, UpdateStream,
 };
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::convert::{self, CLI_KEY, META_KEY, UpdateMapper};
 use crate::diagnostics::RawLog;
-use crate::process::{GRACE_PERIOD, ResourceSample, RuntimeLaunch, SupervisedProcess};
+use crate::process::{GRACE_PERIOD, Pipes, ResourceSample, RuntimeLaunch, SupervisedProcess};
 use crate::registry::{CliInfo, IncompatibleCombo, KNOWN_INCOMPATIBLE, RuntimeRegistration};
 
 /// 出错后等进程退出的时限：用来区分「进程死了」和「协议出错」。
 const EXIT_PROBE: Duration = Duration::from_secs(1);
+/// 运行时发来的单条消息（一行）的字节上限。超过即视为运行时故障：结束进程树，不再读。
+pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+/// 开会话时 `spec.mcp` 非空的报错：MCP 的启动配置与密钥随本机导入功能（T10）接入。
+pub const MCP_UNSUPPORTED: &str = "M1 本机导入功能未接入前不支持挂载 MCP";
 
 /// 一种 ACP 运行时：怎么启动它，以及哪些版本组合不许运行。
 #[derive(Debug, Clone)]
@@ -64,23 +73,21 @@ impl AcpRuntime {
         &self,
         handler: Option<Arc<H>>,
     ) -> Result<Connection, AgentError> {
-        let (process, stdin, stdout) =
+        let (process, pipes) =
             SupervisedProcess::spawn(&self.launch).map_err(|e| AgentError::Protocol {
                 message: e.to_string(),
             })?;
         let process = Arc::new(process);
         let shared = Arc::new(Shared::default());
-        let cx = start_connection(stdin, stdout, shared.clone(), handler).await?;
+        let cx = start_connection(pipes, shared.clone(), process.clone(), handler).await?;
         let init = InitializeRequest::new(ProtocolVersion::V1)
             .client_capabilities(ClientCapabilities::new())
             .client_info(Implementation::new(
                 "iwork",
                 env!("CARGO_PKG_VERSION").to_string(),
             ));
-        let response = match cx.connection.send_request(init).block_task().await {
-            Ok(r) => r,
-            Err(e) => return Err(failure(&process, "initialize", e).await),
-        };
+        let sent = cx.connection.send_request(init).block_task();
+        let response = guarded(&process, &shared, &cx, "initialize", sent).await?;
         let registration = registration_of(&response).map_err(|message| {
             process.kill_tree();
             AgentError::Protocol { message }
@@ -136,9 +143,9 @@ impl AgentPort for AcpRuntime {
 /// 建会话：有旧会话 id 就续接（`session/load`），否则新建。会话配置放进 `_meta`。
 async fn open(conn: &Connection, spec: &SessionSpec) -> Result<String, AgentError> {
     if !spec.mcp.is_empty() {
-        // MCP 服务的启动配置（命令、密钥）随本机导入功能接入，这里还没有可下发的内容
+        // 端口只给了 id 与名字；启动配置与密钥随本机导入功能（T10）接入后才能透传
         return Err(AgentError::Protocol {
-            message: "暂不支持给会话挂 MCP 服务".into(),
+            message: MCP_UNSUPPORTED.into(),
         });
     }
     let caps = &conn.init.agent_capabilities;
@@ -171,35 +178,66 @@ async fn open(conn: &Connection, spec: &SessionSpec) -> Result<String, AgentErro
             let req = LoadSessionRequest::new(SessionId::new(old.clone()), spec.cwd.clone())
                 .system_prompt(system_prompt)
                 .meta(meta);
-            match cx.send_request(req).block_task().await {
-                Ok(_) => Ok(old.clone()),
-                Err(e) => Err(failure(&conn.process, "session/load", e).await),
-            }
+            let sent = cx.send_request(req).block_task();
+            guarded(&conn.process, &conn.shared, &conn.cx, "session/load", sent).await?;
+            Ok(old.clone())
         }
         None => {
             let req = NewSessionRequest::new(spec.cwd.clone())
                 .system_prompt(system_prompt)
                 .meta(meta);
-            match cx.send_request(req).block_task().await {
-                Ok(r) => Ok(r.session_id.0.to_string()),
-                Err(e) => Err(failure(&conn.process, "session/new", e).await),
-            }
+            let sent = cx.send_request(req).block_task();
+            let r = guarded(&conn.process, &conn.shared, &conn.cx, "session/new", sent).await?;
+            Ok(r.session_id.0.to_string())
         }
     }
 }
 
-/// 一次请求失败时判断原因：进程已经（或马上）退出就是进程退出，否则是协议错误。
-async fn failure(
+/// 等一个请求的响应，同时等进程退出。进程先退出就停掉连接、结束进程树，报进程退出。
+async fn guarded<T>(
     process: &SupervisedProcess,
+    shared: &Shared,
+    cx: &ConnectionHandle,
     method: &str,
-    error: agent_client_protocol::Error,
-) -> AgentError {
-    match process.wait_exit(EXIT_PROBE).await {
-        Some(exit) => AgentError::ProcessExited {
+    request: impl Future<Output = Result<T, agent_client_protocol::Error>>,
+) -> Result<T, AgentError> {
+    tokio::select! {
+        result = request => match result {
+            Ok(response) => Ok(response),
+            Err(e) => Err(failure(process, shared, method, &e).await),
+        },
+        exit = process.exited() => {
+            cx.stop();
+            process.kill_tree();
+            Err(exited(shared, method, &exit))
+        }
+    }
+}
+
+fn exited(shared: &Shared, method: &str, exit: &crate::process::ExitInfo) -> AgentError {
+    match shared.fatal() {
+        Some(reason) => AgentError::Protocol { message: reason },
+        None => AgentError::ProcessExited {
             message: format!("{method} 期间运行时退出（{}）", exit.description),
         },
+    }
+}
+
+/// 一次请求失败时判断原因：进程已经（或马上）退出就是进程退出，否则是协议错误。
+/// 只报方法名与错误码：错误说明由运行时给出，可能夹带正文或凭据，不进事件与日志。
+async fn failure(
+    process: &SupervisedProcess,
+    shared: &Shared,
+    method: &str,
+    error: &agent_client_protocol::Error,
+) -> AgentError {
+    if let Some(reason) = shared.fatal() {
+        return AgentError::Protocol { message: reason };
+    }
+    match process.wait_exit(EXIT_PROBE).await {
+        Some(exit) => exited(shared, method, &exit),
         None => AgentError::Protocol {
-            message: format!("{method} 失败：{error}"),
+            message: format!("{method} 失败（错误码 {:?}）", error.code),
         },
     }
 }
@@ -224,9 +262,10 @@ fn registration_of(init: &InitializeResponse) -> Result<RuntimeRegistration, Str
                     path: PathBuf::from(path),
                     version: version.into(),
                 }),
+                // 不回显收到的值：它来自运行时，内容不可信
                 _ => {
                     return Err(format!(
-                        "_meta.{META_KEY}.{CLI_KEY} 须同时有字符串 path 与 version：{v}"
+                        "_meta.{META_KEY}.{CLI_KEY} 须同时有字符串 path 与 version"
                     ));
                 }
             }
@@ -262,18 +301,32 @@ struct Connection {
     init: InitializeResponse,
 }
 
-/// 连接任务的句柄：`stop` 让连接任务收尾退出。
+/// 连接任务的句柄。
 #[derive(Debug)]
 struct ConnectionHandle {
     connection: ConnectionTo<Agent>,
-    stop: Mutex<Option<oneshot::Sender<()>>>,
+    stopper: Stopper,
+}
+
+/// 让连接任务收尾退出的开关，可交给别的任务；只生效一次。
+#[derive(Debug, Clone)]
+struct Stopper(Arc<Mutex<Option<oneshot::Sender<()>>>>);
+
+impl Stopper {
+    fn stop(&self) {
+        if let Some(tx) = self.0.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            let _ = tx.send(());
+        }
+    }
 }
 
 impl ConnectionHandle {
     fn stop(&self) {
-        if let Some(tx) = self.stop.lock().unwrap_or_else(|p| p.into_inner()).take() {
-            let _ = tx.send(());
-        }
+        self.stopper.stop();
+    }
+
+    fn stopper(&self) -> Stopper {
+        self.stopper.clone()
     }
 }
 
@@ -285,6 +338,8 @@ struct Shared {
     /// 每次取消加一；挂起的权限请求看到它变化就以「已取消」答复运行时
     cancel_epoch: watch::Sender<u64>,
     raw: RawLog,
+    /// 连接层发现的致命错误（如消息超长），优先于「进程退出」报给上层
+    fatal: Mutex<Option<String>>,
 }
 
 #[derive(Debug)]
@@ -293,11 +348,26 @@ struct ActiveTurn {
     tx: mpsc::UnboundedSender<AgentUpdate>,
     mapper: UpdateMapper,
     cancel_requested: bool,
+    /// prompt 请求已有结果（响应、失败或进程退出）；取消收尾等它
+    prompt_done: watch::Sender<bool>,
 }
 
 impl Shared {
     fn lock_turn(&self) -> std::sync::MutexGuard<'_, Option<ActiveTurn>> {
         self.turn.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn fatal(&self) -> Option<String> {
+        self.fatal.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// 推回合的最后一条更新并结束这一回合；回合已换了就什么都不做。
+    fn finish_turn(&self, turn_id: u64, last: AgentUpdate) {
+        let mut turn = self.lock_turn();
+        if turn.as_ref().is_some_and(|t| t.id == turn_id) {
+            let active = turn.take().expect("刚检查过");
+            let _ = active.tx.send(last);
+        }
     }
 
     fn on_update(&self, notification: SessionNotification) {
@@ -325,24 +395,101 @@ impl PermissionHandler for NoPermissions {
     }
 }
 
+/// 按行读运行时的输出，单行超过 `limit` 字节时报错（不把超长内容读进内存）。
+async fn read_frame<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    limit: usize,
+) -> std::io::Result<Option<String>> {
+    let mut line = Vec::new();
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            return Ok(if line.is_empty() {
+                None
+            } else {
+                Some(String::from_utf8_lossy(&line).into_owned())
+            });
+        }
+        let (part, done) = match chunk.iter().position(|b| *b == b'\n') {
+            Some(i) => (&chunk[..i], Some(i + 1)),
+            None => (chunk, None),
+        };
+        if line.len() + part.len() > limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("运行时发来的单条消息超过 {limit} 字节"),
+            ));
+        }
+        line.extend_from_slice(part);
+        let used = done.unwrap_or(chunk.len());
+        reader.consume(used);
+        if done.is_some() {
+            let text = String::from_utf8(line).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "运行时发来的消息不是 UTF-8",
+                )
+            })?;
+            return Ok(Some(text));
+        }
+    }
+}
+
+/// 读掉运行时的 stderr，只记每行长度：内容可能是任何东西，不进后台服务的日志。
+async fn drain_stderr<R: AsyncRead + Unpin>(mut stderr: R, shared: Arc<Shared>) {
+    let mut buf = [0u8; 8192];
+    let mut line_bytes = 0usize;
+    loop {
+        match stderr.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                for b in &buf[..n] {
+                    if *b == b'\n' {
+                        shared.raw.record_stderr(line_bytes);
+                        line_bytes = 0;
+                    } else {
+                        line_bytes += 1;
+                    }
+                }
+            }
+        }
+    }
+    if line_bytes > 0 {
+        shared.raw.record_stderr(line_bytes);
+    }
+}
+
 /// 把运行时的 stdin / stdout 接成 ACP 连接，在后台任务里跑；返回连接句柄。
 async fn start_connection<H: PermissionHandler + 'static>(
-    stdin: tokio::process::ChildStdin,
-    stdout: tokio::process::ChildStdout,
+    pipes: Pipes,
     shared: Arc<Shared>,
+    process: Arc<SupervisedProcess>,
     handler: Option<Arc<H>>,
 ) -> Result<ConnectionHandle, AgentError> {
-    let raw = shared.clone();
-    let incoming = futures::stream::unfold(BufReader::new(stdout).lines(), move |mut lines| {
-        let raw = raw.clone();
+    let Pipes {
+        stdin,
+        stdout,
+        stderr,
+    } = pipes;
+    tokio::spawn(drain_stderr(stderr, shared.clone()));
+    let reader = shared.clone();
+    let incoming = futures::stream::unfold(BufReader::new(stdout), move |mut out| {
+        let shared = reader.clone();
+        let process = process.clone();
         async move {
-            match lines.next_line().await {
+            match read_frame(&mut out, MAX_FRAME_BYTES).await {
                 Ok(Some(line)) => {
-                    raw.raw.record(&line);
-                    Some((Ok(line), lines))
+                    shared.raw.record_incoming(&line);
+                    Some((Ok(line), out))
                 }
                 Ok(None) => None,
-                Err(e) => Some((Err(e), lines)),
+                Err(e) => {
+                    // 读坏了（超长、非 UTF-8）就不再信任这个运行时
+                    shared.raw.record_oversize(MAX_FRAME_BYTES);
+                    *shared.fatal.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.to_string());
+                    process.kill_tree();
+                    Some((Err(e), out))
+                }
             }
         }
     });
@@ -410,7 +557,7 @@ async fn start_connection<H: PermissionHandler + 'static>(
     })?;
     Ok(ConnectionHandle {
         connection,
-        stop: Mutex::new(Some(stop_tx)),
+        stopper: Stopper(Arc::new(Mutex::new(Some(stop_tx)))),
     })
 }
 
@@ -490,45 +637,54 @@ impl AgentSession for AcpSession {
                 tx,
                 mapper: UpdateMapper::default(),
                 cancel_requested: false,
+                prompt_done: watch::channel(false).0,
             });
         }
         let request = PromptRequest::new(
             SessionId::new(self.session_id.clone()),
             blocks.iter().map(convert::content_to_acp).collect(),
         );
-        let sent = self.conn.cx.connection.send_request(request);
+        let sent = self.conn.cx.connection.send_request(request).block_task();
         let shared = self.conn.shared.clone();
         let process = self.conn.process.clone();
+        let stopper = self.conn.cx.stopper();
         tokio::spawn(async move {
-            let result = sent.block_task().await;
-            let cancelled = shared
-                .lock_turn()
-                .as_ref()
-                .is_some_and(|t| t.id == turn_id && t.cancel_requested);
-            let last = match result {
-                Ok(response) => AgentUpdate::Finished(convert::outcome_of(response.stop_reason)),
-                // 取消后超时被结束进程树，请求随之失败：这是取消的结局，不是故障
-                Err(_) if cancelled => AgentUpdate::Finished(TurnOutcome::Cancelled),
-                Err(e) => AgentUpdate::Failed(failure(&process, "session/prompt", e).await),
+            let last = tokio::select! {
+                result = sent => match result {
+                    Ok(response) => AgentUpdate::Finished(convert::outcome_of(response.stop_reason)),
+                    Err(e) => AgentUpdate::Failed(failure(&process, &shared, "session/prompt", &e).await),
+                },
+                exit = process.exited() => {
+                    stopper.stop();
+                    process.kill_tree();
+                    AgentUpdate::Failed(exited(&shared, "session/prompt", &exit))
+                }
             };
-            let mut turn = shared.lock_turn();
-            if turn.as_ref().is_some_and(|t| t.id == turn_id) {
-                let active = turn.take().expect("刚检查过");
-                let _ = active.tx.send(last);
+            {
+                let turn = shared.lock_turn();
+                if let Some(active) = turn.as_ref().filter(|t| t.id == turn_id)
+                    && active.cancel_requested
+                {
+                    // 取消收尾由取消任务做：它要等整棵树结束才推「已取消」
+                    active.prompt_done.send_replace(true);
+                    return;
+                }
             }
+            shared.finish_turn(turn_id, last);
         });
         Ok(AcpUpdates { rx })
     }
 
     async fn cancel(&self) -> Result<(), AgentError> {
-        let turn_id = {
+        let (turn_id, mut prompt_done) = {
             let mut turn = self.conn.shared.lock_turn();
             match turn.as_mut() {
-                Some(active) => {
+                Some(active) if !active.cancel_requested => {
                     active.cancel_requested = true;
-                    active.id
+                    (active.id, active.prompt_done.subscribe())
                 }
-                None => return Ok(()),
+                // 没有进行中的回合，或已经在取消
+                _ => return Ok(()),
             }
         };
         self.conn.shared.cancel_epoch.send_modify(|e| *e += 1);
@@ -539,18 +695,23 @@ impl AgentSession for AcpSession {
             .send_notification(CancelNotification::new(SessionId::new(
                 self.session_id.clone(),
             )));
-        // 不管通知有没有发出去，3 秒后回合还没结束就结束进程树（技术设计 6.3 第 5 条）
+        // 等 prompt 结束（最多 3 秒，技术设计 6.3 第 5 条），然后不论运行时是否配合，都结束整棵
+        // 进程树并确认清空：运行时起的子进程不会因为 prompt 结束而停下
         let shared = self.conn.shared.clone();
         let process = self.conn.process.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(GRACE_PERIOD).await;
-            let still_running = shared.lock_turn().as_ref().is_some_and(|t| t.id == turn_id);
-            if still_running {
-                process.kill_tree();
-            }
+            let _ = tokio::time::timeout(GRACE_PERIOD, prompt_done.wait_for(|done| *done)).await;
+            let last = if process.kill_tree_and_wait().await {
+                AgentUpdate::Finished(TurnOutcome::Cancelled)
+            } else {
+                AgentUpdate::Failed(AgentError::ProcessExited {
+                    message: "取消后运行时进程树没能在时限内结束".into(),
+                })
+            };
+            shared.finish_turn(turn_id, last);
         });
         notified.map_err(|e| AgentError::Protocol {
-            message: format!("发送取消通知失败：{e}"),
+            message: format!("发送取消通知失败（错误码 {:?}）", e.code),
         })
     }
 

@@ -137,6 +137,26 @@ async fn resume_uses_session_load_and_requires_capability() {
     assert!(err.to_string().contains("不支持续接会话"), "{err}");
 }
 
+/// 本机导入功能接入前，会话挂 MCP 报可读错误，且不发出 session/new（透传移交 T10）。
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_is_rejected_until_local_import_lands() {
+    let fake = Fake::new(&one_text_turn(json!({})));
+    let mut s = spec(fake.dir.path());
+    s.mcp = vec![iwork_ports::agent::McpServerRef {
+        id: iwork_domain::event::McpServerId("m1".into()),
+        name: "filesystem".into(),
+    }];
+    let err = AcpRuntime::new(fake.launch.clone())
+        .open_session(s, AllowAll)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "与运行时通信出错：M1 本机导入功能未接入前不支持挂载 MCP"
+    );
+    assert!(fake.params_of("session/new").is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn system_prompt_requires_capability() {
     let fake = Fake::new(&one_text_turn(json!({ "system_prompt": false })));

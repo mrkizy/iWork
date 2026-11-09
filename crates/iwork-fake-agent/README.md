@@ -80,7 +80,8 @@ iwork-fake-agent --script <脚本.json> [--record <记录.jsonl>]
 | `type` | 字段 | 行为 |
 | --- | --- | --- |
 | `text` | `text`；`chunk_chars`（每片字符数，不填整段一片）；`rate_per_sec`（每秒片数，不填不限速） | 以 `agent_message_chunk` 输出正文 |
-| `repeat_text` | `chunk`、`count`、`rate_per_sec` | 同一片正文输出 `count` 次，用于输出速率与延迟基准（如 100 片段/秒） |
+| `repeat_text` | `chunk`、`count`、`rate_per_sec`、`stamp`（默认 false） | 同一片正文输出 `count` 次，用于输出速率与延迟基准（如 100 片段/秒）；`stamp` 为真时每片前加「发出时刻（Unix 纪元纳秒）`\|`」，接收方据此算延迟 |
+| `stderr` | `text` | 往 stderr 写一行（后台服务只记行长度，不记内容） |
 | `tool_call` | `id`、`name`、`title`（默认同 `name`）、`input`（任意 JSON，作为 `rawInput`） | 发 `tool_call`，状态 `in_progress` |
 | `tool_result` | `id`、`ok`、`output` | 发 `tool_call_update`，状态 `completed` 或 `failed`，`output` 作为文字内容 |
 | `permission` | `tool_call_id`、`allowed`（步骤数组）、`denied`（步骤数组） | 发 `session/request_permission`（带上同 id 的 `tool_call` 步骤给出的名字、标题与输入；选项：允许一次 `allow-once`、拒绝一次 `reject-once`），**一直等到客户端答复**；选了允许走 `allowed`，选了拒绝走 `denied`，答「已取消」按取消结束 |
