@@ -78,6 +78,7 @@ sample_types! {
     SessionConstraints => [b::session_constraints],
     SessionToolSet => [b::session_tool_set],
     SessionModel => [b::session_model],
+    SessionSetup => [b::session_setup],
     TransientEvent => [
         b::transient_message_delta,
         b::transient_tool_output_delta,
@@ -137,6 +138,8 @@ sample_types! {
         b::ev_mcp_secret_set,
         b::ev_global_settings_changed,
         b::ev_recovery_completed,
+        // 以下是后加的样本：只能追加在末尾，编号才不会挪动
+        b::ev_approval_voided_turn_failed,
     ],
 }
 

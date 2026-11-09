@@ -102,6 +102,9 @@ pub struct PermissionRequest {
     pub raw_input: RawToolInput,
     /// 运行时请求绕过沙箱
     pub bypass_sandbox: bool,
+    /// 这次请求之前，适配器在本回合更新流里已交出的更新条数。编排处理完这么多条更新才受理
+    /// 这次请求，「工具调用开始」因此一定排在「等待审批」之前，不管更新流里积压了多少
+    pub updates_before: u64,
 }
 
 /// 对权限请求的答复。

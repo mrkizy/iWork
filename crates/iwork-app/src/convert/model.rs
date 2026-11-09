@@ -72,6 +72,7 @@ enum_pair!(void_reason_to_proto, void_reason_from_proto, VoidReason, pb::VoidRea
     VoidReason::ConversationDeleted => pb::VoidReason::ConversationDeleted,
     VoidReason::TurnAbandonedAfterInterrupt => pb::VoidReason::TurnAbandonedAfterInterrupt,
     VoidReason::AssistantDeleted => pb::VoidReason::AssistantDeleted,
+    VoidReason::TurnFailed => pb::VoidReason::TurnFailed,
 });
 enum_pair!(review_phase_to_proto, review_phase_from_proto, ReviewPhase, pb::ReviewState, {
     ReviewPhase::NotReviewed => pb::ReviewState::NotReviewed,

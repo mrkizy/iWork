@@ -26,6 +26,17 @@ ulid = { version = "3", default-features = false }
 proptest = "1"
 pollster = "1"
 tauri = "2.12"
+agent-client-protocol = "5.1"
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "sync", "time"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+futures-channel = "0.3"
+futures-core = "0.3"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
+libc = "0.2"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Diagnostics_ToolHelp"] }
+base64 = "0.22"
 tauri-build = "2.7"
 rusqlite = { version = "0.41", features = ["bundled"] }
 sha2 = "0.10"

@@ -24,3 +24,9 @@ pub trait Clock: Send + Sync {
 pub trait IdGenerator: Send + Sync {
     fn next(&self) -> RawUlid;
 }
+
+/// 定时器：只用来等一段时长。编排核心要按时间做事（如流式正文每 500ms 落一次检查点）但不绑定
+/// 异步运行时，由后台服务注入实现。
+pub trait Timer: Send + Sync {
+    fn sleep(&self, duration: std::time::Duration) -> impl std::future::Future<Output = ()> + Send;
+}

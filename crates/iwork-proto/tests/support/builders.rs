@@ -696,6 +696,14 @@ pub fn session_model() -> SessionModel {
     SessionModel { model: model_sel() }
 }
 
+pub fn session_setup() -> SessionSetup {
+    SessionSetup {
+        model: model_sel(),
+        constraints: Some(session_constraints()),
+        tool_set: Some(session_tool_set()),
+    }
+}
+
 // ---------- 不落盘的增量 ----------
 
 pub fn transient_message_delta() -> TransientEvent {
@@ -1008,6 +1016,13 @@ pub fn ev_approval_voided() -> DomainEvent {
     ev(E::ApprovalVoided(ApprovalVoided {
         approval_id: s(APPROVAL),
         reason: VoidReason::TurnAbandonedAfterInterrupt.into(),
+    }))
+}
+
+pub fn ev_approval_voided_turn_failed() -> DomainEvent {
+    ev(E::ApprovalVoided(ApprovalVoided {
+        approval_id: s(APPROVAL),
+        reason: VoidReason::TurnFailed.into(),
     }))
 }
 

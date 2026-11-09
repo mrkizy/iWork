@@ -753,6 +753,7 @@ fn fakes_are_callable() {
     assert_eq!(pollster::block_on(updates.next()), None);
     assert!(matches!(
         pollster::block_on(DenyAll.on_permission(PermissionRequest {
+            updates_before: 0,
             tool: iwork_domain::action::ToolRef("t".into()),
             raw_input: iwork_ports::agent::RawToolInput("{}".into()),
             bypass_sandbox: false,
