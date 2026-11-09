@@ -155,3 +155,77 @@ fn is_empty_dir(p: &Path) -> bool {
         .map(|mut d| d.next().is_none())
         .unwrap_or(false)
 }
+
+// ---------- 审查第 1 轮回归（F-2）：仓库自带的符号链接不能把读写带出项目根 ----------
+
+#[cfg(unix)]
+mod symlinks {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn assert_refused<T: std::fmt::Debug>(r: Result<T, ProjectFilesError>) {
+        match r {
+            Err(ProjectFilesError::SymlinkRefused { .. }) => {}
+            other => panic!("应拒绝符号链接，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn gitignore_symlink_is_refused_and_outside_file_untouched() {
+        let repo = tmp();
+        let outside = tmp();
+        let target = outside.path().join("victim");
+        std::fs::write(&target, "original\n").unwrap();
+        std::fs::create_dir(repo.path().join(".iwork")).unwrap();
+        symlink(&target, repo.path().join(".iwork/.gitignore")).unwrap();
+
+        assert_refused(
+            FsProjectMarkerStore
+                .write(repo.path(), id("01JC0000000000000000000004"))
+                .await,
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original\n");
+        assert!(!repo.path().join(".iwork/project.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn marker_file_symlink_is_refused_for_read_and_write() {
+        let repo = tmp();
+        let outside = tmp();
+        let target = outside.path().join("marker");
+        std::fs::write(&target, "id = \"01JC0000000000000000000005\"\n").unwrap();
+        std::fs::create_dir(repo.path().join(".iwork")).unwrap();
+        symlink(&target, marker_path(repo.path())).unwrap();
+
+        assert_refused(FsProjectMarkerStore.read(repo.path()).await);
+        assert_refused(
+            FsProjectMarkerStore
+                .write(repo.path(), id("01JC0000000000000000000006"))
+                .await,
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "id = \"01JC0000000000000000000005\"\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn marker_dir_symlink_is_refused_and_nothing_is_written_outside() {
+        let repo = tmp();
+        let outside = tmp();
+        symlink(outside.path(), repo.path().join(".iwork")).unwrap();
+        std::fs::write(
+            outside.path().join("project.toml"),
+            "id = \"01JC0000000000000000000007\"\n",
+        )
+        .unwrap();
+
+        assert_refused(FsProjectMarkerStore.read(repo.path()).await);
+        assert_refused(
+            FsProjectMarkerStore
+                .write(repo.path(), id("01JC0000000000000000000008"))
+                .await,
+        );
+        assert!(!outside.path().join(".gitignore").exists());
+    }
+}

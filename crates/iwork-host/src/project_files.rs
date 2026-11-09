@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 
 use iwork_domain::id::ProjectId;
 use iwork_ports::project_files::{ProjectDirectories, ProjectFilesError, ProjectMarkerStore};
-use tokio::io::AsyncWriteExt;
 
 /// 项目标记在仓库根下的相对位置。
 pub const MARKER_DIR: &str = ".iwork";
@@ -32,80 +31,124 @@ pub struct FsProjectMarkerStore;
 
 impl ProjectMarkerStore for FsProjectMarkerStore {
     async fn read(&self, root: &Path) -> Result<Option<ProjectId>, ProjectFilesError> {
-        let path = marker_path(root);
-        let text = match tokio::fs::read_to_string(&path).await {
-            Ok(text) => text,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(io(&path, &e)),
-        };
-        parse_marker(&text)
-            .map(Some)
-            .map_err(|message| ProjectFilesError::MarkerMalformed { path, message })
+        let root = root.to_owned();
+        blocking(move || {
+            let rel = marker_rel();
+            let Some(bytes) = iwork_rootfs::read_file(&root, &rel).map_err(|e| rooted(&root, e))?
+            else {
+                return Ok(None);
+            };
+            let path = root.join(&rel);
+            let text =
+                String::from_utf8(bytes).map_err(|_| ProjectFilesError::MarkerMalformed {
+                    path: path.clone(),
+                    message: "不是 UTF-8 文本".to_owned(),
+                })?;
+            parse_marker(&text)
+                .map(Some)
+                .map_err(|message| ProjectFilesError::MarkerMalformed { path, message })
+        })
+        .await
     }
 
     async fn write(&self, root: &Path, id: ProjectId) -> Result<(), ProjectFilesError> {
-        let dir = root.join(MARKER_DIR);
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|e| io(&dir, &e))?;
-        // 先忽略再写标记：中途失败也不会留下一个会被提交的标记
-        ensure_marker_ignored(&dir).await?;
-        let path = marker_path(root);
-        // create_new：已有文件时失败而不是覆盖（端口约定）
-        let file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .await;
-        let mut file = match file {
-            Ok(f) => f,
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-                return Err(ProjectFilesError::MarkerExists { path });
+        let root = root.to_owned();
+        blocking(move || {
+            iwork_rootfs::ensure_dir(&root, Path::new(MARKER_DIR)).map_err(|e| rooted(&root, e))?;
+            // 先忽略再写标记：中途失败也不会留下一个会被提交的标记
+            ensure_marker_ignored(&root)?;
+            let rel = marker_rel();
+            // 独占新建：已有文件（包括链接）时失败而不是覆盖（端口约定）
+            match iwork_rootfs::create_new_file(&root, &rel, render_marker(id).as_bytes()) {
+                Ok(()) => Ok(()),
+                Err(iwork_rootfs::RootedError::Io { source, .. })
+                    if source.kind() == ErrorKind::AlreadyExists =>
+                {
+                    Err(ProjectFilesError::MarkerExists {
+                        path: root.join(rel),
+                    })
+                }
+                Err(e) => Err(rooted(&root, e)),
             }
-            Err(e) => return Err(io(&path, &e)),
-        };
-        file.write_all(render_marker(id).as_bytes())
-            .await
-            .map_err(|e| io(&path, &e))?;
-        file.sync_all().await.map_err(|e| io(&path, &e))
+        })
+        .await
+    }
+}
+
+fn marker_rel() -> PathBuf {
+    Path::new(MARKER_DIR).join(MARKER_FILE)
+}
+
+/// 文件操作都是小文件的同步读写，放到阻塞线程池里做。
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, ProjectFilesError> + Send + 'static,
+) -> Result<T, ProjectFilesError> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ProjectFilesError::Io {
+            path: PathBuf::new(),
+            message: format!("后台线程异常结束：{e}"),
+        })?
+}
+
+/// `iwork-rootfs` 的错误 → 端口错误：碰到链接一律是 `SymlinkRefused`，点名是哪个路径。
+fn rooted(root: &Path, e: iwork_rootfs::RootedError) -> ProjectFilesError {
+    use iwork_rootfs::RootedError as R;
+    match e {
+        R::ThroughSymlink { link } => ProjectFilesError::SymlinkRefused { path: link },
+        R::FinalSymlink { path } => ProjectFilesError::SymlinkRefused { path },
+        R::InvalidRelative { path } | R::NotAFile { path } => ProjectFilesError::Io {
+            message: format!("{} 不是普通文件或目录", path.display()),
+            path: root.join(path),
+        },
+        R::Io { path, source } => ProjectFilesError::Io {
+            path,
+            message: source.to_string(),
+        },
     }
 }
 
 /// 让版本控制忽略项目标记：项目 ID 只属于本机这份工作副本，不随仓库共享（技术设计 8.2，产品负责人
-/// 2026-11-09 决定）。`.iwork/.gitignore` 不存在就创建；已有就保留原内容、在末尾追加一行；
-/// 已经有这一行就不动，重复调用结果不变。
+/// 2026-11-09 决定）。`.iwork/.gitignore` 不存在就创建；已有就保留原内容，必要时在末尾追加一行
+/// （见 [`with_ignore_line`]）；重复调用结果不变。
 ///
-/// 只写一个忽略文件，不调用任何版本控制命令；不认识 `.gitignore` 的工具不受影响。
-async fn ensure_marker_ignored(iwork_dir: &Path) -> Result<(), ProjectFilesError> {
-    let path = iwork_dir.join(IGNORE_FILE);
-    let existing = match tokio::fs::read_to_string(&path).await {
-        Ok(text) => text,
-        Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(io(&path, &e)),
-    };
+/// 只写一个忽略文件，不调用任何版本控制命令；不跟随符号链接。
+fn ensure_marker_ignored(root: &Path) -> Result<(), ProjectFilesError> {
+    let rel = Path::new(MARKER_DIR).join(IGNORE_FILE);
+    let existing = iwork_rootfs::read_file(root, &rel)
+        .map_err(|e| rooted(root, e))?
+        .unwrap_or_default();
+    let existing = String::from_utf8(existing).map_err(|_| ProjectFilesError::Io {
+        path: root.join(&rel),
+        message: "不是 UTF-8 文本，不敢改它".to_owned(),
+    })?;
     let Some(updated) = with_ignore_line(&existing) else {
         return Ok(());
     };
-    tokio::fs::write(&path, updated)
-        .await
-        .map_err(|e| io(&path, &e))
+    iwork_rootfs::replace_file(root, &rel, updated.as_bytes()).map_err(|e| rooted(root, e))
 }
 
-/// 在忽略文件内容末尾补上忽略项目标记的一行；已经有了返回 `None`。
+/// 忽略项目标记的那一行（与 [`MARKER_FILE`] 对应，见测试 `ignore_line_names_the_marker_file`）。
+const IGNORE_LINE: &str = "/project.toml";
+
+/// 保证忽略文件里**最后一条生效的规则**就是 [`IGNORE_LINE`]；已经是了返回 `None`，否则在末尾追加一行。
+///
+/// 只看最后一条规则，不去判断前面的规则会不会匹配：gitignore 后面的规则覆盖前面的（例如 `!*.toml`
+/// 会把前面的忽略取消），最后一条是我们的就一定生效，不用实现一遍 glob 匹配。空行与 `#` 注释不算规则。
+/// 原有内容一字不改（前导空格是模式的一部分，不 trim）。
 fn with_ignore_line(existing: &str) -> Option<String> {
-    let line = format!("/{MARKER_FILE}");
-    let already = existing
+    let last_rule = existing
         .lines()
-        .map(str::trim)
-        .any(|l| l == line || l == MARKER_FILE);
-    if already {
+        .rev()
+        .find(|l| !l.trim_end_matches(' ').is_empty() && !l.starts_with('#'));
+    if last_rule == Some(IGNORE_LINE) {
         return None;
     }
     let mut out = existing.to_owned();
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str(&line);
+    out.push_str(IGNORE_LINE);
     out.push('\n');
     Some(out)
 }
@@ -209,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn ignore_line_is_appended_once_and_keeps_existing_content() {
+    fn ignore_line_is_appended_unless_it_is_already_the_last_rule() {
         assert_eq!(with_ignore_line(""), Some("/project.toml\n".to_owned()));
         assert_eq!(
             with_ignore_line("*.log"),
@@ -219,14 +262,39 @@ mod tests {
             with_ignore_line("# mine\ncache/\n"),
             Some("# mine\ncache/\n/project.toml\n".to_owned())
         );
-        assert_eq!(with_ignore_line("a\n/project.toml\n"), None);
         assert_eq!(
-            with_ignore_line("project.toml\n"),
+            with_ignore_line("a\n/project.toml\n"),
             None,
-            "不带斜杠的写法也算"
+            "已是最后一条规则"
         );
-        // 对照：只是包含这个词的行不算
-        assert!(with_ignore_line("old-project.toml\n").is_some());
+        assert_eq!(
+            with_ignore_line("/project.toml\n\n# note\n"),
+            None,
+            "后面只有空行和注释也算最后一条"
+        );
+    }
+
+    #[test]
+    fn ignore_line_names_the_marker_file() {
+        assert_eq!(IGNORE_LINE, format!("/{MARKER_FILE}"));
+    }
+
+    /// F-4：后面有否定规则时，前面的忽略不生效，要在末尾再加一行。
+    #[test]
+    fn later_negation_forces_a_new_trailing_ignore_line() {
+        assert_eq!(
+            with_ignore_line("/project.toml\n!*.toml\n"),
+            Some("/project.toml\n!*.toml\n/project.toml\n".to_owned())
+        );
+    }
+
+    /// F-4：前导空格是模式的一部分（` /project.toml` 不匹配标记），不能 trim 掉。
+    #[test]
+    fn leading_space_is_significant() {
+        assert_eq!(
+            with_ignore_line(" /project.toml\n"),
+            Some(" /project.toml\n/project.toml\n".to_owned())
+        );
     }
 
     #[test]

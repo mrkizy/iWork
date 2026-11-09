@@ -44,6 +44,7 @@ iwork-app = { path = "crates/iwork-app" }
 iwork-store = { path = "crates/iwork-store" }
 iwork-agent-acp = { path = "crates/iwork-agent-acp" }
 iwork-vcs-git = { path = "crates/iwork-vcs-git" }
+iwork-rootfs = { path = "crates/iwork-rootfs" }
 iwork-host = { path = "crates/iwork-host" }
 iwork-ipc = { path = "crates/iwork-ipc" }
 iwork-claude-hook = { path = "crates/iwork-claude-hook" }

@@ -2586,6 +2586,7 @@ version = "0.1.0"
 dependencies = [
  "iwork-domain",
  "iwork-ports",
+ "iwork-rootfs",
  "tempfile",
  "tokio",
  "toml 1.2.1+spec-1.1.0",
@@ -2621,6 +2622,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "iwork-rootfs"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "iwork-store"
 version = "0.1.0"
 dependencies = [
@@ -2636,6 +2644,7 @@ dependencies = [
  "gix",
  "iwork-domain",
  "iwork-ports",
+ "iwork-rootfs",
  "proptest",
  "tempfile",
  "tokio",

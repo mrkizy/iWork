@@ -235,6 +235,90 @@ async fn fresh_repo_gets_ignore_file_and_marker_stays_out_of_git_status() {
     assert_eq!(status, "?? .iwork/.gitignore", "{status:?}");
 }
 
+// ---------- 审查第 1 轮回归（F-3、F-4） ----------
+
+/// F-3：项目 A 搬走后在原路径新建仓库 B：A 标为找不到路径，B 不能接上 A 的身份。
+#[tokio::test]
+async fn new_repo_at_a_moved_projects_old_path_is_not_that_project() {
+    let env = Env::new();
+    let repo = env.repo("spot");
+    let a = env.add(&[], &repo).await;
+    std::fs::rename(&repo, env.root().join("spot-moved")).unwrap();
+    let b = env.repo("spot");
+    assert_eq!(b, a.root_path, "前提：B 就在 A 的原路径");
+
+    assert_eq!(
+        check_path(&env.vcs(), &FsProjectMarkerStore, &a).await,
+        Ok(Some(PathStatus::Missing))
+    );
+    match resolve_add(
+        &env.vcs(),
+        &FsProjectMarkerStore,
+        std::slice::from_ref(&a),
+        &b,
+    )
+    .await
+    {
+        Ok(AddTarget::New(new)) => assert_eq!(new.existing_id, None),
+        other => panic!("B 应是新项目，实际 {other:?}"),
+    }
+}
+
+/// F-3：仓库失去版本控制（.git 被移走）算找不到路径；放回去后恢复。
+#[tokio::test]
+async fn project_that_lost_version_control_is_missing_until_restored() {
+    let env = Env::new();
+    let repo = env.repo("vanishing-git");
+    let mut p = env.add(&[], &repo).await;
+    let stash = env.root().join("stashed-git");
+    std::fs::rename(repo.join(".git"), &stash).unwrap();
+
+    assert_eq!(
+        check_path(&env.vcs(), &FsProjectMarkerStore, &p).await,
+        Ok(Some(PathStatus::Missing))
+    );
+    p.path_status = PathStatus::Missing;
+    assert_eq!(
+        check_path(&env.vcs(), &FsProjectMarkerStore, &p).await,
+        Ok(None)
+    );
+
+    std::fs::rename(&stash, repo.join(".git")).unwrap();
+    assert_eq!(
+        check_path(&env.vcs(), &FsProjectMarkerStore, &p).await,
+        Ok(Some(PathStatus::Ok))
+    );
+}
+
+/// F-4：仓库自带的忽略规则里有后置否定规则或带前导空格的写法时，添加后标记仍被 git 忽略。
+#[tokio::test]
+async fn marker_stays_ignored_despite_tricky_existing_ignore_rules() {
+    for (name, rules) in [
+        ("negated", "/project.toml\n!*.toml\n"),
+        ("spaced", " /project.toml\n"),
+    ] {
+        let env = Env::new();
+        let repo = env.repo(name);
+        std::fs::create_dir_all(repo.join(".iwork")).unwrap();
+        std::fs::write(repo.join(".iwork/.gitignore"), rules).unwrap();
+        env.git(&repo, &["add", "--all"]);
+        env.git(&repo, &["commit", "--quiet", "-m", "tricky rules"]);
+
+        env.add(&[], &repo).await;
+
+        // check-ignore 退出码 0 才表示被忽略（env.git 要求成功）
+        env.git(&repo, &["check-ignore", "--quiet", ".iwork/project.toml"]);
+        let status = env.git(&repo, &["status", "--porcelain", "--untracked-files=all"]);
+        assert!(!status.contains("project.toml"), "{name}: {status:?}");
+        assert!(
+            std::fs::read_to_string(repo.join(".iwork/.gitignore"))
+                .unwrap()
+                .starts_with(rules),
+            "{name}: 原内容保留"
+        );
+    }
+}
+
 // ---------- 验收 3：移动后找不到路径；重新定位按项目 ID ----------
 
 #[tokio::test]

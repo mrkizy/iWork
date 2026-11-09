@@ -167,14 +167,13 @@ fn any_path_into_a_registered_repo_jumps_to_that_project() {
         project(2, "/other", PathStatus::Ok),
         project(1, "/repo", PathStatus::Ok),
     ];
+    // 已登记项目的根里有各自的标记（首次添加时写入）
+    let markers = FakeMarkers::default()
+        .with("/repo", pid(1))
+        .with("/other", pid(2));
     for path in ["/repo", "/repo/sub", "/wt"] {
         assert_eq!(
-            block_on(resolve_add(
-                &vcs,
-                &FakeMarkers::default(),
-                &known,
-                Path::new(path)
-            )),
+            block_on(resolve_add(&vcs, &markers, &known, Path::new(path))),
             Ok(AddTarget::Existing(pid(1))),
             "{path}"
         );
@@ -348,4 +347,62 @@ fn relocate_links_only_when_marker_id_matches() {
     block_on(relocate(&vcs, &markers, &mut p, Path::new("/new/sub"))).expect("relocate");
     assert_eq!(p.root_path, PathBuf::from("/new"), "关联到仓库根");
     assert_eq!(p.path_status, PathStatus::Ok);
+}
+
+// ---------- 审查第 1 轮回归（F-3）：登记的位置要仍是仓库根且标记 ID 匹配 ----------
+
+#[test]
+fn replaced_repo_at_the_old_path_is_not_the_old_project() {
+    // A 搬走后，原路径上新建了仓库 B（同路径、同形状的共享目录，但没有 A 的标记）
+    let vcs = FakeVcs::default().repo("/a", "/a", "/a/.git");
+    let a = project(1, "/a", PathStatus::Ok);
+
+    for markers in [
+        FakeMarkers::default(),
+        FakeMarkers::default().with("/a", pid(2)),
+    ] {
+        assert_eq!(
+            block_on(check_path(&vcs, &markers, &a)),
+            Ok(Some(PathStatus::Missing)),
+            "替代的仓库不算 A 还在"
+        );
+        match block_on(resolve_add(
+            &vcs,
+            &markers,
+            std::slice::from_ref(&a),
+            Path::new("/a"),
+        )) {
+            Ok(AddTarget::New(new)) => assert_ne!(new.existing_id, Some(pid(1))),
+            other => panic!("B 应是新项目，实际 {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn location_that_is_no_longer_a_repo_root_does_not_count_as_present() {
+    let markers = FakeMarkers::default().with("/a", pid(1));
+    let ok = project(1, "/a", PathStatus::Ok);
+    let missing = project(1, "/a", PathStatus::Missing);
+
+    // 失去版本控制：目录还在，但不再是仓库
+    let plain = FakeVcs::default().plain("/a");
+    assert_eq!(
+        block_on(check_path(&plain, &markers, &ok)),
+        Ok(Some(PathStatus::Missing))
+    );
+    assert_eq!(block_on(check_path(&plain, &markers, &missing)), Ok(None));
+
+    // 原路径成了另一个仓库的子目录
+    let nested = FakeVcs::default().repo("/a", "/", "/.git");
+    assert_eq!(
+        block_on(check_path(&nested, &markers, &ok)),
+        Ok(Some(PathStatus::Missing))
+    );
+
+    // 恢复版本控制、标记仍是 A：恢复正常
+    let back = FakeVcs::default().repo("/a", "/a", "/a/.git");
+    assert_eq!(
+        block_on(check_path(&back, &markers, &missing)),
+        Ok(Some(PathStatus::Ok))
+    );
 }

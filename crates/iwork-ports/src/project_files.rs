@@ -50,6 +50,9 @@ pub enum ProjectFilesError {
     TargetNotEmpty { path: PathBuf },
     #[error("项目名 {name:?} 不能用作目录名：{reason}")]
     InvalidName { name: String, reason: String },
+    /// 项目标记目录、标记文件或忽略文件是符号链接：读写会被带出项目根，一律拒绝
+    #[error("{path} 是符号链接（或经过符号链接），拒绝读写")]
+    SymlinkRefused { path: PathBuf },
     #[error("读写 {path} 失败：{message}")]
     Io { path: PathBuf, message: String },
 }

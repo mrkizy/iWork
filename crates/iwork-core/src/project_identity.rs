@@ -77,7 +77,7 @@ pub async fn resolve_add<V: VcsProvider, M: ProjectMarkerStore>(
         Detection::Repository { root, shared_dir } => (root, shared_dir),
     };
     for p in known {
-        if shared_dir_of(vcs, p).await?.as_ref() == Some(&shared_dir) {
+        if verified_shared_dir(vcs, markers, p).await?.as_ref() == Some(&shared_dir) {
             return Ok(AddTarget::Existing(p.id));
         }
     }
@@ -95,14 +95,31 @@ pub async fn resolve_add<V: VcsProvider, M: ProjectMarkerStore>(
     Ok(AddTarget::New(NewProject { root, existing_id }))
 }
 
-/// 已登记项目的共享目录；路径不在了或已不受版本控制时为 `None`（这样的项目不会和任何仓库重复）。
-async fn shared_dir_of<V: VcsProvider>(
+/// 已登记项目的登记位置是否仍是**这个项目**：位置仍是仓库根，并且那里的项目标记写着这个项目的 ID。
+/// 是就返回仓库的共享目录，否则 `None`。路径状态检查与添加时的去重都按这一条判断。
+///
+/// 不算「还在」的情况：路径不在了；目录还在但不再受版本控制，或成了别的仓库的子目录；原路径上
+/// 换成了另一个仓库（没有标记或标记是别的 ID）；标记读不出 ID 或是符号链接（无法确认是同一个项目，
+/// 读不出的原因由重新定位或添加那个目录时的错误报出来）。
+async fn verified_shared_dir<V: VcsProvider, M: ProjectMarkerStore>(
     vcs: &V,
+    markers: &M,
     p: &Project,
 ) -> Result<Option<PathBuf>, ProjectIdentityError> {
-    match vcs.detect(&p.root_path).await {
-        Ok(Detection::Repository { shared_dir, .. }) => Ok(Some(shared_dir)),
-        Ok(Detection::NotVersionControlled) | Err(VcsError::PathMissing { .. }) => Ok(None),
+    let (root, shared_dir) = match vcs.detect(&p.root_path).await {
+        Ok(Detection::Repository { root, shared_dir }) => (root, shared_dir),
+        Ok(Detection::NotVersionControlled) | Err(VcsError::PathMissing { .. }) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if root.0 != p.root_path {
+        return Ok(None);
+    }
+    match markers.read(&root.0).await {
+        Ok(found) if found == Some(p.id) => Ok(Some(shared_dir)),
+        Ok(_)
+        | Err(
+            ProjectFilesError::MarkerMalformed { .. } | ProjectFilesError::SymlinkRefused { .. },
+        ) => Ok(None),
         Err(e) => Err(e.into()),
     }
 }
@@ -123,23 +140,17 @@ pub async fn assign_id<M: ProjectMarkerStore, G: IdGenerator>(
 
 /// 启动或打开项目时检查路径，返回变化后的路径状态（没变化返回 `None`）。
 ///
-/// - 原本正常、现在路径不在了 → 找不到路径。
-/// - 原本找不到、原路径又出现且标记里的 ID 仍是这个项目 → 恢复正常；出现的是别的仓库就还算找不到。
+/// 「还在」按 [`verified_shared_dir`] 判断：原本正常、现在不是了 → 找不到路径；原本找不到、现在又是了
+/// → 恢复正常。原路径上换成了别的仓库、或失去了版本控制，都算找不到。
 pub async fn check_path<V: VcsProvider, M: ProjectMarkerStore>(
     vcs: &V,
     markers: &M,
     p: &Project,
 ) -> Result<Option<PathStatus>, ProjectIdentityError> {
-    let present = match vcs.detect(&p.root_path).await {
-        Ok(_) => true,
-        Err(VcsError::PathMissing { .. }) => false,
-        Err(e) => return Err(e.into()),
-    };
+    let present = verified_shared_dir(vcs, markers, p).await?.is_some();
     let trigger = match (p.path_status, present) {
         (PathStatus::Ok, false) => PathTrigger::PathLost,
-        (PathStatus::Missing, true) if markers.read(&p.root_path).await? == Some(p.id) => {
-            PathTrigger::PathFound
-        }
+        (PathStatus::Missing, true) => PathTrigger::PathFound,
         _ => return Ok(None),
     };
     Ok(Some(

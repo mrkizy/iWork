@@ -10,6 +10,7 @@ publish.workspace = true
 iwork-domain.workspace = true
 iwork-ports.workspace = true
 gix.workspace = true
+iwork-rootfs.workspace = true
 tokio = { workspace = true, features = ["rt", "process", "io-util"] }
 dunce.workspace = true
 

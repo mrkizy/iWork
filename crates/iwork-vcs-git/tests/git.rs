@@ -548,3 +548,264 @@ async fn workspace_reads_on_a_moved_repo_report_path_missing() {
 fn capabilities_declare_cheap_isolated_workspaces() {
     assert!(Fixture::new().vcs().capabilities().cheap_isolated_workspace);
 }
+
+// ---------- 审查第 1 轮回归（F-1、F-5、F-6、F-7） ----------
+
+fn patch_of<'a>(diff: &'a iwork_ports::vcs::Diff, path: &str) -> &'a iwork_ports::vcs::FileDiff {
+    diff.files
+        .iter()
+        .find(|d| d.path == Path::new(path))
+        .unwrap_or_else(|| {
+            panic!(
+                "差异里没有 {path}：{:?}",
+                diff.files.iter().map(|d| &d.path).collect::<Vec<_>>()
+            )
+        })
+}
+
+/// F-1：目录被换成指向仓库外的链接，差异里不得出现仓库外文件的内容。
+#[cfg(unix)]
+#[tokio::test]
+async fn diff_never_reads_through_a_directory_symlink_out_of_the_repo() {
+    let f = Fixture::new();
+    let repo = f.repo_with_commit("leaky", &[("dir/sentinel", "inside\n")]);
+    let outside = f.root().join("outside");
+    write(&outside.join("sentinel"), "OUTSIDE-SECRET\n");
+    write(&outside.join("other"), "OUTSIDE-OTHER\n");
+    let root = RepoRoot(repo.clone());
+    let base = f.vcs().baseline(&root).await.unwrap();
+
+    std::fs::remove_dir_all(repo.join("dir")).unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join("dir")).unwrap();
+    // 对照：最后一级是链接时只取链接目标，不取内容
+    std::os::unix::fs::symlink(outside.join("other"), repo.join("leaf")).unwrap();
+
+    let diff = f
+        .vcs()
+        .diff(&root, DiffRange::WorkspaceSince(base))
+        .await
+        .unwrap();
+    for d in &diff.files {
+        assert!(
+            !d.patch.contains("OUTSIDE-SECRET"),
+            "{}: {}",
+            d.path.display(),
+            d.patch
+        );
+        assert!(
+            !d.patch.contains("OUTSIDE-OTHER"),
+            "{}: {}",
+            d.path.display(),
+            d.patch
+        );
+    }
+    let gone = patch_of(&diff, "dir/sentinel");
+    assert!(gone.patch.contains("-inside"), "{}", gone.patch);
+    assert!(
+        patch_of(&diff, "dir")
+            .patch
+            .contains("new file mode 120000")
+    );
+}
+
+/// F-5：改名后差异里要同时有源路径的删除和目标路径的新增。
+#[tokio::test]
+async fn diff_after_git_mv_keeps_both_the_deletion_and_the_addition() {
+    let f = Fixture::new();
+    let repo = f.repo_with_commit("mv", &[("a.txt", "same content\nline 2\n")]);
+    let root = RepoRoot(repo.clone());
+    let base = f.vcs().baseline(&root).await.unwrap();
+    f.git(&repo, &["mv", "a.txt", "b.txt"]);
+
+    let ws = f
+        .vcs()
+        .diff(&root, DiffRange::WorkspaceSince(base.clone()))
+        .await
+        .unwrap();
+    assert_eq!(patch_of(&ws, "a.txt").deletions, 2);
+    assert_eq!(patch_of(&ws, "b.txt").insertions, 2);
+
+    f.git(&repo, &["commit", "--quiet", "-m", "mv"]);
+    let head = f.vcs().baseline(&root).await.unwrap();
+    let between = f
+        .vcs()
+        .diff(
+            &root,
+            DiffRange::Between {
+                from: base,
+                to: head,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch_of(&between, "a.txt").deletions, 2);
+    assert_eq!(patch_of(&between, "b.txt").insertions, 2);
+}
+
+/// F-6：只改执行位也要出差异（工作区与提交之间两种范围）。
+#[cfg(unix)]
+#[tokio::test]
+async fn diff_reports_mode_only_changes() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let repo = f.repo_with_commit("modes", &[("run.sh", "echo hi\n")]);
+    let root = RepoRoot(repo.clone());
+    let base = f.vcs().baseline(&root).await.unwrap();
+    std::fs::set_permissions(repo.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let ws = f
+        .vcs()
+        .diff(&root, DiffRange::WorkspaceSince(base.clone()))
+        .await
+        .unwrap();
+    let d = patch_of(&ws, "run.sh");
+    assert_eq!(d.patch, "old mode 100644\nnew mode 100755\n");
+    assert_eq!((d.insertions, d.deletions), (0, 0));
+
+    f.commit_all(&repo, "chmod");
+    let head = f.vcs().baseline(&root).await.unwrap();
+    let between = f
+        .vcs()
+        .diff(
+            &root,
+            DiffRange::Between {
+                from: base,
+                to: head,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        patch_of(&between, "run.sh").patch,
+        "old mode 100644\nnew mode 100755\n"
+    );
+}
+
+/// F-6：子模块引用（gitlink）变化要出差异。
+#[tokio::test]
+async fn diff_reports_gitlink_changes() {
+    let f = Fixture::new();
+    let lib = f.repo_with_commit("lib", &[("l", "1\n")]);
+    let sup = f.repo_with_commit("super", &[("s", "1\n")]);
+    let url = format!("file://{}", lib.display());
+    f.git(
+        &sup,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "--quiet",
+            "add",
+            &url,
+            "deps/lib",
+        ],
+    );
+    f.git(&sup, &["commit", "--quiet", "-m", "add submodule"]);
+    let root = RepoRoot(sup.clone());
+    let base = f.vcs().baseline(&root).await.unwrap();
+    let old_id = f.git(&sup.join("deps/lib"), &["rev-parse", "HEAD"]);
+
+    let sub = sup.join("deps/lib");
+    f.git(&sub, &["config", "user.name", "T"]);
+    f.git(&sub, &["config", "user.email", "t@example.invalid"]);
+    write(&sub.join("l"), "2\n");
+    f.commit_all(&sub, "bump");
+    let new_id = f.git(&sub, &["rev-parse", "HEAD"]);
+    let expected = format!("-Subproject commit {old_id}\n+Subproject commit {new_id}\n");
+
+    let ws = f
+        .vcs()
+        .diff(&root, DiffRange::WorkspaceSince(base.clone()))
+        .await
+        .unwrap();
+    assert!(
+        patch_of(&ws, "deps/lib").patch.ends_with(&expected),
+        "{}",
+        patch_of(&ws, "deps/lib").patch
+    );
+
+    f.commit_all(&sup, "bump submodule");
+    let head = f.vcs().baseline(&root).await.unwrap();
+    let between = f
+        .vcs()
+        .diff(
+            &root,
+            DiffRange::Between {
+                from: base,
+                to: head,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(patch_of(&between, "deps/lib").patch.ends_with(&expected));
+}
+
+/// F-7：`eol=crlf` 的文件改一行，差异就是一增一删，不是整个文件重写。
+#[tokio::test]
+async fn diff_applies_eol_conversion_before_comparing() {
+    let f = Fixture::new();
+    let repo = f.repo_with_commit("crlf", &[(".gitattributes", "*.txt eol=crlf\n")]);
+    write(&repo.join("a.txt"), "one\r\ntwo\r\nthree\r\n");
+    f.commit_all(&repo, "crlf file");
+    let root = RepoRoot(repo.clone());
+    let base = f.vcs().baseline(&root).await.unwrap();
+    write(&repo.join("a.txt"), "one\r\nTWO\r\nthree\r\n");
+
+    let ws = f
+        .vcs()
+        .diff(&root, DiffRange::WorkspaceSince(base))
+        .await
+        .unwrap();
+    let d = patch_of(&ws, "a.txt");
+    assert_eq!((d.insertions, d.deletions), (1, 1), "{}", d.patch);
+    assert!(d.patch.contains("-two\n+TWO\n"), "{}", d.patch);
+}
+
+/// F-7：配置了清理过滤器（clean）的文件按 git 的方式先过滤再比较；过滤器失败时报错，不生成错误的差异。
+#[tokio::test]
+async fn diff_runs_configured_clean_filters_and_fails_loudly_when_they_fail() {
+    let f = Fixture::new();
+    let repo = f.repo_with_commit(
+        "filtered",
+        &[(".gitattributes", "*.up filter=upper\n*.req filter=broken\n")],
+    );
+    f.git(&repo, &["config", "filter.upper.clean", "tr a-z A-Z"]);
+    f.git(&repo, &["config", "filter.upper.smudge", "cat"]);
+    write(&repo.join("x.up"), "hello\nworld\n");
+    f.commit_all(&repo, "filtered file");
+    let root = RepoRoot(repo.clone());
+    let base = f.vcs().baseline(&root).await.unwrap();
+    write(&repo.join("x.up"), "hello\nthere\n");
+
+    let ws = f
+        .vcs()
+        .diff(&root, DiffRange::WorkspaceSince(base.clone()))
+        .await
+        .unwrap();
+    let d = patch_of(&ws, "x.up");
+    assert!(d.patch.contains("-WORLD\n+THERE\n"), "{}", d.patch);
+    assert_eq!((d.insertions, d.deletions), (1, 1));
+
+    // 必需的过滤器跑不起来：报错
+    f.git(
+        &repo,
+        &[
+            "config",
+            "filter.broken.clean",
+            "iwork-no-such-filter-program",
+        ],
+    );
+    f.git(&repo, &["config", "filter.broken.required", "true"]);
+    write(&repo.join("y.req"), "data\n");
+    let err = f.vcs().diff(&root, DiffRange::WorkspaceSince(base)).await;
+    assert!(
+        matches!(
+            err,
+            Err(VcsError::Failed {
+                operation: "diff",
+                ..
+            })
+        ),
+        "{err:?}"
+    );
+}
