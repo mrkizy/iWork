@@ -6,6 +6,7 @@
 
 pub mod action;
 pub mod denial;
+pub mod engine;
 pub mod env;
 pub mod evaluate;
 pub mod registry;

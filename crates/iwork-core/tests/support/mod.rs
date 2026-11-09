@@ -5,6 +5,8 @@
 #[path = "../../../iwork-ports/tests/fake_fs/mod.rs"]
 pub mod fake_fs;
 
+pub mod engine_fakes;
+
 use std::path::PathBuf;
 
 use fake_fs::FakeFs;
