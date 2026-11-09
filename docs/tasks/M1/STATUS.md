@@ -27,8 +27,8 @@
 | T01 | 已合入 main `bb6d69a` | — | `2026-11-09-m1-t01` 已关 | 验收 5 空窗口截图未补（屏幕锁定） | 有空时补截图 |
 | T02 | 方案 `docs/plans/T02.md`（已提交 `94662af`） | developer `fecce968`，worktree 分支 `cao/fecce968`，**暂停、未开工** | 方案 `2026-11-09-m1-t02-plan` 已关 | — | 4 点后按方案第 11 节开工 |
 | T03 | 方案 `docs/plans/T03.md`（未提交，第 4 轮已整体重写） | architect `474f00b7`；方案 reviewer `3f790292` | `2026-11-09-m1-t03-plan` 第 4 轮复审中 | 1/F-6、3/F-1～F-6 | 等 reviewer 复审结论 |
-| T05 | 分支 `cao/2d513126` @ `68362e0` | developer `2d513126`；reviewer A `6b16e848`、B `b9bc79da` | `2026-11-09-m1-t05` 第 3 轮 A/B 块均通过 | 无（14 条全关；CI run 42661019937 三平台全绿） | 等产品负责人同意合入 main（合入时统一 ADR 编号） |
-| T07 | 方案 `docs/plans/T07.md`（未提交） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 3 轮（已满三轮） | 1/F-11（`install -d` 操作数角色）、1/F-12（`ssh -E/-F/-i` 短选项粘值、`grep -f` 操作数） | 等产品负责人批准第 4 轮小改：architect 只改这两处，reviewer 只核这两条 |
+| T05 | 已合入 main `a6987d4` | — | `2026-11-09-m1-t05` 已关（三轮，14 条全 fixed） | — | — |
+| T07 | 方案 `docs/plans/T07.md`（未提交） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 4 轮（产品负责人 01:20 批准） | 1/F-11（`install -d`）、1/F-12（短选项粘值、`grep -f`） | architect 在改这两处；回报后 reviewer 只核这两条 |
 | T08 | 分支 `cao/49facf33` | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 4 轮 | racy 时间戳边角（外部过滤文件同一秒内等长改写会漏标） | 等产品负责人定：修（推荐，条件加 `is_racy` 就保守列出）还是登记已知限制；CI run 42660636464 三平台 test 失败，等日志 |
 | T04、T06、T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
 
@@ -36,7 +36,7 @@
 
 ## 4 合入时要处理
 
-- ADR 编号：T05、T08 都用了 `0006`；T02、T03、T07 方案里写成 `ADR-T0X-a/b/c` 占位。合入时 supervisor 统一编号。
+- ADR 编号：T05 已用 `0006` 合入 main；T08 合入时改成下一个空号。T02、T03、T07 方案里写成 `ADR-T0X-a/b/c` 占位。合入时 supervisor 统一编号。
 - T05 已实现「回合失败时作废审批」（需求 v1.70 已同意）。
 
 ## 5 运行中踩过的坑
