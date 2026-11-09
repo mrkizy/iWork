@@ -160,7 +160,7 @@ impl Model {
         self.last_on_conn = 0;
         // 全部范围一次写出。
         for (id, s) in &self.scopes {
-            let _ = c.subscribe_nowait(*id, s.clone(), from).expect("刚连上");
+            drop(c.subscribe_nowait(*id, s.clone(), from).expect("刚连上"));
         }
         if from == 0 && self.scopes.is_empty() {
             self.cursor = 0;
@@ -239,7 +239,7 @@ async fn run(acts: Vec<Act>, small_budget: bool) {
                 m.scopes.insert(id as u32, s.clone());
                 m.synced.remove(&(id as u32));
                 // 新范围从快照起（from_seq 0）；同 id 替换。
-                let _ = m.client().subscribe_nowait(id as u32, s, 0);
+                drop(m.client().subscribe_nowait(id as u32, s, 0));
             }
             Act::Unsubscribe { id } => {
                 m.synced.remove(&(id as u32));
@@ -247,7 +247,7 @@ async fn run(acts: Vec<Act>, small_budget: bool) {
                     let scopes = m.active();
                     m.members.retain(|e| covers(&scopes, e));
                     // 立即写出：帧顺序必须与调用顺序一致（之后的 Subscribe 不能跑到它前面）。
-                    let _ = m.client().unsubscribe_nowait(id as u32);
+                    drop(m.client().unsubscribe_nowait(id as u32));
                 }
             }
             Act::ViewQuery { conv } => {

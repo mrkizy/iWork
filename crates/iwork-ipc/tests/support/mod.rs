@@ -299,6 +299,9 @@ impl EventSource for WorldSource {
 
 // ---------------------------------------------------------------- handler
 
+/// 查询读完 head 之后、返回之前调用的钩子。
+pub type AfterRead = Box<dyn FnMut() + Send>;
+
 #[derive(Clone, Default)]
 pub struct TestHandler {
     pub world: World,
@@ -312,7 +315,7 @@ pub struct TestHandler {
     /// 会写视图的查询：读完 head 之后、返回之前的延迟（模拟读事务里慢的查询）。
     pub view_query_delay: Arc<Mutex<Duration>>,
     /// 返回之前调用的钩子（测试在「读事务之后、结果返回之前」提交事件）。
-    pub after_read: Arc<Mutex<Option<Box<dyn FnMut() + Send>>>>,
+    pub after_read: Arc<Mutex<Option<AfterRead>>>,
 }
 
 impl TestHandler {

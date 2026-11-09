@@ -192,6 +192,10 @@ pub enum CloseReason {
 
 /// `Incoming` 里的一项。
 #[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "每条事件都经过它；装箱等于推送热路径上每条多一次分配"
+)]
 pub enum IncomingItem {
     Event(pb::Event),
     ViewResult {

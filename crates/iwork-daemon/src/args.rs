@@ -37,14 +37,19 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<DaemonArgs, Arg
         trust: TrustPolicy::RequireSigner,
     };
     for arg in args {
-        let arg = arg.into_string().map_err(ArgError::NotUtf8)?;
-        match arg.as_str() {
-            #[cfg(feature = "dev")]
-            DEV_TRUST_FLAG => out.trust = TrustPolicy::DevTrust,
-            _ => return Err(ArgError::Unknown(arg)),
-        }
+        out.trust = trust_flag(arg)?;
     }
     Ok(out)
+}
+
+/// 目前唯一认识的参数是开发开关；发布构建里任何参数都是未知参数。
+fn trust_flag(arg: OsString) -> Result<TrustPolicy, ArgError> {
+    let arg = arg.into_string().map_err(ArgError::NotUtf8)?;
+    match arg.as_str() {
+        #[cfg(feature = "dev")]
+        DEV_TRUST_FLAG => Ok(TrustPolicy::DevTrust),
+        _ => Err(ArgError::Unknown(arg)),
+    }
 }
 
 #[cfg(test)]

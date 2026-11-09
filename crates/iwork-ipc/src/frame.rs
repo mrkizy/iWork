@@ -15,6 +15,10 @@ pub const HEADER_LEN: usize = 5;
 
 /// 一帧。
 #[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "每帧解码一次、移动一次就交出去；装箱等于热路径上每帧多一次分配"
+)]
 pub enum Frame {
     Hello(pb::Hello),
     Welcome(pb::Welcome),

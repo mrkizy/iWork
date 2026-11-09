@@ -355,12 +355,12 @@ async fn write_loop<W: AsyncWrite + Unpin>(conn: Arc<ConnShared>, mut wr: W) {
         enum Next {
             Write,
             Idle,
-            Close(Option<pb::Response>),
+            Close(Option<Box<pb::Response>>),
         }
         let next = {
             let mut st = conn.lock();
             if st.closed.is_some() {
-                Next::Close(st.final_frame.take())
+                Next::Close(st.final_frame.take().map(Box::new))
             } else if st.budget.pop_batch(WRITE_BATCH, &mut buf) > 0 {
                 Next::Write
             } else if conn.cancel.is_cancelled() {
@@ -374,7 +374,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(conn: Arc<ConnShared>, mut wr: W) {
                 if let Some(f) = final_frame {
                     let _ = tokio::time::timeout(
                         FINAL_FRAME_WRITE,
-                        write_one(&mut wr, &Frame::Response(f)),
+                        write_one(&mut wr, &Frame::Response(*f)),
                     )
                     .await;
                 }
@@ -846,9 +846,7 @@ async fn take_snapshot<H, S: EventSource>(
     conn: &ConnShared,
     deadline: Instant,
 ) -> Option<(pb::Snapshot, u64)> {
-    let Some(scopes) = conn.with_stream(|stream, _| stream.active_scopes()) else {
-        return None;
-    };
+    let scopes = conn.with_stream(|stream, _| stream.active_scopes())?;
     loop {
         match tokio::time::timeout_at(deadline, shared.source.snapshot(&scopes)).await {
             Ok(Ok((snap, s))) => {

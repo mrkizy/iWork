@@ -196,9 +196,8 @@ async fn client_does_not_send_hello_before_judging() {
     let err = Client::connect(&connector, &ep, &client_own(), client_cfg()).await.err().unwrap();
     assert!(matches!(err, ConnectError::PeerRejected(_)));
     // 读到 0（对端关闭）或超时，都说明没写；读到 1 字节就是写了 Hello。
-    match server.await.unwrap() {
-        Ok(Ok(n)) => assert_eq!(n, 0, "判定不过却写出了字节"),
-        Ok(Err(_)) | Err(_) => {}
+    if let Ok(Ok(n)) = server.await.unwrap() {
+        assert_eq!(n, 0, "判定不过却写出了字节");
     }
 }
 
