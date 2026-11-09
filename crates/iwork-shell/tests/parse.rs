@@ -169,7 +169,8 @@ fn shell_unparsable_forms() {
 /// 第 2 轮复审 2/F-2：解析放弃前可靠识别的字面重定向与字面词随 Unparsable 带回。
 #[test]
 fn partial_facts_survive_unparsable() {
-    let cases: &[(&str, &[(RedirectKind, &str)], &[&str])] = &[
+    type Case<'a> = (&'a str, &'a [(RedirectKind, &'a str)], &'a [&'a str]);
+    let cases: &[Case] = &[
         (
             "{ printf x; } > .git/iwork-marker",
             &[(RedirectKind::Write, ".git/iwork-marker")],
