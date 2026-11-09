@@ -67,17 +67,15 @@ fn backups(env: &Env) -> Vec<String> {
 /// 用 v1 建库并写一个项目。
 fn v1_with_data(env: &Env) {
     let store = env.open_with(Env::config(), with(&ONLY_V1)).unwrap();
-    block(
-        store.commit(cmd(
-            1,
-            vec![
+    block(store.commit(cmd(
+        1,
+        vec![
                 ProjectAdded {
                     project: project(1),
                 }
                 .into(),
             ],
-        )),
-    )
+    )))
     .unwrap();
     store.close().unwrap();
 }

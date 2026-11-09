@@ -89,6 +89,13 @@ fn blobs(
     rows(conn, sql, params, |r| r.get(0))
 }
 
+/// 最新一页（无游标）。
+const PAGE_LATEST: &str =
+    "SELECT snapshot FROM messages WHERE conversation_id = ?1 ORDER BY id DESC LIMIT ?2";
+/// 游标之前的一页。
+const PAGE_BEFORE: &str = "SELECT snapshot FROM messages WHERE conversation_id = ?1 AND id < ?2 \
+                           ORDER BY id DESC LIMIT ?3";
+
 /// 一页消息；流式中的消息正文用检查点填，没有检查点就是空串。
 fn message_page<C: EventCodec + ?Sized>(
     conn: &Connection,
@@ -98,15 +105,10 @@ fn message_page<C: EventCodec + ?Sized>(
 ) -> Result<Vec<Message>, StorageError> {
     // 有无游标拆成两条语句：`? IS NULL OR id < ?` 会让规划器用不上 id 的范围约束（方案 2.7）
     let snapshots = match page.before {
-        None => blobs(
-            conn,
-            "SELECT snapshot FROM messages WHERE conversation_id = ?1 ORDER BY id DESC LIMIT ?2",
-            params![conversation, page.limit],
-        )?,
+        None => blobs(conn, PAGE_LATEST, params![conversation, page.limit])?,
         Some(before) => blobs(
             conn,
-            "SELECT snapshot FROM messages WHERE conversation_id = ?1 AND id < ?2 \
-             ORDER BY id DESC LIMIT ?3",
+            PAGE_BEFORE,
             params![conversation, before.to_string(), page.limit],
         )?,
     };
@@ -453,4 +455,109 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
 
 fn unread_u32(v: i64) -> u32 {
     u32::try_from(v).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::StatementStatus;
+
+    use super::{PAGE_BEFORE, PAGE_LATEST};
+    use crate::fixtures::*;
+    use iwork_domain::event::{ConversationCreated, MessageAppended, ProjectAdded};
+    use iwork_ports::store::StoragePort;
+
+    /// 方案 S9 / 第 4b 步：灌 10 万条消息，深分页（游标在中段）走索引的范围约束，
+    /// 不全表扫描，代价与第 1 页同量级。
+    #[test]
+    fn conversation_deep_page_uses_range_constraint() {
+        let env = Env::new();
+        let store = env.open();
+        block(store.commit(cmd(
+            1,
+            vec![
+                ProjectAdded { project: project(1) }.into(),
+                ConversationCreated { conversation: project_conversation(10, 1) }.into(),
+                ConversationCreated { conversation: project_conversation(11, 1) }.into(),
+                MessageAppended { message: user_message(1, 10, "x") }.into(),
+            ],
+        )))
+        .unwrap();
+        // 直接灌行（只关心查询计划与扫描量，快照用同一份）：两个对话各 5 万条交错
+        let conn = rusqlite::Connection::open(env.db()).unwrap();
+        conn.execute_batch("BEGIN").unwrap();
+        {
+            let mut ins = conn
+                .prepare(
+                    "INSERT INTO messages(id, conversation_id, author_kind, status, turn_id, appended_seq, \
+                     created_at, snapshot, updated_seq) SELECT ?1, ?2, author_kind, status, NULL, 1, 0, snapshot, 1 \
+                     FROM messages WHERE id = ?3",
+                )
+                .unwrap();
+            let seed = mid(1).to_string();
+            for n in 2..=100_000u128 {
+                let conv = if n % 2 == 0 { cid(10) } else { cid(11) };
+                ins.execute(rusqlite::params![
+                    mid(n).to_string(),
+                    conv.to_string(),
+                    seed
+                ])
+                .unwrap();
+            }
+        }
+        conn.execute_batch("COMMIT; ANALYZE;").unwrap();
+
+        let conv = cid(10).to_string();
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {PAGE_BEFORE}"))
+            .unwrap()
+            .query_map(rusqlite::params![conv, "x", 100], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|p| p
+                .contains("USING INDEX messages_by_conversation (conversation_id=? AND id<?)")
+                || p.contains(
+                    "USING COVERING INDEX messages_by_conversation (conversation_id=? AND id<?)"
+                )),
+            "范围约束在用：{plan:?}"
+        );
+
+        let run = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> (usize, i32, i32) {
+            let mut stmt = conn.prepare(sql).unwrap();
+            let n = stmt.query_map(params, |_| Ok(())).unwrap().count();
+            (
+                n,
+                stmt.get_status(StatementStatus::FullscanStep),
+                stmt.get_status(StatementStatus::VmStep),
+            )
+        };
+        let (n1, scan1, vm1) = run(PAGE_LATEST, &[&conv, &100]);
+        // 第 999 页附近：游标在中段
+        let cursor = mid(50_000).to_string();
+        let (n2, scan2, vm2) = run(PAGE_BEFORE, &[&conv, &cursor, &100]);
+        assert_eq!((n1, n2), (100, 100), "对照：两页都取满");
+        assert_eq!((scan1, scan2), (0, 0), "没有全表扫描步");
+        assert!(
+            vm2 < vm1 * 10,
+            "深分页的 VM 步数与第 1 页同量级：{vm1} vs {vm2}"
+        );
+
+        let started = std::time::Instant::now();
+        let page = block(iwork_ports::read_model::ReadModelPort::conversation(
+            &read_model(&store),
+            cid(10),
+            iwork_ports::read_model::MessagePage {
+                before: Some(mid(50_000)),
+                limit: 100,
+            },
+        ))
+        .unwrap();
+        assert_eq!(page.messages.len(), 100);
+        assert!(
+            started.elapsed().as_millis() < 50,
+            "单次分页 {:?}",
+            started.elapsed()
+        );
+    }
 }
