@@ -33,7 +33,7 @@
 | T02 | 分支 `cao/fecce968` @ `67cafbd`（基于 bf73ed9，5 个提交，+10526） | developer `fecce968`；reviewer A `3036f50a`（写线程、迁移、协议门、端口）、B `6723c1bb`（投影器、读模型、快照、制品） | `2026-11-10-m1-t02` 第 1 轮审查中 | — | 等审查结论；ADR 用了 T02-a/b/c 占位，合入时统一编号 |
 | T03 | 方案 `docs/plans/T03.md`（未提交，第 5 轮） | architect `474f00b7`；方案 reviewer `3f790292` | `2026-11-09-m1-t03-plan` 第 5 轮不通过 | 5/F-1（seq 超前的查询结果先应用、旧事件后到，状态回退且未读数等汇总会重复计入）、5/F-2（按全局游标淘汰查询，别处持续写入时未变化的页面反复加载失败）、5/F-3（QueueFull 先入队落后通知再清瞬时事件，把通知自己删了） | 第 6 轮已派（01:45，产品负责人要求现在再来一轮），architect 在改，回报后原 reviewer 复审 |
 | T05 | 已合入 main `a6987d4` | — | `2026-11-09-m1-t05` 已关（三轮，14 条全 fixed） | — | — |
-| T07 | 方案 `docs/plans/T07.md`（未提交） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 5 轮不通过 | 1/F-12 残留：parse 本身放弃时（前置赋值 `LC_ALL=C ssh -E.git/config host`、同条命令别处有展开）PartialFacts 只有扁平字面词，第 ⓪ 步没机会跑，`-E.git/config` 整词丢了写目标 | 第 6 轮已派（01:45，产品负责人要求现在再来一轮），architect 在改，回报后原 reviewer 复审 |
+| T07 | 方案 `docs/plans/T07.md`（未提交，第 6 轮） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 6 轮不通过（1/F-12 已关） | 6/F-1（兜底候选表没保留以 - 开头的整词，`> -out` 链接漏掉；作者本意是整词恒保留再追加）、6/F-2（`name=value` 的值不抽成路径：`LC_ALL=C dd of=.git/config`、`make OUT=.git/x`；兜底与表外程序共用一条拆分规则） | 等产品负责人批准第 7 轮（两处都是小改） |
 | T08 | 分支 `cao/49facf33` @ `bbefd46`（本地，远端还在 `52f35cc`） | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 5 轮通过，全部 finding 已关 | — | 只差 CI：run 42660636464（52f35cc）三平台 test 失败，supervisor 在临时副本里用无 git 身份的干净环境复现；合入前需三平台全绿 |
 | T04、T06、T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
 
