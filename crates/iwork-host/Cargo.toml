@@ -9,3 +9,6 @@ publish.workspace = true
 [dependencies]
 iwork-domain.workspace = true
 iwork-ports.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
