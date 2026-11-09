@@ -38,7 +38,7 @@ fn turn_in(state: TurnState) -> Turn {
 fn turn_table_forward() {
     assert_eq!(
         TURN_TRANSITIONS.len(),
-        18,
+        19,
         "对照：表行数，防止表被清空后正向检查空转"
     );
     assert_eq!(check_forward(turn::next, TURN_TRANSITIONS), vec![]);
@@ -121,6 +121,8 @@ fn turn_scenarios() {
         run(S::WaitingApproval, &[T::ProcessLost, T::Abandon]),
         vec![S::Interrupted { reason: Crash }, S::Cancelled]
     );
+    // 等审批时运行时进程意外退出（后台服务还在）：直接失败
+    assert_eq!(run(S::WaitingApproval, &[T::Failed]), vec![S::Failed]);
     // 取消途中后台服务重启：直接算取消
     assert_eq!(run(S::Cancelling, &[T::ProcessLost]), vec![S::Cancelled]);
     // 还没起就取消
@@ -246,4 +248,24 @@ fn turn_process_lost_illegal_without_process() {
             })
         );
     }
+}
+
+/// 哪些触发作废审批：手写期望，不从实现推。
+#[test]
+fn triggers_that_void_pending_approvals() {
+    use iwork_domain::approval::VoidReason;
+    let voiding: Vec<_> = TurnTrigger::all()
+        .into_iter()
+        .filter_map(|t| t.void_reason().map(|r| (t, r)))
+        .collect();
+    assert_eq!(
+        voiding,
+        vec![
+            (T::Cancel, VoidReason::TurnCancelled),
+            (T::Failed, VoidReason::TurnFailed),
+            (T::Abandon, VoidReason::TurnAbandonedAfterInterrupt),
+        ]
+    );
+    // 对照：等待上限中断不作废
+    assert_eq!(T::WaitLimitReached.void_reason(), None);
 }

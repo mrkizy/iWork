@@ -33,6 +33,8 @@ finite_enum! {
         ConversationDeleted,
         TurnAbandonedAfterInterrupt,
         AssistantDeleted,
+        /// 所属回合失败（如等审批时运行时进程意外退出）：回合已是终态，审批再批也没有回合可续
+        TurnFailed,
     }
 }
 
@@ -135,6 +137,15 @@ pub const APPROVAL_TRANSITIONS: &[Transition<ApprovalState, ApprovalTriggerKind>
         },
         A::Voided {
             reason: VoidReason::AssistantDeleted,
+        },
+    ),
+    (
+        A::Pending,
+        AT::Void {
+            reason: VoidReason::TurnFailed,
+        },
+        A::Voided {
+            reason: VoidReason::TurnFailed,
         },
     ),
     (A::Pending, AT::AiReviewStarted, A::Pending),

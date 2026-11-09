@@ -1,5 +1,6 @@
 //! 回合：一次 prompt 到结束（技术设计 6.4）。
 
+use crate::approval::VoidReason;
 use crate::common::{ModelSelection, Timestamp};
 use crate::id::{AssistantId, ConversationId, RuntimeId, TurnId};
 use crate::machine::{IllegalTransition, Transition, finite_enum, lookup};
@@ -42,7 +43,7 @@ finite_enum! {
         Started,
         /// `CancelTurn` / `CancelAll` / 删除对话的收尾
         Cancel,
-        /// 运行时缺失、模型不可用或运行中出错
+        /// 运行时缺失、模型不可用、运行中出错，或后台服务还在时运行时进程意外退出
         Failed,
         PermissionAsked,
         /// 放行或拒绝都回到运行
@@ -76,6 +77,8 @@ pub const TURN_TRANSITIONS: &[Transition<TurnState, TurnTrigger>] = &[
     (S::Cancelling, T::ProcessEnded, S::Cancelled),
     (S::Running, T::Completed, S::Completed),
     (S::Running, T::Failed, S::Failed),
+    // 等审批时运行时出错或进程意外退出（后台服务还在）：与运行中出错同样失败，不经过假的「审批有结果」
+    (S::WaitingApproval, T::Failed, S::Failed),
     (S::Running, T::ProcessLost, S::Interrupted { reason: Crash }),
     (
         S::WaitingApproval,
@@ -118,6 +121,26 @@ pub type TurnIllegal = IllegalTransition<TurnState, TurnTrigger>;
 /// 按 [`TURN_TRANSITIONS`] 求下一状态；表外返回点名的 [`IllegalTransition`]。
 pub fn next(state: TurnState, trigger: TurnTrigger) -> Result<TurnState, TurnIllegal> {
     lookup(TURN_MACHINE, TURN_TRANSITIONS, state, trigger)
+}
+
+impl TurnTrigger {
+    /// 这个触发让回合挂着的审批作废时，作废的原因（需求第 12 章）。
+    /// 等待上限引起的中断（`WaitLimitReached`）不作废审批，审批继续等用户。
+    pub fn void_reason(self) -> Option<VoidReason> {
+        match self {
+            T::Cancel => Some(VoidReason::TurnCancelled),
+            T::Failed => Some(VoidReason::TurnFailed),
+            T::Abandon => Some(VoidReason::TurnAbandonedAfterInterrupt),
+            T::Started
+            | T::PermissionAsked
+            | T::PermissionDecided
+            | T::ProcessEnded
+            | T::Completed
+            | T::ProcessLost
+            | T::WaitLimitReached
+            | T::Resume => None,
+        }
+    }
 }
 
 impl TurnState {
