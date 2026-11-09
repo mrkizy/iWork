@@ -269,3 +269,173 @@ fn append(text: &mut String, offset: u64, next: &str, next_offset: u64) -> bool 
     text.push_str(next);
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iwork_proto::routing::StreamKey;
+
+    fn persisted(seq: u64, pad: usize) -> Outbound {
+        Outbound::Persisted {
+            ids: vec![1],
+            event: Arc::new(RoutedEvent::new(
+                pb::PersistedEvent {
+                    seq,
+                    actor: "x".repeat(pad),
+                    ..Default::default()
+                },
+                vec![StreamKey::all("project")],
+            )),
+        }
+    }
+
+    fn delta(msg: &str, offset: u64, text: &str, ids: &[u32]) -> Outbound {
+        Outbound::Transient {
+            ids: ids.to_vec(),
+            event: pb::TransientEvent {
+                event: Some(Transient::MessageDelta(pb::MessageDelta {
+                    message_id: msg.into(),
+                    offset,
+                    text: text.into(),
+                })),
+            },
+        }
+    }
+
+    fn texts(b: &ConnectionBudget) -> Vec<String> {
+        b.queue
+            .iter()
+            .map(|(o, _)| match o {
+                Outbound::Transient { event, .. } => match &event.event {
+                    Some(Transient::MessageDelta(d)) => d.text.clone(),
+                    _ => "?".into(),
+                },
+                Outbound::Persisted { event, .. } => format!("P{}", event.seq()),
+                Outbound::Response(_) => "R".into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn persisted_encoding_matches_prost() {
+        let o = persisted(7, 10);
+        let mut mine = BytesMut::new();
+        o.encode(&mut mine);
+        let Outbound::Persisted { ids, event } = &o else { unreachable!() };
+        let mut theirs = BytesMut::new();
+        crate::frame::encode_frame(
+            &crate::frame::Frame::Event(pb::Event {
+                subscription_ids: ids.clone(),
+                body: Some(pb::event::Body::Persisted(event.event.clone())),
+            }),
+            &mut theirs,
+        );
+        assert_eq!(mine, theirs);
+        assert_eq!(o.encoded_len(), theirs.len());
+    }
+
+    #[test]
+    fn live_events_cannot_use_replay_reserve_but_replay_can() {
+        let one = persisted(1, 100).encoded_len();
+        // 上限 10 条、保底 3 条：实时最多 7 条，补发能用满 10 条。
+        let mut b = ConnectionBudget::new(one * 10, one * 3);
+        for i in 1..=7 {
+            assert_eq!(b.push_live(persisted(i, 100)), Push::Queued);
+        }
+        assert_eq!(b.push_live(persisted(8, 100)), Push::Overflow);
+        assert_eq!(b.used(), one * 7, "溢出时预算不动");
+        for i in 0..3 {
+            assert_eq!(b.push_replay(persisted(10 + i, 100)), Push::Queued);
+        }
+        assert_eq!(b.push_replay(persisted(20, 100)), Push::Overflow);
+        assert_eq!(b.used(), b.limit());
+    }
+
+    #[test]
+    fn responses_are_never_refused() {
+        let mut b = ConnectionBudget::new(100, 10);
+        for _ in 0..50 {
+            b.push_response(pb::Response { request_id: 1, body: None });
+        }
+        assert!(b.used() > b.limit());
+        assert_eq!(b.push_live(persisted(1, 0)), Push::Overflow);
+    }
+
+    #[test]
+    fn buffer_counts_against_live_limit_and_moves_without_recheck() {
+        let one = persisted(1, 100).encoded_len();
+        let mut b = ConnectionBudget::new(one * 4, one);
+        assert_eq!(b.reserve_buffer(one), Push::Queued);
+        assert_eq!(b.reserve_buffer(one), Push::Queued);
+        assert_eq!(b.reserve_buffer(one), Push::Queued);
+        assert_eq!(b.reserve_buffer(one), Push::Overflow, "缓冲也只能用到实时上限");
+        assert_eq!(b.used(), one * 3);
+        b.move_buffered_to_queue(persisted(1, 100), one);
+        b.release_buffer(one);
+        assert_eq!(b.used(), one * 2);
+        b.clear();
+        assert_eq!(b.used(), 0);
+    }
+
+    #[test]
+    fn adjacent_deltas_of_same_message_merge_when_full() {
+        let first = delta("m", 0, "ab", &[1]);
+        let mut b = ConnectionBudget::new(first.encoded_len() + 2, 1);
+        assert_eq!(b.push_live(first), Push::Queued);
+        assert_eq!(b.push_live(delta("m", 2, "cd", &[1])), Push::Queued, "满了就合并");
+        assert_eq!(texts(&b), ["abcd"]);
+        assert_eq!(b.used(), b.queue[0].0.encoded_len(), "合并后字节重算");
+        // offset 不连续、订阅集合不同、别的消息：都不合并 → 溢出。
+        assert_eq!(b.push_live(delta("m", 9, "x", &[1])), Push::Overflow);
+        assert_eq!(b.push_live(delta("m", 4, "x", &[1, 2])), Push::Overflow);
+        assert_eq!(b.push_live(delta("other", 0, "x", &[1])), Push::Overflow);
+        assert_eq!(texts(&b), ["abcd"]);
+    }
+
+    #[test]
+    fn merge_skips_other_transients_but_not_persisted_events() {
+        let mut b = ConnectionBudget::new(10_000, 1);
+        b.push_live(delta("m", 0, "a", &[1]));
+        b.push_live(delta("n", 0, "z", &[1]));
+        // 塞满，逼合并。
+        while b.push_live(persisted(1, 50)) == Push::Queued {}
+        // 再用别的消息的增量把零头塞满（offset 不连续，彼此不合并）。
+        let mut k = 0;
+        while b.push_live(delta("f", k * 10, "q", &[9])) == Push::Queued {
+            k += 1;
+        }
+        assert_eq!(b.push_live(delta("m", 1, "b", &[1])), Push::Overflow, "中间隔着持久事件不合并");
+        let mut b = ConnectionBudget::new(200, 1);
+        b.push_live(delta("m", 0, "a", &[1]));
+        b.push_live(delta("n", 0, "z", &[1]));
+        while b.push_live(delta("n", b.queue.len() as u64 + 100, "q", &[2])) == Push::Queued {}
+        let before = texts(&b);
+        assert_eq!(before[0], "a");
+        assert_eq!(b.push_live(delta("m", 1, "b", &[1])), Push::Queued, "隔着别的瞬时事件可以合并");
+        assert_eq!(texts(&b)[0], "ab");
+    }
+
+    #[test]
+    fn merge_respects_chunk_limit() {
+        let big = "x".repeat(MAX_CHUNK_DATA);
+        let first = delta("m", 0, &big, &[1]);
+        let mut b = ConnectionBudget::new(first.encoded_len() + 1, 1);
+        assert_eq!(b.push_live(first), Push::Queued);
+        assert_eq!(b.push_live(delta("m", MAX_CHUNK_DATA as u64, "y", &[1])), Push::Overflow);
+    }
+
+    #[test]
+    fn pop_batch_takes_at_least_one_and_respects_size() {
+        let mut b = ConnectionBudget::new(1 << 20, 1);
+        for i in 1..=10 {
+            b.push_live(persisted(i, 100));
+        }
+        let one = persisted(1, 100).encoded_len();
+        let mut buf = BytesMut::new();
+        assert_eq!(b.pop_batch(one * 3, &mut buf), 3);
+        assert_eq!(buf.len(), one * 3);
+        let mut buf = BytesMut::new();
+        assert_eq!(b.pop_batch(1, &mut buf), 1, "上限小于一帧也至少取一帧");
+        assert_eq!(b.used(), one * 6);
+    }
+}

@@ -162,6 +162,8 @@ pub struct World {
     pub read_delay: Arc<Mutex<Duration>>,
     /// 取数永不返回。
     pub read_hangs: Arc<Mutex<bool>>,
+    /// 每条事件的填充字节（放在 actor 里），用来快速撑满预算。
+    pub pad: Arc<Mutex<usize>>,
 }
 
 impl World {
@@ -171,13 +173,14 @@ impl World {
 
     /// 提交一条事件（不发布）。
     pub fn commit(&self, op: Op) -> Arc<RoutedEvent> {
+        let pad = *self.pad.lock().unwrap();
         let mut st = self.state.lock().unwrap();
         let seq = st.events.len() as u64 + 1;
         let e = Arc::new(RoutedEvent::new(
             pb::PersistedEvent {
                 seq,
                 at: None,
-                actor: "user".into(),
+                actor: "u".repeat(1 + pad),
                 event: None,
             },
             vec![route_of(op.entity())],
