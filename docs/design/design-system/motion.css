@@ -1,0 +1,64 @@
+/* iWork 动效（docs/design/ui-m1.md 3.3、3.4；技术设计 9.7）
+ * 只用 transform / opacity；系统“减少动态效果”或设置 playful_ui 关闭时停用（见文件末尾）。
+ */
+.iw-ch { display: inline-flex; position: relative; cursor: pointer; }
+.iw-ch .iw-h { display: none; }
+
+/* 悬停：蹦一下 + 换成眨眼笑 + 头顶“嗨” */
+.iw-ch:hover .iw-n { display: none; }
+.iw-ch:hover .iw-h { display: inline; }
+.iw-ch:hover { animation: iw-hop .5s cubic-bezier(.3,1.7,.5,1); }
+@keyframes iw-hop { 0% { transform: translateY(0) rotate(0) } 40% { transform: translateY(-5px) rotate(-8deg) } 100% { transform: translateY(0) rotate(0) } }
+.iw-ch:hover::after {
+  content: '嗨'; position: absolute; top: -16px; right: -14px; z-index: 3;
+  font-size: 11px; line-height: 16px; color: var(--tx); white-space: nowrap;
+  background: var(--surf); border: 1px solid var(--bd); border-radius: 8px; padding: 0 6px;
+}
+
+/* 戳一下：比悬停跳得更高（客户端在点击时加上 .iw-poke，动画结束移除） */
+.iw-poke { animation: iw-poke .45s cubic-bezier(.3,1.7,.5,1); }
+@keyframes iw-poke { 0% { transform: translateY(0) } 35% { transform: translateY(-9px) rotate(6deg) } 100% { transform: translateY(0) } }
+
+/* 2 秒内连戳 3 次：假装生气约 1.5 秒（换 angry 图形 + 抖动），之后回到原状态 */
+.iw-angry { animation: iw-angry 1.5s ease-in-out; }
+@keyframes iw-angry {
+  0%,100% { transform: translateX(0) } 10%,30%,50%,70% { transform: translateX(-1.5px) rotate(-2deg) }
+  20%,40%,60%,80% { transform: translateX(1.5px) rotate(2deg) }
+}
+
+/* 工作中：轻微上下浮动摇摆 */
+.iw-float { animation: iw-float 2.2s ease-in-out infinite; transform-origin: 50% 80%; }
+@keyframes iw-float { 0%,100% { transform: translateY(0) rotate(-3deg) } 50% { transform: translateY(-3px) rotate(3deg) } }
+
+/* 完成：出现时弹一下 */
+.iw-pop { animation: iw-pop .6s cubic-bezier(.3,1.6,.5,1) both; }
+@keyframes iw-pop { from { transform: scale(.6) } to { transform: scale(1) } }
+
+/* 侧栏眼睛跟随：客户端只改 .iw-eyes 的 transform（最多 1.5px），rAF 合并，见 README */
+.iw-eyes { transition: transform .08s linear; }
+
+/* 正在输入的三个点 */
+.iw-dots { display: inline-flex; gap: 4px; }
+.iw-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--tx3); animation: iw-dot 1.2s infinite; }
+.iw-dots i:nth-child(2) { animation-delay: .2s } .iw-dots i:nth-child(3) { animation-delay: .4s }
+@keyframes iw-dot { 0%,80%,100% { opacity: .3 } 40% { opacity: 1 } }
+
+/* “搞定”印章：盖在改动摘要卡片上，后台下发 celebrate: true 时显示 */
+.iw-stamp {
+  display: inline-block; font-weight: 700; font-style: italic; letter-spacing: 2px;
+  font-size: 24px; color: var(--acc); border: 3px solid var(--acc); border-radius: 12px;
+  padding: 2px 14px; transform: rotate(-9deg);
+  animation: iw-stamp .35s cubic-bezier(.3,1.6,.5,1) both;
+}
+@keyframes iw-stamp { from { transform: rotate(-9deg) scale(1.6); opacity: 0 } to { transform: rotate(-9deg) scale(1); opacity: 1 } }
+
+/* 停用：系统减少动态效果，或设置里关闭轻松元素（根元素加 .iw-playful-off） */
+@media (prefers-reduced-motion: reduce) {
+  .iw-ch:hover, .iw-poke, .iw-angry, .iw-float, .iw-pop, .iw-dots i, .iw-stamp { animation: none; }
+  .iw-eyes { transition: none; transform: none !important; }
+}
+.iw-playful-off .iw-ch:hover, .iw-playful-off .iw-poke, .iw-playful-off .iw-angry,
+.iw-playful-off .iw-float, .iw-playful-off .iw-pop { animation: none; }
+.iw-playful-off .iw-ch:hover::after { content: none; }
+.iw-playful-off .iw-eyes { transform: none !important; }
+.iw-playful-off .iw-stamp { display: none; }

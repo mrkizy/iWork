@@ -1,0 +1,15 @@
+/tmp/workflow-results
+/.env
+/db
+/logs
+/fifos
+/locks
+/server.lock
+/watchdog.pid
+/agent-context
+/memory
+/workflow-script-scratch
+/graph-exports
+/agent-plugin-data
+/skills
+/metrics

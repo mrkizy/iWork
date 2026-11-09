@@ -1,0 +1,207 @@
+/* iWork 设计令牌（定稿：底色 1，2026-11-08）
+ * 组件只引用这些变量，不写死颜色。主题切换：在根元素上设 data-theme="light" / "dark"；
+ * 不设时跟随系统。浅色与深色的取值说明见 docs/design/ui-m1.md 3.2。
+ */
+:root,
+[data-theme="light"] {
+  --bg:#FFFFFF;
+  --side:#F4F6F9;
+  --sideOn:#E6ECF3;
+  --surf:#FFFFFF;
+  --surf2:#F7F9FB;
+  --bd:#E3E8EF;
+  --bd2:#D8DFE8;
+  --tx:#13334D;
+  --tx2:#475A6E;
+  --tx3:#6B7785;
+  --brand:#13334D;
+  --acc:#C9562E;
+  --accTx:#FFFFFF;
+  --mus:#D9A93A;
+  --pri:#13334D;
+  --priTx:#FFFFFF;
+  --bub:#EAF1F8;
+  --idle:#B4BECA;
+  --tag:#EEF2F6;
+  --warnBg:#FDF3D7;
+  --warnTx:#7A5A0E;
+  --warnBd:#EBCB79;
+  --okBg:#E3F2E7;
+  --okTx:#2F7D55;
+  --impBg:#FDF3D7;
+  --impTx:#7A5A0E;
+  --blkBg:#FBE3DA;
+  --blkTx:#9A3B1B;
+  --addTx:#2F7D55;
+  --sel:#EAF1F8;
+  --selBg:#EAF1F8;
+  --scrim:rgba(19,51,77,.28);
+  --grid:#E9EEF4;
+  --line:#B9C5D3;
+  --avL:#E3ECF6;
+  --avLt:#13334D;
+  --avA:#FDF0CC;
+  --avAt:#7A5A0E;
+  --avD:#F8E1D7;
+  --avDt:#9A3B1B;
+  --avR:#EEF1F4;
+  --avRt:#475A6E;
+  --ch1:#C9562E;
+  --ch2:#E8C15F;
+  --ch3:#13334D;
+  --ch4:#7FB0DE;
+  --chInk:#1E1A24;
+  --chInk3:#FFFFFF;
+  --chHat:#C9562E;
+  --xp:#E8C15F;
+}
+
+[data-theme="dark"] {
+  --bg:#0F1720;
+  --side:#0B1219;
+  --sideOn:#1B2836;
+  --surf:#16212D;
+  --surf2:#131D28;
+  --bd:#243241;
+  --bd2:#2C3B4C;
+  --tx:#E8EEF5;
+  --tx2:#AFBBC8;
+  --tx3:#8593A2;
+  --brand:#8DB8E2;
+  --acc:#E2683F;
+  --accTx:#FFFFFF;
+  --mus:#E8C15F;
+  --pri:#E8EEF5;
+  --priTx:#0F1720;
+  --bub:#1E3045;
+  --idle:#4A5868;
+  --tag:#1E2B3A;
+  --warnBg:#3A2F14;
+  --warnTx:#EBC874;
+  --warnBd:#6B5520;
+  --okBg:#15302A;
+  --okTx:#7FD3A0;
+  --impBg:#3A2F14;
+  --impTx:#EBC874;
+  --blkBg:#3A2219;
+  --blkTx:#F0A487;
+  --addTx:#7FD3A0;
+  --sel:#1B2836;
+  --selBg:#1B2836;
+  --scrim:rgba(0,0,0,.5);
+  --grid:#1C2836;
+  --line:#3A4B5E;
+  --avL:#1E3045;
+  --avLt:#8DB8E2;
+  --avA:#3A2F14;
+  --avAt:#EBC874;
+  --avD:#3A2219;
+  --avDt:#F0A487;
+  --avR:#222E3B;
+  --avRt:#AFBBC8;
+  --ch1:#E2683F;
+  --ch2:#E8C15F;
+  --ch3:#8DB8E2;
+  --ch4:#7FB0DE;
+  --chInk:#14202E;
+  --chInk3:#14202E;
+  --chHat:#E2683F;
+  --xp:#E8C15F;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0F1720;
+    --side:#0B1219;
+    --sideOn:#1B2836;
+    --surf:#16212D;
+    --surf2:#131D28;
+    --bd:#243241;
+    --bd2:#2C3B4C;
+    --tx:#E8EEF5;
+    --tx2:#AFBBC8;
+    --tx3:#8593A2;
+    --brand:#8DB8E2;
+    --acc:#E2683F;
+    --accTx:#FFFFFF;
+    --mus:#E8C15F;
+    --pri:#E8EEF5;
+    --priTx:#0F1720;
+    --bub:#1E3045;
+    --idle:#4A5868;
+    --tag:#1E2B3A;
+    --warnBg:#3A2F14;
+    --warnTx:#EBC874;
+    --warnBd:#6B5520;
+    --okBg:#15302A;
+    --okTx:#7FD3A0;
+    --impBg:#3A2F14;
+    --impTx:#EBC874;
+    --blkBg:#3A2219;
+    --blkTx:#F0A487;
+    --addTx:#7FD3A0;
+    --sel:#1B2836;
+    --selBg:#1B2836;
+    --scrim:rgba(0,0,0,.5);
+    --grid:#1C2836;
+    --line:#3A4B5E;
+    --avL:#1E3045;
+    --avLt:#8DB8E2;
+    --avA:#3A2F14;
+    --avAt:#EBC874;
+    --avD:#3A2219;
+    --avDt:#F0A487;
+    --avR:#222E3B;
+    --avRt:#AFBBC8;
+    --ch1:#E2683F;
+    --ch2:#E8C15F;
+    --ch3:#8DB8E2;
+    --ch4:#7FB0DE;
+    --chInk:#14202E;
+    --chInk3:#14202E;
+    --chHat:#E2683F;
+    --xp:#E8C15F;
+  }
+}
+
+/* 非颜色令牌（取自画布各页的实际用值） */
+:root {
+  --font-sans: Inter, "Noto Sans SC", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --fs-2xs: 10px;    /* 头像角标、截图标签 */
+  --fs-xs: 11px;     /* 徽标、气泡、次要标注 */
+  --fs-sm: 12px;     /* 说明文字、时间戳、侧栏分组标题 */
+  --fs-sm2: 12.5px;  /* 按钮、标签、工具栏 */
+  --fs-md: 13.5px;   /* 侧栏项、卡片正文、菜单项 */
+  --fs-body: 14.5px; /* 对话正文 */
+  --fs-lg: 16px;     /* 品牌名、小标题 */
+  --fs-title: 19px;  /* 弹窗标题 */
+  --fs-display: 30px;/* 首页“要做点什么？” */
+  --lh-body: 1.75;
+  --lh-ui: 1.6;
+
+  --r-xs: 6px;   /* 小图标按钮、标签 */
+  --r-sm: 8px;   /* 按钮、侧栏项 */
+  --r-md: 10px;  /* 输入框、代码块、附件卡片 */
+  --r-lg: 12px;  /* 对话内卡片 */
+  --r-xl: 14px;  /* 菜单、浮层 */
+  --r-2xl: 18px; /* 弹窗、主输入框 */
+  --r-pill: 999px;
+
+  --shadow-seg: 0 1px 2px rgba(0,0,0,.12);
+  --shadow-pop: 0 12px 32px rgba(20,25,35,.16);
+  --shadow-tip: 0 12px 30px rgba(0,0,0,.18);
+  --shadow-dialog: 0 20px 50px rgba(0,0,0,.2);
+
+  --sidebar-w: 264px;
+  --content-max: 720px;   /* 对话内容列 */
+  --composer-max: 760px;  /* 输入框 */
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--tx);
+  font-family: var(--font-sans);
+}

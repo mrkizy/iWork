@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "scaffoldVersion": "0.1.0",
+  "createdAt": "2026-11-07T15:38:48.852Z",
+  "selectedRoles": [
+    "code_supervisor",
+    "architect",
+    "developer",
+    "code_reviewer",
+    "ui_design_reviewer",
+    "functional_reviewer"
+  ],
+  "providers": {
+    "code_supervisor": "claude_code",
+    "architect": "claude_code",
+    "developer": "claude_code",
+    "code_reviewer": "codex",
+    "ui_design_reviewer": "antigravity_cli",
+    "functional_reviewer": "codex"
+  },
+  "models": {
+    "code_supervisor": "claude-opus-5-5",
+    "architect": "claude-fable-5-1",
+    "developer": "claude-opus-5-5",
+    "code_reviewer": "gpt-6-astra",
+    "ui_design_reviewer": "gemini-3.8-flash-high",
+    "functional_reviewer": "gpt-6.1-sol"
+  },
+  "providerSettings": {
+    "code_supervisor": {
+      "effort": "high"
+    },
+    "architect": {
+      "effort": "high"
+    },
+    "developer": {
+      "effort": "medium"
+    },
+    "code_reviewer": {
+      "model_reasoning_effort": "high"
+    },
+    "functional_reviewer": {
+      "model_reasoning_effort": "high"
+    }
+  },
+  "extraTools": {},
+  "serverPort": 9895,
+  "workflowName": "agent_scaffold_review",
+  "installedWorkflowHash": "5ebf3e103bb4e4915d973793a138d653855dbaafb5455feaf049631f0b233b77",
+  "changelogSeen": "2026-11-06-2",
+  "generatedFiles": {
+    ".cao/.gitignore": "7cf7b3b06093f11d67ae7ebd560028d0306056b4105f4f4099d649febb2a53ad",
+    ".cao/agent-store/code_supervisor.md": "56c619e4721603abdc0bc048e1aebaaf15450e7b58dfccce1043d2b5105c85cd",
+    ".cao/project-prompts/code_supervisor.md": "84c8f51029821a5d08a9f016aa07fbf4a51109a5bd5416fc7083dd65d06e9981",
+    ".cao/agent-store/architect.md": "19bcdeb4d7f953259c611aa886f9941374169cb1e6ef2c7b0769f279e1915a83",
+    ".cao/project-prompts/architect.md": "eb0b755b726a7beeaf036895126632b84c51f706337c53f169ccb75e70e8e838",
+    ".cao/agent-store/developer.md": "94bbcd6d5a096e51fe68b6ed67e0b3876e6285a90e779df944d9da26b07a43cd",
+    ".cao/project-prompts/developer.md": "768621c01ea1d15ae1619d57d0c2958c4f964b7414a86d12ebc30a478874a612",
+    ".cao/agent-store/code_reviewer.md": "d3aa4c9ec7f9cd3bbb0004c388f95aeb5c52983821f0669367b686e4f73a1c74",
+    ".cao/project-prompts/code_reviewer.md": "bca8473f37910e0ada4c50f3c735051f0139aacbf436ace62ed8950e19cae822",
+    ".cao/agent-store/ui_design_reviewer.md": "ce2fde3b1e80dee43a04faff1b0490a9434559445cfa7581b5dfec6f2380ad38",
+    ".cao/project-prompts/ui_design_reviewer.md": "f2fb68817ea655aa68d4e0f2d9a57e6ca24f5bb753a3ad0814ceda2fa2504d55",
+    ".cao/agent-store/functional_reviewer.md": "b5769957cc9ac665fec3ed28e3a397be85e87c0afdc4bd555a536aba735ee7c6",
+    ".cao/project-prompts/functional_reviewer.md": "eb4e37564f390244cf37f05a2090fa4899a2742ebd657a8aa52945b304e4094e",
+    ".cao/project-prompts/review-standards.md": "4ad0cb2bd779290e7424ddafd2fc4f157c1592534cd5dd1d465a1216f46e3009",
+    ".cao/agent-store/retrospector.md": "abbb3163edbde2e1feb35043aeb80ad72828578183fa77dc1ccb6ff3647cb66a",
+    ".cao/project-prompts/design-principles.md": "c092c975395e4a2a220e6ce75ffa5de5b14202a5b11e03844a25c09fde404a56",
+    ".cao/THIRD_PARTY_LICENSES.md": "e88c78a0161cd0776c04d301f53749d35aaf6db8a8bc8828ce76fe38b1ea851f",
+    ".cao/workflows/agent_review.py": "5ebf3e103bb4e4915d973793a138d653855dbaafb5455feaf049631f0b233b77",
+    ".cao/start-server.sh": "26762c04bd5fe2e00d17a0084ef8944ae155d51ed304dab3c2f8a92545c1adb9",
+    ".cao/launch-supervisor.sh": "d7c4433540a1966e561e7fe280765d2ceb64820592216ac38e9bda4b01d33983"
+  }
+}
