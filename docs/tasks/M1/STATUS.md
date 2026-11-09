@@ -1,6 +1,6 @@
 # M1 进度与决策（supervisor 交接记录）
 
-> 最后更新：2026-11-10 01:17。上下文压缩或换会话后，supervisor 先读这份文件再动手。
+> 最后更新：2026-11-10 01:27。上下文压缩或换会话后，supervisor 先读这份文件再动手。
 > 只记当前状态与还没写进其他文档的决定；已写进需求、技术设计、任务卡、方案的，以那些文档为准。
 
 ## 1 运行安排
@@ -26,10 +26,10 @@
 | --- | --- | --- | --- | --- | --- |
 | T01 | 已合入 main `bb6d69a` | — | `2026-11-09-m1-t01` 已关 | 验收 5 空窗口截图未补（屏幕锁定） | 有空时补截图 |
 | T02 | 方案 `docs/plans/T02.md`（已提交 `94662af`） | developer `fecce968`，worktree 分支 `cao/fecce968`，**暂停、未开工** | 方案 `2026-11-09-m1-t02-plan` 已关 | — | 4 点后按方案第 11 节开工 |
-| T03 | 方案 `docs/plans/T03.md`（未提交，第 4 轮已整体重写） | architect `474f00b7`；方案 reviewer `3f790292` | `2026-11-09-m1-t03-plan` 第 4 轮不通过（已超三轮） | 3/F-2→4/F-1（迟到的查询结果覆盖新状态）、3/F-6→4/F-3（缓冲溢出取消不记 cancel_at）、4/F-2（PeerRejected 推断版本新旧，旧客户端无限等） | 等产品负责人批准第 5 轮小改 |
+| T03 | 方案 `docs/plans/T03.md`（未提交，第 4 轮已整体重写） | architect `474f00b7`；方案 reviewer `3f790292` | `2026-11-09-m1-t03-plan` 第 4 轮不通过（已超三轮） | 3/F-2→4/F-1（迟到的查询结果覆盖新状态）、3/F-6→4/F-3（缓冲溢出取消不记 cancel_at）、4/F-2（PeerRejected 推断版本新旧，旧客户端无限等） | 第 5 轮已批准（01:26），architect 在改；回报后原 reviewer 只核这几条 |
 | T05 | 已合入 main `a6987d4` | — | `2026-11-09-m1-t05` 已关（三轮，14 条全 fixed） | — | — |
-| T07 | 方案 `docs/plans/T07.md`（未提交） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 4 轮不通过（已超三轮） | 1/F-12 残留：整条 Unparsable 时丢掉已识别的选项路径（`ssh -v -E.git/config -p2222 host` 只问不拒）；语料 `curl -o/tmp/x` 与正文不一致 | 等产品负责人批准第 5 轮小改 |
-| T08 | 分支 `cao/49facf33` | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 4 轮 | racy 时间戳边角（外部过滤文件同一秒内等长改写会漏标） | 等产品负责人定：修（推荐，条件加 `is_racy` 就保守列出）还是登记已知限制；CI run 42660636464 三平台 test 失败，等日志 |
+| T07 | 方案 `docs/plans/T07.md`（未提交） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 4 轮不通过（已超三轮） | 1/F-12 残留：整条 Unparsable 时丢掉已识别的选项路径（`ssh -v -E.git/config -p2222 host` 只问不拒）；语料 `curl -o/tmp/x` 与正文不一致 | 第 5 轮已批准（01:26），architect 在改；回报后原 reviewer 只核这几条 |
+| T08 | 分支 `cao/49facf33` | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 4 轮 | racy 时间戳边角（外部过滤文件同一秒内等长改写会漏标） | 等产品负责人定：修（推荐，条件加 `is_racy` 就保守列出）→ 已批准修（01:26），developer 在改；CI run 42660636464 三平台 test 失败，等日志 |
 | T04、T06、T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
 
 查开着的问题：`agent-scaffold findings list --task <任务 ID> --open`。
