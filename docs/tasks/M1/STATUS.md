@@ -33,7 +33,7 @@
 | T02 | 分支 `cao/fecce968` @ `67cafbd` | developer `fecce968`；reviewer A `3036f50a`、B `6723c1bb` | `2026-11-10-m1-t02` 第 1 轮不通过 | 1/F-1～F-7（5 blocking、2 important）：复合读无读事务、GC 吞回滚错误、recover 误删制品、Seq 超 i64 panic、Exclusive 遗留事务、首次初始化中断后无法重试、崩溃注入不查子进程退出 | 方案 2.2 与读事务规则已补（`33035e1`、`940f26f`）；**4 点后派 developer `fecce968` 修 1/F-1～F-7**（产品负责人 02:00 定）：先 `git merge main` 拿到方案补丁，修复后交原 A/B reviewer 第 2 轮 |
 | T03 | 方案 `docs/plans/T03.md`（未提交） | architect `474f00b7`；方案 reviewer `3f790292` | `2026-11-09-m1-t03-plan` 第 7 轮（产品负责人 02:00 批准） | 5/F-1、6/F-1～F-5 | architect 按三条规则改（单一有序出口；交接异常一律断开走断线重连；published_head 启动取库 head），回报后原 reviewer 复审。若再出同粒度问题，建议方案定稿、余下进实现阶段 |
 | T05 | 已合入 main `a6987d4` | — | `2026-11-09-m1-t05` 已关（三轮，14 条全 fixed） | — | — |
-| T07 | 方案 `docs/plans/T07.md`（未提交） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 7 轮（产品负责人 02:00 批准） | 6/F-1、6/F-2（6/F-2 记为 prior，产品负责人同意本轮一并修） | architect 改 fallback_candidates（整词恒保留 + name=value 拆值），回报后原 reviewer 复审 |
+| T07 | 方案 `docs/plans/T07.md`（定稿，已提交） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 7 轮通过，全部关闭 | — | 按依赖排实施（4 点后派 developer，方案第 11 节分步） |
 | T08 | 分支 `cao/49facf33` @ `bbefd46`（本地，远端还在 `52f35cc`） | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 5 轮通过，全部 finding 已关 | — | 只差 CI：run 42660636464（52f35cc）三平台 test 失败，supervisor 在临时副本里用无 git 身份的干净环境复现；合入前需三平台全绿 |
 | T04、T06、T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
 
