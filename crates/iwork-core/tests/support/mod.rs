@@ -96,3 +96,218 @@ pub fn scope() -> ScopeKeys {
         conversation: conversation(),
     }
 }
+
+use std::collections::BTreeSet;
+
+use iwork_core::approval::action::{NormalizeContext, NormalizedCall, normalize_request};
+use iwork_core::approval::session::{SessionSnapshot, snapshot_for};
+use iwork_domain::action::{Action, ActionKind, ActionTarget, ToolRef};
+use iwork_domain::approval_mode::ApprovalMode;
+use iwork_domain::id::Seq;
+use iwork_ports::agent::{PermissionRequest, RawToolInput};
+
+pub fn snapshot() -> SessionSnapshot {
+    snapshot_for(ApprovalMode::Manual, &[], &scope(), &env(), Seq(0))
+}
+
+pub fn bash_req(command: &str) -> PermissionRequest {
+    PermissionRequest {
+        tool: ToolRef("Bash".into()),
+        raw_input: RawToolInput(serde_json::json!({ "command": command }).to_string()),
+        bypass_sandbox: false,
+        updates_before: 0,
+    }
+}
+
+pub fn tool_req(tool: &str, input: serde_json::Value) -> PermissionRequest {
+    PermissionRequest {
+        tool: ToolRef(tool.into()),
+        raw_input: RawToolInput(input.to_string()),
+        bypass_sandbox: false,
+        updates_before: 0,
+    }
+}
+
+/// 在工作区根下归一一次调用（`env()` + `fs()` + 默认快照）。
+pub fn norm(req: &PermissionRequest) -> NormalizedCall {
+    norm_with(req, &snapshot(), &fs())
+}
+
+pub fn norm_with(
+    req: &PermissionRequest,
+    snap: &SessionSnapshot,
+    fs: &fake_fs::FakeFs,
+) -> NormalizedCall {
+    let e = env();
+    let none = BTreeSet::new();
+    let cwd = cp(WS);
+    let ctx = NormalizeContext {
+        paths: &e,
+        boundaries: &snap.boundaries,
+        mcp_read_only: &none,
+        cwd: &cwd,
+    };
+    normalize_request(req, &ctx, fs)
+}
+
+/// 动作的简写：`Read /path`、`Execute git status`。
+pub fn brief(a: &Action) -> String {
+    let t = match &a.target {
+        ActionTarget::Path(p) => p.0.display().to_string(),
+        ActionTarget::Paths(ps) => format!("{ps:?}"),
+        ActionTarget::Command {
+            program,
+            subcommand,
+            ..
+        } => match subcommand {
+            Some(s) => format!("{program} {s}"),
+            None => program.clone(),
+        },
+        ActionTarget::ToolName(n) => n.clone(),
+        ActionTarget::Remote(r) => r.clone(),
+        ActionTarget::None => "-".into(),
+    };
+    format!("{:?} {t}", a.kind)
+}
+
+pub fn briefs(c: &NormalizedCall) -> Vec<String> {
+    c.actions.iter().map(brief).collect()
+}
+
+pub fn has(c: &NormalizedCall, kind: ActionKind, path: &str) -> bool {
+    c.actions
+        .iter()
+        .any(|a| a.kind == kind && a.target == ActionTarget::Path(cp(path)))
+}
+
+use iwork_core::approval::denial::DenialMemory;
+use iwork_core::approval::evaluate::{CallEvaluation, EvalContext, evaluate_call};
+use iwork_core::approval::rules::build_ruleset;
+use iwork_core::approval::session::tool_set_for;
+use iwork_domain::common::ToolGroups;
+use iwork_domain::rule::{RuleEntry, Verdict};
+use iwork_domain::turn::TurnKind;
+
+/// 一次求值的全部输入，默认是：助手回合、没有活规则、没有拒绝记忆、没有关掉的分组。
+pub struct Harness {
+    pub snap: SessionSnapshot,
+    pub live: Vec<RuleEntry>,
+    pub denial: DenialMemory,
+    pub turn: TurnKind,
+    pub disabled: ToolGroups,
+    pub fs: fake_fs::FakeFs,
+}
+
+impl Default for Harness {
+    fn default() -> Self {
+        Self {
+            snap: snapshot(),
+            live: Vec::new(),
+            denial: DenialMemory::default(),
+            turn: TurnKind::Assistant,
+            disabled: ToolGroups::new(),
+            fs: fs(),
+        }
+    }
+}
+
+impl Harness {
+    pub fn eval(
+        &self,
+        req: &PermissionRequest,
+        mode: ApprovalMode,
+    ) -> (NormalizedCall, CallEvaluation) {
+        let call = norm_with(req, &self.snap, &self.fs);
+        let rules = build_ruleset(&self.snap.rules, &self.live, &scope()).unwrap();
+        let tool_set = tool_set_for(self.turn, &self.disabled);
+        let ctx = EvalContext {
+            mode,
+            turn_kind: self.turn,
+            tool_set: &tool_set,
+            disabled_groups: &self.disabled,
+            denial: &self.denial,
+        };
+        let e = evaluate_call(&call, &rules, &ctx, &self.fs);
+        (call, e)
+    }
+
+    pub fn verdict(&self, req: &PermissionRequest, mode: ApprovalMode) -> Verdict {
+        self.eval(req, mode).1.evaluation.verdict
+    }
+}
+
+pub const MODES: [ApprovalMode; 3] = [
+    ApprovalMode::Manual,
+    ApprovalMode::Auto,
+    ApprovalMode::FullAccess,
+];
+
+/// 默认环境下一条 Bash 命令在某档位的结果。
+pub fn bash_verdict(cmd: &str, mode: ApprovalMode) -> Verdict {
+    Harness::default().verdict(&bash_req(cmd), mode)
+}
+
+/// 结果的简写：Allow / Ask / OutsideSandbox / Deny / UserAction，便于表驱动。
+pub fn v(verdict: &Verdict) -> &'static str {
+    match verdict {
+        Verdict::Allow => "Allow",
+        Verdict::Ask(_) => "Ask",
+        Verdict::OutsideSandbox(_) => "Outside",
+        Verdict::Deny(_) => "Deny",
+        Verdict::UserAction(_) => "UserAction",
+    }
+}
+
+/// 三档的简写结果。
+pub fn three(req: &PermissionRequest) -> [&'static str; 3] {
+    let h = Harness::default();
+    MODES.map(|m| v(&h.verdict(req, m)))
+}
+
+use iwork_domain::common::{Actor, Timestamp};
+use iwork_domain::id::{ApprovalId, RuleId};
+use iwork_domain::rule::{RuleEffect, RuleLayer, RuleMatcher, RuleScope, RuleSource};
+
+/// 一条活规则（记住 / 项目放行 / 用户拒绝）。
+pub fn live_rule(n: u128, layer: RuleLayer, matcher: RuleMatcher, scope: RuleScope) -> RuleEntry {
+    RuleEntry {
+        id: RuleId::from_raw(RawUlid::from_u128(0x1000 + n)),
+        layer,
+        matcher,
+        effect: if layer == RuleLayer::UserDeny {
+            RuleEffect::Deny
+        } else {
+            RuleEffect::Allow
+        },
+        source: RuleSource::Remembered {
+            approval_id: ApprovalId::from_raw(RawUlid::from_u128(0x2000 + n)),
+            by: Actor("user".into()),
+        },
+        scope,
+        created_at: Timestamp(1),
+        label: format!("live{n}"),
+        applies_in: Default::default(),
+    }
+}
+
+pub fn kind_and(kind: ActionKind, m: RuleMatcher) -> RuleMatcher {
+    RuleMatcher::All(vec![RuleMatcher::ActionKindIs(kind), m])
+}
+
+pub fn read_req(path: &str) -> PermissionRequest {
+    tool_req("Read", serde_json::json!({ "file_path": path }))
+}
+
+pub fn write_req(path: &str) -> PermissionRequest {
+    tool_req(
+        "Write",
+        serde_json::json!({ "file_path": path, "content": "x" }),
+    )
+}
+
+pub fn edit_req(path: &str) -> PermissionRequest {
+    tool_req(
+        "Edit",
+        serde_json::json!({ "file_path": path, "old_string": "a", "new_string": "b" }),
+    )
+}

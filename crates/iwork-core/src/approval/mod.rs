@@ -5,7 +5,9 @@
 //! 只经端口碰外界）。路径事实经 `iwork_ports::fs::PathResolver` 取来，归一本身是纯函数。
 
 pub mod action;
+pub mod denial;
 pub mod env;
+pub mod evaluate;
 pub mod registry;
 pub mod rules;
 pub mod session;

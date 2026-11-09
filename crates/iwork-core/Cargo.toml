@@ -11,6 +11,7 @@ iwork-domain.workspace = true
 iwork-ports.workspace = true
 iwork-shell.workspace = true
 sha2.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 futures-channel.workspace = true
 futures-core.workspace = true
