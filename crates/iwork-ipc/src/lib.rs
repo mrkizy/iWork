@@ -8,9 +8,11 @@
 //! - 客户端（[`client`]）：建连、握手、唯一的有序出口 `Incoming`。
 
 pub mod audit;
+pub mod client;
 pub mod endpoint;
 pub mod frame;
 pub mod peer;
+pub mod server;
 pub mod transport;
 
 pub use endpoint::{EndpointError, LocalEndpoint};

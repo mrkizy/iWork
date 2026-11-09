@@ -61,3 +61,33 @@ pub(crate) fn manifest_loaded(path: &Path, manifest: &Manifest, self_listed: boo
         tracing::warn!(target: TARGET, event = "manifest_loaded", path = %path.display(), app_version = %manifest.app_version, entries = manifest.entries(), self_listed);
     }
 }
+
+/// 协议违规。`phase` 是 `handshake`（握手前）或 `established`。不记帧内容。
+pub(crate) fn protocol_violation(
+    connection_id: u64,
+    pid: u32,
+    frame_type: &str,
+    reason: &str,
+    phase: &str,
+) {
+    tracing::warn!(target: TARGET, event = "protocol_violation", connection_id, pid, frame_type, reason, phase);
+}
+
+/// 连接被 `fail_connection` 关闭。后台自身问题（交接超时、发布停滞、存储出错）另记一条 `error`。
+pub(crate) fn connection_failed(
+    connection_id: u64,
+    pid: u32,
+    cause: crate::server::FailCause,
+    cursor: u64,
+    used_bytes: usize,
+    in_flight: &str,
+) {
+    if cause == crate::server::FailCause::PeerClosed {
+        tracing::debug!(target: TARGET, event = "connection_failed", connection_id, pid, cause = cause.as_str(), cursor, used_bytes, in_flight);
+        return;
+    }
+    tracing::warn!(target: TARGET, event = "connection_failed", connection_id, pid, cause = cause.as_str(), cursor, used_bytes, in_flight);
+    if cause.is_server_fault() {
+        tracing::error!(target: TARGET, event = "connection_failed", connection_id, pid, cause = cause.as_str(), cursor, used_bytes, in_flight);
+    }
+}
