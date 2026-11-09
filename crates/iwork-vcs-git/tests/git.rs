@@ -1141,3 +1141,100 @@ async fn externally_filtered_file_is_never_judged_unchanged_by_raw_bytes() {
     );
     assert!(!diff.files.iter().any(|d| d.path == Path::new("calm.r")));
 }
+
+// ---------- 第 5 轮：外部过滤文件的 racy 条目 ----------
+
+/// 建一个 rot13 过滤文件已提交的仓库；`x.r` 的 mtime 在加入暂存区前设成 `mtime`，存储内容是 "uryyb\n"。
+/// 关掉 `core.trustctime`：改写文件必然改变 ctime，而 ctime 设不回去；这样改写后 stat 能与暂存区记录完全相同。
+fn rot13_repo_with_mtime(
+    f: &Fixture,
+    name: &str,
+    mtime: std::time::SystemTime,
+) -> (std::path::PathBuf, BaselineRef) {
+    let repo = f.repo_with_commit(name, &[(".gitattributes", "*.r filter=rot\n")]);
+    f.git(
+        &repo,
+        &["config", "filter.rot.clean", "tr a-zA-Z n-za-mN-ZA-M"],
+    );
+    f.git(
+        &repo,
+        &["config", "filter.rot.smudge", "tr a-zA-Z n-za-mN-ZA-M"],
+    );
+    f.git(&repo, &["config", "core.trustctime", "false"]);
+    write(&repo.join("x.r"), "hello\n");
+    set_mtime(&repo.join("x.r"), mtime);
+    f.commit_all(&repo, "rot13 stored");
+    let head = f.git(&repo, &["rev-parse", "HEAD"]);
+    (repo, BaselineRef(head))
+}
+
+fn set_mtime(path: &Path, t: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
+}
+
+/// 在同一时间粒度内改写成与存储内容等长等值的内容，并把 mtime 改回原值：stat 与暂存区记录完全相同。
+fn rewrite_keeping_stat(path: &Path, mtime: std::time::SystemTime) {
+    std::fs::write(path, "uryyb\n").unwrap();
+    set_mtime(path, mtime);
+}
+
+/// 条目 mtime 不早于索引文件自身的时间戳（racy）：stat 相同也说明不了没改动，要列为可能有改动。
+#[tokio::test]
+async fn racy_externally_filtered_file_with_identical_stat_is_listed() {
+    let f = Fixture::new();
+    // 未来的时间：一定晚于随后写出的索引文件时间戳
+    let racy_mtime = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+    let (repo, base) = rot13_repo_with_mtime(&f, "racy", racy_mtime);
+    rewrite_keeping_stat(&repo.join("x.r"), racy_mtime);
+    let root = RepoRoot(repo.clone());
+
+    let status = f.vcs().status(&root).await.unwrap();
+    assert!(
+        status
+            .changed
+            .iter()
+            .any(|c| c.path == Path::new("x.r") && c.change == ChangeKind::Modified),
+        "{status:?}"
+    );
+    let diff = f
+        .vcs()
+        .diff(&root, DiffRange::WorkspaceSince(base))
+        .await
+        .unwrap();
+    assert!(
+        patch_of(&diff, "x.r").patch.contains("not supported"),
+        "{}",
+        patch_of(&diff, "x.r").patch
+    );
+}
+
+/// 对照：条目不是 racy（mtime 早于索引时间戳）且 stat 与暂存区记录相同时不列出。
+#[tokio::test]
+async fn non_racy_externally_filtered_file_with_identical_stat_is_not_listed() {
+    let f = Fixture::new();
+    let past_mtime = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    let (repo, base) = rot13_repo_with_mtime(&f, "settled", past_mtime);
+    rewrite_keeping_stat(&repo.join("x.r"), past_mtime);
+    let root = RepoRoot(repo.clone());
+
+    let status = f.vcs().status(&root).await.unwrap();
+    assert!(
+        !status.changed.iter().any(|c| c.path == Path::new("x.r")),
+        "{status:?}"
+    );
+    let diff = f
+        .vcs()
+        .diff(&root, DiffRange::WorkspaceSince(base))
+        .await
+        .unwrap();
+    assert!(
+        !diff.files.iter().any(|d| d.path == Path::new("x.r")),
+        "{:?}",
+        diff.files
+    );
+}

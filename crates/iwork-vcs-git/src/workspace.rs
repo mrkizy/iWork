@@ -353,7 +353,8 @@ impl<'repo> Worktree<'repo> {
     /// gix 的 status 看不到或不能信的已跟踪路径（相对暂存区）。`status` 与 `diff` 都用它，判定只有这一份：
     ///
     /// - **需要外部过滤器的文件**：后台不运行外部程序，原始字节和存储内容相同也不能说明没改动（存储的是过滤后的
-    ///   内容）。所以只看暂存区记的 stat（时间戳、大小等）：变了就列为「可能有改动」，差异里标「内容比较不支持」。
+    ///   内容）。所以只看暂存区记的 stat（时间戳、大小等）：变了，或条目是 racy 的（stat 相同也说明不了什么），
+    ///   就列为「可能有改动」，差异里标「内容比较不支持」。
     /// - **子模块指向的提交**：gix 的子模块扫描已关掉（见 [`status_items`]，它会用子模块自己的配置跑 status），
     ///   这里只比较检出的提交与暂存区记录的提交，相当于 `--ignore-submodules=dirty`。
     fn changes_gix_cannot_judge(&mut self) -> Result<Vec<BString>, VcsError> {
@@ -386,7 +387,10 @@ impl<'repo> Worktree<'repo> {
                     .map_err(|e| failed(op, format!("{}：{e}", rel.display())))?;
                 let on_disk = Stat::from_fs(&on_disk)
                     .map_err(|e| failed(op, format!("{} 的时间戳无法表示：{e}", rel.display())))?;
+                // racy：条目的时间戳不早于索引自身，同一时间粒度内改写成等长内容时 stat 完全相同。git 遇到这种条目
+                // 会比内容，我们不能运行过滤器比内容，只能保守地列出
                 !stat.matches(&on_disk, self.stat_options)
+                    || stat.is_racy(self.index.timestamp(), self.stat_options)
             } else {
                 false
             };
