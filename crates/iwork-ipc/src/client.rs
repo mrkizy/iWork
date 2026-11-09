@@ -278,8 +278,8 @@ enum Pending {
     Ack(oneshot::Sender<Result<(), ClientError>>),
 }
 
+/// 读任务与 `Client` 共享的部分。写端不在这里：`Client` 被丢掉时写端随之关闭，连接才会结束。
 struct Inner {
-    out: mpsc::UnboundedSender<BytesMut>,
     pending: Mutex<Option<HashMap<u64, Pending>>>,
     next_id: AtomicU64,
 }
@@ -298,12 +298,6 @@ impl Inner {
             .expect("pending 锁中毒")
             .as_mut()?
             .remove(&id)
-    }
-
-    fn send(&self, frame: &Frame) -> bool {
-        let mut buf = BytesMut::new();
-        encode_frame(frame, &mut buf);
-        self.out.send(buf).is_ok()
     }
 
     /// 连接结束：之后的请求立即失败，在飞的全部以 `Closed` 结束。
@@ -325,6 +319,7 @@ impl Inner {
 /// 一条已握手的连接。
 pub struct Client {
     inner: Arc<Inner>,
+    out: mpsc::UnboundedSender<BytesMut>,
     welcome: pb::Welcome,
 }
 
@@ -412,7 +407,6 @@ impl Client {
             let _ = wr.shutdown().await;
         });
         let inner = Arc::new(Inner {
-            out: out_tx,
             pending: Mutex::new(Some(HashMap::new())),
             next_id: AtomicU64::new(1),
         });
@@ -425,7 +419,8 @@ impl Client {
             limit,
         };
         tokio::spawn(read_loop(reader, Arc::clone(&inner), incoming_tx));
-        Ok((Client { inner, welcome }, Incoming { rx: in_rx, space }))
+        let client = Client { inner, out: out_tx, welcome };
+        Ok((client, Incoming { rx: in_rx, space }))
     }
 
     pub fn welcome(&self) -> &pb::Welcome {
@@ -503,7 +498,7 @@ impl Client {
         if chunk.data.len() > MAX_CHUNK_DATA {
             return Err(ClientError::ChunkTooLarge);
         }
-        if self.inner.send(&Frame::Chunk(chunk)) {
+        if self.send(&Frame::Chunk(chunk)) {
             Ok(())
         } else {
             Err(ClientError::Closed)
@@ -516,13 +511,19 @@ impl Client {
         rx.await.unwrap_or(Err(ClientError::Closed))
     }
 
+    fn send(&self, frame: &Frame) -> bool {
+        let mut buf = BytesMut::new();
+        encode_frame(frame, &mut buf);
+        self.out.send(buf).is_ok()
+    }
+
     fn send_request(&self, p: Pending, body: pb::request::Body) -> Result<u64, ClientError> {
         let id = self.inner.register(p).ok_or(ClientError::Closed)?;
         let frame = Frame::Request(pb::Request {
             request_id: id,
             body: Some(body),
         });
-        if self.inner.send(&frame) {
+        if self.send(&frame) {
             Ok(id)
         } else {
             self.inner.take(id);
