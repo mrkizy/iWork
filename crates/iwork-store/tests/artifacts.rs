@@ -496,17 +496,15 @@ fn gc_after_conversation_deleted_frees_attachment_copy() {
             .put_bytes(ArtifactArea::Attachments, b"attached".to_vec()),
     )
     .unwrap();
-    block(
-        w.store.commit(cmd(
-            2,
-            vec![
+    block(w.store.commit(cmd(
+        2,
+        vec![
                 AttachmentStored {
                     attachment: attachment(40, 10, AttachmentOrigin::Copied(r)),
                 }
                 .into(),
             ],
-        )),
-    )
+    )))
     .unwrap();
     w.env.clock.advance(2 * DAY);
     assert_eq!(

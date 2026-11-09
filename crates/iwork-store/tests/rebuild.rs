@@ -81,10 +81,9 @@ fn history(store: &Store) {
         outbox("runtime", b"c"),
     ];
     block(store.commit(req)).unwrap();
-    block(
-        store.commit(cmd(
-            2,
-            vec![
+    block(store.commit(cmd(
+        2,
+        vec![
                 ApprovalDecided {
                     approval_id: apid(41),
                     state: ApprovalState::Approved {
@@ -118,8 +117,7 @@ fn history(store: &Store) {
                 }
                 .into(),
             ],
-        )),
-    )
+    )))
     .unwrap();
 }
 

@@ -220,8 +220,8 @@ pub(crate) fn parse_sha(text: &str) -> Option<Sha256> {
         _ => None,
     };
     let mut out = [0u8; 32];
-    for (i, pair) in bytes.chunks_exact(2).enumerate() {
-        out[i] = nibble(pair[0])? << 4 | nibble(pair[1])?;
+    for (i, [hi, lo]) in bytes.as_chunks::<2>().0.iter().enumerate() {
+        out[i] = nibble(*hi)? << 4 | nibble(*lo)?;
     }
     Some(Sha256(out))
 }

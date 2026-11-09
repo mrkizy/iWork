@@ -235,7 +235,7 @@ fn pending_items_four_sources() {
 #[test]
 fn rules_scope_filter_and_security_lists_three_layers() {
     let (_env, store) = setup();
-    let rules = vec![
+    let rules = [
         rule(1, RuleLayer::Remembered, RuleScope::Global),
         rule(2, RuleLayer::Remembered, RuleScope::Project(pid(1))),
         rule(3, RuleLayer::Remembered, RuleScope::Project(pid(2))),

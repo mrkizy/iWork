@@ -653,17 +653,19 @@ fn gc_in_tx(
     }
 }
 
+type IoJob = Box<dyn FnOnce() + Send>;
+
 /// 制品 I/O 线程池：读写文件不占调用方（异步任务）的线程，也不占写线程。
 struct IoPool {
-    tx: SyncSender<Box<dyn FnOnce() + Send>>,
+    tx: SyncSender<IoJob>,
 }
 
 impl IoPool {
     fn start(threads: usize) -> std::io::Result<Self> {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Box<dyn FnOnce() + Send>>(256);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<IoJob>(256);
         let rx = Arc::new(Mutex::new(rx));
         for i in 0..threads {
-            let rx: Arc<Mutex<Receiver<Box<dyn FnOnce() + Send>>>> = rx.clone();
+            let rx: Arc<Mutex<Receiver<IoJob>>> = rx.clone();
             std::thread::Builder::new()
                 .name(format!("iwork-artifact-io-{i}"))
                 .spawn(move || {

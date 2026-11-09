@@ -40,7 +40,7 @@ fn events_for(n: u128) -> Vec<DomainEvent> {
         }
         .into(),
     ];
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         events.push(
             ConversationCreated {
                 conversation: project_conversation(n, n),
@@ -76,7 +76,8 @@ fn crash_child() {
         .map(|w| {
             let (store, out) = (store.clone(), out.clone());
             std::thread::spawn(move || {
-                for k in 0.. {
+                // 一直提交，直到被父进程杀掉
+                for k in 0..u64::MAX {
                     let n = command_number(round, w, k);
                     let mut req = cmd(n, events_for(n));
                     req.outbox = vec![outbox("t", &n.to_le_bytes())];

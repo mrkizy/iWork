@@ -162,21 +162,16 @@ fn turns_for<C: EventCodec + ?Sized>(
         .collect()
 }
 
-fn approval_row(
-    r: &rusqlite::Row<'_>,
-) -> rusqlite::Result<(String, Vec<u8>, String, Option<String>, Option<String>)> {
+/// `approvals` 的一行：`(id, snapshot, state, decider, void_reason)`。
+type ApprovalRow = (String, Vec<u8>, String, Option<String>, Option<String>);
+
+fn approval_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRow> {
     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
 }
 
 fn decode_approval_row<C: EventCodec + ?Sized>(
     codec: &C,
-    (id, snapshot, state, decider, void_reason): (
-        String,
-        Vec<u8>,
-        String,
-        Option<String>,
-        Option<String>,
-    ),
+    (id, snapshot, state, decider, void_reason): ApprovalRow,
 ) -> Result<Approval, StorageError> {
     let state =
         approval_state_from_columns(&id, &state, decider.as_deref(), void_reason.as_deref())?;
