@@ -219,6 +219,9 @@ impl World {
     }
 
     async fn delay(&self) {
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
         let d = *self.read_delay.lock().unwrap();
         if !d.is_zero() {
             tokio::time::sleep(d).await;
@@ -249,6 +252,10 @@ impl WorldSource {
 
 impl EventSource for WorldSource {
     async fn head_seq(&self) -> Result<u64, SourceError> {
+        // 让出几次：真实存储读 head 要等读连接，测试里并发的提交要能落进「已暂停、还没读到 head」的窗口。
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
         Ok(self.world.head())
     }
 

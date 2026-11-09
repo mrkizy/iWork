@@ -11,6 +11,9 @@
 //! - 客户端记一个数：流游标 = 最近一次**已应用**的持久事件 seq、`snapshot_seq` 或 `ViewResult` 的 seq。
 //!   连接因任何原因结束（`Incoming` 给出 [`IncomingItem::Closed`]）就重连，把全部范围**一次写出**
 //!   `Subscribe{from_seq: 游标}`；在飞的命令按原 `command_id` 重发（幂等）。
+//! - `from_seq = 游标` 的含义是「全部范围的视图都齐到游标」：有范围还没收到过它的 `Subscribed`（订阅还在路上就断了）时，
+//!   重连必须用 `from_seq = 0`，否则这个范围永远拿不到快照。改范围的请求用 `subscribe_nowait` / `unsubscribe_nowait`
+//!   按调用顺序写出，不要放进各自的任务里乱序发送。
 //! - 同一游标第二次被关（续传没送出任何事件又断了）就改用 `from_seq = 0` 拿快照；连续 3 次同游标失败提示
 //!   「后台负载过高」，继续退避重连。
 //! - 收到的事件若没有任何活动范围对应（退订后排着的），丢掉。
@@ -483,6 +486,16 @@ impl Client {
     }
 
     pub async fn unsubscribe(&self, id: u32) -> Result<(), ClientError> {
+        self.unsubscribe_nowait(id)?
+            .await
+            .unwrap_or(Err(ClientError::Closed))
+    }
+
+    /// 立即写出退订请求，返回等结果的接收端。与 [`Client::subscribe_nowait`] 一起用时，帧按调用顺序发出。
+    pub fn unsubscribe_nowait(
+        &self,
+        id: u32,
+    ) -> Result<oneshot::Receiver<Result<(), ClientError>>, ClientError> {
         let (tx, rx) = oneshot::channel();
         self.send_request(
             Pending::Ack(tx),
@@ -490,7 +503,7 @@ impl Client {
                 subscription_id: id,
             }),
         )?;
-        rx.await.unwrap_or(Err(ClientError::Closed))
+        Ok(rx)
     }
 
     /// 分片上传。本地先查 1MiB 上限。
