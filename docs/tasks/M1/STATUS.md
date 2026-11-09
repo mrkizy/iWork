@@ -30,7 +30,7 @@
 | T03 | 方案 `docs/plans/T03.md`（未提交，第 5 轮已改） | architect `474f00b7`；方案 reviewer `3f790292` | `2026-11-09-m1-t03-plan` 第 5 轮复审中 | 3/F-2、3/F-6、4/F-1～F-3 | 等复审结论；结论到了只记账，4 点后再派返工 |
 | T05 | 已合入 main `a6987d4` | — | `2026-11-09-m1-t05` 已关（三轮，14 条全 fixed） | — | — |
 | T07 | 方案 `docs/plans/T07.md`（未提交） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 5 轮不通过 | 1/F-12 残留：parse 本身放弃时（前置赋值 `LC_ALL=C ssh -E.git/config host`、同条命令别处有展开）PartialFacts 只有扁平字面词，第 ⓪ 步没机会跑，`-E.git/config` 整词丢了写目标 | 暂停到 4 点。supervisor 建议改走更简单的路：兜底抽字面词时，`-X值` 与 `--opt=值` 形式的词把值也按 Read+Write 抽出（宁可多抽），不需要把参数结构带进 PartialFacts；先交产品负责人定 |
-| T08 | 分支 `cao/49facf33` @ `bbefd46`（racy 已修） | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 5 轮复审中 | 3/F-1（racy 残留） | 等复审结论；CI run 42660636464 三平台 test 失败，等日志 |
+| T08 | 分支 `cao/49facf33` @ `bbefd46`（本地，远端还在 `52f35cc`） | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 5 轮通过，全部 finding 已关 | — | 只差 CI：run 42660636464（52f35cc）三平台 test 失败，supervisor 在临时副本里用无 git 身份的干净环境复现；合入前需三平台全绿 |
 | T04、T06、T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
 
 查开着的问题：`agent-scaffold findings list --task <任务 ID> --open`。
