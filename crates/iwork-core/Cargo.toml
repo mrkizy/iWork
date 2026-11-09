@@ -9,3 +9,7 @@ publish.workspace = true
 [dependencies]
 iwork-domain.workspace = true
 iwork-ports.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true

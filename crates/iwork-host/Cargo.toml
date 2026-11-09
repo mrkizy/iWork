@@ -9,3 +9,9 @@ publish.workspace = true
 [dependencies]
 iwork-domain.workspace = true
 iwork-ports.workspace = true
+tokio = { workspace = true, features = ["rt", "fs", "io-util"] }
+toml.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+tempfile.workspace = true

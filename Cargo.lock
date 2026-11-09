@@ -2542,6 +2542,8 @@ version = "0.1.0"
 dependencies = [
  "iwork-domain",
  "iwork-ports",
+ "pollster",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2558,6 +2560,8 @@ dependencies = [
  "iwork-proto",
  "iwork-store",
  "iwork-vcs-git",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -2582,6 +2586,9 @@ version = "0.1.0"
 dependencies = [
  "iwork-domain",
  "iwork-ports",
+ "tempfile",
+ "tokio",
+ "toml 1.2.1+spec-1.1.0",
 ]
 
 [[package]]

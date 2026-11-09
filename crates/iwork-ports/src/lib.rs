@@ -17,6 +17,7 @@ pub mod clock;
 pub mod discovery;
 pub mod exec;
 pub mod notify;
+pub mod project_files;
 pub mod read_model;
 pub mod secret;
 pub mod store;

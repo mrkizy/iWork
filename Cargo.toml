@@ -33,6 +33,8 @@ tokio = { version = "1", default-features = false }
 # Windows 上 canonicalize 去掉 `\\?\` 前缀；其他平台等同 std::fs::canonicalize
 dunce = "1"
 tempfile = "3"
+# 读 `.iwork/project.toml`；只要解析，不要写出与 serde 派生
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 
 iwork-proto = { path = "crates/iwork-proto" }
 iwork-domain = { path = "crates/iwork-domain" }
