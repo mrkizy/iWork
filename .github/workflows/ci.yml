@@ -79,7 +79,8 @@ jobs:
       # vitest 跑 client/src 与 client/tests 下全部测试：
       #   - 金样本跨语言解码（src/gen.test.ts）
       #   - 开发服务器只监听 127.0.0.1（tests/dev-server.test.ts，真起一次 vite 看监听地址）
-      #   - 发布配置不含开发服务器、裸跑 tauri build 被拒（tests/release-config.test.ts，
-      #     层清单与包装脚本共用 scripts/tauri-layers.ts）
-      - name: 前端测试（金样本解码、开发服务器只绑回环、发布配置检查）
+      #   - 发布配置不含开发服务器、src-tauri/ 无未登记的 Tauri 配置、裸跑 tauri build/bundle 被拒
+      #     （tests/release-config.test.ts，层清单与包装脚本共用 scripts/tauri-layers.ts）
+      #   - 包装脚本只放行 dev/build、拒绝自带 -c/--config（tests/tauri-wrapper.test.ts）
+      - name: 前端测试（金样本解码、开发服务器只绑回环、发布配置与包装脚本检查）
         run: pnpm -C client test

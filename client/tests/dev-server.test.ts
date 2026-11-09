@@ -4,7 +4,7 @@
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 import { afterEach, expect, it, vi } from "vitest";
-import { buildSection, effectiveConfig, PLATFORMS } from "./tauri-config.ts";
+import { buildSection, effectiveConfig } from "./tauri-config.ts";
 
 const LOOPBACK = "127.0.0.1";
 const CLIENT_DIR = fileURLToPath(new URL("..", import.meta.url));
@@ -46,10 +46,10 @@ it("HTTP 与 HMR 只监听 127.0.0.1，TAURI_DEV_HOST 放宽不了", async () =>
   }
 });
 
-it.each(PLATFORMS)("%s：pnpm tauri dev 的 devUrl 指向开发服务器的回环地址与端口", async (platform) => {
+it("pnpm tauri dev 的 devUrl 指向开发服务器的回环地址与端口", async () => {
   const server = await createServer({ configFile: VITE_CONFIG, root: CLIENT_DIR, logLevel: "silent" });
   try {
-    expect(buildSection(effectiveConfig("dev", platform)).devUrl).toBe(`http://${LOOPBACK}:${server.config.server.port}`);
+    expect(buildSection(effectiveConfig("dev")).devUrl).toBe(`http://${LOOPBACK}:${server.config.server.port}`);
   } finally {
     await server.close();
   }

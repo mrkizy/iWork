@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "identifier": "dev.iwork.client",
   "build": {
-    "beforeBuildCommand": "node scripts/refuse-bare-build.ts"
+    "beforeBuildCommand": "node scripts/refuse-bare-build.ts",
+    "beforeBundleCommand": "node scripts/refuse-bare-build.ts"
   },
   "app": {
     "windows": [
