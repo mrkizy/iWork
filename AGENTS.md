@@ -10,7 +10,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 
 ## 依据文档（先读，按优先级）
 
-1. `docs/requirements/iwork-requirements.md`：需求与架构基线（v1.69）。**已确认**的需求不得自行改动。
+1. `docs/requirements/iwork-requirements.md`：需求与架构基线（v1.70）。**已确认**的需求不得自行改动。
 2. `docs/design/m1-tech-design.md`：M1 技术设计，写“怎么做”。与需求冲突时以需求为准。
 3. `docs/design/t0-findings.md`：三家厂商 CLI 的实测事实。适配器实现以它为准，不要凭记忆或网上资料假设厂商行为。
 4. `docs/tasks/M1/`：M1 任务卡（T01–T11）与未决事项清单（`README.md`），每张卡写明目标、范围、交付物、验收标准、依赖。

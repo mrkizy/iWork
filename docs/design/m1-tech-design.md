@@ -180,7 +180,7 @@ iWork 在本机是三类进程：客户端、后台服务（daemon）、每个�
 | `projects` | 项目 | `id`（与 `.iwork/project.toml` 一致）、`root_path`、`vcs_kind`、`name`、`pinned`、`last_active_at`、`path_status` |
 | `assistants` | 助手（含内置 iWork） | `id`、`name`、`role_label`、`avatar`、`builtin`、`current_version`（版本内含运行时、模型、思考强度） |
 | `assistant_versions` | 助手配置版本 | `assistant_id`、`version`、`config`、`created_at` |
-| `project_members` | 助手加入的项目 | `project_id`、`assistant_id`、`in_default_team`、`joined_at` |
+| `project_members` | 助手加入的项目（**M2 再建**：M1 没有团队，也没有写入它的事件，见 9.1） | `project_id`、`assistant_id`、`in_default_team`、`joined_at` |
 | `conversations` | 对话 | `id`、`kind`（项目对话 / 助手私聊）、`project_id?`、`assistant_id?`、`last_read_seq`、`unread`、`model_override?`、`effort_override?`、`updated_at` |
 | `messages` | 消息 | `id`、`conversation_id`、`author`、`context_project_id?`、`status`、`body`、`checkpoint_offset`、`created_at` |
 | `turns` | 一次成员运行 | `id`、`conversation_id`、`assistant_version`、`runtime_id`、`model`、`effort`、`cli_session_id`、`state`、`started_at`、`ended_at` |
@@ -395,7 +395,7 @@ Bash 命令用 shell 语法解析器拆成管道、子命令、重定向、变�
 2. 选项：允许（可选记住范围：一次 / 本对话 / 本项目 / 永久，永久记在助手上；记住即生成规则，可在设置里查看与撤销，三档都生效）/ 拒绝。记住的匹配范围（需求 FR11，v1.61）：执行命令按程序名加子命令（`npm test` 带任何参数都算，`npm publish` 不算），写文件与读敏感目录按目标所在目录，MCP 与未归类工具按工具名；卡片的记住下拉里写明范围，如“本项目内 `npm test …` 不再问”。“必问”动作与清单外的沙箱外执行只有“允许一次”，不显示记住范围。沙箱外执行的卡片标明“将在沙箱外运行，命令带起的脚本也不受沙箱约束”。
 3. 拒绝时，运行时收到“用户已拒绝，不要换方式重试”的说明；同一动作指纹在本对话内、直到用户发出下一条消息之前自动拒绝。
 4. 没有超时；客户端不在线时请求保留，重新打开即可处理。运行时一侧有等待上限的（Claude Code hook），由适配器在到时前中断回合并以拒绝返回，用户批准后续接（见 6.3）。
-5. 作废：所属回合或任务被取消、对话被删除、回合中断后用户选择不再继续时，待审批转为“已作废”（需求第 12 章）：卡片置灰、移出“待你处理”，运行时侧不再等待。hook 超时防护引起的中断不作废，审批继续等待，批准后经 `--resume` 续接；用户拒绝时回合保持「已中断」，对话里出「继续 / 放弃」卡片，点继续则把拒绝结果随续接告诉模型，点放弃则回合结束、其余待审批作废（产品负责人 2026-11-09 决定）。
+5. 作废：所属回合或任务被取消、所属回合失败（需求 v1.70）、对话被删除、回合中断后用户选择不再继续时，待审批转为“已作废”（需求第 12 章）：卡片置灰、移出“待你处理”，运行时侧不再等待。hook 超时防护引起的中断不作废，审批继续等待，批准后经 `--resume` 续接；用户拒绝时回合保持「已中断」，对话里出「继续 / 放弃」卡片，点继续则把拒绝结果随续接告诉模型，点放弃则回合结束、其余待审批作废（产品负责人 2026-11-09 决定）。
 6. 档位切换即时生效：切到更宽松的档位时，已弹出且在新档位下可直接放行的待审批自动放行，其余保留（例：手动切自动只放行边界内的；切到全开放行除 git push 以外的全部（亲手执行卡片不受档位切换影响，始终等你本人处理））。切到全开每次都弹确认；在 iWork 对话中切到全开时，确认框列出受影响的成员。
 
 **已知限制**：以需求第 9 章“已知限制”清单为准，新增规则时同步登记。不支持沙箱的平台上沙箱不可用，界面须常驻提示“隔离不可用”。审批卡片对“执行脚本”类动作标注“审批看不到脚本内部”。
