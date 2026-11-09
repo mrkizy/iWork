@@ -31,7 +31,7 @@
 | --- | --- | --- | --- | --- | --- |
 | T01 | 已合入 main `bb6d69a` | — | `2026-11-09-m1-t01` 已关 | 验收 5 空窗口截图未补（屏幕锁定） | 有空时补截图 |
 | T02 | 分支 `cao/fecce968` @ `67cafbd` | developer `fecce968`；reviewer A `3036f50a`、B `6723c1bb` | `2026-11-10-m1-t02` 第 1 轮不通过 | 1/F-1～F-7（5 blocking、2 important）：复合读无读事务、GC 吞回滚错误、recover 误删制品、Seq 超 i64 panic、Exclusive 遗留事务、首次初始化中断后无法重试、崩溃注入不查子进程退出 | 方案 2.2 与读事务规则已补（`33035e1`、`940f26f`）；**4 点后派 developer `fecce968` 修 1/F-1～F-7**（产品负责人 02:00 定）：先 `git merge main` 拿到方案补丁，修复后交原 A/B reviewer 第 2 轮 |
-| T03 | 方案 `docs/plans/T03.md`（未提交） | architect `474f00b7`；方案 reviewer `3f790292` | `2026-11-09-m1-t03-plan` 第 7 轮（产品负责人 02:00 批准） | 5/F-1、6/F-1～F-5 | architect 按三条规则改（单一有序出口；交接异常一律断开走断线重连；published_head 启动取库 head），回报后原 reviewer 复审。若再出同粒度问题，建议方案定稿、余下进实现阶段 |
+| T03 | 方案 `docs/plans/T03.md`（未提交） | architect `474f00b7`；方案 reviewer `3f790292` | `2026-11-09-m1-t03-plan` 第 7 轮不通过（上轮 6 条全关） | 7/F-1（客户端 Incoming 无界，慢应用时内存涨）、7/F-2（持续高写入 + 慢快照时重连循环不收敛）、7/F-3（旧落后通知 / 取消重启的残留规则与测试、待同步文档没列全） | supervisor 建议第 8 轮收尾：7/F-1 Incoming 有界、满了暂停读 socket；7/F-3 清残留并列全同步清单；7/F-2 登记已知限制（持久事件持续 8MiB/s 不现实，恢复办法是降载后重开）；之后定稿，再有同粒度问题进实现阶段。等产品负责人定 |
 | T05 | 已合入 main `a6987d4` | — | `2026-11-09-m1-t05` 已关（三轮，14 条全 fixed） | — | — |
 | T07 | 方案 `docs/plans/T07.md`（定稿，已提交） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 7 轮通过，全部关闭 | — | 按依赖排实施（4 点后派 developer，方案第 11 节分步） |
 | T08 | 分支 `cao/49facf33` @ `bbefd46`（本地，远端还在 `52f35cc`） | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 5 轮通过，全部 finding 已关 | — | 只差 CI：run 42660636464（52f35cc）三平台 test 失败，supervisor 在临时副本里用无 git 身份的干净环境复现；合入前需三平台全绿 |
