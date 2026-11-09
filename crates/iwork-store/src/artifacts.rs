@@ -59,9 +59,17 @@ pub struct ArtifactHooks {
     pub after_select: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
-/// 制品存储。
+/// 制品存储。克隆只是多一个句柄，共用同一组线程与状态。
 pub struct FsArtifactStore<G: IdGenerator, K: Clock> {
     inner: Arc<Inner<G, K>>,
+}
+
+impl<G: IdGenerator, K: Clock> Clone for FsArtifactStore<G, K> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 struct Inner<G, K> {
@@ -225,7 +233,9 @@ impl<G: IdGenerator, K: Clock> Inner<G, K> {
             let _ = std::fs::remove_file(&tmp);
             return Err(storage_err(&tmp, e));
         }
-        if let Some(hook) = lock(&self.hooks).after_touch.clone() {
+        // 先取出再调用：钩子里可能再次用到本存储，不能持着锁
+        let hook = lock(&self.hooks).after_touch.clone();
+        if let Some(hook) = hook {
             hook();
         }
         let target = self.object_path(area, &r.sha256);
@@ -506,7 +516,8 @@ impl<G: IdGenerator + 'static, K: Clock + 'static> ArtifactStore for FsArtifactS
             if candidates.is_empty() {
                 return Ok(GcReport::default());
             }
-            if let Some(hook) = lock(&inner.hooks).after_select.clone() {
+            let hook = lock(&inner.hooks).after_select.clone();
+            if let Some(hook) = hook {
                 hook();
             }
             // 2. 写线程上：复查、删行、删文件，同一个事务

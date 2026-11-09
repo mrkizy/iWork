@@ -28,6 +28,8 @@ mod store;
 pub mod tables;
 mod writer;
 
+#[doc(hidden)]
+pub use artifacts::ArtifactHooks;
 pub use artifacts::{FsArtifactStore, RecoverReport};
 pub use data_dir::{DataDir, DataDirError};
 #[doc(hidden)]
