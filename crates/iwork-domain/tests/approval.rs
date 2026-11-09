@@ -77,7 +77,7 @@ fn stale(trigger: ApprovalTriggerKind, r: ReviewId, why: StaleReason) -> Approva
 
 #[test]
 fn approval_table_forward() {
-    assert_eq!(APPROVAL_TRANSITIONS.len(), 13, "对照：表行数");
+    assert_eq!(APPROVAL_TRANSITIONS.len(), 14, "对照：表行数");
     assert_eq!(check_forward(approval::next, APPROVAL_TRANSITIONS), vec![]);
     assert_eq!(REVIEW_TRANSITIONS.len(), 6, "对照：表行数");
     assert_eq!(
@@ -401,8 +401,8 @@ fn approval_terminal_states_reject_every_trigger() {
         .into_iter()
         .filter(|s| s.is_terminal())
         .collect();
-    // Approved×3 决定者 + Denied + Voided×4 原因
-    assert_eq!(terminal.len(), 8);
+    // Approved×3 决定者 + Denied + Voided×5 原因
+    assert_eq!(terminal.len(), 9);
     for state in terminal {
         for trigger in ApprovalTriggerKind::all() {
             assert!(
@@ -413,7 +413,7 @@ fn approval_terminal_states_reject_every_trigger() {
     }
 }
 
-/// 作废只能由四个原因之一触发，且每个原因只产生同名的作废状态。
+/// 作废只能由五个原因之一触发，且每个原因只产生同名的作废状态。
 #[test]
 fn approval_void_reasons_exhaustive() {
     assert_eq!(
@@ -423,6 +423,7 @@ fn approval_void_reasons_exhaustive() {
             VoidReason::ConversationDeleted,
             VoidReason::TurnAbandonedAfterInterrupt,
             VoidReason::AssistantDeleted,
+            VoidReason::TurnFailed,
         ]
     );
     let voiding: Vec<_> = APPROVAL_TRANSITIONS
