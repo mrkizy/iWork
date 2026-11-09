@@ -1646,6 +1646,12 @@ dependencies = [
 [[package]]
 name = "iwork-bench"
 version = "0.1.0"
+dependencies = [
+ "iwork-ipc",
+ "iwork-proto",
+ "tokio",
+ "tokio-util",
+]
 
 [[package]]
 name = "iwork-bridge-claude"
