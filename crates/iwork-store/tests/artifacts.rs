@@ -20,7 +20,9 @@ const DAY: i64 = 24 * 3600 * 1000;
 
 fn files_under(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else { return out };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -93,7 +95,11 @@ fn same_content_stored_once() {
     w.env.clock.advance(1000);
     let b = block(w.art.put_bytes(ArtifactArea::Artifacts, b"hello".to_vec())).unwrap();
     assert_eq!(a, b);
-    assert_eq!(objects(&w.env, ArtifactArea::Artifacts).len(), 1, "相同内容只存一份");
+    assert_eq!(
+        objects(&w.env, ArtifactArea::Artifacts).len(),
+        1,
+        "相同内容只存一份"
+    );
     assert_eq!(
         scalar(&w.env.db(), "SELECT created_at FROM artifact_objects"),
         T0 + 1000,
@@ -103,14 +109,19 @@ fn same_content_stored_once() {
     let handles: Vec<_> = (0..2)
         .map(|_| {
             let art = w.art.clone();
-            std::thread::spawn(move || block(art.put_bytes(ArtifactArea::Artifacts, vec![7u8; 200_000])).unwrap())
+            std::thread::spawn(move || {
+                block(art.put_bytes(ArtifactArea::Artifacts, vec![7u8; 200_000])).unwrap()
+            })
         })
         .collect();
     let refs: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     assert_eq!(refs[0], refs[1]);
     assert_eq!(objects(&w.env, ArtifactArea::Artifacts).len(), 2);
     assert_eq!(rows(&w.env), 2);
-    assert_eq!(block(w.art.read_range(&refs[0], 0..200_000)).unwrap(), vec![7u8; 200_000]);
+    assert_eq!(
+        block(w.art.read_range(&refs[0], 0..200_000)).unwrap(),
+        vec![7u8; 200_000]
+    );
     assert!(tmp_files(&w.env, ArtifactArea::Artifacts).is_empty());
 }
 
@@ -150,14 +161,31 @@ impl Read for Faulty {
 fn crash_mid_write_leaves_no_hash_named_file() {
     let w = world();
     // 读源出错：返回错误、临时文件清掉
-    let err = block(w.art.put_reader(ArtifactArea::Artifacts, Faulty { sent: 0, fail_at: 5000, panic: false }));
+    let err = block(w.art.put_reader(
+        ArtifactArea::Artifacts,
+        Faulty {
+            sent: 0,
+            fail_at: 5000,
+            panic: false,
+        },
+    ));
     assert!(matches!(err, Err(ArtifactError::Io { .. })), "{err:?}");
     assert!(tmp_files(&w.env, ArtifactArea::Artifacts).is_empty());
 
     // 写到一半崩溃：半截只在 tmp/，名字不是哈希
-    let crashed = block(w.art.put_reader(ArtifactArea::Artifacts, Faulty { sent: 0, fail_at: 5000, panic: true }));
+    let crashed = block(w.art.put_reader(
+        ArtifactArea::Artifacts,
+        Faulty {
+            sent: 0,
+            fail_at: 5000,
+            panic: true,
+        },
+    ));
     assert!(crashed.is_err());
-    assert!(objects(&w.env, ArtifactArea::Artifacts).is_empty(), "sha256/ 下没有新文件");
+    assert!(
+        objects(&w.env, ArtifactArea::Artifacts).is_empty(),
+        "sha256/ 下没有新文件"
+    );
     let parts = tmp_files(&w.env, ArtifactArea::Artifacts);
     assert_eq!(parts.len(), 1);
     assert!(parts[0].extension().is_some_and(|e| e == "part"));
@@ -179,21 +207,39 @@ fn crash_mid_write_leaves_no_hash_named_file() {
 #[test]
 fn read_range_bounds() {
     let w = world();
-    let r = block(w.art.put_bytes(ArtifactArea::Artifacts, b"0123456789".to_vec())).unwrap();
+    let r = block(
+        w.art
+            .put_bytes(ArtifactArea::Artifacts, b"0123456789".to_vec()),
+    )
+    .unwrap();
     assert_eq!(block(w.art.read_range(&r, 2..5)).unwrap(), b"234");
     assert_eq!(block(w.art.read_range(&r, 10..10)).unwrap(), b"");
     assert!(matches!(
         block(w.art.read_range(&r, 5..11)),
-        Err(ArtifactError::RangeInvalid { start: 5, end: 11, size: 10, .. })
+        Err(ArtifactError::RangeInvalid {
+            start: 5,
+            end: 11,
+            size: 10,
+            ..
+        })
     ));
     #[allow(clippy::reversed_empty_ranges)]
     let backwards = 6..5;
-    assert!(matches!(block(w.art.read_range(&r, backwards)), Err(ArtifactError::RangeInvalid { .. })));
+    assert!(matches!(
+        block(w.art.read_range(&r, backwards)),
+        Err(ArtifactError::RangeInvalid { .. })
+    ));
     let missing = artifact(1, ArtifactArea::Artifacts);
-    assert!(matches!(block(w.art.read_range(&missing, 0..1)), Err(ArtifactError::NotFound { .. })));
+    assert!(matches!(
+        block(w.art.read_range(&missing, 0..1)),
+        Err(ArtifactError::NotFound { .. })
+    ));
     // 文件被用户手删：Io 点名路径
     std::fs::remove_file(&objects(&w.env, ArtifactArea::Artifacts)[0]).unwrap();
-    assert!(matches!(block(w.art.read_range(&r, 0..1)), Err(ArtifactError::Io { .. })));
+    assert!(matches!(
+        block(w.art.read_range(&r, 0..1)),
+        Err(ArtifactError::Io { .. })
+    ));
 }
 
 #[test]
@@ -207,7 +253,10 @@ fn retain_release_pairing() {
     block(w.art.retain(&r)).unwrap();
     block(w.art.release(&r)).unwrap();
     let missing = artifact(1, ArtifactArea::Artifacts);
-    assert!(matches!(block(w.art.retain(&missing)), Err(ArtifactError::NotFound { .. })));
+    assert!(matches!(
+        block(w.art.retain(&missing)),
+        Err(ArtifactError::NotFound { .. })
+    ));
 }
 
 #[test]
@@ -215,15 +264,31 @@ fn gc_keeps_referenced_objects() {
     let w = world();
     let put = |b: &[u8]| block(w.art.put_bytes(ArtifactArea::Artifacts, b.to_vec())).unwrap();
     let (a, a2, b, c) = (put(b"A"), put(b"A'"), put(b"B"), put(b"C"));
-    block(w.store.commit(cmd(2, vec![complete_with(a), sent_with_body(31, a2)]))).unwrap();
+    block(
+        w.store
+            .commit(cmd(2, vec![complete_with(a), sent_with_body(31, a2)])),
+    )
+    .unwrap();
     block(w.art.retain(&b)).unwrap();
     w.env.clock.advance(DAY + 1);
     let report = block(w.art.collect_garbage()).unwrap();
-    assert_eq!(report, GcReport { removed: 1, freed_bytes: 1 });
+    assert_eq!(
+        report,
+        GcReport {
+            removed: 1,
+            freed_bytes: 1
+        }
+    );
     for kept in [a, a2, b] {
-        assert!(block(w.art.read_range(&kept, 0..kept.size)).is_ok(), "{kept:?} 保留");
+        assert!(
+            block(w.art.read_range(&kept, 0..kept.size)).is_ok(),
+            "{kept:?} 保留"
+        );
     }
-    assert!(matches!(block(w.art.read_range(&c, 0..1)), Err(ArtifactError::NotFound { .. })));
+    assert!(matches!(
+        block(w.art.read_range(&c, 0..1)),
+        Err(ArtifactError::NotFound { .. })
+    ));
     assert_eq!(objects(&w.env, ArtifactArea::Artifacts).len(), 3);
     // 对照：release B 后再回收，B 没了
     block(w.art.release(&b)).unwrap();
@@ -236,7 +301,11 @@ fn gc_respects_grace_period() {
     let w = world();
     let r = block(w.art.put_bytes(ArtifactArea::Artifacts, b"young".to_vec())).unwrap();
     w.env.clock.advance(DAY - 1);
-    assert_eq!(block(w.art.collect_garbage()).unwrap().removed, 0, "宽限期内不删");
+    assert_eq!(
+        block(w.art.collect_garbage()).unwrap().removed,
+        0,
+        "宽限期内不删"
+    );
     w.env.clock.advance(2);
     assert_eq!(block(w.art.collect_garbage()).unwrap().removed, 1);
     assert!(block(w.art.read_range(&r, 0..1)).is_err());
@@ -290,7 +359,10 @@ fn gc_barrier_reput_after_select() {
         assert_eq!(again, r);
     });
     assert_eq!(block(w.art.collect_garbage()).unwrap().removed, 0);
-    assert!(block(w.art.read_range(&r, 0..5)).is_ok(), "再次 put 返回的引用可读");
+    assert!(
+        block(w.art.read_range(&r, 0..5)).is_ok(),
+        "再次 put 返回的引用可读"
+    );
     w.art.set_hooks(ArtifactHooks::default());
 }
 
@@ -299,7 +371,11 @@ fn gc_barrier_control_without_interference_deletes() {
     let w = world();
     let r = old_object(&w, b"gone");
     after_select(&w, || {});
-    assert_eq!(block(w.art.collect_garbage()).unwrap().removed, 1, "对照：什么都不做就删");
+    assert_eq!(
+        block(w.art.collect_garbage()).unwrap().removed,
+        1,
+        "对照：什么都不做就删"
+    );
     assert!(block(w.art.read_range(&r, 0..1)).is_err());
 }
 
@@ -311,12 +387,20 @@ fn gc_between_touch_and_rename_keeps_registration() {
     let reports = Arc::new(std::sync::Mutex::new(Vec::new()));
     let seen = reports.clone();
     w.art.set_hooks(ArtifactHooks {
-        after_touch: Some(Arc::new(move || seen.lock().unwrap().push(block(art.collect_garbage()).unwrap()))),
+        after_touch: Some(Arc::new(move || {
+            seen.lock()
+                .unwrap()
+                .push(block(art.collect_garbage()).unwrap())
+        })),
         ..ArtifactHooks::default()
     });
     let again = block(w.art.put_bytes(ArtifactArea::Artifacts, b"touch".to_vec())).unwrap();
     w.art.set_hooks(ArtifactHooks::default());
-    assert_eq!(reports.lock().unwrap().as_slice(), &[GcReport::default()], "登记已刷新，GC 跳过");
+    assert_eq!(
+        reports.lock().unwrap().as_slice(),
+        &[GcReport::default()],
+        "登记已刷新，GC 跳过"
+    );
     block(w.store.commit(cmd(2, vec![sent_with_body(31, again)]))).unwrap();
     assert_eq!(block(w.art.read_range(&r, 0..5)).unwrap(), b"touch");
     assert_eq!(rows(&w.env), 1, "登记行在");
@@ -326,18 +410,43 @@ fn gc_between_touch_and_rename_keeps_registration() {
 fn recover_cleans_three_kinds_of_residue() {
     let w = world();
     let referenced = block(w.art.put_bytes(ArtifactArea::Artifacts, b"kept".to_vec())).unwrap();
-    let lost_ref = block(w.art.put_bytes(ArtifactArea::Artifacts, b"lost-but-referenced".to_vec())).unwrap();
-    let orphan_row = block(w.art.put_bytes(ArtifactArea::Attachments, b"row-only".to_vec())).unwrap();
-    block(w.store.commit(cmd(2, vec![sent_with_body(31, referenced), sent_with_body(32, lost_ref)]))).unwrap();
+    let lost_ref = block(
+        w.art
+            .put_bytes(ArtifactArea::Artifacts, b"lost-but-referenced".to_vec()),
+    )
+    .unwrap();
+    let orphan_row = block(
+        w.art
+            .put_bytes(ArtifactArea::Attachments, b"row-only".to_vec()),
+    )
+    .unwrap();
+    block(w.store.commit(cmd(
+        2,
+        vec![sent_with_body(31, referenced), sent_with_body(32, lost_ref)],
+    )))
+    .unwrap();
     // 三类残留：tmp 半截、有行无文件（一个无引用、一个有引用）、有文件无行
-    std::fs::write(w.env.dir.area_tmp(ArtifactArea::Private).join("x.part"), b"half").unwrap();
+    std::fs::write(
+        w.env.dir.area_tmp(ArtifactArea::Private).join("x.part"),
+        b"half",
+    )
+    .unwrap();
     let path_of = |r: &ArtifactRef| {
         let hex = r.sha256.to_string();
-        w.env.dir.area_objects(r.area).join(&hex[..2]).join(&hex[2..])
+        w.env
+            .dir
+            .area_objects(r.area)
+            .join(&hex[..2])
+            .join(&hex[2..])
     };
     std::fs::remove_file(path_of(&orphan_row)).unwrap();
     std::fs::remove_file(path_of(&lost_ref)).unwrap();
-    let stray = w.env.dir.area_objects(ArtifactArea::Artifacts).join("ab").join("c".repeat(62));
+    let stray = w
+        .env
+        .dir
+        .area_objects(ArtifactArea::Artifacts)
+        .join("ab")
+        .join("c".repeat(62));
     std::fs::create_dir_all(stray.parent().unwrap()).unwrap();
     std::fs::write(&stray, b"stray").unwrap();
 
@@ -351,7 +460,11 @@ fn recover_cleans_three_kinds_of_residue() {
     assert_eq!(block(w.art.read_range(&referenced, 0..4)).unwrap(), b"kept");
 
     // 投递开始后再调：拒绝，不动任何文件
-    std::fs::write(w.env.dir.area_tmp(ArtifactArea::Private).join("y.part"), b"half").unwrap();
+    std::fs::write(
+        w.env.dir.area_tmp(ArtifactArea::Private).join("y.part"),
+        b"half",
+    )
+    .unwrap();
     w.store.mark_delivery_started();
     assert!(block(w.art.recover()).is_err());
     assert_eq!(tmp_files(&w.env, ArtifactArea::Private).len(), 1);
@@ -360,7 +473,11 @@ fn recover_cleans_three_kinds_of_residue() {
 #[test]
 fn sent_message_with_artifact_body_survives_gc_and_rebuild() {
     let w = world();
-    let r = block(w.art.put_bytes(ArtifactArea::Artifacts, b"long user message".to_vec())).unwrap();
+    let r = block(
+        w.art
+            .put_bytes(ArtifactArea::Artifacts, b"long user message".to_vec()),
+    )
+    .unwrap();
     block(w.store.commit(cmd(2, vec![sent_with_body(31, r)]))).unwrap();
     w.env.clock.advance(2 * DAY);
     block(w.art.collect_garbage()).unwrap();
@@ -374,16 +491,39 @@ fn sent_message_with_artifact_body_survives_gc_and_rebuild() {
 #[test]
 fn gc_after_conversation_deleted_frees_attachment_copy() {
     let w = world();
-    let r = block(w.art.put_bytes(ArtifactArea::Attachments, b"attached".to_vec())).unwrap();
-    block(w.store.commit(cmd(
-        2,
-        vec![AttachmentStored { attachment: attachment(40, 10, AttachmentOrigin::Copied(r)) }.into()],
-    )))
+    let r = block(
+        w.art
+            .put_bytes(ArtifactArea::Attachments, b"attached".to_vec()),
+    )
+    .unwrap();
+    block(
+        w.store.commit(cmd(
+            2,
+            vec![
+                AttachmentStored {
+                    attachment: attachment(40, 10, AttachmentOrigin::Copied(r)),
+                }
+                .into(),
+            ],
+        )),
+    )
     .unwrap();
     w.env.clock.advance(2 * DAY);
-    assert_eq!(block(w.art.collect_garbage()).unwrap().removed, 0, "附件在用");
-    block(w.store.commit(cmd(3, vec![ConversationDeleted { conversation_id: cid(10) }.into()]))).unwrap();
-    assert_eq!(block(w.art.collect_garbage()).unwrap().removed, 1, "删对话后副本进入回收");
+    assert_eq!(
+        block(w.art.collect_garbage()).unwrap().removed,
+        0,
+        "附件在用"
+    );
+    block(w.store.commit(cmd(
+        3,
+        vec![ConversationDeleted { conversation_id: cid(10) }.into()],
+    )))
+    .unwrap();
+    assert_eq!(
+        block(w.art.collect_garbage()).unwrap().removed,
+        1,
+        "删对话后副本进入回收"
+    );
     assert!(objects(&w.env, ArtifactArea::Attachments).is_empty());
 }
 
@@ -391,7 +531,11 @@ fn gc_after_conversation_deleted_frees_attachment_copy() {
 fn three_areas_are_separate_dirs() {
     let w = world();
     let mut paths = Vec::new();
-    for area in [ArtifactArea::Artifacts, ArtifactArea::Attachments, ArtifactArea::Private] {
+    for area in [
+        ArtifactArea::Artifacts,
+        ArtifactArea::Attachments,
+        ArtifactArea::Private,
+    ] {
         let r = block(w.art.put_bytes(area, b"same".to_vec())).unwrap();
         assert_eq!(r.area, area);
         let files = objects(&w.env, area);
