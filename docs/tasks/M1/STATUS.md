@@ -5,8 +5,8 @@
 
 ## 1 运行安排
 
-- **暂停**：产品负责人要求 Claude 侧的 developer、architect 本轮回报送审后暂停，等 **2026-11-10 凌晨 4 点**额度恢复再继续。codex 侧的 reviewer 不受限。
-- **定时任务**（只在当前会话有效）：04:03 恢复派活；09:07 提醒产品负责人运行 `! brew install gh && gh auth login`，以便读取 GitHub CI 日志，并汇总夜间进展。
+- **暂停**：产品负责人要求 Claude 侧的 developer、architect 本轮回报送审后暂停，等 **2026-11-10 凌晨 3 点**额度恢复再继续。codex 侧的 reviewer 不受限。
+- **定时任务**（只在当前会话有效）：03:02 恢复派活（额度 3 点恢复，原 4 点任务已取消）；09:07 提醒产品负责人运行 `! brew install gh && gh auth login`，以便读取 GitHub CI 日志，并汇总夜间进展。
 - **推送**：main 推送已获同意；T05、T08 分支已推送用于跑三平台 CI。
 - **01:30 产品负责人再次要求**：本轮（T03/T07 第 5 轮、T08 racy）worker 回报后送 reviewer，之后 Claude 侧暂停，等 4 点额度恢复再继续；reviewer 结论到了只记账、不派返工。
 - **2026-11-10 00:54 已提前派出本轮**（产品负责人看额度还够，要求先做一轮）：T02 开工、T03 第 4 轮重写、T05 第 3 轮返工、T07 第 3 轮修改、T08 第 4 轮修复，都在等回报。4 点的定时任务不要重复派这些活，只看回报、送审、推进。技术设计第 4 节升级规则与需求 v1.71（子模块与外部过滤已知限制）已提交 `bf73ed9`。
@@ -32,10 +32,10 @@
 | 卡 | 产物 | worker（终端） | 审查任务 ID / 轮次 | 还开着的问题 | 下一步 |
 | --- | --- | --- | --- | --- | --- |
 | T01 | 已合入 main `bb6d69a` | — | `2026-11-09-m1-t01` 已关 | 验收 5 空窗口截图未补（屏幕锁定） | 有空时补截图 |
-| T02 | 分支 `cao/fecce968` @ `67cafbd` | developer `fecce968`；reviewer A `3036f50a`、B `6723c1bb` | `2026-11-10-m1-t02` 第 1 轮不通过 | 1/F-1～F-7（5 blocking、2 important）：复合读无读事务、GC 吞回滚错误、recover 误删制品、Seq 超 i64 panic、Exclusive 遗留事务、首次初始化中断后无法重试、崩溃注入不查子进程退出 | 方案 2.2 与读事务规则已补（`33035e1`、`940f26f`）；**4 点后派 developer `fecce968` 修 1/F-1～F-7**（产品负责人 02:00 定）：先 `git merge main` 拿到方案补丁，修复后交原 A/B reviewer 第 2 轮 |
+| T02 | 分支 `cao/fecce968` @ `67cafbd` | developer `fecce968`；reviewer A `3036f50a`、B `6723c1bb` | `2026-11-10-m1-t02` 第 1 轮不通过 | 1/F-1～F-7（5 blocking、2 important）：复合读无读事务、GC 吞回滚错误、recover 误删制品、Seq 超 i64 panic、Exclusive 遗留事务、首次初始化中断后无法重试、崩溃注入不查子进程退出 | 方案 2.2 与读事务规则已补（`33035e1`、`940f26f`）；**3 点后派 developer `fecce968` 修 1/F-1～F-7**（产品负责人 02:00 定）：先 `git merge main` 拿到方案补丁，修复后交原 A/B reviewer 第 2 轮 |
 | T03 | 方案 `docs/plans/T03.md`（未提交） | architect `474f00b7`；方案 reviewer `3f790292` | `2026-11-09-m1-t03-plan` 第 7 轮不通过（上轮 6 条全关） | 7/F-1（客户端 Incoming 无界，慢应用时内存涨）、7/F-2（持续高写入 + 慢快照时重连循环不收敛）、7/F-3（旧落后通知 / 取消重启的残留规则与测试、待同步文档没列全） | supervisor 建议第 8 轮收尾：7/F-1 Incoming 有界、满了暂停读 socket；7/F-3 清残留并列全同步清单；7/F-2 登记已知限制（持久事件持续 8MiB/s 不现实，恢复办法是降载后重开）；之后定稿，再有同粒度问题进实现阶段。第 8 轮已批准（02:52），architect 在改；回报后原 reviewer 只核这三条，通过即定稿 |
 | T05 | 已合入 main `a6987d4` | — | `2026-11-09-m1-t05` 已关（三轮，14 条全 fixed） | — | — |
-| T07 | 方案 `docs/plans/T07.md`（定稿，已提交） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 7 轮通过，全部关闭 | — | 按依赖排实施（4 点后派 developer，方案第 11 节分步） |
+| T07 | 方案 `docs/plans/T07.md`（定稿，已提交） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 7 轮通过，全部关闭 | — | 按依赖排实施（3 点后派 developer，方案第 11 节分步） |
 | T08 | 分支 `cao/49facf33` @ `bbefd46`（本地，远端还在 `52f35cc`） | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 5 轮通过，全部 finding 已关 | — | 只差 CI：run 42660636464（52f35cc）三平台 test 失败，supervisor 在临时副本里用无 git 身份的干净环境复现；合入前需三平台全绿 |
 | T04、T06、T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
 
