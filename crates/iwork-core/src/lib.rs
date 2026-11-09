@@ -3,4 +3,5 @@
 //! 只依赖 `iwork-domain` 与 `iwork-ports`，不知道 SQLite、git、ACP 的存在，也不绑定异步运行时
 //! （只用无运行时的 `futures-channel` 做内部信箱）。
 
+pub mod approval;
 pub mod turn;

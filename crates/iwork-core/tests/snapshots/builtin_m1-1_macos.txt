@@ -1,0 +1,200 @@
+baseline.cred.ssh 1G5KG09CW278JHSAND4V03DCJM Baseline UserActionEligible {} PathUnder("/home/u/.ssh")
+baseline.cred.gnupg 1P15RA2WCW182RG0RHYVR9WBQ3 Baseline UserActionEligible {} PathUnder("/home/u/.gnupg")
+baseline.cred.aws 7S22JBMV3C8VE6JZDB1DJV0AWZ Baseline UserActionEligible {} PathUnder("/home/u/.aws")
+baseline.cred.azure 1MK6QVTT35G06A3XF0MC2MWFF1 Baseline UserActionEligible {} PathUnder("/home/u/.azure")
+baseline.cred.kube 6XMD8S3QN889WTKGNJWADBV7D2 Baseline UserActionEligible {} PathUnder("/home/u/.kube")
+baseline.cred.docker-config 6XT7XKQXGGPTE5BNDYDTHEKC1F Baseline UserActionEligible {} PathIs("/home/u/.docker/config.json")
+baseline.cred.netrc 15ZDGA5P8164CYEJVFZ38YTFHP Baseline UserActionEligible {} PathIs("/home/u/.netrc")
+baseline.cred.git-credentials 6KV583CZYPQECD3KK6PV2PH9AY Baseline UserActionEligible {} PathIs("/home/u/.git-credentials")
+baseline.cred.npmrc 4QNADMQETZ0YNTQHVG430APYSC Baseline UserActionEligible {} PathIs("/home/u/.npmrc")
+baseline.cred.pypirc 5FVZVH81QG2JZEWZCAYW0GTHYS Baseline UserActionEligible {} PathIs("/home/u/.pypirc")
+baseline.cred.claude-credentials 4C70QDCE1N88VGATKS79VSC9R6 Baseline UserActionEligible {} PathIs("/home/u/.claude/.credentials.json")
+baseline.cred.codex-auth 2VETM1BX44NFN8JMD1Y186PMFD Baseline UserActionEligible {} PathIs("/home/u/.codex/auth.json")
+baseline.cred.gcloud 1BPS4X49M153H8PK0GKW5ZFC8Q Baseline UserActionEligible {} PathUnder("/home/u/.config/gcloud")
+baseline.cred.keychains 2EP37ZJ9Z8Y5CSEEC1MKTXR52Q Baseline UserActionEligible {} PathUnder("/home/u/Library/Keychains")
+baseline.data-dir 3XBQ34KF2NKPR2D0W85C5DB6B6 Baseline UserActionEligible {} PathUnder("/home/u/Library/Application Support/iWork")
+baseline.data-dir.readonly.attachments 53D4XPAFC6F6EKQANS4PRSREA6 Baseline Allow {} PathUnder("/home/u/Library/Application Support/iWork/attachments")
+baseline.data-dir.readonly.imports 6H92BGWWQW4NS085H9DP6244F2 Baseline Allow {} PathUnder("/home/u/Library/Application Support/iWork/imports")
+baseline.git-internal.write 4323B47T8ZKG0F0NG5EHPAG3KF Baseline UserActionEligible {} All([PathUnder("/home/u/iWork/projects/proj/.git"), ActionKindIs(Write)])
+baseline.git-internal.delete 0P8FK5VZZWJJNPN03V7WZJEVX6 Baseline UserActionEligible {} All([PathUnder("/home/u/iWork/projects/proj/.git"), ActionKindIs(Delete)])
+baseline.git-internal.autorun 0VNF3YZTDWZJR5ZDP2JRAT8EB6 Baseline UserActionEligible {} All([PathUnder("/home/u/iWork/projects/proj/.git"), ActionKindIs(WriteAutorunConfig)])
+baseline.critical.root 2ABZV1C7JP7CJRM0GZ1NNGZHCF Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/")])
+baseline.critical.home 3KJ1Y2YMS21RNCAG0DGSSDTSCA Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/home/u")])
+baseline.critical.workspace 6AFJP79PCF3HEZT7F91DMCHA5Z Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/home/u/iWork/projects/proj")])
+baseline.critical.workspace-git 5WHJGT9X2733590VHVGBW92QGY Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/home/u/iWork/projects/proj/.git")])
+baseline.critical.data-dir 6RC2X5Z2ZWTC6M58JBH66BRJH1 Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/home/u/Library/Application Support/iWork")])
+baseline.critical.iwork-root 7EQER26AFT8P8NW9PJC5J95SYF Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/home/u/iWork")])
+baseline.critical.iwork-projects 4DQWB71747RD992FBW8NS2JG3X Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/home/u/iWork/projects")])
+baseline.critical.iwork-assistants 5R77R51EEV9G7TABJK3HJJBSXT Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/home/u/iWork/assistants")])
+baseline.critical.system.system 68BDXD1A7VXE7WBK1V9XAVKGMR Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/System")])
+baseline.critical.system.usr 1RZ7Y63JBTDC0NZJ6XHMQNRVN5 Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/usr")])
+baseline.critical.system.bin 06T16J0SRWC5H28PD1A48WPJZT Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/bin")])
+baseline.critical.system.sbin 1EEKSS5QZN844225J4WY86S9TJ Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/sbin")])
+baseline.critical.system.etc 1QZZK38DWJ96C2S0WSC9BRJZEM Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/etc")])
+baseline.critical.system.library 6K5BMEXBTC8ESVSKPAW5296ZVE Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/Library")])
+baseline.critical.system.private 5EVKYQ44RR5N5T5XD193G4FK6N Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/private")])
+baseline.critical.system.var 55M8AEJQBPGBY4KK7HBTWP97TF Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/var")])
+baseline.critical.system.applications 7TT0WB96BF91QV2XJFT223N46R Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/Applications")])
+baseline.critical.system.opt 3Y51PE3336XVKSV3YX4H93HA4V Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/opt")])
+baseline.critical.system.users 499M1YHF46M4R7Z6RET3STFS08 Baseline UserActionEligible {} All([ActionKindIs(Delete), PathIs("/Users")])
+toolconfig.disabled.RemoteTrigger 2R78KSQ54ENB1A2ZEKEX545TEP ToolConfig Deny {} ToolName("RemoteTrigger")
+toolconfig.disabled.CronCreate 5FC5EGVW40H0Q2FR7PJWY03Q21 ToolConfig Deny {} ToolName("CronCreate")
+toolconfig.disabled.CronDelete 3W2XE3P9MFJXG6M9DEMHXY1RHN ToolConfig Deny {} ToolName("CronDelete")
+toolconfig.disabled.CronList 0SGWMP1JSNTYRJJWSX8Z9F7D8B ToolConfig Deny {} ToolName("CronList")
+toolconfig.disabled.ScheduleWakeup 67NTCPQPR74WA7QYK1W2FZ7067 ToolConfig Deny {} ToolName("ScheduleWakeup")
+mustask.push 46Y9TQ2YRT9KGB0AJ7AEN1SZ9T MustAsk Ask {} ActionKindIs(Push)
+mustask.publish 79M35PACP0WSMF6BJ3DQMSV6ZG MustAsk Ask {Manual, Auto} ActionKindIs(Publish)
+mustask.autorun-config 48WB19KBPYSC0QAYM6AP8NKMF0 MustAsk Ask {Manual, Auto} ActionKindIs(WriteAutorunConfig)
+mustask.delete 0VSQR00ECM04EH58GHH6G9VJWF MustAsk Ask {Manual, Auto} ActionKindIs(Delete)
+default.harmless.BashOutput 7G7ZF0KPHGWQ5N48NR7WJGQM13 Default Allow {} ToolName("BashOutput")
+default.harmless.KillShell 1VFD1AV7B7V4PHEZ2ZAP1HK1M7 Default Allow {} ToolName("KillShell")
+default.harmless.Agent 3ZMK07ZGGCF6391KJS4W8TZQBX Default Allow {} ToolName("Agent")
+default.harmless.Skill 2JPDN9GXZ3AF7DHVXZE7TK9ZHV Default Allow {} ToolName("Skill")
+default.harmless.TodoWrite 0B9620BS12057FC7Z0FZC4DMGJ Default Allow {} ToolName("TodoWrite")
+default.harmless.EnterPlanMode 0N74MYMHJCPN1FFJK3ESGZWW03 Default Allow {} ToolName("EnterPlanMode")
+default.harmless.ExitPlanMode 3VAEKY441FS0HM08BGFPFPDBKC Default Allow {} ToolName("ExitPlanMode")
+default.read.oob 668TFNR9GF301ZZE6BQHXKRW9F Default Ask {Manual, Auto} All([ActionKindIs(Read), Flag(OutOfBounds)])
+default.read.oob.full 2J7V6YWS87J6CR0T2BEJ3VXYH3 Default Allow {FullAccess} All([ActionKindIs(Read), Flag(OutOfBounds)])
+default.read 7SSQAVN5JA645D8YTRTTKQQMG9 Default Allow {} ActionKindIs(Read)
+default.write.oob 1208GRTBAFJ0AEDB9YNNWA3TRQ Default Ask {Manual, Auto} All([ActionKindIs(Write), Flag(OutOfBounds)])
+default.write.oob.full 7KR0XQM8Z2WJSZ963MB9ZVWFGP Default Allow {FullAccess} All([ActionKindIs(Write), Flag(OutOfBounds)])
+default.write.manual 3QQA1721GWCY0THFTSRNE1ZH25 Default Ask {Manual} ActionKindIs(Write)
+default.write.auto-full 5EKKKQ526PQ84QMCMVJPB1XJM5 Default Allow {Auto, FullAccess} ActionKindIs(Write)
+default.execute.manual 0WCAWNR5GHN89JKQ4DYCPWFV23 Default Ask {Manual} ActionKindIs(Execute)
+default.execute.auto-full 327NT913D1Y3SS5GY1E10NYT2T Default Allow {Auto, FullAccess} ActionKindIs(Execute)
+default.outside.retry.manual-auto 25K4PE4T537HJ6R1M3E6KQFMJP Default OutsideSandbox {Manual, Auto} All([ActionKindIs(OutsideSandbox), Flag(BypassSandboxRequested)])
+default.outside.retry.full 2ABQBKEHP2CDMGCZ08CKRRN1PF Default Deny {FullAccess} All([ActionKindIs(OutsideSandbox), Flag(BypassSandboxRequested)])
+default.outside.listed.manual-auto 1MXXXHVM3BX9JX5AM7MX06927C Default OutsideSandbox {Manual, Auto} ActionKindIs(OutsideSandbox)
+default.outside.listed.full 3QXYEAXDZHG8T43PF3FTFK3TCZ Default Allow {FullAccess} ActionKindIs(OutsideSandbox)
+default.autorun-config.manual-auto 0YVPBTPE2G8CD5Y8P9Z3AAJH7J Default Ask {Manual, Auto} ActionKindIs(WriteAutorunConfig)
+default.autorun-config.full 6MPY4K633RP0CMCYVB2HYQKNP7 Default Allow {FullAccess} ActionKindIs(WriteAutorunConfig)
+default.delete.manual-auto 0ZVB7X66K2K58DM92521WVN9XW Default Ask {Manual, Auto} ActionKindIs(Delete)
+default.delete.full 3CKD4164N12TFAFDA6N5HK33G8 Default Allow {FullAccess} ActionKindIs(Delete)
+default.publish.manual-auto 2MHGF35VY2EXVVRN0J0AAAEQ3B Default Ask {Manual, Auto} ActionKindIs(Publish)
+default.publish.full 6BBR10M2WDW6N5ZY12ZA9SYENN Default Allow {FullAccess} ActionKindIs(Publish)
+default.push 1D538TRJ0KV8E85GWDC86Z0XZT Default Ask {} ActionKindIs(Push)
+default.network 5YWW1DYJC08RY370DXT34BXJ99 Default Allow {} ActionKindIs(Network)
+default.mcp.manual-auto 6Z3036RY22ZKYS4J8MZDVK72TQ Default Ask {Manual, Auto} ActionKindIs(McpCall)
+default.mcp.full 0PZF3K1Q3T6ZPT8HZWJ56Q0W7S Default Allow {FullAccess} ActionKindIs(McpCall)
+default.unclassified.manual-auto 4F92ZAQ5Y1AHGZV03ST8GY19QP Default Ask {Manual, Auto} ActionKindIs(Unclassified)
+default.unclassified.full 3W77RNAY3TE17R3E56R8KYGKAX Default Allow {FullAccess} ActionKindIs(Unclassified)
+credential.git.pull 33HWD60YHJV5ZE1X4ZV5CVKBVB CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "git", subcommand: Some("pull") }
+credential.git.fetch 3PZ51Q1YY9V1Y61TGFCPWQ7SZG CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "git", subcommand: Some("fetch") }
+credential.git.clone 6SPY2RZA7CSAXM7PJ3TAQR0447 CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "git", subcommand: Some("clone") }
+credential.git.push 1DHW3FR5FHHPWQWCJE22VVSBWN CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "git", subcommand: Some("push") }
+credential.git.ls-remote 42039P6W3KPQYFQ94KR6ZSC0JA CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "git", subcommand: Some("ls-remote") }
+credential.git.remote 1MD28CQ4T722B1SXEE5KTD5QP5 CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "git", subcommand: Some("remote") }
+credential.git.submodule 2TGW9Y6NSM41NNV3XHD04512YE CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "git", subcommand: Some("submodule") }
+credential.git.lfs 3AWRQ5G5Y2NZ22WR89FYBVFJP2 CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "git", subcommand: Some("lfs") }
+credential.gh 68GMN3SY210NZ33P58BRFGNT22 CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "gh", subcommand: None }
+credential.docker.login 4X68QKVKXV14PFJYQXF4SVZXMJ CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "docker", subcommand: Some("login") }
+credential.docker.logout 2PMY7P0AZXB9Y4RWJ66B45MFPE CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "docker", subcommand: Some("logout") }
+credential.docker.pull 4QWTXFYAS17XAMYTP28MPMWJXR CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "docker", subcommand: Some("pull") }
+credential.docker.push 00E0K3MPTPXDJKVQPETJE2SPC0 CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "docker", subcommand: Some("push") }
+credential.npm.publish 308JHY4MXQVDNSJ7GQ7M04KN2T CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "npm", subcommand: Some("publish") }
+credential.npm.login 5MD41WR1VCYT2E1MGWJZSQ489N CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "npm", subcommand: Some("login") }
+credential.npm.adduser 1D3GFGJGG4BWQNS5TMEGVJQCAW CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "npm", subcommand: Some("adduser") }
+credential.npm.whoami 449T6GSJK01TS5JXW4SDSMP694 CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "npm", subcommand: Some("whoami") }
+credential.npm.token 11PN87NFFYDQECTVXT0YCJ8HNT CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "npm", subcommand: Some("token") }
+credential.npm.access 5H81Q1Z72EFEAYH1MVWAY2GC9A CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "npm", subcommand: Some("access") }
+credential.npm.owner 7STC5T6KE3QRSVNQ107NY6J8RX CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "npm", subcommand: Some("owner") }
+credential.npm.deprecate 6AFMWV4TFSHA391SCTCQDAD5PY CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "npm", subcommand: Some("deprecate") }
+credential.npm.unpublish 4PXARAXKX0JE8379QZJT866PXR CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "npm", subcommand: Some("unpublish") }
+credential.pnpm.publish 6ZTFBAJ4VSMHPWKPG7E4DHD2HS CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "pnpm", subcommand: Some("publish") }
+credential.pnpm.login 6Z2SNTJC9NK0VP712G2PXVPP7C CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "pnpm", subcommand: Some("login") }
+credential.yarn.publish 1W3876GH5NF6W2FWT9N943YXZ6 CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "yarn", subcommand: Some("publish") }
+credential.yarn.login 0VF5ZHKDMNJA6JA36WHYQY98SG CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "yarn", subcommand: Some("login") }
+credential.cargo.publish 2B8RDQZ8THSETVWMGXR47RJQAQ CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "cargo", subcommand: Some("publish") }
+credential.cargo.login 6KTETYS99RA9N61Q15G97BJP62 CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "cargo", subcommand: Some("login") }
+credential.cargo.owner 0TRGQYVHAEND53RTDGAVZ0A37Z CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "cargo", subcommand: Some("owner") }
+credential.cargo.yank 70JGPDNCRNTFQQR9Y4HCGEGTJ1 CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "cargo", subcommand: Some("yank") }
+credential.twine.upload 4NGR321JVPN8BVY1N0BTBE1885 CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "twine", subcommand: Some("upload") }
+credential.gem.push 3DQX5WRWWCF01FAQ900X1V7K50 CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "gem", subcommand: Some("push") }
+credential.gem.signin 66XXK4BH4HVRK996VB5WCAFY5S CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "gem", subcommand: Some("signin") }
+credential.ssh 01KFW4YWP2YH135PVGR4PFPTSB CredentialCommands OutsideSandbox {} ProgramSubcommand { program: "ssh", subcommand: None }
+autorun.claude-settings 2YQK9ARXSMFYVWBC25S1ZRGXAK AutorunConfig Ask {} PathUnder("/home/u/iWork/projects/proj/.claude")
+autorun.claude-home 6F66SY2BB13HWX7VSXXVWS4ZX3 AutorunConfig Ask {} PathUnder("/home/u/.claude")
+autorun.mcp-json 57JAZDYW68P12JEN491Q4H0K1H AutorunConfig Ask {} PathIs("/home/u/iWork/projects/proj/.mcp.json")
+autorun.gitconfig 2M8XF50GK1N275XQDES6KMTW92 AutorunConfig Ask {} PathIs("/home/u/.gitconfig")
+autorun.git-hooks 1TG6W3NB3RSJRWZ2531ZRCHE52 AutorunConfig Ask {} PathUnder("/home/u/iWork/projects/proj/.git/hooks")
+autorun.shell-rc.zshrc 6W5EX5EGQJTCVQFG0ZERHPBFBP AutorunConfig Ask {} PathIs("/home/u/.zshrc")
+autorun.shell-rc.zprofile 65NWNB4MQHGA7XB0G2F5G86JFR AutorunConfig Ask {} PathIs("/home/u/.zprofile")
+autorun.shell-rc.zshenv 7M85J5G2WPT7CT581CC4GKBSFF AutorunConfig Ask {} PathIs("/home/u/.zshenv")
+autorun.shell-rc.bashrc 6GCSA0XE92QXTPJ0HYRXHD0XDF AutorunConfig Ask {} PathIs("/home/u/.bashrc")
+autorun.shell-rc.bash-profile 5G60JK3S784PJ2Y0BH6N3PFK6T AutorunConfig Ask {} PathIs("/home/u/.bash_profile")
+autorun.shell-rc.profile 3KJ6Y8G5Y7Z6TVGGQR6EE2V3FW AutorunConfig Ask {} PathIs("/home/u/.profile")
+autorun.shell-rc.config-fish-config-fish 6PMFC2ZBBS5D0SZ5EDSYTTAZ4Q AutorunConfig Ask {} PathIs("/home/u/.config/fish/config.fish")
+autorun.launch-agents 01T6DW858N8GV04W41QNWK9XJ1 AutorunConfig Ask {} PathUnder("/home/u/Library/LaunchAgents")
+autorun.launch-daemons.agents 73PQGZSSWC9E6AGD988BVMD2GB AutorunConfig Ask {} PathUnder("/Library/LaunchAgents")
+autorun.launch-daemons.daemons 6GJFW42926KA2SW85SCW7YAN2C AutorunConfig Ask {} PathUnder("/Library/LaunchDaemons")
+sensitive.documents 0RVKQ7H19PCSJQDEWRQ4TVEMND SensitiveDirs Ask {} PathUnder("/home/u/Documents")
+sensitive.desktop 45H648V37SRX69S1WJPFFH4YY5 SensitiveDirs Ask {} PathUnder("/home/u/Desktop")
+sensitive.downloads 6W8Z0J8RT6RFTBQ38HGV5A8JDG SensitiveDirs Ask {} PathUnder("/home/u/Downloads")
+sensitive.pictures 36H04Y051PYHFWVHZA069KN26Y SensitiveDirs Ask {} PathUnder("/home/u/Pictures")
+sensitive.movies 65Q543K4M8CEXYJPSN7Y0F27MA SensitiveDirs Ask {} PathUnder("/home/u/Movies")
+sensitive.music 408CB6Z9JEZ3R6JDRG6VBX6SD2 SensitiveDirs Ask {} PathUnder("/home/u/Music")
+sensitive.icloud 55H99JR6E98N4KZP0E940PCF0Y SensitiveDirs Ask {} PathUnder("/home/u/Library/Mobile Documents")
+sensitive.mail 182RW0VZBPSYGHB7SJ8C9HG9YV SensitiveDirs Ask {} PathUnder("/home/u/Library/Mail")
+sensitive.messages 4NJ7KV45FH38Y9F6EGJDEX39PP SensitiveDirs Ask {} PathUnder("/home/u/Library/Messages")
+sensitive.chrome 1JHXR5JWVKJ0CDEXQ52QB369AF SensitiveDirs Ask {} PathUnder("/home/u/Library/Application Support/Google/Chrome")
+sensitive.safari 5DCD2X8X1TAEPY1VFCX8RC26DJ SensitiveDirs Ask {} PathUnder("/home/u/Library/Safari")
+sensitive.firefox 4J2H1C24B3VGYY93N8C3FG3QD7 SensitiveDirs Ask {} PathUnder("/home/u/Library/Application Support/Firefox")
+sensitive.edge 3ARA013BCP8FVJ8VY9GF6CAKZP SensitiveDirs Ask {} PathUnder("/home/u/Library/Application Support/Microsoft Edge")
+cache.npm 222WR1AGGSK7YBTHC3CMPG76RX WritableCache Allow {} PathUnder("/home/u/.npm")
+cache.cargo-registry 300K9BFMWCM39FFSHTBNSQ1PX0 WritableCache Allow {} PathUnder("/home/u/.cargo/registry")
+cache.cargo-git 472DFC7HZRRX4TK63WRKRHTDY7 WritableCache Allow {} PathUnder("/home/u/.cargo/git")
+cache.go-mod 28G35R8Y71HCXFYVFAGM88Y7HX WritableCache Allow {} PathUnder("/home/u/go/pkg/mod")
+cache.pip 5E0S37JYSNM81P2X7JH5NR204N WritableCache Allow {} PathUnder("/home/u/.cache/pip")
+cache.gradle 0GREDHKG8VK8KEZDK5S2BB6H6V WritableCache Allow {} PathUnder("/home/u/.gradle")
+cache.m2 1297DC1PT3PFQ83YAZ2XNNDB74 WritableCache Allow {} PathUnder("/home/u/.m2/repository")
+cache.pnpm-store 2JFAFCV1E12R5VY8C6QXBX5BNP WritableCache Allow {} PathUnder("/home/u/.local/share/pnpm/store")
+cache.yarn-cache 6ZF80TCW73ZEFKNGEJ62AEFG7S WritableCache Allow {} PathUnder("/home/u/.cache/yarn")
+cache.bun 0PXXAMYHKGEF5X1BT3GWNDAXR9 WritableCache Allow {} PathUnder("/home/u/.bun/install/cache")
+cache.rustup-toolchains 4VP5AXQTA6VK69PXWY73HPWG8D WritableCache Allow {} PathUnder("/home/u/.rustup/toolchains")
+cache.cocoapods 5H2RXETZY8R94VDPFQ3CPYF68V WritableCache Allow {} PathUnder("/home/u/.cocoapods")
+cache.pip-macos 7F7W4EM1CA62QC7VAG50Q5X3J1 WritableCache Allow {} PathUnder("/home/u/Library/Caches/pip")
+cache.derived-data 3SW00XXP1MHKFE6XGG7QMAXEHA WritableCache Allow {} PathUnder("/home/u/Library/Developer/Xcode/DerivedData")
+cache.cocoapods-cache 25JJ89K5J9YQTFJCNJH8EXF3QB WritableCache Allow {} PathUnder("/home/u/Library/Caches/CocoaPods")
+cache.pnpm-store-macos 3Y16GAMHC13B2NX2N17NKR9JJE WritableCache Allow {} PathUnder("/home/u/Library/pnpm/store")
+cache.yarn-cache-macos 1JH7YYEDNQDVCDD0D1PM70HHPX WritableCache Allow {} PathUnder("/home/u/Library/Caches/Yarn")
+reject.bash 5M1M2VQVHAJSKR4WB7VN2JSH1F RejectList Deny {} ProgramSubcommand { program: "bash", subcommand: None }
+reject.sh 0CAM0Q2KM7KMBYVX18GEHCMEYT RejectList Deny {} ProgramSubcommand { program: "sh", subcommand: None }
+reject.zsh 4A9JGR90213T97Y2PBZCPQDB42 RejectList Deny {} ProgramSubcommand { program: "zsh", subcommand: None }
+reject.fish 2ESWKD9H9DWA6WEEM5CWHBCXTN RejectList Deny {} ProgramSubcommand { program: "fish", subcommand: None }
+reject.dash 5P872ET780D466TGGQP8N2SAEJ RejectList Deny {} ProgramSubcommand { program: "dash", subcommand: None }
+reject.ksh 56B8WQCY5GTNSNF88R9605YSV2 RejectList Deny {} ProgramSubcommand { program: "ksh", subcommand: None }
+reject.csh 5WA2J2KWFEPNV2KPKVF1GE8MP7 RejectList Deny {} ProgramSubcommand { program: "csh", subcommand: None }
+reject.tcsh 7QB7R2E6TVH6QCJXCGDBG0EJVJ RejectList Deny {} ProgramSubcommand { program: "tcsh", subcommand: None }
+reject.python 1585YQSVFGZ46V8DP45CR2812N RejectList Deny {} ProgramSubcommand { program: "python", subcommand: None }
+reject.python2 48XBCVWVXATRZ5GM9MKRMGPRGK RejectList Deny {} ProgramSubcommand { program: "python2", subcommand: None }
+reject.python3 0TRAGAMV2C8R9GT84MSQGK2VJZ RejectList Deny {} ProgramSubcommand { program: "python3", subcommand: None }
+reject.node 4GH5WRN5GJGRF453MH3KF7S4MC RejectList Deny {} ProgramSubcommand { program: "node", subcommand: None }
+reject.deno 5R81GY35KF4HTEJA5425FVKP22 RejectList Deny {} ProgramSubcommand { program: "deno", subcommand: None }
+reject.bun 3FF2YSFHWMBKB9E3S0STQGET33 RejectList Deny {} ProgramSubcommand { program: "bun", subcommand: None }
+reject.ruby 66QQC37RBACVG2CMPB3GQWQW67 RejectList Deny {} ProgramSubcommand { program: "ruby", subcommand: None }
+reject.perl 6396W8HHZ7R4EG2QDH1Q8ZVTCD RejectList Deny {} ProgramSubcommand { program: "perl", subcommand: None }
+reject.php 2KHHK6CMFVP0TZYC1B4M907NYP RejectList Deny {} ProgramSubcommand { program: "php", subcommand: None }
+reject.lua 3JD4XT1VK6Y340P5TEXN8KMT5S RejectList Deny {} ProgramSubcommand { program: "lua", subcommand: None }
+reject.env 2DMFHV9V9MNQP72HZNEV2KRS2C RejectList Deny {} ProgramSubcommand { program: "env", subcommand: None }
+reject.xargs 14QKM59HKFTWW5AYR59NZNDBSH RejectList Deny {} ProgramSubcommand { program: "xargs", subcommand: None }
+reject.make 6Z0GSAVHKG9S61EH5Y5KAT95GF RejectList Deny {} ProgramSubcommand { program: "make", subcommand: None }
+reject.cmake 5SGQES3QX5WJPB97RVY7KBQK43 RejectList Deny {} ProgramSubcommand { program: "cmake", subcommand: None }
+reject.ninja 44SYVA9XRYTPF54G90AY5NEVMB RejectList Deny {} ProgramSubcommand { program: "ninja", subcommand: None }
+reject.sudo 1B21HJG3HAQQ1YNAM1EXPHR4CZ RejectList Deny {} ProgramSubcommand { program: "sudo", subcommand: None }
+reject.doas 3BNKG7N8N3AGSMT8330GKNNCSE RejectList Deny {} ProgramSubcommand { program: "doas", subcommand: None }
+reject.su 73BNBS46YKS1YYMZ80GNZP0J6V RejectList Deny {} ProgramSubcommand { program: "su", subcommand: None }
+reject.nohup 2QHMP0WGSM165NZ6RT9Y4EZ1ET RejectList Deny {} ProgramSubcommand { program: "nohup", subcommand: None }
+reject.time 2AVX63GTE8F3P7A1RA83VDVT78 RejectList Deny {} ProgramSubcommand { program: "time", subcommand: None }
+reject.nice 5RX10GJ9ZNBVT3V66G4R5EBY28 RejectList Deny {} ProgramSubcommand { program: "nice", subcommand: None }
+reject.exec 0AS90GJ120T72KYS3KGFT5SRRT RejectList Deny {} ProgramSubcommand { program: "exec", subcommand: None }
+reject.eval 3VN6VR6XXMS5CNV2NTPDNQFMN6 RejectList Deny {} ProgramSubcommand { program: "eval", subcommand: None }
+reject.command 60T18Y5CBMKDQHCVSEJJKXC8WX RejectList Deny {} ProgramSubcommand { program: "command", subcommand: None }
+reject.busybox 3WS2QK4XZA04YSF491AF4N4K1B RejectList Deny {} ProgramSubcommand { program: "busybox", subcommand: None }
+reject.osascript 4ZJX4P8QRWH9N9JTR2Q3Y65WBW RejectList Deny {} ProgramSubcommand { program: "osascript", subcommand: None }
+reject.open 194AVST5QVDWD1PVYK8MME20VS RejectList Deny {} ProgramSubcommand { program: "open", subcommand: None }
+reject.nsenter 6MP1QP56CA0TJYDX2VDP8TZ0D8 RejectList Deny {} ProgramSubcommand { program: "nsenter", subcommand: None }
+reject.chroot 31ARG1GQ06YP5318GZG87XX2TD RejectList Deny {} ProgramSubcommand { program: "chroot", subcommand: None }
+reject.docker 3BE3JAXYRSM1E5BHTR1SK2VN20 RejectList Deny {} ProgramSubcommand { program: "docker", subcommand: None }
+reject.rsync 798P60WPFG5XYB216ZEW4VM6WM RejectList Deny {} ProgramSubcommand { program: "rsync", subcommand: None }
+reject.scp 60S269RZCKQ2K5YAD6PHY2CCW0 RejectList Deny {} ProgramSubcommand { program: "scp", subcommand: None }
+reject.sftp 05SNXWGY56Z024WS3J64KM3VAP RejectList Deny {} ProgramSubcommand { program: "sftp", subcommand: None }
