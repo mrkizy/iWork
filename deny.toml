@@ -1,0 +1,44 @@
+# cargo-deny：只管许可、来源、重复版本与已知漏洞。
+# 依赖方向（哪个 crate 能依赖谁）不在这里，见 scripts/deps-policy.toml 与 scripts/check-deps.sh。
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+# 白名单先于依赖写好，暂时没用到的许可不告警
+unused-allowed-license = "allow"
+# 白名单：只放宽松许可。新依赖带来白名单外的许可时 CI 红，加进来前先确认它能用于本项目。
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "0BSD",
+]
+# 工作区自己的 crate 不发布，license 字段写的是 UNLICENSED
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

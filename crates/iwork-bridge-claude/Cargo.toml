@@ -1,0 +1,11 @@
+[package]
+name = "iwork-bridge-claude"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+iwork-proto.workspace = true
+iwork-claude-hook.workspace = true

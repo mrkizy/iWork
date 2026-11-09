@@ -1,0 +1,12 @@
+[package]
+name = "iwork-agent-acp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+iwork-domain.workspace = true
+iwork-ports.workspace = true
+iwork-proto.workspace = true

@@ -1,0 +1,13 @@
+# Rust
+/target/
+# Node
+node_modules/
+client/dist/
+# 生成代码（构建时生成，不入库）
+client/src/gen/
+client/src-tauri/gen/schemas/
+# 本地状态
+*.log
+.DS_Store
+.idea/
+.vscode/
