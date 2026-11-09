@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "client/src-tauri"]
+# cargo-fuzz 目标是独立 workspace（nightly 构建），不进 cargo test --workspace 与依赖方向检查。
+exclude = ["crates/iwork-ipc/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -38,6 +40,11 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Diagnostics_ToolHelp"] }
 base64 = "0.22"
 tauri-build = "2.7"
+tokio-util = { version = "0.7", features = ["codec"] }
+tracing = "0.1"
+sha2 = "0.10"
+hex = "0.4"
+core-foundation-sys = "0.8"
 
 iwork-proto = { path = "crates/iwork-proto" }
 iwork-domain = { path = "crates/iwork-domain" }

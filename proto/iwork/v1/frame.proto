@@ -39,7 +39,7 @@ message Hello {
   uint32 protocol_minor = 2;
   ClientKind client_kind = 3;
   string client_version = 4;
-  // 断线重连时带上，恢复订阅。
+  // 预留；M1 服务端忽略，重连靠 Subscribe.from_seq（T03 方案 2.6）。
   optional bytes resume_token = 5;
 }
 

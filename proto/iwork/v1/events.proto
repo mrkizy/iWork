@@ -530,7 +530,7 @@ message CloneProgress {
   string text = 4;
 }
 
-// 发送队列满，本订阅落后；客户端用 last_seq 重新订阅（设计 3.5）。
+// 预留；M1 不发，异常走断开：发送队列满等流异常一律关闭连接，客户端重连按游标续传（T03 方案 2.9）。
 message SubscriptionLagging {
   uint32 subscription_id = 1;
   uint64 last_seq = 2;
