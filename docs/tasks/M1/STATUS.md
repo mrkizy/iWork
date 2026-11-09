@@ -30,10 +30,10 @@
 | 卡 | 产物 | worker（终端） | 审查任务 ID / 轮次 | 还开着的问题 | 下一步 |
 | --- | --- | --- | --- | --- | --- |
 | T01 | 已合入 main `bb6d69a` | — | `2026-11-09-m1-t01` 已关 | 验收 5 空窗口截图未补（屏幕锁定） | 有空时补截图 |
-| T02 | 分支 `cao/fecce968` @ `67cafbd` | developer `fecce968`；reviewer A `3036f50a`、B `6723c1bb` | `2026-11-10-m1-t02` 第 1 轮不通过 | 1/F-1～F-7（5 blocking、2 important）：复合读无读事务、GC 吞回滚错误、recover 误删制品、Seq 超 i64 panic、Exclusive 遗留事务、首次初始化中断后无法重试、崩溃注入不查子进程退出 | 方案 2.2 与读事务规则已补（`33035e1`、`940f26f`）；等派 developer 返工（4 点后或产品负责人另定） |
-| T03 | 方案 `docs/plans/T03.md`（未提交，第 6 轮） | architect `474f00b7`；方案 reviewer `3f790292` | `2026-11-09-m1-t03-plan` 第 6 轮不通过 | 5/F-1→6/F-1（客户端请求响应与事件两个出口，顺序又被拆开）、6/F-2（落后时查询占住 FIFO，挡住恢复订阅）、6/F-3（重启后 published_head 没初值）、6/F-4（发布等待超时只回错误、不给恢复信号）、6/F-5（交接取数没有时间上限） | supervisor 建议第 7 轮：客户端只留一个有序出口；交接出任何异常一律断开连接、走现有断线重连续传；published_head 启动时取库里 head。等产品负责人定 |
+| T02 | 分支 `cao/fecce968` @ `67cafbd` | developer `fecce968`；reviewer A `3036f50a`、B `6723c1bb` | `2026-11-10-m1-t02` 第 1 轮不通过 | 1/F-1～F-7（5 blocking、2 important）：复合读无读事务、GC 吞回滚错误、recover 误删制品、Seq 超 i64 panic、Exclusive 遗留事务、首次初始化中断后无法重试、崩溃注入不查子进程退出 | 方案 2.2 与读事务规则已补（`33035e1`、`940f26f`）；**4 点后派 developer `fecce968` 修 1/F-1～F-7**（产品负责人 02:00 定）：先 `git merge main` 拿到方案补丁，修复后交原 A/B reviewer 第 2 轮 |
+| T03 | 方案 `docs/plans/T03.md`（未提交） | architect `474f00b7`；方案 reviewer `3f790292` | `2026-11-09-m1-t03-plan` 第 7 轮（产品负责人 02:00 批准） | 5/F-1、6/F-1～F-5 | architect 按三条规则改（单一有序出口；交接异常一律断开走断线重连；published_head 启动取库 head），回报后原 reviewer 复审。若再出同粒度问题，建议方案定稿、余下进实现阶段 |
 | T05 | 已合入 main `a6987d4` | — | `2026-11-09-m1-t05` 已关（三轮，14 条全 fixed） | — | — |
-| T07 | 方案 `docs/plans/T07.md`（未提交，第 6 轮） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 6 轮不通过（1/F-12 已关） | 6/F-1（兜底候选表没保留以 - 开头的整词，`> -out` 链接漏掉；作者本意是整词恒保留再追加）、6/F-2（`name=value` 的值不抽成路径：`LC_ALL=C dd of=.git/config`、`make OUT=.git/x`；兜底与表外程序共用一条拆分规则） | 等产品负责人批准第 7 轮（两处都是小改） |
+| T07 | 方案 `docs/plans/T07.md`（未提交） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 7 轮（产品负责人 02:00 批准） | 6/F-1、6/F-2（6/F-2 记为 prior，产品负责人同意本轮一并修） | architect 改 fallback_candidates（整词恒保留 + name=value 拆值），回报后原 reviewer 复审 |
 | T08 | 分支 `cao/49facf33` @ `bbefd46`（本地，远端还在 `52f35cc`） | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 5 轮通过，全部 finding 已关 | — | 只差 CI：run 42660636464（52f35cc）三平台 test 失败，supervisor 在临时副本里用无 git 身份的干净环境复现；合入前需三平台全绿 |
 | T04、T06、T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
 
