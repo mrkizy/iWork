@@ -1,0 +1,7 @@
+command_id: "01JC0K0000000000000000CMD5"
+upload_attachment {
+  conversation_id: "01JC0C0000000000000000CNV1"
+  name: "\346\227\245\345\277\227.txt"
+  mime: "text/plain"
+  upload_id: "upload-1"
+}

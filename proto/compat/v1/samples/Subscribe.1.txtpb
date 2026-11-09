@@ -1,0 +1,7 @@
+subscription_id: 3
+scope {
+  conversation {
+    conversation_id: "01JC0C0000000000000000CNV1"
+  }
+}
+from_seq: 900

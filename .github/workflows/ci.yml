@@ -1,0 +1,80 @@
+# iWork CI：三平台矩阵（任务卡 T01 验收 1；方案 docs/plans/T01.md 2.6）。
+# 工具链版本由仓库根的 rust-toolchain.toml 决定，rustup 在第一次调用 cargo 时自动安装。
+name: ci
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 与平台无关的检查只在 Linux 跑一次
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+      - name: domain 里不许出现厂商名与 git 字样
+        run: scripts/check-domain-terms.sh
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # Windows 上用 Git Bash 跑，与另外两个平台同一套脚本
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # iwork-client（Tauri 壳）在 Linux 上编译需要 WebKitGTK 等系统库，清单按 Tauri v2 官方 prerequisites。
+      # 若这里装不上导致整个 workspace 编不过（方案 S7），把 iwork-client 拆成单独的 job：
+      # 主 job 用 `--workspace --exclude iwork-client`，另起一个 job 跑 `cargo clippy -p iwork-client`。
+      - name: Tauri 系统依赖（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: 依赖方向检查
+        run: scripts/check-deps.sh
+      - name: 依赖方向检查自测（注入违规必须失败）
+        run: scripts/check-deps.sh --selftest
+
+      - uses: pnpm/action-setup@v4
+        with:
+          # 版本取 client/package.json 的 packageManager 字段
+          package_json_file: client/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+      - name: 前端依赖
+        run: pnpm -C client install --frozen-lockfile
+      - name: 前端类型检查（含 TS 生成）
+        run: pnpm -C client typecheck
+      - name: 前端测试（金样本跨语言解码）
+        run: pnpm -C client test

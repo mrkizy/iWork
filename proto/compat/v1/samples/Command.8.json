@@ -1,0 +1,22 @@
+{
+  "commandId": "01JC0K0000000000000000CMD8",
+  "createAssistant": {
+    "config": {
+      "name": "审查员",
+      "avatar": {
+        "initial": "审",
+        "color": "#4f46e5"
+      },
+      "prompt": "你负责代码审查。",
+      "runtimeId": "01JC0X0000000000000000RTM1",
+      "model": {
+        "modelId": "opus",
+        "effort": "high"
+      },
+      "disabledGroups": [
+        "TOOL_GROUP_WEB",
+        "TOOL_GROUP_RUN_COMMANDS"
+      ]
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "ERROR_CODE_PROTOCOL_VERSION_MISMATCH",
+    "message": "协议主版本不一致",
+    "retryable": true,
+    "details": {
+      "server_major": "2",
+      "client_major": "1"
+    }
+  }
+}

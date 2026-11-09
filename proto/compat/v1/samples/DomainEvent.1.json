@@ -1,0 +1,30 @@
+{
+  "projectAdded": {
+    "project": {
+      "id": "01JC0P0000000000000000PRJ1",
+      "rootPath": "/Users/me/code/iwork",
+      "vcsKind": "vcs-a",
+      "name": "iwork",
+      "pinned": true,
+      "lastActiveAt": "2025-11-01T12:26:40.123Z",
+      "pathStatus": "PATH_STATUS_OK",
+      "settings": {
+        "defaultApprovalMode": "APPROVAL_MODE_AUTO",
+        "defaultModel": {
+          "modelId": "opus",
+          "effort": "high"
+        },
+        "aiReview": {
+          "enabled": true,
+          "runtimeId": "01JC0X0000000000000000RTM1",
+          "model": {
+            "modelId": "opus",
+            "effort": "high"
+          },
+          "timeoutSecs": 60
+        }
+      },
+      "unread": 3
+    }
+  }
+}

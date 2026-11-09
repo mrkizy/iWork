@@ -1,0 +1,11 @@
+usage_reported {
+  runtime_id: "01JC0X0000000000000000RTM1"
+  turn_id: "01JC0T0000000000000000TRN1"
+  usage {
+    input_tokens: 1200
+    output_tokens: 340
+    cache_read_tokens: 5000
+    cache_write_tokens: 60
+    cost_usd: 0.25
+  }
+}

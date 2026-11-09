@@ -1,0 +1,6 @@
+command_id: "01JC0K0000000000000000CMD2"
+decide_approval {
+  approval_id: "01JC0V0000000000000000APR1"
+  decision: APPROVAL_DECISION_ALLOW
+  remember: REMEMBER_SCOPE_PROJECT
+}

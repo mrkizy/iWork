@@ -1,11 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "client/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# 与 rust-toolchain.toml 的版本保持一致：resolver 3 只挑这个版本能编的依赖，
+# 写得比工具链低会把依赖锁在有安全公告的旧版本上（time、plist 曾因此卡住）。
+rust-version = "1.99"
 license = "UNLICENSED"
 publish = false
 
@@ -23,6 +25,8 @@ thiserror = "2"
 ulid = { version = "3", default-features = false }
 proptest = "1"
 pollster = "1"
+tauri = "2.12"
+tauri-build = "2.7"
 
 iwork-proto = { path = "crates/iwork-proto" }
 iwork-domain = { path = "crates/iwork-domain" }

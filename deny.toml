@@ -7,6 +7,12 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# 每条忽略都要写清楚来路、为什么现在修不了、什么时候能删。
+ignore = [
+    # proc-macro-error 不再维护（不是漏洞）。只在 Linux 上经 tauri → gtk3 绑定 → glib-macros 引入，
+    # 是构建期过程宏，不进运行时；上游没有可升级的版本。tauri 换掉 gtk3 绑定后删掉这一条。
+    { id = "RUSTSEC-2024-0370", reason = "Linux 上 tauri 的 gtk3 绑定经构建期过程宏引入，上游无修复版本" },
+]
 
 [licenses]
 version = 2

@@ -1,0 +1,6 @@
+session_id: "session-1"
+server_version: "0.1.0"
+capabilities: ["resume", "chunk-upload"]
+head_seq: 9007199254740993
+protocol_major: 1
+protocol_minor: 2

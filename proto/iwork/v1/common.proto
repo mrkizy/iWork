@@ -1,0 +1,313 @@
+// 通用类型：错误、通用枚举、跨文件共用的小值对象。
+//
+// 兼容规则（本包所有文件相同；由 crates/iwork-proto/tests/compat.rs 机器检查，规则全文见 proto/compat/README.md）：
+// - 字段只增不改号；已进契约的字段不改名、不改类型、不改 label、不改 oneof 归属。
+// - 删字段先 `reserved` 编号与名字；同一主版本内不删，只标 `deprecated = true` 留着，真删是升主版本的事。
+// - 枚举值同理：只增不改值；删值先 `reserved`。
+// - 不改 oneof 字段的类型。
+// - 只用 protox 与 buf 都支持的 proto3 子集：不用 proto2、extensions、Any。
+// - 枚举值一律带枚举名前缀：proto3 枚举值与包同一命名空间，不带前缀会撞名（如 CANCELLED）。
+//
+// 协议主版本：就是包名 `iwork.v1` 里的 1。Rust 侧 `iwork_proto::PROTOCOL_MAJOR` 由构建脚本从包名解析，
+// 不在任何地方手抄第二份。破坏性变更 = 改包名为 iwork.v2 并新建 proto/compat/v2/。
+syntax = "proto3";
+
+package iwork.v1;
+
+// 对外错误统一形状（AGENTS.md「错误不得静默吞掉」）。
+message Error {
+  ErrorCode code = 1;
+  // 给人看的中文说明；不含路径以外的用户数据，不含凭据。
+  string message = 2;
+  bool retryable = 3;
+  // 机器可读的补充，如 "path"、"expected_version"、"client_major"。键名集中定义成常量（握手的在
+  // iwork_proto::handshake，其余在 iwork-app），不在各处手写字符串。禁止放凭据。
+  map<string, string> details = 4;
+}
+
+// 错误码按功能分段；段内编号一经分配不再变动。
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+
+  // 通用 1–19
+  ERROR_CODE_INVALID_ARGUMENT = 1;
+  ERROR_CODE_NOT_FOUND = 2;
+  ERROR_CODE_ALREADY_EXISTS = 3;
+  // expected_version 不符。
+  ERROR_CODE_CONFLICT = 4;
+  ERROR_CODE_PRECONDITION_FAILED = 5;
+  ERROR_CODE_PERMISSION_DENIED = 6;
+  ERROR_CODE_UNAVAILABLE = 7;
+  ERROR_CODE_INTERNAL = 8;
+  ERROR_CODE_CANCELLED = 9;
+  ERROR_CODE_TIMEOUT = 10;
+  ERROR_CODE_PAYLOAD_TOO_LARGE = 11;
+
+  // 协议与连接 20–29
+  // 握手主版本不一致；details 带 client_major、server_major（iwork_proto::handshake）。
+  ERROR_CODE_PROTOCOL_VERSION_MISMATCH = 20;
+  ERROR_CODE_PEER_REJECTED = 21;
+  ERROR_CODE_MALFORMED_FRAME = 22;
+  ERROR_CODE_SUBSCRIPTION_TOO_OLD = 23;
+
+  // 存储 30–39
+  ERROR_CODE_STORAGE_FAILURE = 30;
+  ERROR_CODE_MIGRATION_FAILED = 31;
+
+  // 运行时与模型 40–59（设计 9.6 第 7 条：三种模型不可用原因必须可区分）
+  ERROR_CODE_RUNTIME_NOT_FOUND = 40;
+  ERROR_CODE_RUNTIME_INCOMPATIBLE = 41;
+  ERROR_CODE_RUNTIME_NOT_LOGGED_IN = 42;
+  ERROR_CODE_RUNTIME_CHANGE_FORBIDDEN = 43;
+  ERROR_CODE_MODEL_NO_PERMISSION = 44;
+  ERROR_CODE_MODEL_RETIRED = 45;
+  ERROR_CODE_MODEL_OVERLOADED = 46;
+  ERROR_CODE_MODEL_UNKNOWN = 47;
+
+  // 对话与回合 60–69
+  ERROR_CODE_CONVERSATION_DELETING = 60;
+  ERROR_CODE_TURN_NOT_RESUMABLE = 61;
+  ERROR_CODE_TURN_NOT_CANCELLABLE = 62;
+
+  // 审批与亲手执行 70–79
+  ERROR_CODE_APPROVAL_NOT_PENDING = 70;
+  // 如把项目默认档位设为全开。
+  ERROR_CODE_APPROVAL_MODE_NOT_ALLOWED = 71;
+  ERROR_CODE_USER_ACTION_HASH_MISMATCH = 72;
+  ERROR_CODE_USER_ACTION_NOT_PENDING = 73;
+  // 不是来自客户端连接的亲手执行请求。
+  ERROR_CODE_USER_ACTION_WRONG_CHANNEL = 74;
+
+  // 附件 80–89
+  ERROR_CODE_ATTACHMENT_TOO_LARGE = 80;
+  ERROR_CODE_ATTACHMENT_PRIVATE_KEY_REFUSED = 81;
+  ERROR_CODE_ATTACHMENT_NEEDS_CONFIRMATION = 82;
+  ERROR_CODE_ATTACHMENT_UNSUPPORTED_BY_RUNTIME = 83;
+
+  // 项目与版本控制 90–109
+  ERROR_CODE_PROJECT_PATH_MISSING = 90;
+  ERROR_CODE_PROJECT_NOT_VERSION_CONTROLLED = 91;
+  ERROR_CODE_PROJECT_ID_MISMATCH = 92;
+  ERROR_CODE_TARGET_NOT_EMPTY = 93;
+  ERROR_CODE_VCS_FAILURE = 94;
+  ERROR_CODE_CLONE_FAILED = 95;
+  // 用户未配置提交身份。
+  ERROR_CODE_VCS_IDENTITY_MISSING = 96;
+
+  // 规则与清单 110–119
+  ERROR_CODE_SECURITY_LIST_ENTRY_REJECTED = 110;
+  // 内置条目不可删。
+  ERROR_CODE_RULE_NOT_REVOCABLE = 111;
+
+  // 密钥 120–129
+  ERROR_CODE_SECRET_STORE_FAILURE = 120;
+
+  // 制品 130–139
+  ERROR_CODE_ARTIFACT_NOT_FOUND = 130;
+  ERROR_CODE_ARTIFACT_RANGE_INVALID = 131;
+}
+
+// 审批档位（需求 FR11）。全开只在当前对话生效，不能作为项目默认：
+// 项目默认只接受 MANUAL / AUTO，传 FULL_ACCESS 返回 APPROVAL_MODE_NOT_ALLOWED。
+enum ApprovalMode {
+  APPROVAL_MODE_UNSPECIFIED = 0;
+  APPROVAL_MODE_MANUAL = 1;
+  APPROVAL_MODE_AUTO = 2;
+  APPROVAL_MODE_FULL_ACCESS = 3;
+}
+
+// 「允许」时的记住范围（设计 7.3）。永久记在助手上。
+enum RememberScope {
+  REMEMBER_SCOPE_UNSPECIFIED = 0;
+  REMEMBER_SCOPE_ONCE = 1;
+  REMEMBER_SCOPE_CONVERSATION = 2;
+  REMEMBER_SCOPE_PROJECT = 3;
+  REMEMBER_SCOPE_FOREVER = 4;
+}
+
+// 用户对审批的决定。
+enum ApprovalDecision {
+  APPROVAL_DECISION_UNSPECIFIED = 0;
+  APPROVAL_DECISION_ALLOW = 1;
+  APPROVAL_DECISION_DENY = 2;
+}
+
+// 回合状态（T01 方案 4.3 回合表）。终态：COMPLETED、CANCELLED、FAILED；INTERRUPTED 不是终态。
+enum TurnState {
+  TURN_STATE_UNSPECIFIED = 0;
+  TURN_STATE_QUEUED = 1;
+  TURN_STATE_RUNNING = 2;
+  TURN_STATE_WAITING_APPROVAL = 3;
+  TURN_STATE_CANCELLING = 4;
+  TURN_STATE_INTERRUPTED = 5;
+  TURN_STATE_COMPLETED = 6;
+  TURN_STATE_CANCELLED = 7;
+  TURN_STATE_FAILED = 8;
+}
+
+// 回合中断的原因。两者的去向不同：APPROVAL_WAIT_LIMIT 下审批不作废、批准后自动续接（设计 6.3、7.3 第 5 条）。
+enum InterruptReason {
+  INTERRUPT_REASON_UNSPECIFIED = 0;
+  // 后台服务崩溃恢复时发现进程已不在。
+  INTERRUPT_REASON_CRASH = 1;
+  // hook 等待上限到时前由适配器主动中断。
+  INTERRUPT_REASON_APPROVAL_WAIT_LIMIT = 2;
+}
+
+// 审批主状态（需求 12）。终态：APPROVED、DENIED、VOIDED。DENIED 永不变 APPROVED。
+enum ApprovalState {
+  APPROVAL_STATE_UNSPECIFIED = 0;
+  APPROVAL_STATE_PENDING = 1;
+  APPROVAL_STATE_APPROVED = 2;
+  APPROVAL_STATE_DENIED = 3;
+  APPROVAL_STATE_VOIDED = 4;
+}
+
+// 审批的 AI 审查子状态（只在 PENDING 期间变化，T01 方案 4.3）。
+enum ReviewState {
+  REVIEW_STATE_UNSPECIFIED = 0;
+  REVIEW_STATE_NOT_REVIEWED = 1;
+  REVIEW_STATE_IN_PROGRESS = 2;
+  REVIEW_STATE_PASSED = 3;
+  REVIEW_STATE_FAILED = 4;
+  REVIEW_STATE_ERRORED = 5;
+  REVIEW_STATE_TIMED_OUT = 6;
+  // 审查进行中切回手动档，本次审查作废，转为问用户。
+  REVIEW_STATE_ABANDONED = 7;
+}
+
+// 谁让审批离开了 PENDING。
+enum ApprovalDecider {
+  APPROVAL_DECIDER_UNSPECIFIED = 0;
+  APPROVAL_DECIDER_USER = 1;
+  // 切到更宽松档位时自动放行（设计 7.3 第 6 条）。
+  APPROVAL_DECIDER_MODE_SWITCH = 2;
+  APPROVAL_DECIDER_AI_REVIEW = 3;
+}
+
+// 待处理项作废的原因（需求 12、设计 7.3 第 5 条、9.0、9.1a 逐条对应）。
+// 没有「审批等待上限」这个原因：hook 超时防护引起的中断不作废，这里有意写不出来。
+enum VoidReason {
+  VOID_REASON_UNSPECIFIED = 0;
+  VOID_REASON_TURN_CANCELLED = 1;
+  VOID_REASON_CONVERSATION_DELETED = 2;
+  VOID_REASON_TURN_ABANDONED_AFTER_INTERRUPT = 3;
+  VOID_REASON_ASSISTANT_DELETED = 4;
+}
+
+// 亲手执行卡片状态（T01 方案 4.3 卡片表）。
+// 终态：DONE、ENDED、FAILED、DISMISSED、VOIDED。UNKNOWN 不是终态，唯一出口是用户确认（ConfirmUserActionEnded）。
+enum UserActionState {
+  USER_ACTION_STATE_UNSPECIFIED = 0;
+  USER_ACTION_STATE_PENDING = 1;
+  USER_ACTION_STATE_STARTING = 2;
+  USER_ACTION_STATE_EXECUTING = 3;
+  USER_ACTION_STATE_STOPPING = 4;
+  USER_ACTION_STATE_DONE = 5;
+  USER_ACTION_STATE_FAILED = 6;
+  USER_ACTION_STATE_UNKNOWN = 7;
+  USER_ACTION_STATE_ENDED = 8;
+  USER_ACTION_STATE_DISMISSED = 9;
+  USER_ACTION_STATE_VOIDED = 10;
+}
+
+// 消息状态：用户与系统消息创建即 SENT；助手消息 STREAMING → COMPLETED / INTERRUPTED / FAILED。
+enum MessageStatus {
+  MESSAGE_STATUS_UNSPECIFIED = 0;
+  MESSAGE_STATUS_SENT = 1;
+  MESSAGE_STATUS_STREAMING = 2;
+  MESSAGE_STATUS_COMPLETED = 3;
+  MESSAGE_STATUS_INTERRUPTED = 4;
+  MESSAGE_STATUS_FAILED = 5;
+}
+
+// 对话状态（设计 9.0）。
+enum ConversationState {
+  CONVERSATION_STATE_UNSPECIFIED = 0;
+  CONVERSATION_STATE_ACTIVE = 1;
+  CONVERSATION_STATE_DELETING = 2;
+  CONVERSATION_STATE_DELETED = 3;
+}
+
+// 项目路径状态（设计 8.2）。
+enum PathStatus {
+  PATH_STATUS_UNSPECIFIED = 0;
+  PATH_STATUS_OK = 1;
+  PATH_STATUS_MISSING = 2;
+}
+
+// 助手工具开关的四个分组（设计 9.1a）。
+enum ToolGroup {
+  TOOL_GROUP_UNSPECIFIED = 0;
+  TOOL_GROUP_READ_AND_SEARCH = 1;
+  TOOL_GROUP_EDIT_FILES = 2;
+  TOOL_GROUP_RUN_COMMANDS = 3;
+  TOOL_GROUP_WEB = 4;
+}
+
+// 三张安全清单（设计 7.2c）。
+enum SecurityList {
+  SECURITY_LIST_UNSPECIFIED = 0;
+  SECURITY_LIST_CREDENTIAL_COMMANDS = 1;
+  SECURITY_LIST_SENSITIVE_DIRS = 2;
+  SECURITY_LIST_WRITABLE_DIRS = 3;
+}
+
+// AGENTS.md 草稿卡片的决定。
+enum DraftDecision {
+  DRAFT_DECISION_UNSPECIFIED = 0;
+  DRAFT_DECISION_ACCEPT = 1;
+  DRAFT_DECISION_DISCARD = 2;
+}
+
+// 规则、清单条目的生效范围。安全清单的用户条目只接受 global / project_id（设计 7.2c），由 iwork-app 校验。
+message Scope {
+  oneof kind {
+    GlobalScope global = 1;
+    string project_id = 2;
+    string assistant_id = 3;
+    string conversation_id = 4;
+  }
+}
+
+message GlobalScope {}
+
+// 模型与思考强度（设计 9.6）。model_id、effort 都是运行时给的不透明字符串。
+message ModelSelection {
+  string model_id = 1;
+  optional string effort = 2;
+}
+
+// 每回合结束时 CLI 上报的用量（设计 9.4）。
+message Usage {
+  uint64 input_tokens = 1;
+  uint64 output_tokens = 2;
+  uint64 cache_read_tokens = 3;
+  uint64 cache_write_tokens = 4;
+  // 运行时报了费用才有（实测 Claude 报，其他家不一定）。
+  optional double cost_usd = 5;
+}
+
+// 制品存储里的对象引用。大文本不随事件推送，只带引用，客户端经 ReadArtifact 分段读取（设计 3.7）。
+message ArtifactRef {
+  // 内容的 SHA-256，小写十六进制。
+  string sha256 = 1;
+  ArtifactArea area = 2;
+  uint64 size = 3;
+}
+
+// 制品所在区域。PRIVATE（凭据附件存档）经 ReadArtifact 一律 PERMISSION_DENIED。
+enum ArtifactArea {
+  ARTIFACT_AREA_UNSPECIFIED = 0;
+  ARTIFACT_AREA_ARTIFACTS = 1;
+  ARTIFACT_AREA_ATTACHMENTS = 2;
+  ARTIFACT_AREA_PRIVATE = 3;
+}
+
+// 进程退出状态：正常退出带退出码，被信号结束带信号值。
+message ExitStatus {
+  oneof kind {
+    int32 code = 1;
+    int32 signal = 2;
+  }
+}

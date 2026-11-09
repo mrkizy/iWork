@@ -1,0 +1,155 @@
+// 帧与握手（设计 3.3、3.5；T01 方案 3.2）。
+//
+// 帧 = u32 长度（小端，= 类型字节 + 载荷的字节数）| u8 类型（FrameType）| Protobuf 载荷。
+// 单帧上限 4MB；Chunk 载荷 ≤ 1MB。
+//
+// 兼容规则：字段只增不改号；删字段先 `reserved` 编号与名字（同一主版本内只标 deprecated 不删）；
+// 枚举值同理；不改 oneof 字段的类型。全文见 proto/compat/README.md，由 tests/compat.rs 检查。
+syntax = "proto3";
+
+package iwork.v1;
+
+import "google/protobuf/timestamp.proto";
+import "iwork/v1/commands.proto";
+import "iwork/v1/common.proto";
+import "iwork/v1/events.proto";
+import "iwork/v1/queries.proto";
+
+// 帧头的类型字节。帧头不是 Protobuf，这里登记取值，让 Rust 与 TS 读同一份。
+enum FrameType {
+  FRAME_TYPE_UNSPECIFIED = 0;
+  // 客户端 → 后台
+  FRAME_TYPE_HELLO = 1;
+  // 后台 → 客户端
+  FRAME_TYPE_WELCOME = 2;
+  // 客户端 → 后台
+  FRAME_TYPE_REQUEST = 3;
+  // 后台 → 客户端
+  FRAME_TYPE_RESPONSE = 4;
+  // 后台 → 客户端
+  FRAME_TYPE_EVENT = 5;
+  // 客户端 → 后台
+  FRAME_TYPE_CHUNK = 6;
+}
+
+// 握手第一帧。主版本不同：后台回 Response{request_id = 0, error{PROTOCOL_VERSION_MISMATCH,
+// details{client_major, server_major}}} 后断开，拒绝前不处理任何业务帧（iwork_proto::handshake::check_hello）。
+message Hello {
+  uint32 protocol_major = 1;
+  uint32 protocol_minor = 2;
+  ClientKind client_kind = 3;
+  string client_version = 4;
+  // 断线重连时带上，恢复订阅。
+  optional bytes resume_token = 5;
+}
+
+// M1 桥接与 hook 不接 IPC（ACP 走 stdio），所以这里只有客户端两种。
+enum ClientKind {
+  CLIENT_KIND_UNSPECIFIED = 0;
+  CLIENT_KIND_DESKTOP = 1;
+  CLIENT_KIND_DEV_TOOL = 2;
+}
+
+message Welcome {
+  string session_id = 1;
+  string server_version = 2;
+  repeated string capabilities = 3;
+  uint64 head_seq = 4;
+  uint32 protocol_major = 5;
+  uint32 protocol_minor = 6;
+}
+
+message Request {
+  // 客户端分配，在本连接内唯一；0 留给后台主动发的错误（如握手拒绝）。
+  uint64 request_id = 1;
+  oneof body {
+    Command command = 10;
+    Query query = 11;
+    Subscribe subscribe = 12;
+    Unsubscribe unsubscribe = 13;
+  }
+}
+
+message Response {
+  uint64 request_id = 1;
+  oneof body {
+    CommandAccepted accepted = 10;
+    QueryResult result = 11;
+    Subscribed subscribed = 12;
+    Error error = 13;
+  }
+}
+
+// 推送的事件。同一条事件命中多个订阅时只发一次，带上全部订阅 id。
+message Event {
+  repeated uint32 subscription_ids = 1;
+  oneof body {
+    PersistedEvent persisted = 10;
+    TransientEvent transient = 11;
+  }
+}
+
+// 持久事件的信封：events 表一行（seq、at、actor）加载荷。
+message PersistedEvent {
+  uint64 seq = 1;
+  google.protobuf.Timestamp at = 2;
+  // 动作主体：用户本人、某个助手、系统。
+  string actor = 3;
+  DomainEvent event = 4;
+}
+
+// 大数据分片上传（设计 3.7）。data ≤ 1MB。
+message Chunk {
+  string upload_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+  bool last = 4;
+}
+
+// 先补发 from_seq 之后的事件再切实时；from_seq 太旧时回快照（设计 3.5）。
+message Subscribe {
+  uint32 subscription_id = 1;
+  SubscriptionScope scope = 2;
+  uint64 from_seq = 3;
+}
+
+message Unsubscribe {
+  uint32 subscription_id = 1;
+}
+
+message Subscribed {
+  uint32 subscription_id = 1;
+  // from_seq 太旧时才有。
+  Snapshot snapshot = 2;
+  uint64 snapshot_seq = 3;
+}
+
+// 快照由若干查询结果组成，形状与对应查询相同，客户端沿查询结果的处理路径应用，不另设一套快照格式。
+message Snapshot {
+  repeated QueryResult results = 1;
+}
+
+message SubscriptionScope {
+  oneof kind {
+    SidebarScope sidebar = 1;
+    ConversationScope conversation = 2;
+    PendingScope pending = 3;
+    QuotaScope quota = 4;
+    RuntimeStatusScope runtime_status = 5;
+    SettingsScope settings = 6;
+  }
+}
+
+message SidebarScope {}
+
+message ConversationScope {
+  string conversation_id = 1;
+}
+
+message PendingScope {}
+
+message QuotaScope {}
+
+message RuntimeStatusScope {}
+
+message SettingsScope {}

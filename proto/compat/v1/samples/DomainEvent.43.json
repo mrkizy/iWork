@@ -1,0 +1,21 @@
+{
+  "attachmentStored": {
+    "attachment": {
+      "id": "01JC0F0000000000000000ATT1",
+      "conversationId": "01JC0C0000000000000000CNV1",
+      "sha256": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+      "size": "1024",
+      "mime": "image/png",
+      "name": "截图.png",
+      "origin": {
+        "pasted": {
+          "sha256": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+          "area": "ARTIFACT_AREA_ATTACHMENTS",
+          "size": "1024"
+        }
+      },
+      "needsConfirmation": true,
+      "createdAt": "2025-11-01T12:45:00.123Z"
+    }
+  }
+}

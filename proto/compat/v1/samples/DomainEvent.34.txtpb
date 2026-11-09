@@ -1,0 +1,32 @@
+approval_evaluated {
+  turn_id: "01JC0T0000000000000000TRN1"
+  action {
+    kind: ACTION_KIND_OUTSIDE_SANDBOX
+    target {
+      command {
+        program: "npm"
+        subcommand: "publish"
+        argv: ["npm", "publish", "--access=public"]
+      }
+    }
+    tool_name: "Bash"
+    raw_summary: "npm publish --access=public"
+    out_of_bounds: true
+    bypass_sandbox_requested: true
+    opaque_script: true
+  }
+  matched_rule_ids: ["01JC0R0000000000000000RXE1", "01JC0R0000000000000000BSE1"]
+  ruleset_version: "2026.11.1"
+  verdict {
+    deny {
+      denial_memory {
+        kind: ACTION_KIND_DELETE
+        target {
+          path: "/Users/me/code/iwork/build"
+        }
+      }
+    }
+  }
+  layer_hit: RULE_LAYER_DENIAL_MEMORY
+  duration_ms: 3
+}

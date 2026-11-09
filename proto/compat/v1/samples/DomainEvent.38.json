@@ -1,0 +1,8 @@
+{
+  "approvalStaleResultDropped": {
+    "approvalId": "01JC0V0000000000000000APR1",
+    "reviewId": "01JC0V0000000000000000RVW1",
+    "result": "REVIEW_STATE_PASSED",
+    "why": "STALE_REASON_MODE_NOT_AUTO"
+  }
+}

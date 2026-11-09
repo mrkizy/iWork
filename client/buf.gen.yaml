@@ -1,0 +1,15 @@
+# TS 类型生成（protobuf-es v2）。输出不入库，由 `pnpm gen` 在 typecheck / test 前生成。
+version: v2
+inputs:
+  # 只取协议定义；proto/compat/ 下是二进制样本与契约，不是 .proto。
+  # paths 按当前目录（client/）解析，不是相对 directory，所以要带 ../proto 前缀
+  - directory: ../proto
+    paths:
+      - ../proto/iwork/v1
+plugins:
+  # protoc-gen-es 由 pnpm 装在 node_modules/.bin，经 pnpm run 进 PATH
+  - local: protoc-gen-es
+    out: src/gen
+    opt: target=ts
+# 每次生成先清空 src/gen，删掉的 .proto 不留旧文件
+clean: true

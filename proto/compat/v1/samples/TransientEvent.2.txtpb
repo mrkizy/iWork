@@ -1,0 +1,5 @@
+tool_output_delta {
+  tool_call_id: "tool-1"
+  offset: 64
+  text: "ok\n"
+}

@@ -1,0 +1,21 @@
+{
+  "projectSettingsUpdated": {
+    "projectId": "01JC0P0000000000000000PRJ1",
+    "settings": {
+      "defaultApprovalMode": "APPROVAL_MODE_AUTO",
+      "defaultModel": {
+        "modelId": "opus",
+        "effort": "high"
+      },
+      "aiReview": {
+        "enabled": true,
+        "runtimeId": "01JC0X0000000000000000RTM1",
+        "model": {
+          "modelId": "opus",
+          "effort": "high"
+        },
+        "timeoutSecs": 60
+      }
+    }
+  }
+}

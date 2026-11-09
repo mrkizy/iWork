@@ -1,0 +1,15 @@
+[package]
+name = "iwork-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+iwork-client-core.workspace = true
+iwork-proto.workspace = true
+tauri.workspace = true

@@ -1,0 +1,22 @@
+{
+  "id": "01JC0D0000000000000000CRD1",
+  "turnId": "01JC0T0000000000000000TRN1",
+  "conversationId": "01JC0C0000000000000000CNV1",
+  "command": {
+    "command": "ssh-add -l",
+    "cwd": "/Users/me"
+  },
+  "reason": "列出已加载的密钥",
+  "proposalHash": "3q2+7wECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxw=",
+  "state": "USER_ACTION_STATE_UNKNOWN",
+  "exit": {
+    "code": 2
+  },
+  "outputArtifact": {
+    "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "area": "ARTIFACT_AREA_ARTIFACTS",
+    "size": "4096"
+  },
+  "error": "后台服务中断",
+  "voidReason": "VOID_REASON_CONVERSATION_DELETED"
+}

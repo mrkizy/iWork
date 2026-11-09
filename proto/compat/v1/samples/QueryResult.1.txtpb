@@ -1,0 +1,67 @@
+seq: 1003
+get_conversation {
+  conversation {
+    id: "01JC0C0000000000000000CNV1"
+    project {
+      project_id: "01JC0P0000000000000000PRJ1"
+    }
+    state: CONVERSATION_STATE_ACTIVE
+    last_read_seq: 42
+    unread: 2
+    model_override {
+      model_id: "opus"
+      effort: "high"
+    }
+    approval_mode: APPROVAL_MODE_FULL_ACCESS
+    updated_at {
+      seconds: 1762000200
+      nanos: 123000000
+    }
+  }
+  messages: [{
+    id: "01JC0M0000000000000000MSG1"
+    conversation_id: "01JC0C0000000000000000CNV1"
+    author {
+      assistant {
+        assistant_id: "01JC0A0000000000000000AST1"
+        name_snapshot: "\345\256\241\346\237\245\345\221\230"
+      }
+    }
+    context_project_id: "01JC0P0000000000000000PRJ1"
+    status: MESSAGE_STATUS_STREAMING
+    body {
+      inline_text: "\346\255\243\345\234\250\347\234\213\342\200\246\342\200\246"
+    }
+    attachment_ids: ["01JC0F0000000000000000ATT1"]
+    created_at {
+      seconds: 1762000400
+      nanos: 123000000
+    }
+    turn_id: "01JC0T0000000000000000TRN1"
+  }]
+  turns: [{
+    id: "01JC0T0000000000000000TRN1"
+    conversation_id: "01JC0C0000000000000000CNV1"
+    assistant_id: "01JC0A0000000000000000AST1"
+    assistant_version: 4
+    runtime_id: "01JC0X0000000000000000RTM1"
+    model {
+      model_id: "opus"
+      effort: "high"
+    }
+    runtime_session_id: "sess-1"
+    state: TURN_STATE_INTERRUPTED
+    state_reason: "\345\256\241\346\211\271\347\255\211\345\276\205\345\210\260\344\270\212\351\231\220"
+    started_at {
+      seconds: 1762000500
+      nanos: 123000000
+    }
+    ended_at {
+      seconds: 1762000600
+      nanos: 123000000
+    }
+    kind: TURN_KIND_ASSISTANT
+    interrupt_reason: INTERRUPT_REASON_APPROVAL_WAIT_LIMIT
+  }]
+  has_more: true
+}

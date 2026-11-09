@@ -1,0 +1,18 @@
+command_id: "01JC0K0000000000000000CMD4"
+update_project_settings {
+  project_id: "01JC0P0000000000000000PRJ1"
+  default_approval_mode: APPROVAL_MODE_AUTO
+  default_model {
+    model_id: "opus"
+    effort: "high"
+  }
+  ai_review {
+    enabled: true
+    runtime_id: "01JC0X0000000000000000RTM1"
+    model {
+      model_id: "opus"
+      effort: "high"
+    }
+    timeout_secs: 60
+  }
+}

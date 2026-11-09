@@ -1,0 +1,5 @@
+protocol_major: 1
+protocol_minor: 3
+client_kind: CLIENT_KIND_DESKTOP
+client_version: "0.1.0"
+resume_token: "resume-token"

@@ -1,0 +1,176 @@
+// 查询：客户端 → 后台，只读，返回快照与快照对应的 seq（设计 3.4）。
+//
+// 兼容规则：字段只增不改号；删字段先 `reserved` 编号与名字（同一主版本内只标 deprecated 不删）；
+// 枚举值同理；不改 oneof 字段的类型。全文见 proto/compat/README.md，由 tests/compat.rs 检查。
+syntax = "proto3";
+
+package iwork.v1;
+
+import "google/protobuf/timestamp.proto";
+import "iwork/v1/common.proto";
+import "iwork/v1/model.proto";
+
+// 查询信封。QueryResult 的 oneof 用同一个编号放对应结果，读起来一一对得上。
+message Query {
+  oneof kind {
+    GetConversation get_conversation = 10;
+    ListConversations list_conversations = 11;
+    ListProjects list_projects = 12;
+    ListAssistants list_assistants = 13;
+    ListPendingItems list_pending_items = 14;
+    GetQuota get_quota = 15;
+    GetRuntimeStatus get_runtime_status = 16;
+    ListModels list_models = 17;
+    ListRules list_rules = 18;
+    ListLocalConfig list_local_config = 19;
+    ListSecurityLists list_security_lists = 20;
+    GetSettings get_settings = 21;
+    ReadArtifact read_artifact = 22;
+  }
+}
+
+message QueryResult {
+  // 快照对应的事件 seq；ReadArtifact（制品不可变）填当前 head_seq。
+  uint64 seq = 1;
+  oneof kind {
+    GetConversationResult get_conversation = 10;
+    ListConversationsResult list_conversations = 11;
+    ListProjectsResult list_projects = 12;
+    ListAssistantsResult list_assistants = 13;
+    ListPendingItemsResult list_pending_items = 14;
+    GetQuotaResult get_quota = 15;
+    GetRuntimeStatusResult get_runtime_status = 16;
+    ListModelsResult list_models = 17;
+    ListRulesResult list_rules = 18;
+    ListLocalConfigResult list_local_config = 19;
+    ListSecurityListsResult list_security_lists = 20;
+    GetSettingsResult get_settings = 21;
+    ArtifactChunk read_artifact = 22;
+  }
+}
+
+// 键集分页：十万条历史（设计 5.3 索引）。不带 before_message_id 取最新的一页。
+message GetConversation {
+  string conversation_id = 1;
+  optional string before_message_id = 2;
+  uint32 limit = 3;
+}
+
+message GetConversationResult {
+  Conversation conversation = 1;
+  // 按创建顺序从旧到新。
+  repeated Message messages = 2;
+  // 本页消息涉及的回合。
+  repeated Turn turns = 3;
+  // 更早的消息还有没有。
+  bool has_more = 4;
+}
+
+message ListConversations {
+  // 未设置表示全部（含私聊）。
+  optional string project_id = 1;
+}
+
+message ListConversationsResult {
+  repeated Conversation conversations = 1;
+}
+
+message ListProjects {}
+
+message ListProjectsResult {
+  repeated Project projects = 1;
+}
+
+message ListAssistants {}
+
+message ListAssistantsResult {
+  repeated Assistant assistants = 1;
+}
+
+message ListPendingItems {}
+
+message ListPendingItemsResult {
+  repeated PendingItem items = 1;
+}
+
+message GetQuota {}
+
+// 按运行时分组：M1 只有一个运行时，但侧栏会同时显示多家（设计 9.4），分组避免以后改形状。
+message GetQuotaResult {
+  repeated RuntimeQuota runtimes = 1;
+}
+
+message RuntimeQuota {
+  string runtime_id = 1;
+  repeated QuotaWindow windows = 2;
+  google.protobuf.Timestamp observed_at = 3;
+}
+
+message GetRuntimeStatus {}
+
+message GetRuntimeStatusResult {
+  repeated RuntimeStatus runtimes = 1;
+}
+
+message ListModels {
+  string runtime_id = 1;
+}
+
+// 运行时不支持思考强度时 effort_levels 为空，界面不显示这一项（设计 9.6 第 5 条）。
+message ListModelsResult {
+  repeated ModelOption models = 1;
+  repeated string effort_levels = 2;
+}
+
+message ListRules {
+  // 未设置表示全部范围。
+  optional string project_id = 1;
+}
+
+message ListRulesResult {
+  repeated Rule rules = 1;
+}
+
+message ListLocalConfig {
+  string runtime_id = 1;
+}
+
+message ListLocalConfigResult {
+  repeated LocalConfigItem items = 1;
+}
+
+message ListSecurityLists {}
+
+// 三张清单的条目放在一起，按 SecurityListEntry.list 区分；builtin 与 scope 在条目上。
+message ListSecurityListsResult {
+  repeated SecurityListEntry entries = 1;
+}
+
+message GetSettings {
+  // 设置时一并返回该项目的设置。
+  optional string project_id = 1;
+}
+
+message GetSettingsResult {
+  GlobalSettings global = 1;
+  ProjectSettings project = 2;
+}
+
+// 分段读制品（设计 3.7）。规则（T01 方案 3.3）：
+// - 只接受通过了对端校验的客户端连接；area = PRIVATE 一律 PERMISSION_DENIED；
+// - 引用必须被当前数据库里的消息、工具调用、附件或亲手执行卡片引用，否则 ARTIFACT_NOT_FOUND；
+// - limit 上限 1MB；offset > total_size 返回 ARTIFACT_RANGE_INVALID。
+message ReadArtifact {
+  ArtifactRef artifact = 1;
+  uint64 offset = 2;
+  uint32 limit = 3;
+}
+
+// offset == total_size 时 data 为空且 eof = true；offset + len(data) == total_size 时 eof = true。
+// 客户端按 eof 判断读完，不靠猜大小。
+message ArtifactChunk {
+  bytes data = 1;
+  uint64 offset = 2;
+  uint64 total_size = 3;
+  bool eof = 4;
+}

@@ -1,0 +1,14 @@
+{
+  "cloneFinished": {
+    "jobId": "01JC0J0000000000000000JB01",
+    "error": {
+      "code": "ERROR_CODE_CLONE_FAILED",
+      "message": "克隆失败",
+      "retryable": true,
+      "details": {
+        "path": "/Users/me/code/x"
+      }
+    },
+    "path": "/Users/me/code/x"
+  }
+}

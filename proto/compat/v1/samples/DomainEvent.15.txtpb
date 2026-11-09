@@ -1,0 +1,17 @@
+conversation_created {
+  conversation {
+    id: "01JC0C0000000000000000CNV1"
+    assistant_dm {
+      assistant_id: "01JC0A0000000000000000AST1"
+      context_project_id: "01JC0P0000000000000000PRJ1"
+    }
+    state: CONVERSATION_STATE_DELETING
+    last_read_seq: 7
+    unread: 1
+    approval_mode: APPROVAL_MODE_MANUAL
+    updated_at {
+      seconds: 1762000300
+      nanos: 123000000
+    }
+  }
+}

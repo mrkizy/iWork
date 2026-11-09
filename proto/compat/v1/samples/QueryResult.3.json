@@ -1,0 +1,92 @@
+{
+  "seq": "1004",
+  "listPendingItems": {
+    "items": [
+      {
+        "approval": {
+          "id": "01JC0V0000000000000000APR1",
+          "turnId": "01JC0T0000000000000000TRN1",
+          "conversationId": "01JC0C0000000000000000CNV1",
+          "kind": "APPROVAL_KIND_OUTSIDE_SANDBOX",
+          "action": {
+            "kind": "ACTION_KIND_OUTSIDE_SANDBOX",
+            "target": {
+              "command": {
+                "program": "npm",
+                "subcommand": "publish",
+                "argv": [
+                  "npm",
+                  "publish",
+                  "--access=public"
+                ]
+              }
+            },
+            "toolName": "Bash",
+            "rawSummary": "npm publish --access=public",
+            "outOfBounds": true,
+            "bypassSandboxRequested": true,
+            "opaqueScript": true
+          },
+          "matchedRuleIds": [
+            "01JC0R0000000000000000RXE1"
+          ],
+          "rulesetVersion": "2026.11.1",
+          "state": "APPROVAL_STATE_PENDING",
+          "review": "REVIEW_STATE_IN_PROGRESS",
+          "reviewReason": "等待审查",
+          "offeredRemember": [
+            "REMEMBER_SCOPE_ONCE",
+            "REMEMBER_SCOPE_PROJECT"
+          ],
+          "rememberLabel": "本项目内 `npm publish …` 不再问",
+          "requestedAt": "2025-11-01T12:38:20.123Z",
+          "decidedAt": "2025-11-01T12:40:00.123Z",
+          "reviewId": "01JC0V0000000000000000RVW1"
+        }
+      },
+      {
+        "userAction": {
+          "id": "01JC0D0000000000000000CRD1",
+          "turnId": "01JC0T0000000000000000TRN1",
+          "conversationId": "01JC0C0000000000000000CNV1",
+          "command": {
+            "command": "ssh-add -l",
+            "cwd": "/Users/me"
+          },
+          "reason": "列出已加载的密钥",
+          "proposalHash": "3q2+7wECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxw=",
+          "state": "USER_ACTION_STATE_UNKNOWN",
+          "exit": {
+            "code": 2
+          },
+          "outputArtifact": {
+            "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "area": "ARTIFACT_AREA_ARTIFACTS",
+            "size": "4096"
+          },
+          "error": "后台服务中断",
+          "voidReason": "VOID_REASON_CONVERSATION_DELETED"
+        }
+      },
+      {
+        "agentsMdDraft": {
+          "cardId": "01JC0D0000000000000000CRD1",
+          "projectId": "01JC0P0000000000000000PRJ1",
+          "content": {
+            "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "area": "ARTIFACT_AREA_ARTIFACTS",
+            "size": "4096"
+          },
+          "proposedAt": "2025-11-01T13:16:40.123Z"
+        }
+      },
+      {
+        "resume": {
+          "turnId": "01JC0T0000000000000000TRN1",
+          "conversationId": "01JC0C0000000000000000CNV1",
+          "reason": "INTERRUPT_REASON_CRASH"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "denyReadWrite": [
+    "~/.ssh",
+    "~/Library/Application Support/iWork"
+  ],
+  "readOnly": [
+    "~/Library/Application Support/iWork/attachments"
+  ],
+  "allowWrite": {
+    "whitelist": {
+      "paths": [
+        "/Users/me/code/iwork",
+        "$TMPDIR"
+      ]
+    }
+  },
+  "excludedCommands": [
+    {
+      "program": "gh",
+      "subcommand": "pr"
+    }
+  ],
+  "allowUnsandboxedRetry": true,
+  "network": "NETWORK_POLICY_OPEN"
+}

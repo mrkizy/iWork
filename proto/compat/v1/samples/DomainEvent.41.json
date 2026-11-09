@@ -1,0 +1,14 @@
+{
+  "securityListEntryAdded": {
+    "entry": {
+      "id": "01JC0E0000000000000000ENT1",
+      "list": "SECURITY_LIST_CREDENTIAL_COMMANDS",
+      "value": "terraform apply",
+      "scope": {
+        "global": {}
+      },
+      "builtin": true,
+      "createdAt": "2025-11-01T12:43:20.123Z"
+    }
+  }
+}

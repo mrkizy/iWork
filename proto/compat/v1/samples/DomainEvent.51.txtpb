@@ -1,0 +1,5 @@
+global_settings_changed {
+  playful_ui: false
+  autostart: true
+  projects_root: "/Users/me/code"
+}

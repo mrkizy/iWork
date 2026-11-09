@@ -1,0 +1,19 @@
+{
+  "runtimeUpdated": {
+    "runtime": {
+      "runtimeId": "01JC0X0000000000000000RTM1",
+      "kind": "runtime-a",
+      "displayName": "Runtime A",
+      "cliPath": "/usr/local/bin/runtime-a",
+      "cliVersion": "2.1.0",
+      "adapterVersion": "0.1.0",
+      "state": "RUNTIME_STATE_READY_VERIFIED",
+      "login": {
+        "loggedIn": true,
+        "authMethod": "oauth",
+        "subscriptionType": "max",
+        "loginExpiresAt": "2025-11-13T02:13:20.123Z"
+      }
+    }
+  }
+}

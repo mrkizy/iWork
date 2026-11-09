@@ -1,0 +1,9 @@
+agents_md_draft_proposed {
+  card_id: "01JC0D0000000000000000CRD1"
+  project_id: "01JC0P0000000000000000PRJ1"
+  content_artifact {
+    sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    area: ARTIFACT_AREA_ARTIFACTS
+    size: 4096
+  }
+}

@@ -1,0 +1,79 @@
+// ViewPatch：客户端 Rust 侧每 16ms 合并一次推给网页层的视图增量（设计 3.6；T01 方案 3.5）。
+// 网页层只解这一个文件的类型，不接触协议全集、不做业务判断：「可否点击」「计数」「表情状态」都由 Rust 侧算好放进来。
+//
+// T01 只定信封与各 patch 的壳，字段由 T09 按画布补齐。
+// 兼容规则：字段只增不改号；删字段先 `reserved` 编号与名字；枚举值同理；不改 oneof 字段的类型。
+// 本文件不落盘、只在客户端进程内传，所以不进 proto/compat/ 契约比对（S8）；但照样只加 optional 字段与新变体，
+// 老字段标 deprecated，不改结构。
+syntax = "proto3";
+
+package iwork.v1;
+
+message ViewPatch {
+  // 帧序号，单调递增。
+  uint64 frame = 1;
+  repeated ViewChange changes = 2;
+}
+
+message ViewChange {
+  oneof change {
+    // 项目列表、助手列表、待处理计数、额度一行。
+    SidebarPatch sidebar = 10;
+    // 某个对话的可见窗口。
+    ConversationPatch conversation = 11;
+    // 「待你处理」页。
+    PendingPatch pending = 12;
+    // 设置页（含记住的规则、运行时、导入摘要）。
+    SettingsPatch settings = 13;
+    // 助手主页与配置页。
+    AssistantProfilePatch assistant = 14;
+    // 添加项目流程（克隆进度、草稿卡片）。
+    AddProjectPatch add_project = 15;
+    // 连接状态、「正在切换版本」、诊断信息。
+    ConnectionPatch connection = 16;
+  }
+}
+
+// 每个 *Patch 都是「可选整体快照 + 增量列表」的形状，T09 加字段只是加 optional。
+message SidebarPatch {}
+
+message ConversationPatch {
+  string conversation_id = 1;
+  // 标题、项目选择器、运行时·模型、档位按钮状态、本对话用量。
+  ConversationHeader header = 2;
+  // 整条替换（含卡片状态、头像表情）。
+  repeated MessageView upserts = 3;
+  // 流式追加。
+  repeated MessageTextAppend appends = 4;
+  repeated string removed_ids = 5;
+  // 可见范围与总数，供虚拟滚动。
+  WindowInfo window = 6;
+}
+
+message ConversationHeader {}
+
+message MessageView {
+  string message_id = 1;
+}
+
+message MessageTextAppend {
+  string message_id = 1;
+  uint64 offset = 2;
+  string text = 3;
+}
+
+message WindowInfo {
+  uint32 first_index = 1;
+  uint32 count = 2;
+  uint32 total = 3;
+}
+
+message PendingPatch {}
+
+message SettingsPatch {}
+
+message AssistantProfilePatch {}
+
+message AddProjectPatch {}
+
+message ConnectionPatch {}

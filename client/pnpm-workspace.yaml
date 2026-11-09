@@ -1,0 +1,5 @@
+# pnpm 默认拦截依赖的安装脚本，这里逐个表态（拦截未表态的会让 install 失败）。
+allowBuilds:
+  # postinstall 只是校验平台二进制版本、缺包时再 npm 下载一份；
+  # 平台二进制已经由 optionalDependencies 装好，bin/buf 运行时自己定位，不需要这一步
+  "@bufbuild/buf": false

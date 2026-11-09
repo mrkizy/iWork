@@ -1,0 +1,4 @@
+subscription_lagging {
+  subscription_id: 3
+  last_seq: 1002
+}

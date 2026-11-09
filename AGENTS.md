@@ -25,12 +25,17 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 - 协议：Protobuf，Rust 侧用 prost 生成，TypeScript 侧用 protobuf-es 生成；生成代码不手改、不入库（构建时生成）。
 - 存储：SQLite（rusqlite，WAL）。版本控制读操作用 gitoxide（`gix`），写操作调本机 `git`。
 
+工具链：Rust 版本由根目录 `rust-toolchain.toml` 固定（经 rustup 自动安装，不用系统自带或 Homebrew 的 rustc）；pnpm 版本由 `client/package.json` 的 `packageManager` 固定；脚本需要 bash 与 jq。CI 是 `.github/workflows/ci.yml`，三平台跑下面除基准外的全部检查。
+
 命令（T01 建立后以此为准；改动须同步本节）：
 
 - 全量测试：`cargo test --workspace`
 - 静态检查：`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`
-- 依赖方向与许可：`cargo deny check`，以及 `scripts/check-deps.sh`（crate 依赖方向检查）
-- 前端：`pnpm -C client install`、`pnpm -C client test`、`pnpm -C client typecheck`
+- 许可与来源：`cargo deny check`（`deny.toml`）
+- 依赖方向：`scripts/check-deps.sh`，真值是 `scripts/deps-policy.toml`（加 crate、放开外部依赖都改这个文件）；`scripts/check-deps.sh --selftest` 证明检查会红
+- 领域层用词：`scripts/check-domain-terms.sh`（`iwork-domain` 里不许出现厂商名与 git 字样）
+- 协议兼容：新加或改了 `.proto` 字段后跑 `cargo run -p iwork-proto --example update-contract -- --additive` 把新字段登记进 `proto/compat/v1/contract.binpb`；它拒绝改号、改类型、删字段；加了样本构造函数后跑 `cargo run -p iwork-proto --example dump-compat -- proto/compat/v1/samples` 写出新的金样本（只增不改，已有样本内容不同会拒绝）。规则见 `proto/compat/README.md`
+- 前端：`pnpm -C client install --frozen-lockfile`、`pnpm -C client gen`（从 `proto/` 生成 TS 到 `client/src/gen/`，不入库）、`pnpm -C client typecheck`、`pnpm -C client test`；`pnpm -C client tauri dev` 起客户端窗口
 - 性能基准：`cargo bench -p iwork-bench`（T01 建空 crate，T11 填实现）
 
 ## 架构约定

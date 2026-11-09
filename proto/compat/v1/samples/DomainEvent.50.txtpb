@@ -1,0 +1,4 @@
+mcp_secret_set {
+  mcp_server_id: "mcp:github"
+  key_name: "GITHUB_TOKEN"
+}

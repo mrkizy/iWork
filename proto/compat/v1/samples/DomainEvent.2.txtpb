@@ -1,0 +1,9 @@
+project_updated {
+  project_id: "01JC0P0000000000000000PRJ1"
+  name: "iwork-2"
+  pinned: false
+  last_active_at {
+    seconds: 1762004000
+    nanos: 123000000
+  }
+}

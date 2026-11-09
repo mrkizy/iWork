@@ -57,7 +57,7 @@ def path_text($parent; $names; $id):
           ( closure($nodes; $names; $id; ["normal", "build"]; []) as $parent
             | $parent | keys[] | select(. != $id)
             | select($names[.] as $n | ($ws_names | index($n)) and ($p.internal | index($n) | not))
-            | "crate \($crate)：\(path_text($parent; $names; .)) 依赖了工作区 crate \($names[.])（规则：工作区内部），\($where)" ),
+            | "crate \($crate)：依赖路径 \(path_text($parent; $names; .))，\($names[.]) 不在 internal 里（规则：工作区内部），\($where)" ),
 
           # 规则二：直接依赖许可（只看自己的 Cargo.toml）
           ( select($p.direct != null)
@@ -79,7 +79,7 @@ def path_text($parent; $names; $id):
             | closure($nodes; $names; $id; $kinds; $exempt) as $parent
             | $parent | keys[] | select(. != $id)
             | select($names[.] as $n | ($io | index($n)) and ($exempt | index($n) | not))
-            | "crate \($crate)：\(path_text($parent; $names; .)) 依赖了 \($names[.])（规则：传递禁用，范围 \($mode)），\($where)" )
+            | "crate \($crate)：依赖路径 \(path_text($parent; $names; .))，\($names[.]) 是禁用的 I/O 或框架 crate（规则：传递禁用，范围 \($mode)），\($where)" )
         )
     )
   )

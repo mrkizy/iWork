@@ -1,0 +1,15 @@
+security_list_entry_added {
+  entry {
+    id: "01JC0E0000000000000000ENT1"
+    list: SECURITY_LIST_CREDENTIAL_COMMANDS
+    value: "terraform apply"
+    scope {
+      global {}
+    }
+    builtin: true
+    created_at {
+      seconds: 1762001000
+      nanos: 123000000
+    }
+  }
+}

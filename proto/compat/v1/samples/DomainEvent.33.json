@@ -1,0 +1,6 @@
+{
+  "approvalVoided": {
+    "approvalId": "01JC0V0000000000000000APR1",
+    "reason": "VOID_REASON_TURN_ABANDONED_AFTER_INTERRUPT"
+  }
+}

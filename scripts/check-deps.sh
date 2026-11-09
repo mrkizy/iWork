@@ -110,12 +110,12 @@ selftest() {
 
   run_case "间接违规（内部）：iwork-ports 依赖 iwork-store" \
     'add_edge(id_of("iwork-ports"); id_of("iwork-store"); null)' \
-    1 "crate iwork-ports：iwork-ports → iwork-store|crate iwork-core：iwork-core 经 iwork-ports → iwork-store|规则：工作区内部"
+    1 "crate iwork-ports：依赖路径 iwork-ports → iwork-store|crate iwork-core：依赖路径 iwork-core 经 iwork-ports → iwork-store|规则：工作区内部"
 
   run_case "dev 依赖违规：iwork-domain 的 dev 依赖 tokio" \
     'add_pkg("fake-tokio"; "tokio") | add_edge(id_of("iwork-domain"); "fake-tokio"; "dev")
      | add_direct(id_of("iwork-domain"); "tokio"; "dev")' \
-    1 "crate iwork-domain：iwork-domain → tokio（规则：传递禁用，范围 normal_build_dev）"
+    1 "crate iwork-domain：依赖路径 iwork-domain → tokio，tokio 是禁用的 I/O 或框架 crate（规则：传递禁用，范围 normal_build_dev）"
 
   run_case "直接依赖越白名单：iwork-core 直接依赖 rand" \
     'add_pkg("fake-rand"; "rand") | add_edge(id_of("iwork-core"); "fake-rand"; null)

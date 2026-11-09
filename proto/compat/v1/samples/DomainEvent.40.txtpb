@@ -1,0 +1,14 @@
+user_action_state_changed {
+  card_id: "01JC0D0000000000000000CRD1"
+  state: USER_ACTION_STATE_DONE
+  exit {
+    signal: 15
+  }
+  error: "\350\242\253\345\201\234\346\255\242"
+  output_artifact {
+    sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    area: ARTIFACT_AREA_ARTIFACTS
+    size: 4096
+  }
+  void_reason: VOID_REASON_TURN_CANCELLED
+}

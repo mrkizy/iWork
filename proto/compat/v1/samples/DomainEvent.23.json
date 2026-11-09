@@ -1,0 +1,14 @@
+{
+  "messageCompleted": {
+    "conversationId": "01JC0C0000000000000000CNV1",
+    "messageId": "01JC0M0000000000000000MSG1",
+    "body": {
+      "artifact": {
+        "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "area": "ARTIFACT_AREA_ARTIFACTS",
+        "size": "70000"
+      }
+    },
+    "status": "MESSAGE_STATUS_INTERRUPTED"
+  }
+}

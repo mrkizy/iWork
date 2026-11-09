@@ -1,0 +1,7 @@
+seq: 1003
+read_artifact {
+  data: "hello artifact"
+  offset: 4082
+  total_size: 4096
+  eof: true
+}

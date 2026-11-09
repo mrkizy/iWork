@@ -1,0 +1,22 @@
+{
+  "id": "01JC0R0000000000000000RXE1",
+  "layer": "RULE_LAYER_REMEMBERED",
+  "matcher": {
+    "programSubcommand": {
+      "program": "npm",
+      "subcommand": "test"
+    }
+  },
+  "effect": "RULE_EFFECT_ALLOW",
+  "source": {
+    "remembered": {
+      "approvalId": "01JC0V0000000000000000APR1",
+      "by": "user"
+    }
+  },
+  "scope": {
+    "projectId": "01JC0P0000000000000000PRJ1"
+  },
+  "createdAt": "2025-11-01T12:41:40.123Z",
+  "label": "本项目内 `npm test …` 不再问"
+}

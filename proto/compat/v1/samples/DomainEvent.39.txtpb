@@ -1,0 +1,25 @@
+user_action_proposed {
+  card {
+    id: "01JC0D0000000000000000CRD1"
+    turn_id: "01JC0T0000000000000000TRN1"
+    conversation_id: "01JC0C0000000000000000CNV1"
+    patch {
+      path: "/Users/me/.ssh/config"
+      old_text: "Host a\n"
+      new_text: "Host a\nHost b\n"
+    }
+    reason: "\345\210\227\345\207\272\345\267\262\345\212\240\350\275\275\347\232\204\345\257\206\351\222\245"
+    proposal_hash: "\336\255\276\357\001\002\003\004\005\006\007\010\t\n\013\014\r\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034"
+    state: USER_ACTION_STATE_UNKNOWN
+    exit {
+      code: 2
+    }
+    output_artifact {
+      sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+      area: ARTIFACT_AREA_ARTIFACTS
+      size: 4096
+    }
+    error: "\345\220\216\345\217\260\346\234\215\345\212\241\344\270\255\346\226\255"
+    void_reason: VOID_REASON_CONVERSATION_DELETED
+  }
+}
