@@ -27,6 +27,14 @@ jobs:
           command: check
       - name: domain 里不许出现厂商名与 git 字样
         run: scripts/check-domain-terms.sh
+      # T03：iWork 进程不开 TCP/UDP 端口（源码层面；运行时监听检查归 T11）
+      - name: 源码里没有 TCP/UDP
+        run: scripts/check-no-tcp.sh
+      - name: 源码检查自测（注入 TcpListener::bind 必须失败）
+        run: scripts/check-no-tcp.sh --selftest
+      # T03：dev feature（--dev-trust）没有被任何工作区 crate 默认打开
+      - name: feature 图里没有 dev
+        run: scripts/check-no-dev-trust.sh --graph-only
 
   test:
     strategy:
@@ -63,6 +71,23 @@ jobs:
       - name: 依赖方向检查自测（注入违规必须失败）
         run: scripts/check-deps.sh --selftest
 
+      # T03 验收 2：发布构建里没有 --dev-trust（feature 图、产物字符串含阳性对照、发布进程拒绝该参数）
+      #   打包步骤（tauri build）还没进 CI，先对 release 的客户端二进制做同样的 grep；打包进 CI 后把产物路径加到 --artifacts
+      - name: 发布构建没有 dev-trust
+        run: |
+          exe=""; [ "$RUNNER_OS" = "Windows" ] && exe=".exe"
+          cargo build --release --locked -p iwork-client
+          scripts/check-no-dev-trust.sh --artifacts "target/release/iwork-client${exe}"
+
+      # T03 验收 1：以另一个系统用户连接被拒（两个方向）。只在 Linux 上做得到。
+      - name: 另一用户连接被拒（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo useradd -m iwork-other
+          cargo build -p iwork-ipc --features dev --example ipc-tool
+          IWORK_TEST_OTHER_USER=1 IWORK_IPC_TOOL="$PWD/target/debug/examples/ipc-tool" \
+            cargo test -p iwork-ipc --features dev --test peer_other_user -- --ignored
+
       - uses: pnpm/action-setup@v4
         with:
           # 版本取 client/package.json 的 packageManager 字段
@@ -84,3 +109,19 @@ jobs:
       #   - 包装脚本只放行 dev/build、拒绝自带 -c/--config（tests/tauri-wrapper.test.ts）
       - name: 前端测试（金样本解码、开发服务器只绑回环、发布配置与包装脚本检查）
         run: pnpm -C client test
+
+  # T03 验收 3：cargo-fuzz 三个目标各跑 60 秒（nightly，只在 Linux）
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: nightly 与 cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --locked
+      - name: fuzz
+        working-directory: crates/iwork-ipc
+        run: |
+          for t in frame_decode connection_prehello connection_established; do
+            cargo +nightly fuzz run "$t" -- -max_total_time=60
+          done
