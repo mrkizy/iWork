@@ -1,0 +1,9 @@
+listening
+getsockopt(LOCAL_PEERTOKEN) rc=0 len=32 (sizeof audit_token_t=32)
+SecCodeCopyGuestWithAttributes=0
+SecCodeCopySigningInformation=0
+claim certificate:58f342e009804c6d63919e7da3c4a2fc435d052c18ce24cf2e76dbd3704fed31
+PAUSE
+-- action: mv live live.old && cp $TMPDIR//iwork-t03-macos.l9Xfcn/bin/signedB live
+SecRequirementCreateWithString=0 (certificate leaf = H"b49df77b4dfde00e816c68bbedcc8ae030bf6c02")
+SecCodeCheckValidity(pinned)=0

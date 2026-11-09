@@ -1,0 +1,13 @@
+listening sock=$TMPDIR//iwork-t03-fx.Dpa7am/s.sock hold=8s
+attacker connected pid=53788
+forked child=53789; parent 53788 exec trusted
+tick=0 conn=1 pid=53788 user=uid:501 exe=- signer=unavailable:SecCodeCopyGuestWithAttributes 失败（OSStatus -67065）
+listening sock=$TMPDIR//iwork-t03-fx.Dpa7am/s.sock.decoy hold=30s
+tick=1 conn=1 pid=53789 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+tick=2 conn=1 pid=53789 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+tick=3 conn=1 pid=53789 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+tick=4 conn=1 pid=53789 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+tick=5 conn=1 pid=53789 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+tick=6 conn=1 pid=53789 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+tick=7 conn=1 pid=53789 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+hold elapsed

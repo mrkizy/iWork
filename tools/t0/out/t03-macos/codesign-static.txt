@@ -1,0 +1,71 @@
+== linker
+Identifier=peer_probe-b9df2d40b5043b43
+CodeDirectory v=20400 size=24628 flags=0x20002(adhoc,linker-signed) hashes=766+0 location=embedded
+CDHash=afd4ebda3e1594b76f1719091c9fda2f8062100e
+Signature=adhoc
+TeamIdentifier=not set
+$TMPDIR//iwork-t03-macos.l9Xfcn/bin/linker: valid on disk
+$TMPDIR//iwork-t03-macos.l9Xfcn/bin/linker: satisfies its Designated Requirement
+== adhoc
+Identifier=adhoc-555549443b3ae1b17f803caf81e46c3c6e8e3ede
+CodeDirectory v=20400 size=6343 flags=0x2(adhoc) hashes=192+2 location=embedded
+CDHash=2173bad191da1563734d6eadc121ac9c2d0f05e5
+Signature=adhoc
+TeamIdentifier=not set
+$TMPDIR//iwork-t03-macos.l9Xfcn/bin/adhoc: valid on disk
+$TMPDIR//iwork-t03-macos.l9Xfcn/bin/adhoc: satisfies its Designated Requirement
+== signedA
+Identifier=t03.probe
+CodeDirectory v=20400 size=6306 flags=0x0(none) hashes=192+2 location=embedded
+CDHash=ec1a23cdf6bfabd19fa62b81986390b48890e9e0
+Signature size=1759
+Authority=iWork T03 Signer A
+TeamIdentifier=not set
+$TMPDIR//iwork-t03-macos.l9Xfcn/bin/signedA: valid on disk
+$TMPDIR//iwork-t03-macos.l9Xfcn/bin/signedA: satisfies its Designated Requirement
+== signedA2
+Identifier=t03.probe.second
+CodeDirectory v=20400 size=6313 flags=0x0(none) hashes=192+2 location=embedded
+CDHash=f64fa4aea10c4437e5150c007fbf5dd33d14fcc7
+Signature size=1759
+Authority=iWork T03 Signer A
+TeamIdentifier=not set
+$TMPDIR//iwork-t03-macos.l9Xfcn/bin/signedA2: valid on disk
+$TMPDIR//iwork-t03-macos.l9Xfcn/bin/signedA2: satisfies its Designated Requirement
+== signedB
+Identifier=t03.probe
+CodeDirectory v=20400 size=6306 flags=0x0(none) hashes=192+2 location=embedded
+CDHash=7c9b4ea9dff1ce8fc0d9e5f5ff3119700b602d7d
+Signature size=1759
+Authority=iWork T03 Signer B
+TeamIdentifier=not set
+$TMPDIR//iwork-t03-macos.l9Xfcn/bin/signedB: valid on disk
+$TMPDIR//iwork-t03-macos.l9Xfcn/bin/signedB: satisfies its Designated Requirement
+== unsigned
+$TMPDIR//iwork-t03-macos.l9Xfcn/bin/unsigned: code object is not signed at all
+In architecture: arm64
+verify failed: 1
+== tampered
+Identifier=t03.probe
+CodeDirectory v=20400 size=6306 flags=0x0(none) hashes=192+2 location=embedded
+CDHash=ec1a23cdf6bfabd19fa62b81986390b48890e9e0
+Signature size=1759
+Authority=iWork T03 Signer A
+TeamIdentifier=not set
+$TMPDIR//iwork-t03-macos.l9Xfcn/bin/tampered: invalid signature (code or signature have been modified)
+In architecture: arm64
+verify failed: 1
+== unsigned_x86
+$TMPDIR//iwork-t03-macos.l9Xfcn/bin/unsigned_x86: code object is not signed at all
+In architecture: x86_64
+verify failed: 1
+signedA  satisfies leaf A requirement
+signedA2 satisfies leaf A requirement
+test-requirement: code failed to satisfy specified code requirement(s)
+signedB  rejected by leaf A requirement (expected)
+test-requirement: code failed to satisfy specified code requirement(s)
+adhoc    rejected by leaf A requirement (expected)
+error: invalid or corrupted code requirement(s)
+Requirement syntax error(s):
+ invalid hash length
+SHA-256 leaf hash in requirement rejected (requirement language takes SHA-1 only)

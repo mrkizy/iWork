@@ -106,3 +106,64 @@
 2. 适配器版本与 CLI 版本可能不一致（codex-acp 内置旧内核）。运行时登记须同时记录 CLI 版本、适配器版本、协议版本。
 3. 不依赖适配器的默认模式与默认模型：建会话后由 iWork 显式设置。
 4. 厂商 CLI 会读取用户自己的配置（hook、权限模式、技能），iWork 的判定必须在其之上且不可被其放宽。
+
+## 6 T03 本机通信实测（2026-11-10）
+
+为 `iwork-ipc` 的对端校验（T03 方案 2.4b、第 8 节 N1–N3）补的实测：每个平台要证明「核验到的是对端**正在运行的映像**，不是路径上的文件」，证明不了的平台全部分支返回 `Unavailable`、M1 暂不支持（方案 Q1）。脚本在 `tools/t0/iwork-t03-*`，原始输出在 `tools/t0/out/t03-*`（家目录与临时目录已脱敏）。
+
+### 6.1 结论速览
+
+| 平台 | 映像绑定 | 取法 | M1 |
+| --- | --- | --- | --- |
+| Linux | 成立（N3） | `SO_PEERCRED` uid/pid；打开 `/proc/<pid>/exe` 得 fd，从 fd 读全文 SHA-256；路径从同一个 fd 反查 | 支持 |
+| macOS | 成立（N1） | `LOCAL_PEERTOKEN` 审计令牌 → 动态 `SecCode` → 读签名信息 → 把读到的身份钉成 requirement → 全量 `SecStaticCodeCheckValidity` → `SecCodeCheckValidity` | 支持 |
+| Windows | 未实测（N2 没有 Windows 机器） | 代码已按方案写好（两次查名 + 按句柄 `WinVerifyTrust`），由常量 `IMAGE_BINDING_VERIFIED = false` 统一返回 `Unavailable` | **暂不支持**：`SelfIdentity::detect` 在 Windows 上失败 |
+| Linux、macOS | **fork+exec 冒充能绕过**（6.5） | — | 待产品负责人决定 |
+
+### 6.2 Linux（N3）
+
+环境：Docker（OrbStack）`rust:1`，内核 Linux 7.0.11 aarch64。脚本 `tools/t0/iwork-t03-linux-procexe.sh`。做法：把 `/bin/sleep` 复制出来运行，换掉文件之后再打开 `/proc/<pid>/exe` 算哈希。
+
+| 情形 | 操作 | `/proc/<pid>/exe` 读到的哈希 | readlink |
+| --- | --- | --- | --- |
+| 改名替换 | `mv peer peer.old`，原路径放别的程序 | 不变 | 跟着 inode 的新名字 |
+| mv 覆盖 | 别的程序 `mv -f` 到原路径 | 不变 | 原路径 + ` (deleted)` |
+| 原地改字节 / 截断重写 | `dd conv=notrunc`、`cp` | 不变：写入被拒（`ETXTBSY`） | 原路径 |
+| 删除 | `rm` | 不变，仍可读 | 原路径 + ` (deleted)` |
+| 进程已退出 | — | 打不开 → `Unavailable` | — |
+
+改名到别的目录会被「同安装目录」检查拦下。
+
+### 6.3 macOS（N1）
+
+环境：macOS 27.2（26B5086k）arm64。脚本 `tools/t0/iwork-t03-macos-codesign.sh`，自签证书放临时钥匙串、跑完删除。不需要 `security-framework` crate，手写 FFI。
+
+- `getsockopt(SOL_LOCAL, LOCAL_PEERTOKEN)` 返回 0、32 字节；交给 `SecCodeCopyGuestWithAttributes(kSecGuestAttributeAudit)` 返回 0。
+- 各种二进制：链接器 ad-hoc（cargo 原样产物）与 `codesign -s -` → `Image(CdHash)`，与 `codesign -dvvv` 一致；同一张自签证书签的两个二进制 → `Certificate`，叶证书 SHA-256 相同；另一张证书 → 不同；签名后改字节 → `Unavailable`（-67061）；未签名 arm64 内核拒绝执行；未签名 x86_64（Rosetta）→ `Unavailable`。
+- requirement 语言的 `certificate leaf = H"…"` 只收 SHA-1，所以钉身份用 SHA-1，对外报的仍是同一份 DER 的 SHA-256。
+
+换文件反例（对端连着时动它的可执行文件）：
+
+| 反例 | 结果 |
+| --- | --- |
+| mv 走再放别的文件 | 始终是原映像 |
+| rm 再放别的文件 | 原映像 → `Unavailable`（-67034）；从未报成新文件 |
+| 原地 dd 改一字节 | `Unavailable`（-67061） |
+| 改一个还没调入的代码页再让它执行 | 只做动态校验时一直通过（进程执行的仍是原始指令）；加全量静态校验后 `Unavailable` |
+| 读签名信息与钉身份校验之间停 4 秒换文件 | 钉住的校验通过，读到的始终是运行中的证书 |
+
+与方案的两处差别：读身份后钉成 requirement 再验（头文件说动态对象的签名信息「有一部分来自磁盘」，只有 `SecCodeCheckValidity` 承诺不受磁盘改动影响）；加一步全量静态校验（否则「改未调入的页」验不出来），代价是每次建连哈希一遍对端映像，量级与 Linux 相同。`kSecCodeInfoMainExecutable` 的路径在 rm+替换后会指向新文件，只用于审计与「同安装目录」检查，此时签名身份本来就是 `Unavailable`。
+
+### 6.4 Windows（N2，未实测）
+
+脚本 `tools/t0/iwork-t03-windows-authenticode.ps1` 已备好（自签 Authenticode、`WinVerifyTrust` 返回码、改名后的映像路径、原地写入、两步之间换文件）。实现按方案：`QueryFullProcessImageNameW` 两次查名 + `GetFinalPathNameByHandleW` 三者一致才算绑定，验签与取证书都按同一个句柄；`ERROR_SUCCESS`、`CERT_E_UNTRUSTEDROOT` → `Certificate`，`TRUST_E_NOSIGNATURE` → 按同一句柄读全文 SHA-256，其他 → `Unavailable`。在 Windows 上跑过 N2、证明「改名后 `QueryFullProcessImageNameW` 返回新名」之前，`IMAGE_BINDING_VERIFIED` 保持 `false`，Windows 暂不支持。命名管道、DACL 测试只做了交叉编译，等 Windows CI 跑。
+
+### 6.5 fork+exec 冒充（Linux、macOS 都成立，未修）
+
+「核验运行中的映像」证明了「pid 正在跑的是哪份映像」，但方案还隐含了一条没写出来的假设：**校验时那个 pid 就是之后在这条连接上收发数据的进程**。这条假设不成立。
+
+- **Linux**（`tools/t0/iwork-t03-linux-forkexec.py`）：攻击进程 connect → fork，子进程留着 socket → 父进程 exec 原版二进制。`SO_PEERCRED` 的 pid 是 connect 那一刻的进程，`/proc/<pid>/exe` 此时正是原版，哈希匹配；收到的数据来自攻击者子进程。实测输出：`hash==legit True`、`received: b'from attacker child pid 8'`。同用户 ptrace 也能做到类似效果。
+- **macOS**（`tools/t0/iwork-t03-macos-forkexec.sh`）：`LOCAL_PEERPID` / `LOCAL_PEERTOKEN` 给的是「最后在这条连接上读写过的进程」，令牌带 pidversion，exec 后旧令牌作废（-67065），所以单靠 exec 骗不过；但如果被信任程序 exec 之后自己往这条连接写过字节（例如它的 stdout/stderr 被接到这个 socket），服务端在 accept 后判定时就会看到被信任映像，而实际控制连接的是攻击者子进程。攻击者能在服务端 accept 之前完成 fork、exec 与这一次写入。
+- 两个方向都存在：冒充客户端（exec 被信任的客户端）、冒充后台（exec 出来的后台往继承的 fd 写日志）。
+- 前提：攻击者是同用户、能在本机运行代码。这比方案已知限制 L2（能在后台启动前改安装目录）门槛低，不需要改任何文件。
+- 实现里没有为它加任何机制（安全设计原则：不擅自加机制）。可选方向（未实现、未评估）：macOS 记下判定通过时的完整审计令牌，之后每帧前再读一次比对，变了就断开；Linux 没有等价的「最后读写者」信息。交产品负责人决定是记已知限制还是另出方案。

@@ -1,0 +1,14 @@
+listening sock=$TMPDIR//iwork-t03-macos.l9Xfcn/probe.sock hold=7s
+tick=0 conn=1 pid=89360 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-b1/live signer=certificate:58f342e009804c6d63919e7da3c4a2fc435d052c18ce24cf2e76dbd3704fed31
+tick=1 conn=1 pid=89360 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-b1/live signer=certificate:58f342e009804c6d63919e7da3c4a2fc435d052c18ce24cf2e76dbd3704fed31
+-- action: printf "\x00" | dd of=live bs=1 seek=$(( $(stat -f%z live) / 2 )) conv=notrunc
+1+0 records in
+1+0 records out
+1 bytes transferred in 0.000093 secs (10753 bytes/sec)
+tick=2 conn=1 pid=89360 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-b1/live signer=unavailable:SecStaticCodeCheckValidity 失败（OSStatus -67061）
+tick=3 conn=1 pid=89360 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-b1/live signer=unavailable:SecStaticCodeCheckValidity 失败（OSStatus -67061）
+tick=4 conn=1 pid=89360 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-b1/live signer=unavailable:SecStaticCodeCheckValidity 失败（OSStatus -67061）
+tick=5 conn=1 pid=89360 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-b1/live signer=unavailable:SecStaticCodeCheckValidity 失败（OSStatus -67061）
+tick=6 conn=1 pid=89360 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-b1/live signer=unavailable:SecStaticCodeCheckValidity 失败（OSStatus -67061）
+-- client exit=143
+hold elapsed

@@ -1,0 +1,11 @@
+listening sock=$TMPDIR//iwork-t03-macos.l9Xfcn/probe.sock hold=7s
+tick=0 conn=1 pid=85285 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/linker signer=cdhash:afd4ebda3e1594b76f1719091c9fda2f8062100e
+tick=1 conn=1 pid=85285 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/linker signer=cdhash:afd4ebda3e1594b76f1719091c9fda2f8062100e
+-- action: true
+tick=2 conn=1 pid=85285 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/linker signer=cdhash:afd4ebda3e1594b76f1719091c9fda2f8062100e
+tick=3 conn=1 pid=85285 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/linker signer=cdhash:afd4ebda3e1594b76f1719091c9fda2f8062100e
+tick=4 conn=1 pid=85285 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/linker signer=cdhash:afd4ebda3e1594b76f1719091c9fda2f8062100e
+tick=5 conn=1 pid=85285 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/linker signer=cdhash:afd4ebda3e1594b76f1719091c9fda2f8062100e
+tick=6 conn=1 pid=85285 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/linker signer=cdhash:afd4ebda3e1594b76f1719091c9fda2f8062100e
+-- client exit=143
+hold elapsed

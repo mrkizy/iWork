@@ -1,0 +1,4 @@
+listening sock=$TMPDIR//iwork-t03-macos.l9Xfcn/probe.sock hold=7s
+-- action: true
+-- client exit=137
+hold elapsed

@@ -1,0 +1,8 @@
+listening
+getsockopt(LOCAL_PEERTOKEN) rc=0 len=32 (sizeof audit_token_t=32)
+SecCodeCopyGuestWithAttributes=0
+SecCodeCheckValidity(no requirement)=0
+PAUSE
+-- action: mv live live.old && cp $TMPDIR//iwork-t03-macos.l9Xfcn/bin/signedA live
+SecCodeCopySigningInformation=0
+claim certificate:5571cfea65f9ca169153ebcbd08cb6e74d4bc0ff93eb6307f6180a30a20926fe
