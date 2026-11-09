@@ -27,10 +27,10 @@
 | --- | --- | --- | --- | --- | --- |
 | T01 | 已合入 main `bb6d69a` | — | `2026-11-09-m1-t01` 已关 | 验收 5 空窗口截图未补（屏幕锁定） | 有空时补截图 |
 | T02 | 方案 `docs/plans/T02.md`（已提交 `94662af`） | developer `fecce968`，worktree 分支 `cao/fecce968`，**暂停、未开工** | 方案 `2026-11-09-m1-t02-plan` 已关 | — | 4 点后按方案第 11 节开工 |
-| T03 | 方案 `docs/plans/T03.md`（未提交，第 4 轮已整体重写） | architect `474f00b7`；方案 reviewer `3f790292` | `2026-11-09-m1-t03-plan` 第 4 轮不通过（已超三轮） | 3/F-2→4/F-1（迟到的查询结果覆盖新状态）、3/F-6→4/F-3（缓冲溢出取消不记 cancel_at）、4/F-2（PeerRejected 推断版本新旧，旧客户端无限等） | 第 5 轮已批准（01:26），architect 在改；回报后原 reviewer 只核这几条 |
+| T03 | 方案 `docs/plans/T03.md`（未提交，第 5 轮已改） | architect `474f00b7`；方案 reviewer `3f790292` | `2026-11-09-m1-t03-plan` 第 5 轮复审中 | 3/F-2、3/F-6、4/F-1～F-3 | 等复审结论；结论到了只记账，4 点后再派返工 |
 | T05 | 已合入 main `a6987d4` | — | `2026-11-09-m1-t05` 已关（三轮，14 条全 fixed） | — | — |
 | T07 | 方案 `docs/plans/T07.md`（未提交） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 5 轮不通过 | 1/F-12 残留：parse 本身放弃时（前置赋值 `LC_ALL=C ssh -E.git/config host`、同条命令别处有展开）PartialFacts 只有扁平字面词，第 ⓪ 步没机会跑，`-E.git/config` 整词丢了写目标 | 暂停到 4 点。supervisor 建议改走更简单的路：兜底抽字面词时，`-X值` 与 `--opt=值` 形式的词把值也按 Read+Write 抽出（宁可多抽），不需要把参数结构带进 PartialFacts；先交产品负责人定 |
-| T08 | 分支 `cao/49facf33` | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 4 轮 | racy 时间戳边角（外部过滤文件同一秒内等长改写会漏标） | 等产品负责人定：修（推荐，条件加 `is_racy` 就保守列出）→ 已批准修（01:26），developer 在改；CI run 42660636464 三平台 test 失败，等日志 |
+| T08 | 分支 `cao/49facf33` @ `bbefd46`（racy 已修） | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 5 轮复审中 | 3/F-1（racy 残留） | 等复审结论；CI run 42660636464 三平台 test 失败，等日志 |
 | T04、T06、T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
 
 查开着的问题：`agent-scaffold findings list --task <任务 ID> --open`。
