@@ -47,6 +47,8 @@ internal = ["iwork-core", "iwork-ports", "iwork-proto", "iwork-domain"]
 
 [crates.iwork-store]
 internal = ["iwork-ports", "iwork-domain"]
+direct = ["rusqlite", "sha2", "thiserror", "tracing"]
+direct_dev = ["pollster", "proptest", "prost", "prost-reflect", "rusqlite", "tempfile", "tracing-subscriber"]
 transitive_exempt = ["rusqlite"]
 
 [crates.iwork-agent-acp]

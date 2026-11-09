@@ -27,6 +27,11 @@ proptest = "1"
 pollster = "1"
 tauri = "2.12"
 tauri-build = "2.7"
+rusqlite = { version = "0.41", features = ["bundled"] }
+sha2 = "0.10"
+tempfile = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 iwork-proto = { path = "crates/iwork-proto" }
 iwork-domain = { path = "crates/iwork-domain" }
