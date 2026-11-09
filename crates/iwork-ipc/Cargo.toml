@@ -39,11 +39,15 @@ windows-sys = { workspace = true, features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Cryptography",
+    # WTHelperProvDataFromStateData / WTHelperGetProvSignerFromChain 要这两个特性才导出。
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
     "Win32_Security_WinTrust",
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
     "Win32_System_Threading",
     "Win32_System_LibraryLoader",
+    "Win32_System_SystemServices",
 ] }
 
 [dev-dependencies]

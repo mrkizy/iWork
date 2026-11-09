@@ -17,7 +17,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 fn hello() -> Vec<u8> {
     let mut b = BytesMut::new();
     encode_frame(
-        &Frame::Hello(pb::Hello { protocol_major: iwork_proto::PROTOCOL_MAJOR, ..Default::default() }),
+        &Frame::Hello(pb::Hello {
+            protocol_major: iwork_proto::PROTOCOL_MAJOR,
+            ..Default::default()
+        }),
         &mut b,
     );
     b.to_vec()
@@ -32,14 +35,20 @@ async fn after_handshake(h: &Harness, payload: Vec<u8>, with_hello: bool) -> Vec
     }
     let _ = wr.write_all(&payload).await;
     let mut raw = Vec::new();
-    tokio::time::timeout(Duration::from_secs(10), rd.read_to_end(&mut raw)).await.expect("应被关闭").ok();
+    tokio::time::timeout(Duration::from_secs(10), rd.read_to_end(&mut raw))
+        .await
+        .expect("应被关闭")
+        .ok();
     let mut buf = BytesMut::from(raw.as_slice());
     let mut frames = Vec::new();
     while let Some(f) = decode_frame(&mut buf, MAX_FRAME_LEN, Direction::ToClient).unwrap() {
         frames.push(f);
     }
     if with_hello {
-        assert!(matches!(frames.first(), Some(Frame::Welcome(_))), "{frames:?}");
+        assert!(
+            matches!(frames.first(), Some(Frame::Welcome(_))),
+            "{frames:?}"
+        );
         frames.remove(0);
     }
     frames
@@ -61,7 +70,12 @@ async fn oversize_garbage_and_request_before_hello_disconnect_and_server_survive
     let (audit, _g) = Captured::install();
     let h = start(server_cfg());
     // 1. 超长帧（握手后）：读到长度就断，不等载荷。
-    let f = after_handshake(&h, header(MAX_FRAME_LEN + 1, pb::FrameType::Request as u8), true).await;
+    let f = after_handshake(
+        &h,
+        header(MAX_FRAME_LEN + 1, pb::FrameType::Request as u8),
+        true,
+    )
+    .await;
     assert!(is_malformed(&f), "{f:?}");
     // 2. 畸形载荷。
     let mut garbage = header(4, pb::FrameType::Request as u8);
@@ -70,7 +84,13 @@ async fn oversize_garbage_and_request_before_hello_disconnect_and_server_survive
     assert!(is_malformed(&f), "{f:?}");
     // 3. 握手前先发请求：直接关闭，不回任何帧。
     let mut req = BytesMut::new();
-    encode_frame(&Frame::Request(pb::Request { request_id: 1, body: Some(command("x")) }), &mut req);
+    encode_frame(
+        &Frame::Request(pb::Request {
+            request_id: 1,
+            body: Some(command("x")),
+        }),
+        &mut req,
+    );
     let f = after_handshake(&h, req.to_vec(), false).await;
     assert!(f.is_empty(), "{f:?}");
     // 4. 握手前超过 64KiB。
@@ -82,11 +102,21 @@ async fn oversize_garbage_and_request_before_hello_disconnect_and_server_survive
     let f = after_handshake(&h, header(1, 77), true).await;
     assert!(is_malformed(&f), "{f:?}");
     let mut zero = BytesMut::new();
-    encode_frame(&Frame::Request(pb::Request { request_id: 0, body: Some(command("x")) }), &mut zero);
+    encode_frame(
+        &Frame::Request(pb::Request {
+            request_id: 0,
+            body: Some(command("x")),
+        }),
+        &mut zero,
+    );
     let f = after_handshake(&h, zero.to_vec(), true).await;
     assert!(is_malformed(&f), "{f:?}");
 
-    assert_eq!(h.handler.handled.load(Ordering::SeqCst), 0, "违规帧一条都没到 handler");
+    assert_eq!(
+        h.handler.handled.load(Ordering::SeqCst),
+        0,
+        "违规帧一条都没到 handler"
+    );
     assert!(audit.events("protocol_violation").len() >= 7);
     // 之后新连接正常握手、正常请求。
     let (client, _inc) = h.connect_ok().await;
@@ -107,7 +137,13 @@ async fn empty_body_is_invalid_argument_not_disconnect() {
     let conn = h.connector.connect(&h.endpoint).await.unwrap();
     let (mut rd, mut wr) = conn.into_split();
     let mut b = BytesMut::from(hello().as_slice());
-    encode_frame(&Frame::Request(pb::Request { request_id: 5, body: None }), &mut b);
+    encode_frame(
+        &Frame::Request(pb::Request {
+            request_id: 5,
+            body: None,
+        }),
+        &mut b,
+    );
     wr.write_all(&b).await.unwrap();
     let mut buf = BytesMut::new();
     let mut frames = Vec::new();
@@ -120,7 +156,9 @@ async fn empty_body_is_invalid_argument_not_disconnect() {
             frames.push(f);
         }
     }
-    assert!(matches!(&frames[1], Frame::Response(pb::Response { request_id: 5, body: Some(pb::response::Body::Error(e)) }) if e.code() == pb::ErrorCode::InvalidArgument));
+    assert!(
+        matches!(&frames[1], Frame::Response(pb::Response { request_id: 5, body: Some(pb::response::Body::Error(e)) }) if e.code() == pb::ErrorCode::InvalidArgument)
+    );
 }
 
 #[tokio::test]
@@ -152,7 +190,11 @@ async fn commands_are_serialized_queries_are_concurrent() {
     }
     let t0 = Instant::now();
     cmds.remove(0).await.unwrap().unwrap();
-    assert!(t0.elapsed() < Duration::from_millis(150), "命令被查询挡住了：{:?}", t0.elapsed());
+    assert!(
+        t0.elapsed() < Duration::from_millis(150),
+        "命令被查询挡住了：{:?}",
+        t0.elapsed()
+    );
     for c in cmds {
         c.await.unwrap().unwrap();
     }
@@ -161,7 +203,11 @@ async fn commands_are_serialized_queries_are_concurrent() {
         s.await.unwrap().unwrap();
     }
     // 4 个 200ms 的查询并发：总时长远小于 800ms。
-    assert!(started.elapsed() < Duration::from_millis(600), "{:?}", started.elapsed());
+    assert!(
+        started.elapsed() < Duration::from_millis(600),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]
@@ -176,9 +222,19 @@ async fn side_query_result_comes_from_future_not_incoming() {
         .unwrap();
     assert!(matches!(resp.body, Some(pb::response::Body::Result(_))));
     // Incoming 里没有这个结果。
-    assert!(tokio::time::timeout(Duration::from_millis(50), inc.next()).await.is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), inc.next())
+            .await
+            .is_err()
+    );
     // 会写视图的查询不能走 request。
-    assert_eq!(client.request(pb::request::Body::Query(get_conversation("c1"))).await.unwrap_err(), ClientError::WrongLane);
+    assert_eq!(
+        client
+            .request(pb::request::Body::Query(get_conversation("c1")))
+            .await
+            .unwrap_err(),
+        ClientError::WrongLane
+    );
 }
 
 #[tokio::test]
@@ -186,13 +242,23 @@ async fn chunk_too_large_is_protocol_violation() {
     let h = start(server_cfg());
     let mut b = BytesMut::new();
     encode_frame(
-        &Frame::Chunk(pb::Chunk { upload_id: "u".into(), data: vec![0; MAX_CHUNK_DATA + 1].into(), ..Default::default() }),
+        &Frame::Chunk(pb::Chunk {
+            upload_id: "u".into(),
+            data: vec![0; MAX_CHUNK_DATA + 1].into(),
+            ..Default::default()
+        }),
         &mut b,
     );
     let f = after_handshake(&h, b.to_vec(), true).await;
     assert!(is_malformed(&f), "{f:?}");
     let mut b = BytesMut::new();
-    encode_frame(&Frame::Chunk(pb::Chunk { upload_id: String::new(), ..Default::default() }), &mut b);
+    encode_frame(
+        &Frame::Chunk(pb::Chunk {
+            upload_id: String::new(),
+            ..Default::default()
+        }),
+        &mut b,
+    );
     assert!(is_malformed(&after_handshake(&h, b.to_vec(), true).await));
     assert_eq!(h.handler.chunks.load(Ordering::SeqCst), 0);
 }
@@ -201,8 +267,22 @@ async fn chunk_too_large_is_protocol_violation() {
 async fn chunk_refused_by_handler_closes_with_error() {
     let h = start(server_cfg());
     let (client, mut inc) = h.connect_ok().await;
-    client.send_chunk(pb::Chunk { upload_id: "ok".into(), data: vec![1; 10].into(), ..Default::default() }).await.unwrap();
-    client.send_chunk(pb::Chunk { upload_id: "refuse".into(), data: vec![1; 10].into(), ..Default::default() }).await.unwrap();
+    client
+        .send_chunk(pb::Chunk {
+            upload_id: "ok".into(),
+            data: vec![1; 10].into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    client
+        .send_chunk(pb::Chunk {
+            upload_id: "refuse".into(),
+            data: vec![1; 10].into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     match next_item(&mut inc).await {
         IncomingItem::ServerError(e) => assert_eq!(e.code(), pb::ErrorCode::PayloadTooLarge),
         other => panic!("{other:?}"),
@@ -231,7 +311,10 @@ async fn shutdown_flushes_queue_within_1s() {
     let h = start(server_cfg());
     let (client, mut inc) = h.connect_ok().await;
     client.subscribe(1, sidebar(), 0).await.unwrap();
-    assert!(matches!(next_item(&mut inc).await, IncomingItem::Subscribed { .. }));
+    assert!(matches!(
+        next_item(&mut inc).await,
+        IncomingItem::Subscribed { .. }
+    ));
     for i in 0..50 {
         h.upsert("project:p1", i);
     }
@@ -247,5 +330,8 @@ async fn shutdown_flushes_queue_within_1s() {
     }
     assert_eq!(got, 50, "停机前把队列写完");
     assert!(t.elapsed() < Duration::from_secs(2));
-    tokio::time::timeout(Duration::from_secs(2), h.server).await.expect("serve 应在停机后返回").unwrap();
+    tokio::time::timeout(Duration::from_secs(2), h.server)
+        .await
+        .expect("serve 应在停机后返回")
+        .unwrap();
 }

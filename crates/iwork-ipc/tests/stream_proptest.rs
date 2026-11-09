@@ -19,7 +19,13 @@ use iwork_proto::pb;
 use proptest::prelude::*;
 use support::*;
 
-const ENTITIES: [&str; 5] = ["conversation:c1", "conversation:c2", "conversation:c3", "project:p1", "project:p2"];
+const ENTITIES: [&str; 5] = [
+    "conversation:c1",
+    "conversation:c2",
+    "conversation:c3",
+    "project:p1",
+    "project:p2",
+];
 
 fn scope_of(i: u8) -> pb::SubscriptionScope {
     match i % 4 {
@@ -92,9 +98,22 @@ impl Model {
     /// 应用一项。返回 false 表示连接结束。
     fn apply(&mut self, item: IncomingItem) -> bool {
         match item {
-            IncomingItem::Event(pb::Event { body: Some(pb::event::Body::Persisted(p)), .. }) => {
-                assert!(p.seq > self.last_on_conn, "一条连接上严格递增：{} 在 {} 之后", p.seq, self.last_on_conn);
-                assert!(p.seq > self.cursor, "流不回退：{} ≤ 游标 {}", p.seq, self.cursor);
+            IncomingItem::Event(pb::Event {
+                body: Some(pb::event::Body::Persisted(p)),
+                ..
+            }) => {
+                assert!(
+                    p.seq > self.last_on_conn,
+                    "一条连接上严格递增：{} 在 {} 之后",
+                    p.seq,
+                    self.last_on_conn
+                );
+                assert!(
+                    p.seq > self.cursor,
+                    "流不回退：{} ≤ 游标 {}",
+                    p.seq,
+                    self.cursor
+                );
                 self.last_on_conn = p.seq;
                 self.cursor = p.seq;
                 let op = self.world.op_at(p.seq);
@@ -155,7 +174,9 @@ impl Model {
         };
         let mut cfg = client_cfg();
         cfg.incoming_limit = 16 * 1024;
-        let (c, inc) = Client::connect(&h.connector, &h.endpoint, &client_own(), cfg).await.expect("重连");
+        let (c, inc) = Client::connect(&h.connector, &h.endpoint, &client_own(), cfg)
+            .await
+            .expect("重连");
         self.reconnects += 1;
         self.last_on_conn = 0;
         // 全部范围一次写出。
@@ -174,7 +195,9 @@ impl Model {
             tokio::task::yield_now().await;
         }
         loop {
-            let Some((_, inc)) = self.conn.as_mut() else { return };
+            let Some((_, inc)) = self.conn.as_mut() else {
+                return;
+            };
             match tokio::time::timeout(Duration::from_millis(1), inc.next()).await {
                 Ok(Some(item)) => {
                     if !self.apply(item) {
@@ -222,7 +245,11 @@ async fn run(acts: Vec<Act>, small_budget: bool) {
             Act::Commit { entity, delete } => {
                 value += 1;
                 let e = ENTITIES[entity as usize].to_owned();
-                h.publish(if delete { Op::Delete { entity: e } } else { Op::Upsert { entity: e, value } });
+                h.publish(if delete {
+                    Op::Delete { entity: e }
+                } else {
+                    Op::Upsert { entity: e, value }
+                });
             }
             Act::Burst { n } => {
                 // 边提交边让出：提交落在补发、快照、交接的各个中间点上。
@@ -252,7 +279,9 @@ async fn run(acts: Vec<Act>, small_budget: bool) {
             }
             Act::ViewQuery { conv } => {
                 let c = m.client();
-                tokio::spawn(async move { c.view_query(get_conversation(&format!("c{conv}"))).await });
+                tokio::spawn(
+                    async move { c.view_query(get_conversation(&format!("c{conv}"))).await },
+                );
             }
             Act::Disconnect => {
                 m.conn = None;
@@ -272,10 +301,12 @@ async fn run(acts: Vec<Act>, small_budget: bool) {
         let head = h.world.head();
         let mut done = false;
         while let Some((_, inc)) = m.conn.as_mut() {
-            let Ok(Some(item)) = tokio::time::timeout(Duration::from_secs(10), inc.next()).await else {
+            let Ok(Some(item)) = tokio::time::timeout(Duration::from_secs(10), inc.next()).await
+            else {
                 panic!("静止阶段等不到东西");
             };
-            let is_final = matches!(&item, IncomingItem::ViewResult { result, .. } if result.seq == head);
+            let is_final =
+                matches!(&item, IncomingItem::ViewResult { result, .. } if result.seq == head);
             if !m.apply(item) {
                 m.conn = None;
                 m.connect(&h, true).await;
@@ -297,9 +328,17 @@ async fn run(acts: Vec<Act>, small_budget: bool) {
 
     let scopes = m.active();
     let truth = visible(&h.world.projection_at(h.world.head()), &scopes);
-    let mine: BTreeMap<String, u64> =
-        m.members.iter().filter(|e| covers(&scopes, e)).map(|e| (e.clone(), m.entities[e])).collect();
-    assert_eq!(mine, truth, "静止后可见视图与服务端投影一致（重连 {} 次）", m.reconnects);
+    let mine: BTreeMap<String, u64> = m
+        .members
+        .iter()
+        .filter(|e| covers(&scopes, e))
+        .map(|e| (e.clone(), m.entities[e]))
+        .collect();
+    assert_eq!(
+        mine, truth,
+        "静止后可见视图与服务端投影一致（重连 {} 次）",
+        m.reconnects
+    );
 }
 
 proptest! {

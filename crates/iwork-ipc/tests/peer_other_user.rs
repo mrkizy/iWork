@@ -39,12 +39,20 @@ fn run_as() -> Vec<String> {
 fn other_user_tool(tool: &Path, args: &[&str]) -> Command {
     let prefix = run_as();
     let mut cmd = Command::new(&prefix[0]);
-    cmd.args(&prefix[1..]).arg("sh").arg("-c").arg("umask 000; exec \"$0\" \"$@\"").arg(tool).args(args);
+    cmd.args(&prefix[1..])
+        .arg("sh")
+        .arg("-c")
+        .arg("umask 000; exec \"$0\" \"$@\"")
+        .arg(tool)
+        .args(args);
     cmd
 }
 
 fn open_dir() -> tempfile::TempDir {
-    let dir = tempfile::Builder::new().prefix("iwork-other-user").tempdir_in("/tmp").unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("iwork-other-user")
+        .tempdir_in("/tmp")
+        .unwrap();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
     dir
 }
@@ -58,8 +66,14 @@ fn dev_client_cfg() -> ClientConfig {
 #[tokio::test]
 #[ignore = "需要另一个系统用户：CI Linux 设 IWORK_TEST_OTHER_USER=1 跑"]
 async fn other_user_is_rejected_both_directions() {
-    assert_eq!(std::env::var("IWORK_TEST_OTHER_USER").as_deref(), Ok("1"), "需要 IWORK_TEST_OTHER_USER=1");
-    let tool = PathBuf::from(std::env::var("IWORK_IPC_TOOL").expect("需要 IWORK_IPC_TOOL 指向 dev 构建的 ipc-tool"));
+    assert_eq!(
+        std::env::var("IWORK_TEST_OTHER_USER").as_deref(),
+        Ok("1"),
+        "需要 IWORK_TEST_OTHER_USER=1"
+    );
+    let tool = PathBuf::from(
+        std::env::var("IWORK_IPC_TOOL").expect("需要 IWORK_IPC_TOOL 指向 dev 构建的 ipc-tool"),
+    );
     let (audit, _guard) = Captured::install();
     let own = SelfIdentity::detect().expect("本进程身份");
 
@@ -69,7 +83,12 @@ async fn other_user_is_rejected_both_directions() {
     let world = World::default();
     let mut cfg = ServerConfig::new("other-user-test");
     cfg.trust = TrustPolicy::DevTrust;
-    let (server, _publisher) = Server::new(cfg, own.clone(), TestHandler::new(world.clone()), WorldSource::new(world));
+    let (server, _publisher) = Server::new(
+        cfg,
+        own.clone(),
+        TestHandler::new(world.clone()),
+        WorldSource::new(world),
+    );
     let listener = LocalListener::bind(&sock).unwrap();
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o777)).unwrap();
     let shutdown = tokio_util::sync::CancellationToken::new();
@@ -77,24 +96,39 @@ async fn other_user_is_rejected_both_directions() {
 
     let out = tokio::task::spawn_blocking({
         let (tool, sock) = (tool.clone(), sock.clone());
-        move || other_user_tool(&tool, &["--endpoint", sock.to_str().unwrap(), "hello"]).output().unwrap()
+        move || {
+            other_user_tool(&tool, &["--endpoint", sock.to_str().unwrap(), "hello"])
+                .output()
+                .unwrap()
+        }
     })
     .await
     .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!out.status.success(), "另一用户不该连上：{stdout}");
-    assert!(!stdout.contains("WELCOME"), "另一用户收到了 Welcome：{stdout}");
+    assert!(
+        !stdout.contains("WELCOME"),
+        "另一用户收到了 Welcome：{stdout}"
+    );
     tokio::time::sleep(Duration::from_millis(100)).await;
     let rejected = audit.events("peer_rejected");
     assert!(
-        rejected.iter().any(|e| e.get("role").map(String::as_str) == Some("server")
-            && e.get("reason").is_some_and(|r| r.starts_with("DifferentUser"))),
+        rejected
+            .iter()
+            .any(|e| e.get("role").map(String::as_str) == Some("server")
+                && e.get("reason")
+                    .is_some_and(|r| r.starts_with("DifferentUser"))),
         "后台审计里应有 DifferentUser：{rejected:?}"
     );
     // 对照：同用户照常连上，后台没被拖垮。
-    let (client, _inc) = Client::connect(&LocalConnector, &Endpoint::Unix(sock.clone()), &own, dev_client_cfg())
-        .await
-        .expect("同用户应能连上");
+    let (client, _inc) = Client::connect(
+        &LocalConnector,
+        &Endpoint::Unix(sock.clone()),
+        &own,
+        dev_client_cfg(),
+    )
+    .await
+    .expect("同用户应能连上");
     assert!(!client.welcome().session_id.is_empty());
     shutdown.cancel();
     serving.await.unwrap();
@@ -113,11 +147,23 @@ async fn other_user_is_rejected_both_directions() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let result = Client::connect(&LocalConnector, &Endpoint::Unix(sock2), &own, dev_client_cfg()).await;
-    let _ = Command::new(&run_as()[0]).args(&run_as()[1..]).args(["pkill", "-f", dir2.path().to_str().unwrap()]).status();
+    let result = Client::connect(
+        &LocalConnector,
+        &Endpoint::Unix(sock2),
+        &own,
+        dev_client_cfg(),
+    )
+    .await;
+    let _ = Command::new(&run_as()[0])
+        .args(&run_as()[1..])
+        .args(["pkill", "-f", dir2.path().to_str().unwrap()])
+        .status();
     let _ = fake.wait();
     match result {
         Err(ConnectError::PeerRejected(RejectReason::DifferentUser { .. })) => {}
-        other => panic!("客户端应以 DifferentUser 拒绝另一用户的后台，得到 {:?}", other.map(|_| ())),
+        other => panic!(
+            "客户端应以 DifferentUser 拒绝另一用户的后台，得到 {:?}",
+            other.map(|_| ())
+        ),
     }
 }

@@ -16,6 +16,9 @@ pub mod memory;
 pub mod unix;
 #[cfg(windows)]
 pub mod windows;
+// 管道 SDDL 是纯字符串：各平台都编译，好让单测在任何主机上跑。
+#[cfg_attr(not(windows), allow(dead_code))]
+mod pipe_sddl;
 
 /// 本机端点。
 #[derive(Debug, Clone, PartialEq, Eq)]

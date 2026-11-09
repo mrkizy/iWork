@@ -20,6 +20,9 @@ pub(crate) mod linux;
 pub(crate) mod macos;
 #[cfg(windows)]
 pub(crate) mod windows;
+// Windows 映像规则里的纯函数：各平台都编译，好让单测在任何主机上跑。
+#[cfg_attr(not(windows), allow(dead_code))]
+mod windows_image;
 
 #[cfg(target_os = "linux")]
 use linux as platform;
@@ -361,6 +364,8 @@ pub fn judge_peer(own: &SelfIdentity, peer: &PeerIdentity, policy: TrustPolicy) 
 #[cfg(test)]
 mod tests;
 
+#[cfg(windows)]
+pub(crate) use platform::current_user_sid;
 #[cfg(windows)]
 pub(crate) use platform::identify_process;
 #[cfg(unix)]
