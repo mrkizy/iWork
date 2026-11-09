@@ -1,6 +1,6 @@
 # M1 进度与决策（supervisor 交接记录）
 
-> 最后更新：2026-11-10 00:50。上下文压缩或换会话后，supervisor 先读这份文件再动手。
+> 最后更新：2026-11-10 01:17。上下文压缩或换会话后，supervisor 先读这份文件再动手。
 > 只记当前状态与还没写进其他文档的决定；已写进需求、技术设计、任务卡、方案的，以那些文档为准。
 
 ## 1 运行安排
@@ -26,10 +26,10 @@
 | --- | --- | --- | --- | --- | --- |
 | T01 | 已合入 main `bb6d69a` | — | `2026-11-09-m1-t01` 已关 | 验收 5 空窗口截图未补（屏幕锁定） | 有空时补截图 |
 | T02 | 方案 `docs/plans/T02.md`（已提交 `94662af`） | developer `fecce968`，worktree 分支 `cao/fecce968`，**暂停、未开工** | 方案 `2026-11-09-m1-t02-plan` 已关 | — | 4 点后按方案第 11 节开工 |
-| T03 | 方案 `docs/plans/T03.md`（未提交） | architect `474f00b7`；方案 reviewer `3f790292` | `2026-11-09-m1-t03-plan` 第 3 轮 | 1/F-6、3/F-1～F-6 | 4 点后按第 2 节决定重写（第 4 轮），reviewer 只核这 7 条 |
-| T05 | 分支 `cao/2d513126` @ `0626c91` | developer `2d513126`；reviewer A `6b16e848`、B `b9bc79da` | `2026-11-09-m1-t05` 第 2 轮 | 1/F-4（Windows 待 CI）、2/F-1（审批前只排空 1024 条，顺序会倒）、2/F-2（取消与完成两次加锁，可能误杀下一回合）、2/F-3（超长入站帧无测试） | 4 点后修；Windows CI `cargo test` 失败（run 42654996135），需日志 |
-| T07 | 方案 `docs/plans/T07.md`（未提交） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 2 轮 | 1/F-2、1/F-4、1/F-11、1/F-12、1/F-16、2/F-1～F-4 | 4 点后第 3 轮修改，并把第 2 节决定写进第 14 节 |
-| T08 | 分支 `cao/49facf33` @ `8d55d47` | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 3 轮 | 2/F-1（子模块路径仍会执行外部过滤器）、3/F-1（去掉过滤器后漏报改动） | 4 点后第 4 轮按第 2 节决定修；Windows CI `cargo clippy` 失败（run 42655008123），可本机交叉 clippy 复现 |
+| T03 | 方案 `docs/plans/T03.md`（未提交，第 4 轮已整体重写） | architect `474f00b7`；方案 reviewer `3f790292` | `2026-11-09-m1-t03-plan` 第 4 轮复审中 | 1/F-6、3/F-1～F-6 | 等 reviewer 复审结论 |
+| T05 | 分支 `cao/2d513126` @ `68362e0` | developer `2d513126`；reviewer A `6b16e848`、B `b9bc79da` | `2026-11-09-m1-t05` 第 3 轮 A/B 块均通过 | 无（14 条全关；CI run 42661019937 三平台全绿） | 等产品负责人同意合入 main（合入时统一 ADR 编号） |
+| T07 | 方案 `docs/plans/T07.md`（未提交） | architect `62a1aeb0`；方案 reviewer `bd0c2ab0` | `2026-11-09-m1-t07-plan` 第 3 轮（已满三轮） | 1/F-11（`install -d` 操作数角色）、1/F-12（`ssh -E/-F/-i` 短选项粘值、`grep -f` 操作数） | 等产品负责人批准第 4 轮小改：architect 只改这两处，reviewer 只核这两条 |
+| T08 | 分支 `cao/49facf33` | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 4 轮 | racy 时间戳边角（外部过滤文件同一秒内等长改写会漏标） | 等产品负责人定：修（推荐，条件加 `is_racy` 就保守列出）还是登记已知限制；CI run 42660636464 三平台 test 失败，等日志 |
 | T04、T06、T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
 
 查开着的问题：`agent-scaffold findings list --task <任务 ID> --open`。
