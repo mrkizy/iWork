@@ -46,6 +46,8 @@ struct Ctl {
     handler: Mutex<Option<Handler>>,
     updates: Mutex<Option<mpsc::UnboundedSender<AgentUpdate>>>,
     prompts: AtomicUsize,
+    /// 本回合已发出的更新条数（不含终态），和真适配器一样作为权限请求的前序边界
+    sent: std::sync::atomic::AtomicU64,
     cancels: AtomicUsize,
     closes: AtomicUsize,
     /// 为真时更新流永远就绪（不停输出文字），直到收到取消
@@ -54,6 +56,9 @@ struct Ctl {
 
 impl Ctl {
     fn send(&self, update: AgentUpdate) {
+        if !matches!(update, AgentUpdate::Finished(_) | AgentUpdate::Failed(_)) {
+            self.sent.fetch_add(1, Ordering::SeqCst);
+        }
         self.updates
             .lock()
             .unwrap()
@@ -67,6 +72,7 @@ impl Ctl {
     fn ask(&self) -> tokio::task::JoinHandle<PermissionDecision> {
         let handler = self.handler.lock().unwrap().clone().expect("已开会话");
         tokio::spawn(handler(PermissionRequest {
+            updates_before: self.sent.load(Ordering::SeqCst),
             tool: ToolRef("Bash".into()),
             raw_input: RawToolInput("{}".into()),
             bypass_sandbox: false,
@@ -114,6 +120,7 @@ impl AgentSession for FakeSession {
     async fn prompt(&self, _blocks: Vec<ContentBlock>) -> Result<FakeUpdates, AgentError> {
         let (tx, rx) = mpsc::unbounded_channel();
         *self.0.updates.lock().unwrap() = Some(tx);
+        self.0.sent.store(0, Ordering::SeqCst);
         self.0.prompts.fetch_add(1, Ordering::SeqCst);
         Ok(FakeUpdates {
             ctl: self.0.clone(),
@@ -501,6 +508,59 @@ async fn answer_arriving_while_cancelling_is_rejected() {
 
     b.ctl.send(AgentUpdate::Finished(TurnOutcome::Cancelled));
     assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Cancelled);
+}
+
+// ---------- 第 2 轮 F-1：审批的前序边界 ----------
+
+/// 更新流里积压了远超一批的文字，后面跟着「工具调用开始」，然后才来权限请求：
+/// 「工具调用开始」一定先于「等待审批」落盘。
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_start_precedes_waiting_even_behind_a_large_backlog() {
+    let b = Bench::new();
+    let (line, canceller) = b.line();
+    let plan = b.plan();
+    let t = plan.turn.id;
+    let task = b.spawn(line, plan);
+    b.wait_prompts(1).await;
+    for i in 0..4096u64 {
+        b.ctl.send(AgentUpdate::Text {
+            offset: i,
+            text: "x".into(),
+        });
+    }
+    b.ctl.send(AgentUpdate::ToolCallStarted {
+        tool_call_id: ToolCallId("t1".into()),
+        tool: ToolRef("Bash".into()),
+        raw_input: RawToolInput("{}".into()),
+    });
+    let ask = b.ctl.ask();
+    b.wait_state(t, TurnState::WaitingApproval).await;
+    let order: Vec<&str> = b
+        .store
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            DomainEvent::ToolCallStarted(_) => Some("tool"),
+            DomainEvent::TurnStateChanged(c) if c.to == TurnState::WaitingApproval => {
+                Some("waiting")
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(order, ["tool", "waiting"]);
+    assert_eq!(
+        b.live.0.load(Ordering::SeqCst),
+        4096,
+        "积压的文字都在受理审批之前处理完"
+    );
+
+    canceller.cancel(t);
+    b.ctl.send(AgentUpdate::Finished(TurnOutcome::Cancelled));
+    assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Cancelled);
+    b.decider.answer(PermissionDecision::Allow);
+    assert_eq!(ask.await.unwrap(), gone());
 }
 
 // ---------- F-9：取消优先 ----------

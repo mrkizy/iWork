@@ -30,13 +30,15 @@ use iwork_ports::agent::{
     RuntimeCapabilities, SessionSpec, TurnOutcome, UpdateStream,
 };
 use serde_json::Value;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::convert::{self, CLI_KEY, META_KEY, UpdateMapper};
+use crate::convert::{self, CLI_KEY, META_KEY};
 use crate::diagnostics::RawLog;
+use crate::frame::read_frame;
 use crate::process::{GRACE_PERIOD, Pipes, ResourceSample, RuntimeLaunch, SupervisedProcess};
 use crate::registry::{CliInfo, IncompatibleCombo, KNOWN_INCOMPATIBLE, RuntimeRegistration};
+use crate::turns::TurnBook;
 
 /// 出错后等进程退出的时限：用来区分「进程死了」和「协议出错」。
 const EXIT_PROBE: Duration = Duration::from_secs(1);
@@ -126,11 +128,7 @@ impl AgentPort for AcpRuntime {
     ) -> Result<AcpSession, AgentError> {
         let conn = self.connect(Some(Arc::new(on_permission))).await?;
         match open(&conn, &spec).await {
-            Ok(session_id) => Ok(AcpSession {
-                session_id,
-                conn,
-                next_turn: Mutex::new(0),
-            }),
+            Ok(session_id) => Ok(AcpSession { session_id, conn }),
             Err(e) => {
                 conn.cx.stop();
                 conn.process.kill_tree();
@@ -333,8 +331,8 @@ impl ConnectionHandle {
 /// 派发循环与会话方法共用的状态。
 #[derive(Debug, Default)]
 struct Shared {
-    /// 正在进行的回合；只有它的队列收更新
-    turn: Mutex<Option<ActiveTurn>>,
+    /// 当前回合的账；收尾方由它的锁决定（见 [`crate::turns`]）
+    turns: TurnBook,
     /// 每次取消加一；挂起的权限请求看到它变化就以「已取消」答复运行时
     cancel_epoch: watch::Sender<u64>,
     raw: RawLog,
@@ -342,42 +340,9 @@ struct Shared {
     fatal: Mutex<Option<String>>,
 }
 
-#[derive(Debug)]
-struct ActiveTurn {
-    id: u64,
-    tx: mpsc::UnboundedSender<AgentUpdate>,
-    mapper: UpdateMapper,
-    cancel_requested: bool,
-    /// prompt 请求已有结果（响应、失败或进程退出）；取消收尾等它
-    prompt_done: watch::Sender<bool>,
-}
-
 impl Shared {
-    fn lock_turn(&self) -> std::sync::MutexGuard<'_, Option<ActiveTurn>> {
-        self.turn.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
     fn fatal(&self) -> Option<String> {
         self.fatal.lock().unwrap_or_else(|p| p.into_inner()).clone()
-    }
-
-    /// 推回合的最后一条更新并结束这一回合；回合已换了就什么都不做。
-    fn finish_turn(&self, turn_id: u64, last: AgentUpdate) {
-        let mut turn = self.lock_turn();
-        if turn.as_ref().is_some_and(|t| t.id == turn_id) {
-            let active = turn.take().expect("刚检查过");
-            let _ = active.tx.send(last);
-        }
-    }
-
-    fn on_update(&self, notification: SessionNotification) {
-        let mut turn = self.lock_turn();
-        let Some(active) = turn.as_mut() else {
-            return; // 回合之外的更新（如会话加载时的历史回放）只留在诊断记录里
-        };
-        if let Some(update) = active.mapper.map(notification.update) {
-            let _ = active.tx.send(update);
-        }
     }
 }
 
@@ -391,46 +356,6 @@ impl PermissionHandler for NoPermissions {
     ) -> iwork_ports::agent::PermissionDecision {
         iwork_ports::agent::PermissionDecision::Deny {
             message: "能力探测连接不处理权限请求".into(),
-        }
-    }
-}
-
-/// 按行读运行时的输出，单行超过 `limit` 字节时报错（不把超长内容读进内存）。
-async fn read_frame<R: AsyncBufRead + Unpin>(
-    reader: &mut R,
-    limit: usize,
-) -> std::io::Result<Option<String>> {
-    let mut line = Vec::new();
-    loop {
-        let chunk = reader.fill_buf().await?;
-        if chunk.is_empty() {
-            return Ok(if line.is_empty() {
-                None
-            } else {
-                Some(String::from_utf8_lossy(&line).into_owned())
-            });
-        }
-        let (part, done) = match chunk.iter().position(|b| *b == b'\n') {
-            Some(i) => (&chunk[..i], Some(i + 1)),
-            None => (chunk, None),
-        };
-        if line.len() + part.len() > limit {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("运行时发来的单条消息超过 {limit} 字节"),
-            ));
-        }
-        line.extend_from_slice(part);
-        let used = done.unwrap_or(chunk.len());
-        reader.consume(used);
-        if done.is_some() {
-            let text = String::from_utf8(line).map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "运行时发来的消息不是 UTF-8",
-                )
-            })?;
-            return Ok(Some(text));
         }
     }
 }
@@ -485,7 +410,7 @@ async fn start_connection<H: PermissionHandler + 'static>(
                 Ok(None) => None,
                 Err(e) => {
                     // 读坏了（超长、非 UTF-8）就不再信任这个运行时
-                    shared.raw.record_oversize(MAX_FRAME_BYTES);
+                    shared.raw.record_rejected_frame();
                     *shared.fatal.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.to_string());
                     process.kill_tree();
                     Some((Err(e), out))
@@ -510,7 +435,7 @@ async fn start_connection<H: PermissionHandler + 'static>(
         .name("iwork")
         .on_receive_notification(
             async move |n: SessionNotification, _cx| {
-                on_update.on_update(n);
+                on_update.turns.on_update(n.update);
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -524,9 +449,11 @@ async fn start_connection<H: PermissionHandler + 'static>(
                 };
                 let mut epoch = on_request.cancel_epoch.subscribe();
                 epoch.mark_unchanged();
+                // 在派发循环里取：此前到达的更新都已进了队列，这个数就是它们的条数
+                let updates_before = on_request.turns.emitted();
                 // 不在派发循环里等审批：等待期间其他消息要照常处理
                 cx.spawn(async move {
-                    let request = convert::permission_request(&req);
+                    let request = convert::permission_request(&req, updates_before);
                     let decision = tokio::select! {
                         d = handler.on_permission(request) => Some(d),
                         _ = epoch.changed() => None,
@@ -568,7 +495,6 @@ async fn start_connection<H: PermissionHandler + 'static>(
 pub struct AcpSession {
     session_id: String,
     conn: Connection,
-    next_turn: Mutex<u64>,
 }
 
 impl AcpSession {
@@ -620,26 +546,7 @@ impl AgentSession for AcpSession {
             });
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        let turn_id = {
-            let mut next = self.next_turn.lock().unwrap_or_else(|p| p.into_inner());
-            *next += 1;
-            *next
-        };
-        {
-            let mut turn = self.conn.shared.lock_turn();
-            if turn.is_some() {
-                return Err(AgentError::Protocol {
-                    message: "上一回合还没结束，不能再发 prompt".into(),
-                });
-            }
-            *turn = Some(ActiveTurn {
-                id: turn_id,
-                tx,
-                mapper: UpdateMapper::default(),
-                cancel_requested: false,
-                prompt_done: watch::channel(false).0,
-            });
-        }
+        let turn_id = self.conn.shared.turns.begin(tx)?;
         let request = PromptRequest::new(
             SessionId::new(self.session_id.clone()),
             blocks.iter().map(convert::content_to_acp).collect(),
@@ -660,32 +567,16 @@ impl AgentSession for AcpSession {
                     AgentUpdate::Failed(exited(&shared, "session/prompt", &exit))
                 }
             };
-            {
-                let turn = shared.lock_turn();
-                if let Some(active) = turn.as_ref().filter(|t| t.id == turn_id)
-                    && active.cancel_requested
-                {
-                    // 取消收尾由取消任务做：它要等整棵树结束才推「已取消」
-                    active.prompt_done.send_replace(true);
-                    return;
-                }
-            }
-            shared.finish_turn(turn_id, last);
+            // 取消在先时终态由取消任务推：它要等整棵树结束
+            shared.turns.complete(turn_id, last);
         });
         Ok(AcpUpdates { rx })
     }
 
     async fn cancel(&self) -> Result<(), AgentError> {
-        let (turn_id, mut prompt_done) = {
-            let mut turn = self.conn.shared.lock_turn();
-            match turn.as_mut() {
-                Some(active) if !active.cancel_requested => {
-                    active.cancel_requested = true;
-                    (active.id, active.prompt_done.subscribe())
-                }
-                // 没有进行中的回合，或已经在取消
-                _ => return Ok(()),
-            }
+        // 没有进行中的回合（prompt 已先收尾）或已经在取消：什么都不做，更不去结束进程树
+        let Some((turn_id, mut prompt_done)) = self.conn.shared.turns.request_cancel() else {
+            return Ok(());
         };
         self.conn.shared.cancel_epoch.send_modify(|e| *e += 1);
         let notified = self
@@ -708,7 +599,9 @@ impl AgentSession for AcpSession {
                     message: "取消后运行时进程树没能在时限内结束".into(),
                 })
             };
-            shared.finish_turn(turn_id, last);
+            shared
+                .turns
+                .finish_cancel(turn_id, last, "运行时已在取消时结束，需要续接会话".into());
         });
         notified.map_err(|e| AgentError::Protocol {
             message: format!("发送取消通知失败（错误码 {:?}）", e.code),

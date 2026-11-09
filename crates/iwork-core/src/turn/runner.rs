@@ -6,8 +6,9 @@
 //! 2. **检查点定时**：上次检查点之后最多 500ms 把未落盘的正文刷出去，即使没有新的更新；
 //! 3. **更新流**与**权限信箱**：一般先更新、后信箱；连续处理 [`FAIR_BURST`] 条更新后先让出一次
 //!    执行权、再先看一次信箱。
-//!    收到「开始等审批」时，先把此刻已经就绪的更新处理完（最多 [`MAX_DRAIN`] 条）再受理：适配器
-//!    保证权限请求之前的更新已在更新流里，所以「工具调用开始」一定排在「等待审批」之前。
+//!    「开始等审批」带着前序边界（适配器给出的「这次请求之前已交出的更新条数」）：编排先把本回合
+//!    的更新处理到这个条数再受理，不管积压多少，「工具调用开始」都排在「等待审批」之前。等边界
+//!    期间取消照样优先、照样按批让出。
 //!
 //! 运行时进程意外退出（后台服务还活着）时回合怎么收尾：
 //! - `Running` 或 `WaitingApproval`：回合 `Failed`，原因是进程退出（`AgentError::ProcessExited`
@@ -56,10 +57,8 @@ pub const ORCHESTRATOR_ACTOR: &str = "system";
 /// 流式正文的检查点间隔（技术设计 3.5：崩溃后最多丢这么久的显示文字）。
 pub const CHECKPOINT_INTERVAL: Duration = Duration::from_millis(500);
 
-/// 连续处理这么多条更新后，先看一次权限信箱。
+/// 连续处理这么多条更新后，先让出一次执行权、再先看一次权限信箱。
 pub const FAIR_BURST: u32 = 32;
-/// 受理「开始等审批」前最多先处理这么多条已就绪的更新。
-pub const MAX_DRAIN: u32 = 1024;
 
 /// 动作摘要最多保留的字符数。
 const SUMMARY_CHARS: usize = 200;
@@ -302,11 +301,12 @@ struct Scheduler<'t> {
     flush_timer: Option<Pin<Box<dyn Future<Output = ()> + Send + 't>>>,
     /// 连续处理的更新条数
     burst: u32,
-    /// 收到、还没受理的「开始等审批」，以及受理前已先处理的更新条数
-    deferred_ask: Option<Signal>,
-    drained: u32,
     /// 这一轮连续更新之后是否已经让出过
     yielded: bool,
+    /// 本回合已处理的更新条数，与审批的前序边界比较
+    consumed: u64,
+    /// 收到、还没到前序边界的「开始等审批」
+    deferred_ask: Option<(Signal, u64)>,
 }
 
 impl Scheduler<'_> {
@@ -328,20 +328,29 @@ impl Scheduler<'_> {
             return Poll::Ready(Input::FlushDue);
         }
         loop {
-            if self.deferred_ask.is_some() {
-                if self.drained < MAX_DRAIN
-                    && let Poll::Ready(update) = next.as_mut().poll(cx)
-                {
-                    self.drained += 1;
-                    return Poll::Ready(Input::Update(update));
+            if let Some((_, after)) = &self.deferred_ask {
+                if self.consumed >= *after {
+                    let (ask, _) = self.deferred_ask.take().expect("刚检查过");
+                    return Poll::Ready(Input::Signal(ask));
                 }
-                self.drained = 0;
-                return Poll::Ready(Input::Signal(self.deferred_ask.take().expect("刚检查过")));
+                // 还没到边界：只处理更新（其余信号留在信箱里排队），照样按批让出
+                if self.burst >= FAIR_BURST {
+                    if !self.yielded {
+                        self.yielded = true;
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                    self.yielded = false;
+                    self.burst = 0;
+                }
+                return match next.as_mut().poll(cx) {
+                    Poll::Ready(update) => Poll::Ready(self.update(update)),
+                    Poll::Pending => Poll::Pending,
+                };
             }
             let signal_first = self.burst >= FAIR_BURST;
             if !signal_first && let Poll::Ready(update) = next.as_mut().poll(cx) {
-                self.burst += 1;
-                return Poll::Ready(Input::Update(update));
+                return Poll::Ready(self.update(update));
             }
             if signal_first && !self.yielded {
                 // 更新一直就绪时主动让出一次，别的任务（含运行时的其他会话）才有机会跑
@@ -352,20 +361,27 @@ impl Scheduler<'_> {
             self.yielded = false;
             self.burst = 0;
             match Pin::new(&mut *signals).poll_next(cx) {
-                Poll::Ready(Some(ask @ Signal::PermissionAsked { .. })) => {
-                    // 先把此刻已就绪的更新处理完再受理，下一轮循环走上面的分支
-                    self.deferred_ask = Some(ask);
+                Poll::Ready(Some(Signal::PermissionAsked { reply, after })) => {
+                    // 先把边界之前的更新处理完再受理，下一轮循环走上面的分支
+                    self.deferred_ask = Some((Signal::PermissionAsked { reply, after }, after));
                     continue;
                 }
                 Poll::Ready(Some(signal)) => return Poll::Ready(Input::Signal(signal)),
                 Poll::Ready(None) | Poll::Pending => {}
             }
             if signal_first && let Poll::Ready(update) = next.as_mut().poll(cx) {
-                self.burst += 1;
-                return Poll::Ready(Input::Update(update));
+                return Poll::Ready(self.update(update));
             }
             return Poll::Pending;
         }
+    }
+
+    fn update(&mut self, update: Option<AgentUpdate>) -> Input {
+        self.burst += 1;
+        if update.is_some() {
+            self.consumed += 1;
+        }
+        Input::Update(update)
     }
 }
 
@@ -598,7 +614,7 @@ where
 
     async fn on_signal(&mut self, signal: Signal) -> Result<(), TurnRunError> {
         match signal {
-            Signal::PermissionAsked { reply } => {
+            Signal::PermissionAsked { reply, .. } => {
                 let accept = match self.turn.state {
                     TurnState::Running => {
                         let events = self.step(TurnTrigger::PermissionAsked, None).await?;

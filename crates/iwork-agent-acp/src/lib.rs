@@ -7,8 +7,10 @@
 mod client;
 pub mod convert;
 pub mod diagnostics;
+mod frame;
 pub mod process;
 pub mod registry;
+mod turns;
 
-pub use client::{AcpRuntime, AcpSession, AcpUpdates};
+pub use client::{AcpRuntime, AcpSession, AcpUpdates, MAX_FRAME_BYTES, MCP_UNSUPPORTED};
 pub use process::{ResourceSample, RuntimeLaunch};

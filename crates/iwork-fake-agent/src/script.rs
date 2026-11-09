@@ -87,6 +87,13 @@ pub enum Step {
     Stderr {
         text: String,
     },
+    /// 绕过 ACP 直接往 stdout 写一行坏数据：`oversize` 写 `bytes` 个 `x`，`invalid_utf8` 写非 UTF-8
+    /// 字节。写完就挂起，等后台服务结束进程
+    BadLine {
+        kind: BadLineKind,
+        #[serde(default)]
+        bytes: usize,
+    },
     /// 开始一次工具调用
     ToolCall {
         id: String,
@@ -127,6 +134,13 @@ pub enum Step {
         #[serde(default)]
         args: Vec<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BadLineKind {
+    Oversize,
+    InvalidUtf8,
 }
 
 fn default_crash_code() -> i32 {

@@ -7,6 +7,6 @@ pub use permission::{
     PermissionDecider, PermissionGate, STUB_DENY_MESSAGE, StubDecider, TURN_GONE_MESSAGE,
 };
 pub use runner::{
-    CHECKPOINT_INTERVAL, FAIR_BURST, MAX_DRAIN, ORCHESTRATOR_ACTOR, SessionLine, TurnCanceller,
-    TurnPlan, TurnPorts, TurnRunError,
+    CHECKPOINT_INTERVAL, FAIR_BURST, ORCHESTRATOR_ACTOR, SessionLine, TurnCanceller, TurnPlan,
+    TurnPorts, TurnRunError,
 };

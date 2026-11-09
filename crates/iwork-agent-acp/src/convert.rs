@@ -233,7 +233,10 @@ pub fn outcome_of(stop: StopReason) -> TurnOutcome {
 ///
 /// `bypass_sandbox`：运行时在原始输入里声明要绕过沙箱（agy 的 `rawInput.BypassSandbox`，
 /// AGENTS.md 安全不变量），按「越界」交给审批判定。
-pub fn permission_request(req: &RequestPermissionRequest) -> PermissionRequest {
+pub fn permission_request(
+    req: &RequestPermissionRequest,
+    updates_before: u64,
+) -> PermissionRequest {
     let fields = &req.tool_call.fields;
     let tool = fields
         .name
@@ -250,6 +253,7 @@ pub fn permission_request(req: &RequestPermissionRequest) -> PermissionRequest {
         tool: ToolRef(tool),
         raw_input: raw_input(fields.raw_input.as_ref()),
         bypass_sandbox,
+        updates_before,
     }
 }
 

@@ -359,6 +359,20 @@ impl Ctx<'_> {
                 });
                 Ok(cancelled(self.paced(pieces, *rate_per_sec).await?))
             }
+            Step::BadLine { kind, bytes } => {
+                let mut line = match kind {
+                    script::BadLineKind::Oversize => vec![b'x'; *bytes],
+                    script::BadLineKind::InvalidUtf8 => vec![0xff, 0xfe, b'{'],
+                };
+                line.push(b'\n');
+                // 和连接共用同一个 stdout；锁住后整行写出，不与 ACP 消息交错
+                {
+                    let mut out = std::io::stdout().lock();
+                    let _ = out.write_all(&line);
+                    let _ = out.flush();
+                }
+                std::future::pending().await
+            }
             Step::Stderr { text } => {
                 eprintln!("{text}");
                 Ok(Flow::Done)
@@ -436,8 +450,10 @@ impl Ctx<'_> {
             }
             Step::Hang => std::future::pending().await,
             Step::SpawnChild { program, args } => {
+                // stdin 不给子进程：ACP 的输入只属于运行时自己；stdout 照常继承（测试要的就是它拿着管道）
                 let child = std::process::Command::new(program)
                     .args(args)
+                    .stdin(std::process::Stdio::null())
                     .spawn()
                     .map_err(|e| {
                         agent_client_protocol::Error::internal_error()

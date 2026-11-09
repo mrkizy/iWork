@@ -44,9 +44,9 @@ impl RawLog {
         self.push(json!({ "stream": "stderr", "bytes": line_bytes }).to_string());
     }
 
-    /// 记一条超过长度上限、被拒收的入站消息。
-    pub fn record_oversize(&self, limit: usize) {
-        self.push(json!({ "stream": "stdout", "oversize": true, "limit": limit }).to_string());
+    /// 记一条被拒收的入站消息（超长或不是 UTF-8）。内容不记。
+    pub fn record_rejected_frame(&self) {
+        self.push(json!({ "stream": "stdout", "rejected": true }).to_string());
     }
 
     fn push(&self, mut entry: String) {

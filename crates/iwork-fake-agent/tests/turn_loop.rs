@@ -365,6 +365,94 @@ async fn crash_with_child_holding_stdout_is_detected() {
     wait_until(Duration::from_secs(2), || !process_exists(child)).await;
 }
 
+/// 第 2 轮 F-1：真适配器里，权限请求之前积压了几千段文字，「工具调用开始」照样排在「等待审批」之前。
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_start_precedes_waiting_behind_a_real_backlog() {
+    let fake = Fake::new(&json!({ "turns": [{ "steps": [
+        { "type": "repeat_text", "chunk": "x", "count": 3000 },
+        { "type": "tool_call", "id": "t1", "name": "Bash", "input": { "command": "ls" } },
+        { "type": "permission", "tool_call_id": "t1",
+          "allowed": [ { "type": "tool_result", "id": "t1", "ok": true } ] }
+    ]}]}));
+    let h = Harness::new();
+    let mut line = SessionLine::new(Arc::new(StubDecider::allow_all()), None);
+    let state = line
+        .run_turn(
+            &AcpRuntime::new(fake.launch.clone()),
+            h.ports(),
+            h.plan(fake.dir.path(), "跑"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(state, TurnState::Completed);
+    let order: Vec<String> = h
+        .store
+        .snapshot()
+        .into_iter()
+        .filter(|l| l.starts_with("tool started") || l.contains("-> WaitingApproval"))
+        .collect();
+    assert_eq!(
+        order,
+        ["tool started t1 Bash", "turn Running -> WaitingApproval"]
+    );
+    assert_eq!(h.live.all().len(), 3000);
+}
+
+/// 第 2 轮 F-3：运行时发来超长行或非 UTF-8 行：报固定原因、回合 Failed、进程树清空。
+#[tokio::test(flavor = "multi_thread")]
+async fn bad_frames_fail_the_turn_with_fixed_reason_and_clear_the_tree() {
+    let cases = [
+        (
+            json!({ "type": "bad_line", "kind": "oversize", "bytes": iwork_agent_acp::MAX_FRAME_BYTES + 1 }),
+            format!(
+                "运行时发来的单条消息超过 {} 字节",
+                iwork_agent_acp::MAX_FRAME_BYTES
+            ),
+        ),
+        (
+            json!({ "type": "bad_line", "kind": "invalid_utf8" }),
+            "运行时发来的消息不是 UTF-8".to_string(),
+        ),
+    ];
+    for (step, reason) in cases {
+        let fake = Fake::new(&json!({ "turns": [{ "steps": [
+            { "type": "text", "text": "前面正常" },
+            step
+        ]}]}));
+        let h = Harness::new();
+        let mut line = SessionLine::new(Arc::new(StubDecider::allow_all()), None);
+        let state = tokio::time::timeout(
+            Duration::from_secs(10),
+            line.run_turn(
+                &AcpRuntime::new(fake.launch.clone()),
+                h.ports(),
+                h.plan(fake.dir.path(), "跑"),
+            ),
+        )
+        .await
+        .expect("10 秒内收尾")
+        .unwrap();
+        assert_eq!(state, TurnState::Failed);
+        let snapshot = h.store.snapshot();
+        assert_eq!(
+            snapshot[snapshot.len() - 3],
+            format!("turn Running -> Failed (与运行时通信出错：{reason})")
+        );
+        let session = line.session().expect("协议错误不丢会话对象");
+        wait_until(Duration::from_secs(3), || {
+            session.process_tree_is_empty().unwrap()
+        })
+        .await;
+        assert!(
+            session
+                .raw_log()
+                .iter()
+                .any(|l| l.contains("\"rejected\":true")),
+            "诊断里记了一条被拒收的消息"
+        );
+    }
+}
+
 /// F-1：真实会话的诊断记录里没有正文、工具输入输出、stderr 内容，只有协议元数据。
 #[tokio::test(flavor = "multi_thread")]
 async fn diagnostics_of_a_real_session_carry_no_content() {
@@ -449,7 +537,7 @@ async fn crash_mid_turn_fails_the_turn_and_next_turn_resumes() {
         failed.starts_with("turn Running -> Failed (运行时进程意外退出"),
         "{failed}"
     );
-    assert!(failed.contains("exit status: 3"), "{failed}");
+    assert!(failed.contains(&exit_code_text(3)), "{failed}");
     assert_eq!(
         &snapshot[snapshot.len() - 2..],
         ["message Failed \"写到一半\"", "turn finished Failed"]
@@ -508,10 +596,21 @@ async fn wait_until(limit: Duration, mut ok: impl FnMut() -> bool) {
     }
 }
 
-/// 一个长时间运行的子进程步骤。
+/// 退出码在退出说明里的写法（标准库 `ExitStatus` 的 Display，两个平台不同）。
+fn exit_code_text(code: i32) -> String {
+    if cfg!(windows) {
+        format!("exit code: {code}")
+    } else {
+        format!("exit status: {code}")
+    }
+}
+
+/// 一个长时间运行、**不往 stdout 写任何东西**的子进程步骤：子进程继承运行时的 stdout，
+/// 写一个字都会混进 ACP 管道（Windows 上的 ping 就会）。
 fn child_step() -> serde_json::Value {
     if cfg!(windows) {
-        json!({ "type": "spawn_child", "program": "ping", "args": ["-n", "600", "127.0.0.1"] })
+        json!({ "type": "spawn_child", "program": "powershell",
+                "args": ["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 600"] })
     } else {
         json!({ "type": "spawn_child", "program": "sleep", "args": ["600"] })
     }

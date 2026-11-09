@@ -97,9 +97,11 @@ pub(crate) fn new_ticket() -> Ticket {
 /// 运行时因此不会在状态落盘前继续。
 #[derive(Debug)]
 pub(crate) enum Signal {
-    /// 回执是票；`None` 表示现在不受理审批（如正在取消）
+    /// 回执是票；`None` 表示现在不受理审批（如正在取消）。`after`：编排要先处理完本回合
+    /// 这么多条更新才受理（前序边界，见 `PermissionRequest::updates_before`）
     PermissionAsked {
         reply: oneshot::Sender<Option<Ticket>>,
+        after: u64,
     },
     /// 回执 `true` 表示结果被采纳
     PermissionDecided {
@@ -165,7 +167,10 @@ impl<D: PermissionDecider> PermissionHandler for PermissionGate<D> {
         let (reply, asked) = oneshot::channel();
         if inbox
             .signals
-            .unbounded_send(Signal::PermissionAsked { reply })
+            .unbounded_send(Signal::PermissionAsked {
+                reply,
+                after: req.updates_before,
+            })
             .is_err()
         {
             return turn_gone();
