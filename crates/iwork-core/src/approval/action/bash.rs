@@ -5,6 +5,8 @@
 //! 参数规则全部满足 → 读 / 写 / 删除 → ⑤ 其余归执行（白名单程序降级时另带保底角色）。②–⑤ 的路径动作
 //! 按登记的参数角色精确提取；解析不了的调用另走 [`fallback_actions`]，不认结构、宁可多抽。
 
+use std::collections::BTreeSet;
+
 use iwork_domain::action::ActionKind;
 use iwork_shell::{PartialFacts, RedirectKind, ShellScript, SimpleCommand};
 
@@ -45,9 +47,10 @@ pub fn classify_script(script: &ShellScript) -> Result<Vec<CommandActions>, Why>
         return Err("空命令".into());
     }
     let mut out = Vec::new();
+    let mut budget = MAX_DIR_CANDIDATES;
     for c in commands {
         let mut actions = Vec::new();
-        classify_simple(c, &mut actions)?;
+        classify_simple(c, &mut actions, &mut budget)?;
         let words: Vec<&str> = c.words.iter().map(|w| w.literal.as_str()).collect();
         out.push(CommandActions {
             command: command_target(
@@ -146,7 +149,11 @@ fn push_redirect(out: &mut Vec<PendingAction>, kind: RedirectKind, target: &str)
     }
 }
 
-fn classify_simple(c: &SimpleCommand, out: &mut Vec<PendingAction>) -> Result<(), Why> {
+fn classify_simple(
+    c: &SimpleCommand,
+    out: &mut Vec<PendingAction>,
+    budget: &mut usize,
+) -> Result<(), Why> {
     redirect_actions(c, out);
     let words: Vec<&str> = c.words.iter().map(|w| w.literal.as_str()).collect();
     let Some(&literal_program) = words.first() else {
@@ -236,7 +243,8 @@ fn classify_simple(c: &SimpleCommand, out: &mut Vec<PendingAction>) -> Result<()
                     true
                 }
                 (_, Some(spec)) => {
-                    floor_actions(spec.floor, args, out);
+                    floor_actions(spec.floor, args, out, budget)
+                        .map_err(|_| "目录目标候选超过上限".to_string())?;
                     true
                 }
                 (_, None) => false,
@@ -261,43 +269,67 @@ fn push_all_candidates(args: &[&str], out: &mut Vec<PendingAction>) {
     }
 }
 
-/// 降级时的位置参数：`--` 之前不以 `-` 开头的词与 `--` 之后的全部词。选项的值也会被当成操作数，只会多抽。
-fn floor_operands<'a>(args: &[&'a str]) -> Vec<&'a str> {
-    let mut out = Vec::new();
-    let mut after_dashdash = false;
-    for a in args {
-        if after_dashdash || !a.starts_with('-') {
-            out.push(*a);
-        } else if *a == "--" {
-            after_dashdash = true;
+/// 一次调用里目录目标候选（「词 / 别的词的 basename」）的上限。候选是词数的平方级，每个都要解析一次路径；
+/// 超过上限时整条按资源上限拒绝，不截断（截断等于少检查）。
+pub const MAX_DIR_CANDIDATES: usize = 4096;
+
+/// 目录目标候选的额度用完了。
+#[derive(Debug)]
+pub struct TooManyCandidates;
+
+/// 保底角色（方案第 13 节实施审查第 2 轮）：`words` 是程序后面的字面词（选项与选项值都算），每个词按
+/// `floor.roles` 产出动作；复制类再对每个词 `d` 与别的词 `s` 产出写入候选 `d / basename(s)`。全是候选：
+/// 选项词解析成不存在的名字无害，走不通的只丢它。
+fn floor_actions(
+    floor: Floor,
+    words: &[&str],
+    out: &mut Vec<PendingAction>,
+    budget: &mut usize,
+) -> Result<(), TooManyCandidates> {
+    for w in words {
+        if is_path_word(w) {
+            for r in floor.roles {
+                out.push(path_with(role_kind(*r), w, PathOrigin::Hypothetical));
+            }
         }
     }
-    out
+    if !floor.dir_target {
+        return Ok(());
+    }
+    let dirs: BTreeSet<&str> = words.iter().copied().filter(|w| is_path_word(w)).collect();
+    for d in &dirs {
+        let joined: BTreeSet<String> = dirs
+            .iter()
+            .filter(|s| *s != d)
+            .filter_map(|s| join_basename(d, s))
+            .collect();
+        *budget = budget.checked_sub(joined.len()).ok_or(TooManyCandidates)?;
+        for j in joined {
+            out.push(path_with(ActionKind::Write, &j, PathOrigin::Hypothetical));
+        }
+    }
+    Ok(())
 }
 
-fn floor_actions(floor: Floor, args: &[&str], out: &mut Vec<PendingAction>) {
-    let operands = floor_operands(args);
-    match floor {
-        Floor::All(roles) => {
-            for o in operands {
-                push_roles(out, roles, o);
+/// 一串没有命令结构的字面词里，每个白名单程序名（含 `dd`，经包装词的也算）后面的全部字面词按它的保底角色
+/// 产出动作（方案第 13 节实施审查第 2 轮）。`find` 另有 [`find_syntax::flat_delete`]。
+fn flat_floor<S: AsRef<str>>(
+    words: &[S],
+    out: &mut Vec<PendingAction>,
+    budget: &mut usize,
+) -> Result<(), TooManyCandidates> {
+    for (i, w) in words.iter().enumerate() {
+        let rest: Vec<&str> = words[i + 1..].iter().map(AsRef::as_ref).collect();
+        match commands::program_id(w.as_ref()) {
+            "dd" => dd_floor(&rest, out),
+            name => {
+                if let Some(spec) = commands::safe_command(name) {
+                    floor_actions(spec.floor, &rest, out, budget)?;
+                }
             }
         }
-        Floor::SourcesThenDest { source, dest } => match operands.split_last() {
-            // 只有一个操作数：目的可能由未登记的选项给出，它既可能是源也可能是目的
-            Some((only, [])) => {
-                push_roles(out, source, only);
-                push_roles(out, dest, only);
-            }
-            Some((d, sources)) => {
-                for s in sources {
-                    push_roles(out, source, s);
-                }
-                push_dest(out, dest, d, sources, true);
-            }
-            None => {}
-        },
     }
+    Ok(())
 }
 
 /// `dd` 降级：`if=` 记读、`of=` 记写，不管别的键认不认。
@@ -707,10 +739,12 @@ fn dd_form(args: &[&str]) -> Result<Vec<PendingAction>, NotSafe> {
 /// 再连同全部字面词（原文与队列里的）按 [`fallback_candidates`] 抽读 + 写；`find … -delete` 的删除约束
 /// 不随解析不了丢掉：parse 成功时用精确切法的结果（`precise_find`），否则对原文的字面词用保守规则；
 /// 队列里的词恒用保守规则。另有一个承载整条命令文字的执行动作。路径全是候选：走不通的只丢它自己。
+///
+/// 第二个返回值为真表示目录目标候选超过上限（[`MAX_DIR_CANDIDATES`]），调用方按资源上限拒绝。
 pub fn fallback_actions(
     facts: &PartialFacts,
     precise_find: Option<&[String]>,
-) -> Vec<PendingAction> {
+) -> (Vec<PendingAction>, bool) {
     // 承载命令文字的执行动作排第一：同样是询问时代表动作取靠前的，原因显示为「解析不了」
     let mut out = vec![PendingAction {
         kind: ActionKind::Execute,
@@ -765,5 +799,9 @@ pub fn fallback_actions(
     {
         out.push(path_with(ActionKind::Delete, d, PathOrigin::Hypothetical));
     }
-    out
+    // 白名单程序名后面的词按保底角色（原文与队列里的词各自扁平处理，没有命令边界）
+    let mut budget = MAX_DIR_CANDIDATES;
+    let too_many = flat_floor(&facts.literal_words, &mut out, &mut budget).is_err()
+        || flat_floor(&facts.queued_words, &mut out, &mut budget).is_err();
+    (out, too_many)
 }

@@ -158,12 +158,13 @@ impl Analysis {
                 Some(bash::precise_find_deletes(script)),
             ),
         };
+        let (actions, too_many) = bash::fallback_actions(&facts, precise.as_deref());
         let flags = CallFlags {
-            resource_limit_hit: facts.resource_limit,
+            resource_limit_hit: facts.resource_limit || too_many,
             unlexable: facts.lex_failed,
             path_unresolved: false,
         };
-        (bash::fallback_actions(&facts, precise.as_deref()), flags)
+        (actions, flags)
     }
 }
 

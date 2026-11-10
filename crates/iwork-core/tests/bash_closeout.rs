@@ -779,3 +779,84 @@ fn unresolved_and_baseline_does_not_offer_card() {
         ));
     }
 }
+
+/// 2/F-5（1/F-1、1/F-7 残留）：降级时保底角色作用于全部词，不再把最后一个操作数猜作目的。
+#[test]
+fn degraded_floor_does_not_guess_destination() {
+    // GNU 写法：-t 给目的、--backup 未登记；真实源是工作区根
+    let h = harness(|_| {});
+    let cmd = format!("mv -t /tmp/destination --backup {WS}");
+    let c = h.eval(&bash_req(&cmd), FullAccess).0;
+    assert!(has(&c, ActionKind::Delete, WS), "{:?}", briefs(&c));
+    assert_base(&h, &cmd);
+    // ./config 是指向 .git/config 的链接：--verbose 未登记，-t . 的目录目标仍要检查 ./config
+    let linked = harness(|f| {
+        f.file(ws("src/config"));
+        f.link(ws("config"), ".git/config");
+    });
+    let cmd = "cp -t . --verbose src/config";
+    let c = linked.eval(&bash_req(cmd), Auto).0;
+    assert!(
+        has(&c, ActionKind::Write, &ws("config")),
+        "{:?}",
+        briefs(&c)
+    );
+    assert!(has(&c, ActionKind::Write, &ws(".git/config")));
+    assert_base(&linked, cmd);
+}
+
+/// 方案第 13 节实施审查第 2 轮：解析不了的调用里，白名单程序名（含经包装词）后面的每个字面词按保底角色
+/// 产出动作；watch、flock -c 的参数再解析。
+#[test]
+fn flat_words_use_program_floor() {
+    let linked = harness(|f| {
+        f.file(ws("src/config"));
+        f.link(ws("config"), ".git/config");
+    });
+    for cmd in [
+        format!("timeout 5 rm -rf {WS}"),
+        format!("nice -n 5 rm -rf {WS}"),
+        "caffeinate cp src/config .".into(),
+        "watch 'printf x > .git/config'".into(),
+        "watch -n 1 printf x '>' .git/config".into(),
+        "flock /tmp/l -c 'printf x > .git/config'".into(),
+        format!("flock /tmp/l rm -rf {WS}"),
+        format!("LC_ALL=C mv -t /tmp/d {WS}"),
+    ] {
+        assert_eq!(
+            norm(&bash_req(&cmd)).shape.kind(),
+            CallShapeKind::Unparsable,
+            "{cmd}"
+        );
+        for m in MODES3 {
+            assert!(
+                matches!(
+                    linked.verdict(&bash_req(&cmd), m),
+                    Verdict::Deny(DenyReason::Baseline(_))
+                ),
+                "{cmd}（{m:?}）"
+            );
+        }
+    }
+    // 对照：删工作区里的普通文件只是询问（解析不了，三档问）
+    unparsable_ask(&linked, "timeout 5 rm -rf src/a.rs");
+}
+
+/// 目录目标候选是词数的平方级：超过上限整条按资源上限拒，不截断。
+#[test]
+fn too_many_dir_candidates_is_resource_limit() {
+    let h = Harness::default();
+    let words: Vec<String> = (0..100).map(|i| format!("f{i}")).collect();
+    let cmd = format!("cp --zz-unknown {} dst", words.join(" "));
+    for m in MODES3 {
+        let (_, e) = h.eval(&bash_req(&cmd), m);
+        assert_eq!(
+            e.evaluation.verdict,
+            deny_rule("deny.resource-limit"),
+            "{m:?}"
+        );
+    }
+    // 对照：登记形态不走保底，词多也照常
+    let cmd = format!("cp {} dst", words.join(" "));
+    assert_eq!(three_on(&h, &cmd), ["Ask", "Allow", "Allow"]);
+}

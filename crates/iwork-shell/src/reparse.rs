@@ -9,8 +9,8 @@
 enum Rule {
     /// 后面每个字面参数各自一段
     EachArg,
-    /// `eval` 先把参数用空格连成一段再执行，引号可以跨参数（closeout 3/F-1）：连起来的一整段与
-    /// 每个参数各自一段，两样都入队
+    /// `eval`、`watch` 先把参数用空格连成一段再交给 shell 执行，引号可以跨参数（closeout 3/F-1）：
+    /// 连起来的一整段与每个参数各自一段，两样都入队
     JoinedAndEachArg,
     /// 后面有 `-c`（含 `c` 的短选项组）、`--command`、`--command=…` 时，每个字面参数各自一段
     EachArgWithCommandOption,
@@ -24,6 +24,8 @@ const REPARSE: &[(&str, Rule)] = &[
     ("ksh", Rule::EachArg),
     ("eval", Rule::JoinedAndEachArg),
     ("su", Rule::EachArgWithCommandOption),
+    ("flock", Rule::EachArgWithCommandOption),
+    ("watch", Rule::JoinedAndEachArg),
 ];
 
 /// 一串字面词里要再解析的文字。程序名不要求是第一个词（包装词后面的照样认），
@@ -91,6 +93,9 @@ mod tests {
         assert_eq!(t(&["su", "-c", "z", "root"]), ["-c", "z", "root"]);
         // 对照：su 没有命令选项、不在表里的程序都不入队
         assert!(t(&["su", "root"]).is_empty());
+        assert_eq!(t(&["watch", "-n", "1", "ls"]), ["-n 1 ls", "-n", "1", "ls"]);
+        assert_eq!(t(&["flock", "/tmp/l", "-c", "x"]), ["/tmp/l", "-c", "x"]);
+        assert!(t(&["flock", "/tmp/l", "make"]).is_empty());
         assert!(t(&["git", "commit", "-m", "Document .git/config format"]).is_empty());
         assert!(t(&["grep", "cat ~/.ssh/id_rsa", "notes.md"]).is_empty());
     }

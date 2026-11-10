@@ -52,17 +52,15 @@ pub enum Operands {
     },
 }
 
-/// 保底角色（方案 3.4，实施审查 1/F-1、8/F-4）：程序带未登记选项、不是安全形态时，位置参数仍按这些
-/// 角色产出路径动作。标准是「这个程序在**任何**选项组合下可能对位置操作数做的最重的事」，降级只能更严。
+/// 保底角色（方案 3.4，实施审查 1/F-1、8/F-4、第 2 轮 2/F-5）：程序带未登记选项不是安全形态、或出现在
+/// 解析不了的调用的扁平词里时，它后面的**每个**字面词都按这些角色产出路径动作，不按位置猜哪个是目的、
+/// 不丢选项值的角色（`mv -t /tmp/d --backup <根>` 的根是源）。标准是「这个程序在任何选项组合下可能对
+/// 操作数做的最重的事」，只能更严。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Floor {
-    /// 每个位置参数都是这些角色
-    All(&'static [Role]),
-    /// 最后一个是目的（按目录目标语义展开），其余是源
-    SourcesThenDest {
-        source: &'static [Role],
-        dest: &'static [Role],
-    },
+pub struct Floor {
+    pub roles: &'static [Role],
+    /// 目的可能是目录（`cp`、`mv`、`install`、`ln`）：每个词再与别的词的 basename 拼出写入候选
+    pub dir_target: bool,
 }
 
 /// 一个白名单程序的参数规则。
@@ -98,12 +96,17 @@ const fn spec(program: &'static str, flags: &'static str, operands: Operands) ->
 
 /// 保底角色默认取安全形态下的角色：模式、权限位这类前置参数也按同样角色记（只会多抽）；
 /// 没有路径角色的（`basename`、`tr`）按读。写文件只经选项值的程序（`sort -o`）由降级时叠加的
-/// 兜底候选覆盖。例外（`uniq` 的第二个操作数是输出文件）在白名单表里单独写。
+/// 兜底候选覆盖。源与目的分不清的复制类全部词既读又写并补目录目标候选；例外（`uniq` 的第二个
+/// 操作数是输出文件、`mv` 的源会被删）在白名单表里单独写。
 const fn floor_of(operands: Operands) -> Floor {
-    match operands {
-        Operands::All(&[]) => Floor::All(&[R]),
-        Operands::All(roles) | Operands::After { roles, .. } => Floor::All(roles),
-        Operands::SourcesThenDest { source, dest } => Floor::SourcesThenDest { source, dest },
+    let roles: &'static [Role] = match operands {
+        Operands::All(&[]) => &[R],
+        Operands::All(roles) | Operands::After { roles, .. } => roles,
+        Operands::SourcesThenDest { .. } => &[R, W],
+    };
+    Floor {
+        roles,
+        dir_target: matches!(operands, Operands::SourcesThenDest { .. }),
     }
 }
 
@@ -229,7 +232,10 @@ pub const SAFE_COMMANDS: &[ArgSpec] = &[
     },
     ArgSpec {
         max_operands: Some(1),
-        floor: Floor::All(&[R, W]),
+        floor: Floor {
+            roles: &[R, W],
+            dir_target: false,
+        },
         ..spec("uniq", "cdui", READ)
     },
     spec("comm", "123", READ),
@@ -306,6 +312,10 @@ pub const SAFE_COMMANDS: &[ArgSpec] = &[
     ArgSpec {
         short_values: &[('t', Value::TargetDir), ('T', Value::NoTargetDirFlag)],
         long_flags: &["no-target-directory"],
+        floor: Floor {
+            roles: &[R, W, D],
+            dir_target: true,
+        },
         ..spec(
             "mv",
             "fnv",

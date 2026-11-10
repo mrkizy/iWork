@@ -93,7 +93,8 @@ const CASES: &[(&str, CallShapeKind, [&str; 3])] = &[
     ("cat ~/Doc*/private.txt", U, ["Ask", "Ask", "Ask"]),
     ("GIT_SSH=x git pull", U, ["Ask", "Ask", "Ask"]),
     ("env git pull", U, ["Ask", "Ask", "Ask"]),
-    ("sudo rm -rf /", U, ["Ask", "Ask", "Ask"]),
+    // 包装词后面的白名单程序按保底角色取词（方案第 13 节实施审查第 2 轮）：删根是底线
+    ("sudo rm -rf /", U, ["Deny", "Deny", "Deny"]),
     // 包装词后面是另一条命令：删除不能藏在参数里被自动档放行（收口实施时补登记）
     ("timeout 5 rm -rf src", U, ["Ask", "Ask", "Ask"]),
     ("stdbuf -oL rm -rf src", U, ["Ask", "Ask", "Ask"]),
