@@ -362,8 +362,13 @@ pub fn evaluate_call(
         .collect();
     let fingerprints = call.fingerprints();
 
-    // 亲手执行卡片（5.4）：底线拒绝、单个简单命令或 Edit、没有子动作在拒绝记忆里、不是系统回合
+    // 亲手执行卡片（5.4）：底线拒绝、单个简单命令或 Edit、没有子动作在拒绝记忆里、不是系统回合，
+    // 且整条调用没有底线以外的硬拒绝（路径查不清、拒绝规则、工具被禁用等三档拒、不出卡片，2/F-6）
+    let other_hard_deny = per_action
+        .iter()
+        .any(|e| matches!(&e.verdict, Verdict::Deny(r) if !matches!(r, DenyReason::Baseline(_))));
     if evaluation.layer_hit == RuleLayer::Baseline
+        && !other_hard_deny
         && ctx.turn_kind == TurnKind::Assistant
         && fingerprints.iter().all(|fp| ctx.denial.get(fp).is_none())
         && let Some(p) = proposal::propose_user_action(call)

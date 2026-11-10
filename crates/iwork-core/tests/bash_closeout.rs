@@ -748,3 +748,34 @@ fn denial_key_survives_parent_creation() {
     // 对照：别的文件照常
     assert_eq!(h.verdict(&write_req("DIR/other.txt"), Auto), Verdict::Allow);
 }
+
+/// 2/F-6：路径查不清与底线同时命中（`gate` 没有搜索权限）：单条命令也不出卡片，三档拒。
+/// 同类：拒绝规则、拒绝记忆与底线并存时同样不出卡片。
+#[test]
+fn unresolved_and_baseline_does_not_offer_card() {
+    let h = harness(|f| {
+        f.add(ws("gate"));
+        f.deny(ws("gate"));
+    });
+    for m in MODES3 {
+        let (c, e) = h.eval(&bash_req("cp gate/a .git/config"), m);
+        assert!(
+            matches!(e.evaluation.verdict, Verdict::Deny(_)),
+            "{m:?}：{:?}\n动作 {:?}",
+            e.evaluation.verdict,
+            briefs(&c)
+        );
+        assert!(
+            e.per_action
+                .iter()
+                .any(|x| x.verdict == deny_rule("deny.path-unresolved"))
+        );
+    }
+    // 对照：没有查不清的路径时照常出卡片
+    for m in MODES3 {
+        assert!(matches!(
+            h.verdict(&bash_req("cp src/a.rs .git/config"), m),
+            Verdict::UserAction(_)
+        ));
+    }
+}
