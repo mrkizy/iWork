@@ -36,6 +36,11 @@ pub trait PermissionDecider: Send + Sync + 'static {
         turn_id: TurnId,
         reason: VoidReason,
     ) -> impl Future<Output = Vec<DomainEvent>> + Send;
+
+    /// 编排已成功提交事件；判定方此时才能应用作废计划。失败时不会调用。
+    fn committed(&self, _events: &[DomainEvent]) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 }
 
 /// 审批桩：全部放行或全部拒绝，运行中可切换。T07 完成后由审批引擎替换。

@@ -1,7 +1,7 @@
 //! 引擎测试用的端口假实现：内存存储、计数时钟与 ID、可编排的审查运行时、可控定时器。
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -21,6 +21,8 @@ use iwork_ports::store::{
 #[derive(Default, Clone)]
 pub struct MemStore {
     pub events: Arc<Mutex<Vec<StoredEvent>>>,
+    pub fail_next: Arc<AtomicBool>,
+    pub receipt_gate: Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>,
 }
 
 impl MemStore {
@@ -39,22 +41,32 @@ impl MemStore {
 
 impl StoragePort for MemStore {
     async fn commit(&self, req: CommitRequest) -> Result<CommitReceipt, StorageError> {
-        let mut events = self.events.lock().unwrap();
-        let first = Seq(events.len() as u64 + 1);
-        for e in req.events {
-            let seq = Seq(events.len() as u64 + 1);
-            events.push(StoredEvent {
-                seq,
-                at: Timestamp(0),
-                actor: req.actor.clone(),
-                event: e,
-            });
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(StorageError::Busy);
         }
-        Ok(CommitReceipt {
-            first_seq: first,
-            last_seq: Seq(events.len() as u64),
-            replayed: false,
-        })
+        let receipt = {
+            let mut events = self.events.lock().unwrap();
+            let first = Seq(events.len() as u64 + 1);
+            for e in req.events {
+                let seq = Seq(events.len() as u64 + 1);
+                events.push(StoredEvent {
+                    seq,
+                    at: Timestamp(0),
+                    actor: req.actor.clone(),
+                    event: e,
+                });
+            }
+            CommitReceipt {
+                first_seq: first,
+                last_seq: Seq(events.len() as u64),
+                replayed: false,
+            }
+        };
+        let gate = self.receipt_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+        Ok(receipt)
     }
     async fn head_seq(&self) -> Result<Seq, StorageError> {
         Ok(Seq(self.events.lock().unwrap().len() as u64))

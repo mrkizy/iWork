@@ -432,10 +432,12 @@ where
         let request = CommitRequest {
             command_id: CommandId::from_raw(self.ports.ids.next()),
             actor: Actor(ORCHESTRATOR_ACTOR.into()),
-            events,
+            events: events.clone(),
             outbox: Vec::new(),
         };
-        self.ports.store.commit(request).await.map(|_| ())
+        self.ports.store.commit(request).await?;
+        self.decider.committed(&events).await;
+        Ok(())
     }
 
     /// 推进一步状态，返回要写入的事件：状态变化，以及这一步作废的审批（取消、失败时）。

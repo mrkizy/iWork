@@ -638,6 +638,7 @@ async fn void_and_wait_limit() {
         let h = b.ask(&d, turn(1), bash_req("npm test"));
         let id = b.approval(0).await;
         let events = d.void_pending(turn(1), reason).await;
+        d.committed(&events).await;
         assert!(
             events
                 .iter()
@@ -666,6 +667,7 @@ async fn void_and_wait_limit() {
         let h = b.ask(&d, turn(1), bash_req("npm test"));
         let id = b.approval(0).await;
         let events = b.engine.void_for_event(&event).await;
+        b.engine.committed(&events).await;
         assert_eq!(events.len(), 1, "{events:?}");
         settle(h).await;
         assert!(
@@ -890,6 +892,7 @@ async fn engine_recovers_pending_from_events() {
         .recover(&b.store.stored(), |_| Some(keys()))
         .await;
     assert_eq!(abandoned.len(), 1);
+    fresh.engine.committed(&abandoned).await;
     let recovered = fresh.engine.pending_approval(reviewing).await.unwrap();
     assert!(matches!(
         recovered.review,
@@ -1071,3 +1074,6 @@ async fn audit_snapshot_reconstructible() {
     }
     assert_eq!(checked, 3, "三次求值各一条审计");
 }
+
+#[path = "engine/review_round1_b.rs"]
+mod review_round1_b;
