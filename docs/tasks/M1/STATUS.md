@@ -33,7 +33,7 @@
 | --- | --- | --- | --- | --- | --- |
 | T01 | 已合入 main `bb6d69a` | — | `2026-11-09-m1-t01` 已关 | 验收 5 空窗口截图未补 | 有空时补截图 |
 | T02 | **已合入 main `2018280`**（ADR 0007–0009） | developer `fecce968` 待删（删除超时，重开后再删）；retrospector 已复盘（给 developer 存 2 条 lesson），终端 `91a45c1b` 可删 | `2026-11-10-m1-t02` 已关（两轮 8 条全 fixed） | — | — |
-| T03 | 实施分支 `cao/2e7bcbe5` @ `4422491`（已推送） | developer `b271f92f` | 实施 `2026-11-10-m1-t03` 第 1 轮 10 条已修，回报 docs/tasks/M1/T03-review-round1.md | F-1～F-10 待第 2 轮核 | developer 合 main + 写 N2 结论进 t0-findings + 看 CI；之后开 A/B 两块新 reviewer 做第 2 轮。**N2 实测：Windows 按句柄绑定不成立，M1 暂不支持 Windows（产品负责人此前批准的默认规则）** |
+| T03 | 实施分支 `cao/2e7bcbe5` @ `4422491`（已推送） | developer `b271f92f` | 实施 `2026-11-10-m1-t03` 第 1 轮 10 条已修，回报 docs/tasks/M1/T03-review-round1.md | F-1～F-10 待第 2 轮核 | HEAD `5e59dc8`，CI run 42766861250 全绿；第 2 轮审查中：A 块 `2ebe217e`、B 块 `215a49bc`。**N2 实测：Windows 按句柄绑定不成立，M1 暂不支持 Windows（产品负责人此前批准的默认规则）** |
 | T05 | 已合入 main `a6987d4`；Windows 偶发测试修复已合入 `a6a5007` | — | 已关；`2026-11-10-m1-t05-flake` 1 轮通过 | — | — |
 | （方案复盘） | T03、T07 方案 | retrospector `f77efc99` 已复盘（给 architect 存 3 条 lesson），终端可删 | — | — | — |
 | T07 | **方案定稿 `4e27665`**（需求 v1.74 登记已知限制）；实施分支 `cao/009e8660` @ `14e4513` | developer `f8877913`（在 worktree 里按定稿方案实施剩余项）；architect `e7a8c21c`、方案复核 `6da87074` 可删 | 实施 `2026-11-10-m1-t07` 第 1 轮：A 块 7 条、B 块 13 条已修，F-12 已关；方案收口任务 `2026-11-10-m1-t07-plan-closeout` 已全关 | F-1、F-2、F-6、F-7 与收口新规则待实施 | 实施完成后 A/B 两块第 2 轮代码审查 |
