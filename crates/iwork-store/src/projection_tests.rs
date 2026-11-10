@@ -111,6 +111,17 @@ fn base(feed: &Feed<'_>) {
     ]);
 }
 
+/// `base` 里回合的助手（`turn()` 夹具用 `aid(1)`）。审批与卡片写入前要查归属存续（方案 2.6），
+/// 建它们的用例先调这个。
+fn owner_assistant(feed: &Feed<'_>) {
+    feed.ok(vec![
+        AssistantCreated {
+            assistant: assistant(1, false),
+        }
+        .into(),
+    ]);
+}
+
 // ---------- 快照覆盖范围核对表（方案 2.6） ----------
 
 #[test]
@@ -121,6 +132,7 @@ fn snapshot_roundtrip_all_entities() {
     let rm = read_model(&store);
     let codec = ProtoEventCodec;
     base(&feed);
+    owner_assistant(&feed);
 
     // Project / Assistant / AssistantVersion
     let mut a = assistant(2, true);
@@ -140,7 +152,11 @@ fn snapshot_roundtrip_all_entities() {
     ]);
     a.current.version = 2;
     a.current.created_at = Timestamp(T0);
-    assert_eq!(block(rm.assistants()).unwrap(), vec![a.clone()]);
+    // 第二个是回合所属的助手（owner_assistant）
+    assert_eq!(
+        block(rm.assistants()).unwrap(),
+        vec![a.clone(), assistant(1, false)]
+    );
     let v = snapshot::decode_assistant_version(
         &codec,
         &conn(&env)
@@ -326,6 +342,7 @@ fn approval_terminal_states_online_and_rebuilt() {
     let store = env.open();
     let feed = Feed::new(&store);
     base(&feed);
+    owner_assistant(&feed);
     let mut expected = Vec::new();
     let mut n = 50;
     let mut push = |state: ApprovalState, event: Option<DomainEvent>, n: u128| {
@@ -388,6 +405,7 @@ fn approval_decided_sets_decided_at_from_envelope() {
     let store = env.open();
     let feed = Feed::new(&store);
     base(&feed);
+    owner_assistant(&feed);
     feed.ok(vec![
         ApprovalRequested {
             approval: approval(1, 20, 10),
@@ -705,6 +723,7 @@ fn conversation_deleted_cascades() {
     let store = env.open();
     let feed = Feed::new(&store);
     base(&feed);
+    owner_assistant(&feed);
     feed.ok(vec![
         ConversationCreated {
             conversation: project_conversation(11, 1),
@@ -917,6 +936,7 @@ fn unread_counts_messages_and_cards_and_recomputes_on_read() {
     let store = env.open();
     let feed = Feed::new(&store);
     base(&feed);
+    owner_assistant(&feed);
     let unread = || {
         block(read_model(&store).conversation(
             cid(10),

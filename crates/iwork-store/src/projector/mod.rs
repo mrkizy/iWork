@@ -1,7 +1,8 @@
 //! `SqliteProjector`：按事件更新投影表（方案 2.6）。
 //!
 //! 规则：
-//! - **不跑状态机**：事件里给出的目标状态直接写进去；合不合法在提交前由 core/app 判过。
+//! - **不跑状态机**，只有一处例外：审批与亲手执行卡片在写入前校验状态前提与归属存续（`owner.rs`，判断在
+//!   `iwork-domain`）；不通过报 `Projection`、整条命令回滚。别的实体的状态照事件直接写。
 //! - **只由事件决定**：不持有任何依赖环境的默认值（默认值在读模型补），同一事件序列在空表上
 //!   重放得到同一张表。
 //! - **缺行报错**：更新事件找不到目标行 → `Projection{seq}`，命令回滚，不吞。
@@ -17,6 +18,7 @@ mod assistants;
 mod attachments;
 mod conversations;
 mod messages;
+pub(crate) mod owner;
 mod projects;
 mod rules;
 mod runtimes;
@@ -104,17 +106,17 @@ fn dispatch<C: EventCodec + ?Sized>(
         E::TurnModelReported(e) => turns::model_reported(cx, e),
         E::ToolCallStarted(e) => turns::tool_call_started(cx, e),
         E::ToolCallFinished(e) => turns::tool_call_finished(cx, e),
-        E::ApprovalRequested(e) => approvals::requested(cx, e),
-        E::ApprovalReviewUpdated(e) => approvals::review_updated(cx, e),
-        E::ApprovalDecided(e) => approvals::decided(cx, e.approval_id, e.state),
-        E::ApprovalVoided(e) => approvals::voided(cx, e),
+        E::ApprovalRequested(e) => approvals::requested(cx, e, event),
+        E::ApprovalReviewUpdated(e) => approvals::review_updated(cx, e, event),
+        E::ApprovalDecided(e) => approvals::decided(cx, e.approval_id, e.state, event),
+        E::ApprovalVoided(e) => approvals::voided(cx, e, event),
         E::RuleRemembered(e) => rules::added(cx, &e.rule),
         E::SecurityListEntryAdded(e) => rules::added(cx, &e.rule),
         E::RuleRevoked(e) => rules::removed(cx, e.rule_id),
         E::SecurityListEntryRemoved(e) => rules::removed(cx, e.entry_id),
         E::RulesDeleted(e) => e.rule_ids.iter().try_for_each(|id| rules::removed(cx, *id)),
-        E::UserActionProposed(e) => user_actions::proposed(cx, e),
-        E::UserActionStateChanged(e) => user_actions::state_changed(cx, e),
+        E::UserActionProposed(e) => user_actions::proposed(cx, e, event),
+        E::UserActionStateChanged(e) => user_actions::state_changed(cx, e, event),
         E::AttachmentStored(e) => attachments::stored(cx, e),
         E::AttachmentConfirmed(e) => attachments::confirmed(cx, e),
         E::RuntimeUpdated(e) => runtimes::updated(cx, e),

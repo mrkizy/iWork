@@ -618,3 +618,151 @@ impl Approval {
         }
     }
 }
+
+// ---------- 提交时校验（T02 方案 2.6「状态前提」、T07 方案 6.10.7）----------
+
+/// 已落盘的状态接不了这条事件。`message` 点名现在的状态与事件要的状态，由存储层加上实体 id。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct PreconditionFailed {
+    pub message: String,
+}
+
+impl PreconditionFailed {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+/// 审批事件的状态前提：已落盘的主状态 `state` 与审查子状态 `review` 能不能接 `event`。
+/// 只看审批流里会改已有审批的三种事件，别的事件一律通过。读的是 [`APPROVAL_TRANSITIONS`] 与
+/// [`REVIEW_TRANSITIONS`]：主状态表的边都从 `Pending` 出发，所以「主状态是 Pending」就是「是表里的边」。
+pub fn check_committed(
+    state: ApprovalState,
+    review: &ReviewState,
+    event: &crate::event::DomainEvent,
+) -> Result<(), PreconditionFailed> {
+    use crate::event::DomainEvent as E;
+    let require_pending = |what: &str| {
+        if state == ApprovalState::Pending {
+            Ok(())
+        } else {
+            Err(PreconditionFailed::new(format!(
+                "{what}要求审批是 Pending，现在是 {state:?}"
+            )))
+        }
+    };
+    match event {
+        E::ApprovalDecided(e) => match e.state {
+            ApprovalState::Approved { .. } | ApprovalState::Denied => require_pending("批准或拒绝"),
+            other => Err(PreconditionFailed::new(format!(
+                "ApprovalDecided 只记批准与拒绝，不能是 {other:?}"
+            ))),
+        },
+        E::ApprovalVoided(_) => require_pending("作废"),
+        E::ApprovalReviewUpdated(e) => {
+            require_pending("审查更新")?;
+            let (from, to) = (review.phase(), e.review.phase());
+            if !REVIEW_TRANSITIONS
+                .iter()
+                .any(|(a, _, b)| *a == from && *b == to)
+            {
+                return Err(PreconditionFailed::new(format!(
+                    "审查子状态 {from:?} → {to:?} 不是 REVIEW_TRANSITIONS 里的边"
+                )));
+            }
+            if to != ReviewPhase::InProgress && e.review.review_id() != review.review_id() {
+                return Err(PreconditionFailed::new(format!(
+                    "审查结果的 review_id {:?} 与正在跑的 {:?} 不同",
+                    e.review.review_id(),
+                    review.review_id()
+                )));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// 有没有记录（不是「还在跑」：回合结束了记录仍在）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Presence {
+    Present,
+    Gone,
+}
+
+/// 回合所在的对话：在、删除中、没有记录。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConversationPresence {
+    Present,
+    Deleting,
+    Gone,
+}
+
+/// 一条审批或卡片的归属事实（T07 方案 6.10.7）：判断「它的回合、对话、助手还在不在」要用的三样。
+/// 存储一侧读行、引擎折叠一侧查表，各自给出这一份；判断只在 [`owner_alive`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OwnerFacts {
+    /// 所属回合有没有记录
+    pub turn: Presence,
+    /// 回合所在的对话。`turn` 是 `Gone` 时不看
+    pub conversation: ConversationPresence,
+    /// 回合的助手有没有记录。`turn` 是 `Gone` 时不看
+    pub assistant: Presence,
+}
+
+/// 缺的是哪一样。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+pub enum OwnerGone {
+    #[error("回合没有记录")]
+    Turn,
+    #[error("对话正在删除")]
+    ConversationDeleting,
+    #[error("对话没有记录")]
+    Conversation,
+    #[error("助手没有记录")]
+    Assistant,
+}
+
+/// 归属存续：按回合 → 对话 → 助手的顺序看，报第一样缺的。
+pub fn owner_alive(facts: &OwnerFacts) -> Result<(), OwnerGone> {
+    if facts.turn == Presence::Gone {
+        return Err(OwnerGone::Turn);
+    }
+    match facts.conversation {
+        ConversationPresence::Gone => return Err(OwnerGone::Conversation),
+        ConversationPresence::Deleting => return Err(OwnerGone::ConversationDeleting),
+        ConversationPresence::Present => {}
+    }
+    if facts.assistant == Presence::Gone {
+        return Err(OwnerGone::Assistant);
+    }
+    Ok(())
+}
+
+/// 归属不在时用什么原因作废：助手没了 → `AssistantDeleted`；别的三样 → `ConversationDeleted`
+/// （回合的记录只会随对话一起消失）。
+pub fn void_reason_for(gone: OwnerGone) -> VoidReason {
+    match gone {
+        OwnerGone::Assistant => VoidReason::AssistantDeleted,
+        OwnerGone::Turn | OwnerGone::ConversationDeleting | OwnerGone::Conversation => {
+            VoidReason::ConversationDeleted
+        }
+    }
+}
+
+/// 这条事件写入前要不要查归属存续（建审批、建卡片、批准、卡片启动）。拒绝、作废、关闭、审查更新不查：
+/// 孤儿要能被清掉。存储与引擎共用这一处。
+pub fn requires_owner(event: &crate::event::DomainEvent) -> bool {
+    use crate::event::DomainEvent as E;
+    match event {
+        E::ApprovalRequested(_) | E::UserActionProposed(_) => true,
+        E::ApprovalDecided(e) => matches!(e.state, ApprovalState::Approved { .. }),
+        E::UserActionStateChanged(e) => {
+            matches!(e.state, crate::user_action::UserActionState::Starting)
+        }
+        _ => false,
+    }
+}
