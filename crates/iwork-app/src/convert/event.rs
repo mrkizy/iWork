@@ -169,6 +169,10 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
             ok: e.ok,
             output_artifact: e.output_artifact.as_ref().map(artifact_ref_to_proto),
         }),
+        DomainEvent::TurnSessionBound(e) => P::TurnSessionBound(pb::TurnSessionBound {
+            turn_id: e.turn_id.to_string(),
+            runtime_session_id: e.runtime_session_id.clone(),
+        }),
         DomainEvent::ApprovalRequested(e) => P::ApprovalRequested(pb::ApprovalRequested {
             approval: Some(approval_to_proto(&e.approval)?),
         }),
@@ -676,6 +680,11 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
             tool_call_id: ToolCallId(e.tool_call_id),
             ok: e.ok,
             output_artifact: opt_artifact(e.output_artifact.as_ref())?,
+        }
+        .into(),
+        P::TurnSessionBound(e) => ev::TurnSessionBound {
+            turn_id: parse_id("TurnSessionBound", "turn_id", &e.turn_id)?,
+            runtime_session_id: e.runtime_session_id,
         }
         .into(),
         P::ApprovalRequested(e) => ev::ApprovalRequested {

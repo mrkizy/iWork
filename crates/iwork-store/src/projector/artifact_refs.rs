@@ -126,6 +126,7 @@ fn refs_in(event: &DomainEvent) -> Vec<Found> {
         | E::TurnStateChanged(_)
         | E::TurnFinished(_)
         | E::TurnModelReported(_)
+        | E::TurnSessionBound(_)
         | E::ToolCallStarted(_)
         | E::ApprovalRequested(_)
         | E::ApprovalReviewUpdated(_)

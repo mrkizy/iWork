@@ -1,5 +1,14 @@
-//! 回合编排的最小闭环（技术设计 6.4、3.5）：开会话或续接 → prompt → 把更新流转成领域事件写入存储、
-//! 把正文增量推出去 → 按回合转换表推进状态 → 结束。
+//! 回合编排的最小闭环（技术设计 6.4、3.5）：开会话或续接 → 提交「开始执行」→ prompt → 把更新流转成
+//! 领域事件写入存储、把正文增量推出去 → 按回合转换表推进状态 → 结束。
+//!
+//! 派发顺序守着重启后核对的两条事实（需求 12「不静默重放」；T04 方案 1.1 的 P1、P2）：
+//! 1. 先确保有会话（新开或续接），拿到运行时会话 ID；
+//! 2. 一次提交写下会话绑定（`TurnSessionBound`）、回合进 `Running`、空的助手消息；
+//! 3. 然后才发 prompt。
+//!
+//! 所以库里是 `Queued` 的回合一定没发过 prompt，`Running` 及之后的回合会话 ID 已落盘（运行时报不出
+//! ID 时除外）。第 1、2 步之间崩溃：回合还是 `Queued`、没有 ID，运行时只开了会话、没收到 prompt，
+//! 重启后照常派发是安全的。prompt 发不出去（如进程已退出且续接失败）时回合已是 `Running`，按失败收尾。
 //!
 //! 回合状态只在 [`SessionLine::run_turn`] 的循环里写。它同时等四路输入，优先次序：
 //! 1. **取消**：最先处理，更新再多也不会被饿死；回合结束前还会再看一眼有没有已收到的取消；
@@ -34,7 +43,8 @@ use iwork_domain::action::{Action, ActionFlags, ActionKind, ActionTarget};
 use iwork_domain::common::{Actor, Usage};
 use iwork_domain::event::{
     DomainEvent, MessageAppended, MessageCompleted, QuotaObserved, ToolCallFinished,
-    ToolCallStarted, TurnFinished, TurnModelReported, TurnStateChanged, UsageReported,
+    ToolCallStarted, TurnFinished, TurnModelReported, TurnSessionBound, TurnStateChanged,
+    UsageReported,
 };
 use iwork_domain::id::{CommandId, MessageId, ProjectId, TurnId};
 use iwork_domain::message::{Author, Message, MessageBody, MessageStatus};
@@ -212,16 +222,28 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         let timer = ports.timer;
         let mut run = TurnRun::new(turn, ports, &*decider);
 
-        let mut updates = match self.start(agent, spec, blocks).await {
-            Ok(updates) => updates,
+        let reused = match self.ensure_session(agent, &spec).await {
+            Ok(reused) => reused,
             Err(e) => {
                 run.fail_before_start(&e).await?;
                 return Ok(run.turn.state);
             }
         };
-        run.started(assistant_name, context_project_id).await?;
+        run.started(self.resume.clone(), assistant_name, context_project_id)
+            .await?;
+        let mut updates = match self.prompt(agent, spec, blocks, reused, &mut run).await? {
+            Ok(updates) => updates,
+            Err(e) => {
+                let process_gone = matches!(e, AgentError::ProcessExited { .. });
+                run.finish(End::Failed(e)).await?;
+                if process_gone {
+                    self.session = None;
+                }
+                return Ok(run.turn.state);
+            }
+        };
 
-        let session = self.session.as_ref().expect("start 成功后一定有会话");
+        let session = self.session.as_ref().expect("prompt 成功后一定有会话");
         let mut sched = Scheduler::default();
         let end = loop {
             let mut next = pin!(updates.next());
@@ -263,19 +285,16 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         Ok(run.turn.state)
     }
 
-    /// 确保有会话并发出 prompt。已有会话的进程退出了（崩溃、取消时被结束）就续接一次再发。
-    async fn start(
-        &mut self,
-        agent: &A,
-        mut spec: SessionSpec,
-        blocks: Vec<ContentBlock>,
-    ) -> Result<<A::Session as AgentSession>::Updates, AgentError> {
-        if let Some(session) = &self.session {
-            match session.prompt(blocks.clone()).await {
-                Err(AgentError::ProcessExited { .. }) => self.session = None,
-                other => return other,
-            }
+    /// 确保有会话：已有就沿用（返回 `true`），没有就按记下的 ID 续接或新开（返回 `false`）。
+    async fn ensure_session(&mut self, agent: &A, spec: &SessionSpec) -> Result<bool, AgentError> {
+        if self.session.is_some() {
+            return Ok(true);
         }
+        self.open_session(agent, spec.clone()).await?;
+        Ok(false)
+    }
+
+    async fn open_session(&mut self, agent: &A, mut spec: SessionSpec) -> Result<(), AgentError> {
         spec.resume = self.resume.clone();
         let gate = PermissionGate {
             slot: self.slot.clone(),
@@ -283,8 +302,43 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         };
         let session = agent.open_session(spec, gate).await?;
         self.resume = session.runtime_session_id().map(str::to_owned);
-        let session = self.session.insert(session);
-        session.prompt(blocks).await
+        self.session = Some(session);
+        Ok(())
+    }
+
+    /// 发 prompt（回合已提交为 `Running`）。沿用的会话进程已经退出（崩溃、取消时被结束）时，
+    /// prompt 没送到：续接一次，先把新会话的绑定落盘，再发。外层错误是编排自己的错误，
+    /// 内层是运行时的错误（回合按失败收尾）。
+    async fn prompt<S, C, I, L, T>(
+        &mut self,
+        agent: &A,
+        spec: SessionSpec,
+        blocks: Vec<ContentBlock>,
+        reused: bool,
+        run: &mut TurnRun<'_, S, C, I, L, T, D>,
+    ) -> Result<Result<<A::Session as AgentSession>::Updates, AgentError>, TurnRunError>
+    where
+        S: StoragePort,
+        C: Clock,
+        I: IdGenerator,
+        L: LivePublisher,
+        T: Timer,
+    {
+        let session = self
+            .session
+            .as_ref()
+            .expect("ensure_session 成功后一定有会话");
+        let first = session.prompt(blocks.clone()).await;
+        if !(reused && matches!(first, Err(AgentError::ProcessExited { .. }))) {
+            return Ok(first);
+        }
+        self.session = None;
+        if let Err(e) = self.open_session(agent, spec).await {
+            return Ok(Err(e));
+        }
+        run.bind_session(self.resume.clone()).await?;
+        let session = self.session.as_ref().expect("刚开好会话");
+        Ok(session.prompt(blocks).await)
     }
 }
 
@@ -470,14 +524,47 @@ where
         Ok(())
     }
 
+    /// 会话 ID 与回合上记着的不同时，返回要写的绑定事件，并记到回合上。
+    fn session_binding(&mut self, runtime_session_id: Option<String>) -> Option<DomainEvent> {
+        let id = runtime_session_id?;
+        if self.turn.runtime_session_id.as_deref() == Some(id.as_str()) {
+            return None;
+        }
+        self.turn.runtime_session_id = Some(id.clone());
+        Some(
+            TurnSessionBound {
+                turn_id: self.turn.id,
+                runtime_session_id: id,
+            }
+            .into(),
+        )
+    }
+
+    /// 回合换了会话（续接时运行时给了新 ID）：发 prompt 之前单独落盘。
+    async fn bind_session(
+        &mut self,
+        runtime_session_id: Option<String>,
+    ) -> Result<(), TurnRunError> {
+        if let Some(event) = self.session_binding(runtime_session_id) {
+            self.commit(vec![event]).await?;
+        }
+        Ok(())
+    }
+
+    /// 发 prompt 之前的那次提交：会话绑定、进 `Running`、空的助手消息。
     async fn started(
         &mut self,
+        runtime_session_id: Option<String>,
         assistant_name: String,
         context_project_id: Option<ProjectId>,
     ) -> Result<(), TurnRunError> {
         let message_id = MessageId::from_raw(self.ports.ids.next());
         self.message_id = Some(message_id);
-        let mut events = self.step(TurnTrigger::Started, None).await?;
+        let mut events: Vec<DomainEvent> = self
+            .session_binding(runtime_session_id)
+            .into_iter()
+            .collect();
+        events.extend(self.step(TurnTrigger::Started, None).await?);
         let author = Author::Assistant {
             id: self.turn.assistant_id,
             name_snapshot: assistant_name,

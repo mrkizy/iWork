@@ -1,4 +1,4 @@
-//! 任意 domain 事件的生成器：每个事件变体一个策略，配上它的种类名，覆盖全部 52 个变体。
+//! 任意 domain 事件的生成器：每个事件变体一个策略，配上它的种类名，覆盖全部 53 个变体。
 
 use std::path::PathBuf;
 
@@ -1087,6 +1087,15 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                             output_artifact,
                         }
                     }),
+            ),
+        ),
+        (
+            "turn_session_bound",
+            boxed(
+                (turn_id(), text()).prop_map(|(turn_id, runtime_session_id)| TurnSessionBound {
+                    turn_id,
+                    runtime_session_id,
+                }),
             ),
         ),
         (

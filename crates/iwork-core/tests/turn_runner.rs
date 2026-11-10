@@ -628,7 +628,14 @@ async fn storage_failure_at_any_stage_stops_the_runtime() {
         }
         let (line, _) = b.line();
         let task = b.spawn(line, b.plan());
-        b.wait_prompts(1).await;
+        // 「开始执行」写不进去时 prompt 不发：库里还是 Queued，就一定没发过 prompt
+        let expected_prompts = match stage {
+            Stage::Started => 0,
+            _ => 1,
+        };
+        if expected_prompts > 0 {
+            b.wait_prompts(expected_prompts).await;
+        }
         let mut pending_ask = None;
         match stage {
             Stage::Started => {}
@@ -655,7 +662,11 @@ async fn storage_failure_at_any_stage_stops_the_runtime() {
             assert_eq!(ask.await.unwrap(), gone(), "挂着的权限请求被拒");
         }
         assert_eq!(b.ctl.ask().await.unwrap(), gone(), "迟到的权限回调被拒");
-        assert_eq!(b.ctl.prompts.load(Ordering::SeqCst), 1, "不重发 prompt");
+        assert_eq!(
+            b.ctl.prompts.load(Ordering::SeqCst),
+            expected_prompts,
+            "不重发 prompt"
+        );
     }
 }
 
