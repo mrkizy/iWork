@@ -1,9 +1,10 @@
-# N2（docs/plans/T03.md 8.2）：Windows 上的自签 Authenticode、WinVerifyTrust 返回码、
+﻿# N2（docs/plans/T03.md 8.2）：Windows 上的自签 Authenticode、WinVerifyTrust 返回码、
 # 改名后的进程映像路径、命名管道两端 pid。结论写进 docs/design/t0-findings.md「T03 本机通信实测 · Windows」。
 #
 # 用法（仓库根目录，普通用户的 PowerShell 5.1 或 7）：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools/t0/iwork-t03-windows-authenticode.ps1
 # 输出：tools/t0/out/t03-windows/（transcript.txt 是完整记录）。
+# 文件要保存成带 BOM 的 UTF-8：PowerShell 5.1 把不带 BOM 的文件当 ANSI 读，中文字符串会解析失败。
 #
 # 决定性的一项是 ⑥(b)：改名运行中进程的 exe 后，QueryFullProcessImageNameW(PROCESS_NAME_NATIVE) 返回新名
 # （live.old.exe）→ 绑定成立，可以把 crates/iwork-ipc/src/peer/windows_image.rs 的 IMAGE_BINDING_VERIFIED 改成 true；
