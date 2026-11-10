@@ -93,6 +93,9 @@ enum ErrorCode {
   ERROR_CODE_CLONE_FAILED = 95;
   // 用户未配置提交身份。
   ERROR_CODE_VCS_IDENTITY_MISSING = 96;
+  // 仓库项目标记里的 ID 已登记给另一个位置的项目（标记默认被忽略、不进版本控制；用户强制提交后
+  // 仓库被另克隆一份时会出现）；details 带冲突的 ID 与已登记项目的路径。
+  ERROR_CODE_PROJECT_ID_CONFLICT = 97;
 
   // 规则与清单 110–119
   ERROR_CODE_SECURITY_LIST_ENTRY_REJECTED = 110;
