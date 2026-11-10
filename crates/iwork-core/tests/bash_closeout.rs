@@ -716,3 +716,35 @@ fn rule_path_alias_cases() {
     });
     assert!(h.snap.rule_paths.is_empty(), "{:?}", h.snap.rule_paths);
 }
+
+/// 2/F-7（1/F-10 残留）：大小写不敏感时，拒绝 `Write DIR/New.TXT`（DIR 还不存在）→ 获准 `mkdir DIR` →
+/// 原样重试，仍被拒绝记忆挡住；跨工具（重定向）同样。
+#[test]
+fn denial_key_survives_parent_creation() {
+    use iwork_core::approval::denial::{DenialEvent, DenialMemory};
+    let mut h = Harness {
+        fs: fs_ci(true),
+        ..Harness::default()
+    };
+    h.snap = snapshot_on(Manual, &[], &env(), Seq(0), &h.fs);
+    let (call, _) = h.eval(&write_req("DIR/New.TXT"), Auto);
+    h.denial = DenialMemory::replay(&[DenialEvent::UserDenied(call.fingerprints())]);
+    assert_eq!(h.verdict(&bash_req("mkdir DIR"), Auto), Verdict::Allow);
+    h.fs.add(ws("DIR"));
+    for req in [
+        write_req("DIR/New.TXT"),
+        bash_req("printf x > dir/new.txt"),
+        write_req(&ws("Dir/NEW.txt")),
+    ] {
+        assert!(
+            matches!(
+                h.verdict(&req, Auto),
+                Verdict::Deny(DenyReason::DenialMemory(_))
+            ),
+            "{}",
+            req.raw_input.0
+        );
+    }
+    // 对照：别的文件照常
+    assert_eq!(h.verdict(&write_req("DIR/other.txt"), Auto), Verdict::Allow);
+}

@@ -108,12 +108,12 @@ impl FakeFs {
         }
     }
 
-    /// 还不存在的分量：大小写不敏感时统一成小写，同一个将创建的文件只有一种写法（审查 1/F-10）。
-    fn missing_name(&self, name: &std::ffi::OsStr) -> OsString {
+    /// 大小写不敏感时把整条路径折成小写，与真实实现相同（2/F-7）。
+    fn fold(&self, p: PathBuf) -> PathBuf {
         if self.case_insensitive {
-            OsString::from(name.to_string_lossy().to_lowercase())
+            PathBuf::from(p.to_string_lossy().to_lowercase())
         } else {
-            name.to_owned()
+            p
         }
     }
 
@@ -167,7 +167,7 @@ impl FakeFs {
                 Part::Name(name) => {
                     let candidate = current.join(&name);
                     if missing {
-                        current = current.join(self.missing_name(&name));
+                        current = current.join(&name);
                         continue;
                     }
                     // 查 current 里的东西：current 自己必须是能进去的目录
@@ -186,7 +186,7 @@ impl FakeFs {
                     match self.lstat(&candidate) {
                         Entry::Missing => {
                             missing = true;
-                            current = current.join(self.missing_name(&name));
+                            current = current.join(&name);
                         }
                         Entry::Exists(actual, _) => current = actual,
                         Entry::Link(target) => {
@@ -254,8 +254,8 @@ impl PathResolver for FakeFs {
             }
         };
         Ok(ResolvedPath {
-            entry: CanonicalPath(entry),
-            target: CanonicalPath(target),
+            entry: CanonicalPath(self.fold(entry)),
+            target: CanonicalPath(self.fold(target)),
         })
     }
 

@@ -97,8 +97,14 @@ impl Layout {
         CanonicalPath(self.root.join("ws"))
     }
 
+    /// 期望的规范路径：大小写不敏感的文件系统上整条折成小写（与解析器同一规则，2/F-7）。
     fn p(&self, rel: &str) -> CanonicalPath {
-        CanonicalPath(self.root.join(rel))
+        let p = self.root.join(rel);
+        if OsPathResolver::detect_case_insensitive(&self.root).unwrap() {
+            CanonicalPath(PathBuf::from(p.to_string_lossy().to_lowercase()))
+        } else {
+            CanonicalPath(p)
+        }
     }
 }
 
@@ -154,7 +160,7 @@ fn case_variant() {
     let l = Layout::new();
     let r = l.os.resolve(&l.ws(), ".GIT/CONFIG").unwrap().target;
     if OsPathResolver::detect_case_insensitive(&l.root).unwrap() {
-        // 已存在的分量取磁盘上的大小写
+        // 整条折成小写：写法不同的同一路径得到同一个键
         assert_eq!(r, l.p("ws/.git/config"));
         assert!(l.os.same_path(&l.p("ws/.GIT"), &l.p("ws/.git")));
         assert!(l.os.is_under(&l.p("ws/.Git/NEW"), &l.p("ws/.git")));
@@ -173,7 +179,10 @@ fn alias_directory() {
     #[cfg(target_os = "macos")]
     {
         let r = l.os.resolve(&l.ws(), "/tmp/iwork-x").unwrap().target;
-        assert_eq!(r.0, PathBuf::from("/private/tmp/iwork-x"));
+        assert!(
+            l.os.same_path(&r, &PathBuf::from("/private/tmp/iwork-x")),
+            "{r:?}"
+        );
     }
 }
 
@@ -301,4 +310,22 @@ fn not_a_directory_and_permission_are_classified() {
     assert_eq!(e.certainty(), ResolveCertainty::Disproved);
     let e = l.os.resolve(&l.ws(), "loop1/x").unwrap_err();
     assert_eq!(e.certainty(), ResolveCertainty::Unknown);
+}
+
+/// 2/F-7：同一路径的规范写法不随父目录是否存在而变（大小写不敏感时整条折叠；敏感时原样）。
+/// 拒绝 `Write DIR/New.TXT` 之后先 `mkdir DIR` 再原样重试，指纹键必须相同。
+#[test]
+fn canonical_key_stable_across_parent_creation() {
+    let l = Layout::new();
+    let before = l.os.resolve(&l.ws(), "NEWDIR/New.TXT").unwrap();
+    std::fs::create_dir(l.root.join("ws/NEWDIR")).unwrap();
+    let after = l.os.resolve(&l.ws(), "NEWDIR/New.TXT").unwrap();
+    assert_eq!(before, after);
+    // 再建出文件本身也不变
+    std::fs::write(l.root.join("ws/NEWDIR/New.TXT"), b"x").unwrap();
+    assert_eq!(l.os.resolve(&l.ws(), "NEWDIR/New.TXT").unwrap(), before);
+    if OsPathResolver::detect_case_insensitive(&l.root).unwrap() {
+        // 换大小写写同一个文件：同一个键
+        assert_eq!(l.os.resolve(&l.ws(), "newdir/new.txt").unwrap(), before);
+    }
 }
