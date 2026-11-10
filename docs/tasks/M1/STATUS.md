@@ -44,6 +44,10 @@
 - 合入前分支先 `git merge main`；STATUS.md 冲突用 main 版本。
 - 每张卡合入后：任务卡「完成记录」、`report_outcome`、assign retrospector（handoff 会超时）、删 worker（use_worktree 的终端删了会清 worktree，分支合入后再删）。
 
+- **完成标志 = 一次合入 main**（产品负责人 2026-11-10 同意；之后每个完成点会清上下文）。小卡一张卡算一个合入单元；大卡按方案的实施步骤分组，每组单独合入、单独验收（如 T07 E3–E5、T06 S2），方案定稿时在第 3 节列出分组。完成要同时满足：合入 main 并推送、CI 过；`findings list --task <任务> --open --queue developer` 为空，`--queue user` 已列给产品负责人并记账；任务卡完成记录、`report_outcome`、retrospector 做完；本文件对应行改成已合入并写下一步。
+- 另一个能清上下文的点是方案定稿：审过、决定写进文档并提交、实施还没开始。审查轮次进行中、等产品负责人回答、worker 交活还没核对时不清；碰上了先把状态写进本文件再清。
+- 每个合入单元用新的 developer 和 reviewer；审方案和审 diff 的 reviewer 分开。
+
 ## 5 踩过的坑
 
 - 新窗口太小消息投不进：`tmux resize-window -t cao-a46fd0b6:<窗口> -x 140 -y 45`。
