@@ -57,18 +57,26 @@ internal = ["iwork-core", "iwork-shell", "iwork-ports", "iwork-proto", "iwork-do
 
 [crates.iwork-store]
 internal = ["iwork-ports", "iwork-domain"]
+direct = ["rusqlite", "sha2", "thiserror", "tracing"]
+direct_dev = ["pollster", "proptest", "prost", "prost-reflect", "rusqlite", "tempfile", "tracing-subscriber"]
 transitive_exempt = ["rusqlite"]
 
 [crates.iwork-agent-acp]
 internal = ["iwork-ports", "iwork-domain", "iwork-proto"]
 transitive_exempt = ["agent-client-protocol", "tokio"]
 
+[crates.iwork-rootfs]
+# 只用 std：在项目根内不跟随符号链接地读写文件（ADR-0010）
+internal = []
+direct = []
+deny_transitive = "normal_build_dev"
+
 [crates.iwork-vcs-git]
-internal = ["iwork-ports", "iwork-domain"]
+internal = ["iwork-ports", "iwork-domain", "iwork-rootfs"]
 transitive_exempt = ["gix", "tokio"]
 
 [crates.iwork-host]
-internal = ["iwork-ports", "iwork-domain"]
+internal = ["iwork-ports", "iwork-domain", "iwork-rootfs"]
 transitive_exempt = ["keyring", "tokio"]
 
 [crates.iwork-ipc]
@@ -79,6 +87,7 @@ transitive_exempt = ["tokio"]
 internal = [
     "iwork-domain", "iwork-ports", "iwork-proto", "iwork-core", "iwork-shell", "iwork-app",
     "iwork-store", "iwork-agent-acp", "iwork-vcs-git", "iwork-host", "iwork-ipc",
+    "iwork-rootfs",
 ]
 deny_transitive = "none"
 

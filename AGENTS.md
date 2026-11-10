@@ -10,7 +10,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 
 ## 依据文档（先读，按优先级）
 
-1. `docs/requirements/iwork-requirements.md`：需求与架构基线（v1.72）。**已确认**的需求不得自行改动。
+1. `docs/requirements/iwork-requirements.md`：需求与架构基线（v1.74）。**已确认**的需求不得自行改动。
 2. `docs/design/m1-tech-design.md`：M1 技术设计，写“怎么做”。与需求冲突时以需求为准。
 3. `docs/design/t0-findings.md`：三家厂商 CLI 的实测事实。适配器实现以它为准，不要凭记忆或网上资料假设厂商行为。
 4. `docs/tasks/M1/`：M1 任务卡（T01–T11）与未决事项清单（`README.md`），每张卡写明目标、范围、交付物、验收标准、依赖。
@@ -31,7 +31,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 
 命令（T01 建立后以此为准；改动须同步本节）：
 
-- 全量测试：`cargo test --workspace`
+- 全量测试：`cargo test --workspace`（含存储的崩溃注入测试 `cargo test -p iwork-store --test crash_injection`，随机 kill -9 子进程 200 轮，约 1 分钟；库建在系统临时目录）
 - 静态检查：`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`
 - 许可与来源：`cargo deny check`（`deny.toml`）
 - 依赖方向：`scripts/check-deps.sh`，真值是 `scripts/deps-policy.toml`（加 crate、放开外部依赖都改这个文件）；`scripts/check-deps.sh --selftest` 证明检查会红
@@ -39,7 +39,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 - 协议兼容：新加或改了 `.proto` 字段后跑 `cargo run -p iwork-proto --example update-contract -- --additive` 把新字段登记进 `proto/compat/v1/contract.binpb`；它拒绝改号、改类型、删字段；加了样本构造函数后跑 `cargo run -p iwork-proto --example dump-compat -- proto/compat/v1/samples` 写出新的金样本（只增不改，已有样本内容不同会拒绝）。规则见 `proto/compat/README.md`
 - 前端：`pnpm -C client install --frozen-lockfile`、`pnpm -C client gen`（从 `proto/` 生成 TS 到 `client/src/gen/`，不入库）、`pnpm -C client typecheck`、`pnpm -C client test`（含开发服务器只绑 127.0.0.1、发布配置不含开发入口两项检查）
 - 客户端：Tauri 配置分三层，层清单只写在 `client/scripts/tauri-layers.ts`，包装脚本与 CI 检查共用它。开发用 `pnpm -C client tauri dev`（叠加 `tauri.dev.conf.json`）；发布构建用 `pnpm -C client tauri build`（叠加 `tauri.build.conf.json`）。tauri CLI 只支持 dev 和 build 两个子命令，且只能经这两条包装命令调用：包装脚本拒绝其他子命令（bundle、android、ios 等）、调用方自带的 `-c/--config` 和环境变量 `TAURI_CONFIG`；裸跑 `tauri build`、`tauri bundle` 会被拒；`client/src-tauri/` 下多出层清单没登记的 Tauri 配置文件时 `pnpm -C client test` 失败。`cargo build`/`cargo run -p iwork-client` 不需要 `dist/`，但 `cargo run` 起来的窗口是空的（没有开发服务器也没有嵌入资源），看界面要用 `tauri dev`
-- 性能基准：`cargo bench -p iwork-bench`（T01 建空 crate，T11 填实现）；审批求值热路径单跑 `cargo bench -p iwork-bench --bench approval`（T07）
+- 性能基准：`cargo bench -p iwork-bench`（T01 建空 crate，T11 填实现）；存储写入基准初版 `cargo bench -p iwork-store --bench write_commit`（每组一行 JSON 到 stdout，macOS 上 fullfsync 开、关各一组；T11 收编后改这一条）；审批求值热路径单跑 `cargo bench -p iwork-bench --bench approval`（T07）
 - 审批对拍语料：`cargo run -p iwork-core --example dump-credential-corpus` 导出需凭据命令的匹配语料（JSON），供 T06 对固定版本的 Claude Code 实测回填；内置规则集快照更新用 `IWORK_UPDATE_SNAPSHOTS=1 cargo test -p iwork-core --test builtin_rules`（改内置条目必须同时升 `RULESET_VERSION`）
 - 重测试排队（产品负责人 2026-11-10 定：同一时间只跑一张卡的重测试）：`cargo test --workspace`、`cargo clippy --workspace`、崩溃注入、`PROPTEST_CASES` 调大的属性测试、fuzz、`cargo bench`、release 构建、docker 里的测试，一律套 `lockf /tmp/iwork-heavy-test.lock <命令>` 跑（macOS 自带 `lockf`，拿不到锁就排队等）；单个 crate 的少量定向测试不用套。临时验证副本里跑也一样套
 
@@ -47,7 +47,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 
 - 进程：客户端（Tauri）、后台服务（daemon，常驻单实例）、每个运行中成员一个适配器进程，下面是厂商 CLI。编排核心是 daemon 里的一层，不是进程。
 - crate 与依赖方向见 `docs/design/m1-tech-design.md` 第 2 节。**依赖只向下**：`iwork-domain`、`iwork-ports` 不依赖任何框架与 I/O；`iwork-core` 不知道 SQLite、git、ACP 的存在；只有 `iwork-daemon` 同时知道所有实现。违反即 `important`。
-- 后台服务只通过 AgentPort 说 ACP。各厂商差异全部收在适配器里，核心不写厂商特例。版本控制差异收在 VcsProvider 里，核心不写 git 特例。
+- 后台服务只通过 AgentPort 说 ACP。各厂商差异全部收在适配器里，核心不写厂商特例。版本控制差异收在 VcsProvider 里，核心不写 git 特例。审批按命令文字识别 git 等程序的子命令（如 git push 必问、git clean 算删除）属于审批规则，可以出现在 core 的规则登记表里；版本控制操作本身的差异仍收在 VcsProvider（产品负责人 2026-11-10 确认）。
 - 状态变化一律经事件：命令只返回受理结果与事件 `seq`；客户端只有一条更新路径（订阅事件）。
 - 事件只追加不修改；一次命令 = 追加事件 + 更新投影 + 写 outbox + 记录 `command_id`，同一事务；单写者线程，组提交。
 - 网页层只渲染：不解析协议全集、不做业务判断；Rust 侧每 16ms 合并一次 `ViewPatch` 推给网页。

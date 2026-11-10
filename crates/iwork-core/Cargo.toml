@@ -17,6 +17,6 @@ futures-channel.workspace = true
 futures-core.workspace = true
 
 [dev-dependencies]
+pollster.workspace = true
 tokio.workspace = true
 proptest.workspace = true
-pollster.workspace = true

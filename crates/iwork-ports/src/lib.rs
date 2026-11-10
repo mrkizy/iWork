@@ -19,6 +19,7 @@ pub mod exec;
 pub mod fs;
 pub mod live;
 pub mod notify;
+pub mod project_files;
 pub mod read_model;
 pub mod secret;
 pub mod store;
