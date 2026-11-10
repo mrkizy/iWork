@@ -51,9 +51,10 @@ impl Env {
         env
     }
 
-    /// 真实路径（macOS 的 /var → /private/var）。
+    /// 真实路径（macOS 的 /var → /private/var）。与产品代码同一种规范化（dunce）：Windows 上不带 `\\?\`
+    /// 前缀，否则 git 不认，与 `detect` 返回的路径也对不上。
     fn root(&self) -> PathBuf {
-        std::fs::canonicalize(self.tmp.path()).unwrap()
+        dunce::canonicalize(self.tmp.path()).unwrap()
     }
 
     fn home(&self) -> PathBuf {

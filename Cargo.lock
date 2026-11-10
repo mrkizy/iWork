@@ -2550,6 +2550,7 @@ dependencies = [
 name = "iwork-daemon"
 version = "0.1.0"
 dependencies = [
+ "dunce",
  "iwork-agent-acp",
  "iwork-app",
  "iwork-core",

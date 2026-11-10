@@ -1097,6 +1097,11 @@ async fn externally_filtered_file_is_never_judged_unchanged_by_raw_bytes() {
     );
     write(&repo.join("x.r"), "hello\n");
     write(&repo.join("calm.r"), "quiet\n");
+    // 对照文件的 mtime 早于随后写出的索引：否则同一时间粒度内它是 racy 的，按规则本就该保守列出
+    set_mtime(
+        &repo.join("calm.r"),
+        std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
+    );
     f.commit_all(&repo, "rot13 stored"); // 存储内容是 "uryyb\n"
     assert_eq!(f.git(&repo, &["cat-file", "-p", "HEAD:x.r"]), "uryyb");
     let root = RepoRoot(repo.clone());

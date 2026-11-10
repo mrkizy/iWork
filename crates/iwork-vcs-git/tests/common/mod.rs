@@ -116,16 +116,8 @@ pub fn write(path: &Path, content: &str) {
 }
 
 pub fn dunce_canonical(p: &Path) -> PathBuf {
-    let c = std::fs::canonicalize(p).expect("canonicalize");
-    // 与实现一致：Windows 上去掉 `\\?\` 前缀
-    #[cfg(windows)]
-    {
-        let s = c.to_string_lossy();
-        if let Some(rest) = s.strip_prefix(r"\\?\") {
-            return PathBuf::from(rest);
-        }
-    }
-    c
+    // 与实现（detect）同一种规范化：Windows 上去掉 `\\?\` 前缀
+    dunce::canonicalize(p).expect("canonicalize")
 }
 
 /// 记下所有进度的接收方。
