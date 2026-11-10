@@ -42,6 +42,7 @@ fn arb_mode() -> impl Strategy<Value = ApprovalMode> {
 /// 链接布局：(链接所在位置, 链接指向, 能碰底线的访问方式)。
 /// - 工作区里的链接指向受保护位置：`target` 视图命中；
 /// - 凭据目录里的链接指向工作区普通文件：`entry` 视图命中。
+///
 /// `.git/` 与关键路径只拦写和删，读的布局只用凭据与数据目录。
 fn arb_link() -> impl Strategy<Value = (String, String, bool)> {
     prop::sample::select(vec![

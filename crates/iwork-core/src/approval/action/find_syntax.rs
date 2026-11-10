@@ -56,6 +56,15 @@ fn is_expression_word(w: &str) -> bool {
     w.starts_with('-') || matches!(w, "(" | ")" | "!" | ",")
 }
 
+/// 不带值的前置选项：可以合写的字母组（`-HL`），或粘着级别的 `-O3`。
+fn is_leading_flag(w: &str) -> bool {
+    let letters = w
+        .strip_prefix('-')
+        .filter(|l| !l.is_empty() && !l.starts_with('-'));
+    (w.starts_with("-O") && w.len() > 2)
+        || letters.is_some_and(|l| l.chars().all(|c| FIND_LEADING_LETTERS.contains(c)))
+}
+
 /// 按 `find` 的语法切 `find` 后面的字面词（精确规则）。
 pub fn split<'a>(args: &[&'a str]) -> FindCall<'a> {
     let mut call = FindCall::default();
@@ -73,13 +82,7 @@ pub fn split<'a>(args: &[&'a str]) -> FindCall<'a> {
             i += 2;
         } else if FIND_LEADING_VALUE.contains(&w) {
             i += 2;
-        } else if w.starts_with("-O") && w.len() > 2 {
-            i += 1;
-        } else if w.len() > 1
-            && w.starts_with('-')
-            && !w.starts_with("--")
-            && w[1..].chars().all(|c| FIND_LEADING_LETTERS.contains(c))
-        {
+        } else if is_leading_flag(w) {
             i += 1;
         } else {
             break;
