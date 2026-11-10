@@ -10,7 +10,7 @@ pub fn program_id(literal: &str) -> &str {
 }
 
 /// 路径参数的角色。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Role {
     Read,
     Write,

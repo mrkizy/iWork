@@ -11,6 +11,7 @@ pub mod bash;
 pub mod commands;
 pub mod credential;
 pub mod credential_corpus;
+pub mod expansion;
 pub mod find_syntax;
 pub mod paths;
 pub mod tool_input;

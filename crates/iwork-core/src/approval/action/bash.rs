@@ -16,6 +16,7 @@ use super::commands::{
     UNPARSABLE_PROGRAMS, Value,
 };
 use super::credential::simple_commands;
+use super::expansion::{Budget, Exhausted, Expander};
 use super::find_syntax::{self, FIND};
 use super::paths::{
     fallback_candidates, is_path_word, join_basename, split_assignment, value_variants,
@@ -47,7 +48,7 @@ pub fn classify_script(script: &ShellScript) -> Result<Vec<CommandActions>, Why>
         return Err("空命令".into());
     }
     let mut out = Vec::new();
-    let mut budget = MAX_DIR_CANDIDATES;
+    let mut budget = Budget::default();
     for c in commands {
         let mut actions = Vec::new();
         classify_simple(c, &mut actions, &mut budget)?;
@@ -152,7 +153,7 @@ fn push_redirect(out: &mut Vec<PendingAction>, kind: RedirectKind, target: &str)
 fn classify_simple(
     c: &SimpleCommand,
     out: &mut Vec<PendingAction>,
-    budget: &mut usize,
+    budget: &mut Budget,
 ) -> Result<(), Why> {
     redirect_actions(c, out);
     let words: Vec<&str> = c.words.iter().map(|w| w.literal.as_str()).collect();
@@ -237,110 +238,133 @@ fn classify_simple(
             );
             // 白名单程序降级：只能更严，不丢已知约束（实施审查 1/F-1）——保底角色 + 兜底候选。
             // 保底动作排在执行动作前面：同样是询问时，代表动作取靠前的，必问的原因才显得出来
-            let floor_known = match (program, commands::safe_command(program)) {
-                ("dd", _) => {
-                    dd_floor(args, out);
-                    true
-                }
-                (_, Some(spec)) => {
-                    floor_actions(spec.floor, args, out, budget)
-                        .map_err(|_| "目录目标候选超过上限".to_string())?;
-                    true
-                }
-                (_, None) => false,
+            let floor = match (program, commands::safe_command(program)) {
+                ("dd", _) => Some(FloorStart::Dd),
+                (_, Some(spec)) => Some(FloorStart::Program(spec.floor)),
+                (_, None) => None,
             };
-            out.push(execute);
-            if floor_known {
-                push_all_candidates(args, out);
-                Ok(())
-            } else {
-                extract_external(program, args, out)
-            }
-        }
-    }
-}
-
-/// 每个参数的兜底候选（读 + 写，打参数标记）。
-fn push_all_candidates(args: &[&str], out: &mut Vec<PendingAction>) {
-    for a in args {
-        for cand in fallback_candidates(a) {
-            push_candidate(out, &cand, true);
-        }
-    }
-}
-
-/// 一次调用里目录目标候选（「词 / 别的词的 basename」）的上限。候选是词数的平方级，每个都要解析一次路径；
-/// 超过上限时整条按资源上限拒绝，不截断（截断等于少检查）。
-pub const MAX_DIR_CANDIDATES: usize = 4096;
-
-/// 目录目标候选的额度用完了。
-#[derive(Debug)]
-pub struct TooManyCandidates;
-
-/// 保底角色（方案第 13 节实施审查第 2 轮）：`words` 是程序后面的字面词（选项与选项值都算），每个词按
-/// `floor.roles` 产出动作；复制类再对每个词 `d` 与别的词 `s` 产出写入候选 `d / basename(s)`。全是候选：
-/// 选项词解析成不存在的名字无害，走不通的只丢它。
-fn floor_actions(
-    floor: Floor,
-    words: &[&str],
-    out: &mut Vec<PendingAction>,
-    budget: &mut usize,
-) -> Result<(), TooManyCandidates> {
-    for w in words {
-        if is_path_word(w) {
-            for r in floor.roles {
-                out.push(path_with(role_kind(*r), w, PathOrigin::Hypothetical));
-            }
-        }
-    }
-    if !floor.dir_target {
-        return Ok(());
-    }
-    let dirs: BTreeSet<&str> = words.iter().copied().filter(|w| is_path_word(w)).collect();
-    for d in &dirs {
-        let joined: BTreeSet<String> = dirs
-            .iter()
-            .filter(|s| *s != d)
-            .filter_map(|s| join_basename(d, s))
-            .collect();
-        *budget = budget.checked_sub(joined.len()).ok_or(TooManyCandidates)?;
-        for j in joined {
-            out.push(path_with(ActionKind::Write, &j, PathOrigin::Hypothetical));
-        }
-    }
-    Ok(())
-}
-
-/// 一串没有命令结构的字面词里，每个白名单程序名（含 `dd`，经包装词的也算）后面的全部字面词按它的保底角色
-/// 产出动作（方案第 13 节实施审查第 2 轮）。`find` 另有 [`find_syntax::flat_delete`]。
-fn flat_floor<S: AsRef<str>>(
-    words: &[S],
-    out: &mut Vec<PendingAction>,
-    budget: &mut usize,
-) -> Result<(), TooManyCandidates> {
-    for (i, w) in words.iter().enumerate() {
-        let rest: Vec<&str> = words[i + 1..].iter().map(AsRef::as_ref).collect();
-        match commands::program_id(w.as_ref()) {
-            "dd" => dd_floor(&rest, out),
-            name => {
-                if let Some(spec) = commands::safe_command(name) {
-                    floor_actions(spec.floor, &rest, out, budget)?;
+            let Some(floor) = floor else {
+                out.push(execute);
+                return extract_external(program, args, out);
+            };
+            let exhausted = |_| "路径候选超过上限".to_string();
+            let mut e = Expander::new(budget);
+            floor_scan(&mut e, args, Some(floor), false).map_err(exhausted)?;
+            let floor_actions = std::mem::take(&mut e.out);
+            // 兜底候选（读 + 写，打参数标记）
+            for a in args {
+                for cand in e.candidates(a).map_err(exhausted)? {
+                    for kind in [ActionKind::Read, ActionKind::Write] {
+                        e.push(kind, &cand, PathOrigin::Hypothetical, true)
+                            .map_err(exhausted)?;
+                    }
                 }
             }
+            out.extend(floor_actions);
+            out.push(execute);
+            out.extend(e.out);
+            Ok(())
         }
     }
-    Ok(())
 }
 
-/// `dd` 降级：`if=` 记读、`of=` 记写，不管别的键认不认。
-fn dd_floor(args: &[&str], out: &mut Vec<PendingAction>) {
-    for a in args {
-        if let Some((k, v)) = a.split_once('=')
+/// 保底扫描从哪里开始生效。
+#[derive(Debug, Clone, Copy)]
+enum FloorStart {
+    Program(Floor),
+    Dd,
+}
+
+/// 保底角色（方案第 13 节实施审查第 2 轮、3/F-1、3/F-2）：一遍扫过 `words`，每个词的**完整候选集合**
+/// （整词 + [`fallback_candidates`] 拆出的值：`--target-directory=.` 的 `.`、`-t.` 的 `.`）按当前生效的角色
+/// 产出动作；复制类再在全部候选之间配出「候选 / 别的候选的 basename」写入候选。`start` 是降级程序自己的
+/// 保底；`scan_programs` 时（解析不了的扁平词）词里每出现一个白名单程序名（含 `dd`、经包装词也算），
+/// 它的保底就并进后面词的角色——角色只增不减，一遍扫完，不为每个程序名重扫后缀。
+/// 全是候选：选项词解析成不存在的名字无害，走不通的只丢它。去重与额度由 [`Expander`] 管。
+fn floor_scan<S: AsRef<str>>(
+    e: &mut Expander,
+    words: &[S],
+    start: Option<FloorStart>,
+    scan_programs: bool,
+) -> Result<(), Exhausted> {
+    let mut roles: BTreeSet<Role> = BTreeSet::new();
+    let mut dir_target = false;
+    let mut dd = false;
+    let absorb = |start: FloorStart, roles: &mut BTreeSet<Role>, dir: &mut bool, dd: &mut bool| {
+        match start {
+            FloorStart::Program(f) => {
+                roles.extend(f.roles.iter().copied());
+                *dir |= f.dir_target;
+            }
+            FloorStart::Dd => *dd = true,
+        }
+    };
+    if let Some(start) = start {
+        absorb(start, &mut roles, &mut dir_target, &mut dd);
+    }
+    let mut dir_candidates: BTreeSet<String> = BTreeSet::new();
+    for w in words {
+        let w = w.as_ref();
+        if !roles.is_empty() {
+            let cands = e.candidates(w)?;
+            for c in &cands {
+                for r in &roles {
+                    e.push(role_kind(*r), c, PathOrigin::Hypothetical, false)?;
+                }
+            }
+            if dir_target {
+                dir_candidates.extend(cands);
+            }
+        }
+        if dd
+            && let Some((k, v)) = w.split_once('=')
             && let Some((_, Some(role))) = DD_KEYS.iter().find(|(key, _)| *key == k)
         {
-            push_roles(out, &[*role], v);
+            e.push(role_kind(*role), v, PathOrigin::Hypothetical, false)?;
+        }
+        if scan_programs {
+            match commands::program_id(w) {
+                "dd" => absorb(FloorStart::Dd, &mut roles, &mut dir_target, &mut dd),
+                name => {
+                    if let Some(spec) = commands::safe_command(name) {
+                        absorb(
+                            FloorStart::Program(spec.floor),
+                            &mut roles,
+                            &mut dir_target,
+                            &mut dd,
+                        );
+                    }
+                }
+            }
         }
     }
+    dir_target_pairs(e, &dir_candidates)
+}
+
+/// 目录目标：每个候选 `d` 与别的候选的 basename 拼出写入候选。配对数是平方级，生成前按上界扣字节额度。
+fn dir_target_pairs(e: &mut Expander, dirs: &BTreeSet<String>) -> Result<(), Exhausted> {
+    let bases: BTreeSet<&str> = dirs
+        .iter()
+        .filter_map(|s| {
+            let base = s.trim_end_matches('/').rsplit('/').next()?;
+            (!base.is_empty() && base != "." && base != "..").then_some(base)
+        })
+        .collect();
+    let dir_bytes: usize = dirs.iter().map(String::len).sum();
+    let base_bytes: usize = bases.iter().map(|b| b.len()).sum();
+    let bound = bases
+        .len()
+        .saturating_mul(dir_bytes.saturating_add(dirs.len()))
+        .saturating_add(dirs.len().saturating_mul(base_bytes));
+    e.reserve(0, bound)?;
+    for d in dirs {
+        for s in dirs.iter().filter(|s| *s != d) {
+            if let Some(joined) = join_basename(d, s) {
+                e.push(ActionKind::Write, &joined, PathOrigin::Hypothetical, false)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 目录目标语义（方案 3.4，实施审查 1/F-7）：目的可能是目录，真正写入的是「目录 / 源文件名」。
@@ -740,7 +764,7 @@ fn dd_form(args: &[&str]) -> Result<Vec<PendingAction>, NotSafe> {
 /// 不随解析不了丢掉：parse 成功时用精确切法的结果（`precise_find`），否则对原文的字面词用保守规则；
 /// 队列里的词恒用保守规则。另有一个承载整条命令文字的执行动作。路径全是候选：走不通的只丢它自己。
 ///
-/// 第二个返回值为真表示目录目标候选超过上限（[`MAX_DIR_CANDIDATES`]），调用方按资源上限拒绝。
+/// 第二个返回值为真表示路径候选超过额度（[`super::expansion`]），调用方按资源上限拒绝。
 pub fn fallback_actions(
     facts: &PartialFacts,
     precise_find: Option<&[String]>,
@@ -763,30 +787,37 @@ pub fn fallback_actions(
         opaque: false,
         argument: false,
     }];
+    let mut budget = Budget::default();
+    let mut e = Expander::new(&mut budget);
+    let expanded = fallback_paths(&mut e, facts, precise_find);
+    out.extend(e.out);
+    (out, expanded.is_err())
+}
+
+fn fallback_paths(
+    e: &mut Expander,
+    facts: &PartialFacts,
+    precise_find: Option<&[String]>,
+) -> Result<(), Exhausted> {
+    let hypo = PathOrigin::Hypothetical;
     for (kind, target) in &facts.literal_redirects {
         if kind.reads() {
-            out.push(path_with(
-                ActionKind::Read,
-                target,
-                PathOrigin::Hypothetical,
-            ));
+            e.push(ActionKind::Read, target, hypo, false)?;
         }
         if kind.writes() {
-            out.push(path_with(
-                ActionKind::Write,
-                target,
-                PathOrigin::Hypothetical,
-            ));
+            e.push(ActionKind::Write, target, hypo, false)?;
         }
-        for cand in fallback_candidates(target) {
+        for cand in e.candidates(target)? {
             if &cand != target {
-                push_candidate(&mut out, &cand, false);
+                e.push(ActionKind::Read, &cand, hypo, false)?;
+                e.push(ActionKind::Write, &cand, hypo, false)?;
             }
         }
     }
     for w in facts.literal_words.iter().chain(&facts.queued_words) {
-        for cand in fallback_candidates(w) {
-            push_candidate(&mut out, &cand, false);
+        for cand in e.candidates(w)? {
+            e.push(ActionKind::Read, &cand, hypo, false)?;
+            e.push(ActionKind::Write, &cand, hypo, false)?;
         }
     }
     let original_deletes = match precise_find {
@@ -797,11 +828,9 @@ pub fn fallback_actions(
         .iter()
         .chain(&find_syntax::flat_delete(&facts.queued_words))
     {
-        out.push(path_with(ActionKind::Delete, d, PathOrigin::Hypothetical));
+        e.push(ActionKind::Delete, d, hypo, false)?;
     }
     // 白名单程序名后面的词按保底角色（原文与队列里的词各自扁平处理，没有命令边界）
-    let mut budget = MAX_DIR_CANDIDATES;
-    let too_many = flat_floor(&facts.literal_words, &mut out, &mut budget).is_err()
-        || flat_floor(&facts.queued_words, &mut out, &mut budget).is_err();
-    (out, too_many)
+    floor_scan(e, &facts.literal_words, None, true)?;
+    floor_scan(e, &facts.queued_words, None, true)
 }

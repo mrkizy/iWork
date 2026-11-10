@@ -154,18 +154,24 @@ fn exec_segment_end(args: &[&str], from: usize) -> Option<usize> {
 
 /// 保守规则：一串没有命令结构的字面词里，`find` 之后又有 `-delete` 时，`find` 之后的**每一个**字面词
 /// （以 `-` 开头的、`-delete` 自己都算）与 cwd（`.`）都是可能的删除目标。不切、不数参数、不认 `-exec` 段。
+///
+/// 多个 `find` 时各自后缀的并集就是「后面有 `-delete` 的最早那个 `find`」之后的全部词：一遍找到它，
+/// 不为每个 `find` 复制后缀（3/F-2 同类）。
 pub fn flat_delete<S: AsRef<str>>(words: &[S]) -> Vec<String> {
-    let mut out = Vec::new();
-    for (i, w) in words.iter().enumerate() {
-        if program_id(w.as_ref()) != FIND {
-            continue;
-        }
-        let rest = &words[i + 1..];
-        if rest.iter().any(|r| r.as_ref() == "-delete") {
-            out.extend(rest.iter().map(|r| r.as_ref().to_owned()));
-            out.push(".".to_owned());
-        }
-    }
+    let Some(last_delete) = words.iter().rposition(|w| w.as_ref() == "-delete") else {
+        return Vec::new();
+    };
+    let Some(first_find) = words[..last_delete]
+        .iter()
+        .position(|w| program_id(w.as_ref()) == FIND)
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = words[first_find + 1..]
+        .iter()
+        .map(|w| w.as_ref().to_owned())
+        .collect();
+    out.push(".".to_owned());
     out.sort();
     out.dedup();
     out

@@ -482,7 +482,7 @@ pub fn builtin_rules(env: &EnvPaths) -> Vec<RuleEntry> {
         (
             "deny.resource-limit",
             ActionFlag::ResourceLimitHit,
-            "命令文字超过 256 KiB，无法完整检查",
+            "命令太大或展开出的检查项过多，请拆成几条重发",
         ),
         (
             "deny.unlexable",

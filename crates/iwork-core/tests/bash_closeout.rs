@@ -842,11 +842,11 @@ fn flat_words_use_program_floor() {
     unparsable_ask(&linked, "timeout 5 rm -rf src/a.rs");
 }
 
-/// 目录目标候选是词数的平方级：超过上限整条按资源上限拒，不截断。
+/// 目录目标候选是词数的平方级：超过额度整条按资源上限拒，不截断。
 #[test]
 fn too_many_dir_candidates_is_resource_limit() {
     let h = Harness::default();
-    let words: Vec<String> = (0..100).map(|i| format!("f{i}")).collect();
+    let words: Vec<String> = (0..200).map(|i| format!("f{i}")).collect();
     let cmd = format!("cp --zz-unknown {} dst", words.join(" "));
     for m in MODES3 {
         let (_, e) = h.eval(&bash_req(&cmd), m);
@@ -859,4 +859,76 @@ fn too_many_dir_candidates_is_resource_limit() {
     // 对照：登记形态不走保底，词多也照常
     let cmd = format!("cp {} dst", words.join(" "));
     assert_eq!(three_on(&h, &cmd), ["Ask", "Allow", "Allow"]);
+}
+
+/// 3/F-1（1/F-7、2/F-5 残留）：保底角色与目录目标作用于完整候选集合——长选项 `=` 后的值、短选项粘值
+/// 也是可能的目的目录（./config 链到 .git/config）。
+#[test]
+fn glued_target_dir_values_join_basename() {
+    let linked = harness(|f| {
+        f.file(ws("src/config"));
+        f.link(ws("config"), ".git/config");
+    });
+    for cmd in [
+        "cp --target-directory=. --verbose src/config",
+        "cp -t. --verbose src/config",
+        "install -t. --verbose src/config",
+        "timeout 5 cp -t. src/config",
+        "timeout 5 cp --target-directory=. src/config",
+    ] {
+        let c = linked.eval(&bash_req(cmd), Auto).0;
+        assert!(
+            has(&c, ActionKind::Write, &ws("config"))
+                && has(&c, ActionKind::Write, &ws(".git/config")),
+            "{cmd}：{:?}",
+            briefs(&c)
+        );
+        assert_base(&linked, cmd);
+    }
+    // 对照：./config 不是链接时只是普通写
+    let plain = harness(|f| {
+        f.file(ws("src/config"));
+    });
+    assert_eq!(
+        three_on(&plain, "cp -t. --verbose src/config"),
+        ["Ask", "Allow", "Allow"]
+    );
+}
+
+/// 3/F-2：扁平词里登记程序名大量重复时，展开量与词数线性、去重，不为每个程序名重扫后缀。
+/// 旧实现 800 次重复产出 32 万动作、耗时数秒。
+#[test]
+fn flat_floor_expansion_is_linear() {
+    let h = Harness::default();
+    for reps in [1000usize, 4000] {
+        let cmd = format!("timeout 5{}", " rm x".repeat(reps));
+        let t = std::time::Instant::now();
+        let (c, e) = h.eval(&bash_req(&cmd), Manual);
+        let spent = t.elapsed();
+        assert!(
+            spent < std::time::Duration::from_secs(2),
+            "{reps} 次：{spent:?}"
+        );
+        assert!(
+            c.actions.len() < 50,
+            "{reps} 次：{} 个动作",
+            c.actions.len()
+        );
+        assert!(
+            matches!(e.evaluation.verdict, Verdict::Ask(_)),
+            "{:?}",
+            e.evaluation.verdict
+        );
+    }
+    // 不同的词很多时按额度失败关闭（资源上限），不是跑很久
+    let words: String = (0..20_000).map(|i| format!(" f{i}")).collect();
+    let cmd = format!("timeout 5 rm{words}");
+    let t = std::time::Instant::now();
+    let (_, e) = h.eval(&bash_req(&cmd), Manual);
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        t.elapsed()
+    );
+    assert_eq!(e.evaluation.verdict, deny_rule("deny.resource-limit"));
 }

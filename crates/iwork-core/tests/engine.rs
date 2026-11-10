@@ -1213,7 +1213,7 @@ async fn builtin_deny_messages() {
     for (cmd, want) in [
         (
             big.as_str(),
-            "被规则拒绝：命令文字超过 256 KiB，无法完整检查",
+            "被规则拒绝：命令太大或展开出的检查项过多，请拆成几条重发",
         ),
         (
             "echo \"abc",
