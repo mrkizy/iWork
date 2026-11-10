@@ -33,7 +33,7 @@
 | --- | --- | --- | --- | --- | --- |
 | T01 | 已合入 main `bb6d69a` | — | `2026-11-09-m1-t01` 已关 | 验收 5 空窗口截图未补（屏幕锁定） | 有空时补截图 |
 | T02 | 分支 `cao/fecce968` @ `24adbca`（合并 main `e5877a2` + 返工） | developer `fecce968`；reviewer A `3036f50a`、B `6723c1bb` | `2026-11-10-m1-t02` 第 2 轮复审中 | 1/F-1～F-7 待复核 | 等 A/B 第 2 轮结论 |
-| T03 | 方案 `docs/plans/T03.md` 定稿 `ae913d3`；实施 developer `2e7bcbe5`（worktree） | architect `474f00b7`、方案 reviewer `3f790292` | 方案 `2026-11-09-m1-t03-plan` 已关（九轮）；实施任务 `2026-11-10-m1-t03` | — | 实施中。待同步：技术设计 3.5、T03 任务卡范围 5 / 验收 5、需求第 9 章已知限制 v1.72（草稿已给产品负责人看，等点头）；proto 注释由 developer 改 |
+| T03 | 实施分支 `cao/2e7bcbe5` @ `5b0ddae`（17 提交，+13438） | developer `2e7bcbe5`；reviewer A `b520b815`（对端校验、传输）、B `9c2a6c04`（帧、连接、事件流、客户端） | 实施任务 `2026-11-10-m1-t03` 第 1 轮审查中 | — | 等审查；**待产品负责人定**：fork+exec 冒充绕过对端校验（t0-findings 6.5，supervisor 建议登记已知限制）；Windows 映像绑定未实测、M1 暂不支持（建议加 Windows CI 跑 N2 脚本） |
 | T05 | 已合入 main `a6987d4` | —（worker 已删，retrospector 已复盘） | `2026-11-09-m1-t05` 已关 | — | — |
 | T07 | 方案 `docs/plans/T07.md` 定稿 `a597d87`；实施 developer `009e8660`（worktree） | architect `62a1aeb0`、方案 reviewer `bd0c2ab0` | 方案已关（七轮）；实施任务 `2026-11-10-m1-t07` | — | 实施中，第 0–3 步已提交；引擎接缝按 T05 的 PermissionDecider（`54ee753`）；加 ArgumentPath 默认放行条目解决手动档执行命令记不住（`2d92a17`） |
 | T08 | 分支 `cao/49facf33` @ `bbefd46`（本地，远端还在 `52f35cc`） | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 5 轮通过，全部 finding 已关 | — | 只差 CI：run 42660636464（52f35cc）三平台 test 失败，supervisor 在临时副本里用无 git 身份的干净环境复现；合入前需三平台全绿 |
