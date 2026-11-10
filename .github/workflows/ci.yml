@@ -105,7 +105,9 @@ jobs:
         run: |
           sudo useradd -m iwork-other
           cargo build -p iwork-ipc --features dev --example ipc-tool
-          IWORK_TEST_OTHER_USER=1 IWORK_IPC_TOOL="$PWD/target/debug/examples/ipc-tool" \
+          # /home/runner 不让别的用户进，ipc-tool 要放到另一用户能执行的地方（run 42760925905：exec Permission denied）
+          install -m 755 target/debug/examples/ipc-tool /tmp/iwork-ipc-tool
+          IWORK_TEST_OTHER_USER=1 IWORK_IPC_TOOL=/tmp/iwork-ipc-tool \
             cargo test -p iwork-ipc --features dev --test peer_other_user -- --ignored
 
       - uses: pnpm/action-setup@v4

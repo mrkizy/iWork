@@ -4,7 +4,8 @@
 //! ```text
 //! sudo useradd -m iwork-other
 //! cargo build -p iwork-ipc --features dev --example ipc-tool
-//! IWORK_TEST_OTHER_USER=1 IWORK_IPC_TOOL=$PWD/target/debug/examples/ipc-tool \
+//! install -m 755 target/debug/examples/ipc-tool /tmp/iwork-ipc-tool   # 另一用户要能执行它，仓库目录它不一定进得去
+//! IWORK_TEST_OTHER_USER=1 IWORK_IPC_TOOL=/tmp/iwork-ipc-tool \
 //!   cargo test -p iwork-ipc --features dev --test peer_other_user -- --ignored
 //! ```
 //! `IWORK_RUN_AS` 改「以另一用户运行」的命令前缀（默认 `sudo -n -u iwork-other`；容器里以 root 跑可用 `runuser -u iwork-other --`）。
