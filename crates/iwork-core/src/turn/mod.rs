@@ -5,6 +5,7 @@ mod runner;
 
 pub use permission::{
     Decided, PermissionDecider, PermissionGate, STUB_DENY_MESSAGE, StubDecider, TURN_GONE_MESSAGE,
+    VoidPlanError,
 };
 pub use runner::{
     CHECKPOINT_INTERVAL, FAIR_BURST, ORCHESTRATOR_ACTOR, SessionLine, TurnCanceller, TurnPlan,

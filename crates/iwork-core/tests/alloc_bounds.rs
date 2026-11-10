@@ -143,7 +143,7 @@ fn allocation_is_linear_and_bounded() {
         let d = engine.decider_for(keys());
         let req = bash_req(&rm_command(n, " ~/.ssh/id_rsa"));
         let (decision, peak) = peak_during(|| rt.block_on(d.decide(turn, &req)));
-        assert!(matches!(decision, PermissionDecision::Deny { .. }));
+        assert!(matches!(decision.decision, PermissionDecision::Deny { .. }));
         let audit = store
             .all()
             .into_iter()

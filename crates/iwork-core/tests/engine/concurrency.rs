@@ -432,7 +432,8 @@ async fn t_deleting_conversation_blocks_new_requests() {
     .await;
     // 落盘前：新请求在令牌上等
     let d2 = d.clone();
-    let before = tokio::spawn(async move { d2.decide(turn(1), &write_req("src/b.rs")).await });
+    let before =
+        tokio::spawn(async move { d2.decide(turn(1), &write_req("src/b.rs")).await.decision });
     settle_tasks().await;
     assert!(!before.is_finished());
     gate.notify_one();
@@ -440,7 +441,7 @@ async fn t_deleting_conversation_blocks_new_requests() {
     assert!(is_deny(&before.await.unwrap(), MSG_TURN_CANCELLED));
     // 落盘后
     assert!(is_deny(
-        &d.decide(turn(1), &write_req("src/c.rs")).await,
+        &d.decide(turn(1), &write_req("src/c.rs")).await.decision,
         MSG_TURN_CANCELLED
     ));
     assert_eq!(
@@ -469,7 +470,7 @@ async fn t_deleted_assistant_blocks_new_requests() {
         .await
         .unwrap();
     assert!(is_deny(
-        &d.decide(turn(1), &write_req("src/a.rs")).await,
+        &d.decide(turn(1), &write_req("src/a.rs")).await.decision,
         MSG_TURN_CANCELLED
     ));
     assert_eq!(
@@ -496,7 +497,7 @@ async fn t_cancelled_turn_blocks_new_requests() {
     b.void_turn(&d, turn(1), VoidReason::TurnCancelled).await;
     assert!(is_deny(&settle(h).await, MSG_TURN_CANCELLED));
     assert!(is_deny(
-        &d.decide(turn(1), &write_req("src/b.rs")).await,
+        &d.decide(turn(1), &write_req("src/b.rs")).await.decision,
         MSG_TURN_CANCELLED
     ));
     assert_eq!(
@@ -958,7 +959,7 @@ async fn f2_request_after_assistant_deleted_is_rejected() {
     *b.store.enqueue_gate.lock().unwrap() = Some(gate.clone());
     let req2 = tokio::spawn({
         let d2 = d2.clone();
-        async move { d2.decide(turn(2), &write_req("src/b.rs")).await }
+        async move { d2.decide(turn(2), &write_req("src/b.rs")).await.decision }
     });
     until("C2 的请求停在入队门口", || {
         b.store.at_enqueue_gate.load(Ordering::SeqCst)
@@ -1000,7 +1001,7 @@ async fn f2_request_before_assistant_deleted_is_swept() {
     .await;
     let h2 = tokio::spawn({
         let d2 = d2.clone();
-        async move { d2.decide(turn(2), &write_req("src/b.rs")).await }
+        async move { d2.decide(turn(2), &write_req("src/b.rs")).await.decision }
     });
     let c2 = b.approval(1).await;
     gate.notify_one();
@@ -1042,7 +1043,7 @@ async fn orphan(b: &Bench) -> (ApprovalId, tokio::task::JoinHandle<PermissionDec
     .await;
     let h2 = tokio::spawn({
         let d2 = d2.clone();
-        async move { d2.decide(turn(2), &write_req("src/b.rs")).await }
+        async move { d2.decide(turn(2), &write_req("src/b.rs")).await.decision }
     });
     let id = b.approval(0).await;
     until("请求追平完", || {
@@ -1155,7 +1156,7 @@ async fn orphan_after(b: &Bench) -> (ApprovalId, tokio::task::JoinHandle<Permiss
     turn_in(b, turn(2), second_conversation(), other_assistant());
     let h2 = tokio::spawn({
         let d2 = d2.clone();
-        async move { d2.decide(turn(2), &write_req("src/b.rs")).await }
+        async move { d2.decide(turn(2), &write_req("src/b.rs")).await.decision }
     });
     let id = b.approval(1).await;
     b.store.seed(vec![
@@ -1305,7 +1306,7 @@ async fn f5_phantom_binding_dropped_at_turn_end() {
     b.waiting(turn(1), assistant());
     b.store.fail_next.store(true, Ordering::SeqCst);
     assert!(is_deny(
-        &d.decide(turn(1), &write_req("src/a.rs")).await,
+        &d.decide(turn(1), &write_req("src/a.rs")).await.decision,
         iwork_core::approval::engine::MSG_STORAGE_FAILED
     ));
     assert!(
@@ -1351,7 +1352,11 @@ async fn t_barrier_only_when_unsettled() {
         0,
         "平常路径没有屏障"
     );
-    let _ = d.void_pending(turn(1), VoidReason::TurnCancelled).await;
+    let _ = d
+        .void_pending(turn(1), VoidReason::TurnCancelled)
+        .await
+        .unwrap()
+        .0;
     b.call(&d, turn(2), bash_req("ls")).await;
     assert_eq!(b.store.empty_commits.load(Ordering::SeqCst), 1);
 }
@@ -1362,7 +1367,11 @@ async fn t_barrier_busy_keeps_flag() {
     let d = b.decider();
     let h = b.ask(&d, turn(1), write_req("src/a.rs"));
     let id = b.approval(0).await;
-    let _ = d.void_pending(turn(1), VoidReason::TurnCancelled).await;
+    let _ = d
+        .void_pending(turn(1), VoidReason::TurnCancelled)
+        .await
+        .unwrap()
+        .0;
     b.store.fail_next.store(true, Ordering::SeqCst);
     assert_eq!(
         b.engine.decide(id, UserDecision::Deny, user()).await,
@@ -1438,12 +1447,12 @@ async fn t_read_failure_fails_closed() {
     let before = b.store.all().len();
     b.store.fail_read.store(true, Ordering::SeqCst);
     assert!(is_deny(
-        &d.decide(turn(1), &bash_req("ls")).await,
+        &d.decide(turn(1), &bash_req("ls")).await.decision,
         iwork_core::approval::engine::MSG_STORAGE_FAILED
     ));
     assert_eq!(b.store.all().len(), before, "没有新事件");
     assert_eq!(
-        d.decide(turn(1), &bash_req("ls")).await,
+        d.decide(turn(1), &bash_req("ls")).await.decision,
         PermissionDecision::Allow
     );
 }
@@ -1466,7 +1475,7 @@ async fn t_fold_error_names_seq_and_fails_closed() {
         seq
     };
     assert!(is_deny(
-        &d.decide(turn(1), &bash_req("ls")).await,
+        &d.decide(turn(1), &bash_req("ls")).await.decision,
         iwork_core::approval::engine::MSG_STORAGE_FAILED
     ));
     match b.engine.catch_up().await {

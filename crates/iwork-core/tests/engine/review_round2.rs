@@ -31,7 +31,11 @@ async fn round2_void_committed_before_callback_cannot_be_approved() {
     let d = b.decider();
     let h = b.ask(&d, turn(200), write_req("src/a.rs"));
     let id = b.approval(0).await;
-    let plan = d.void_pending(turn(200), VoidReason::TurnCancelled).await;
+    let plan = d
+        .void_pending(turn(200), VoidReason::TurnCancelled)
+        .await
+        .unwrap()
+        .0;
     assert!(!plan.is_empty());
     let mut with_turn = vec![state_changed(
         turn(200),
@@ -56,7 +60,7 @@ async fn round2_void_committed_before_callback_cannot_be_approved() {
     );
     // 同一回合在作废中：新请求直接按取消拒绝，不登记等待项
     assert!(is_deny(
-        &d.decide(turn(200), &write_req("src/b.rs")).await,
+        &d.decide(turn(200), &write_req("src/b.rs")).await.decision,
         MSG_TURN_CANCELLED
     ));
     assert_eq!(
@@ -71,7 +75,11 @@ async fn round2_void_committed_before_callback_cannot_be_approved() {
     // 对照：外部提交失败 → 撤销预留，等待项照常可以批准
     let h = b.ask(&d, turn(201), write_req("src/c.rs"));
     let id = b.approval(1).await;
-    let plan = d.void_pending(turn(201), VoidReason::TurnCancelled).await;
+    let plan = d
+        .void_pending(turn(201), VoidReason::TurnCancelled)
+        .await
+        .unwrap()
+        .0;
     assert!(!plan.is_empty());
     let commits = b.store.commits.load(Ordering::SeqCst);
     b.engine
@@ -340,7 +348,7 @@ async fn round2_failed_audit_must_not_consume_grant_once() {
     let first = d
         .decide(turn(220), &bash_req("rm a.txt && touch a.txt"))
         .await;
-    assert!(matches!(first, PermissionDecision::Deny { .. }));
+    assert!(matches!(first.decision, PermissionDecision::Deny { .. }));
     assert!(b.grant(id).await.is_some(), "审计失败不消费");
     assert_eq!(
         b.call(&d, turn(220), bash_req("rm a.txt && touch a.txt"))

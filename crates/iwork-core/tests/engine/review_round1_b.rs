@@ -144,7 +144,11 @@ async fn void_plan_does_not_change_waiting_state_before_commit() {
     let d = b.decider();
     let h = b.ask(&d, turn(104), write_req("src/a.rs"));
     let id = b.approval(0).await;
-    let plan = d.void_pending(turn(104), VoidReason::TurnCancelled).await;
+    let plan = d
+        .void_pending(turn(104), VoidReason::TurnCancelled)
+        .await
+        .unwrap()
+        .0;
     b.store.fail_next.store(true, Ordering::SeqCst);
     use iwork_domain::id::CommandId;
     use iwork_ports::store::{CommitRequest, StoragePort};
@@ -161,7 +165,11 @@ async fn void_plan_does_not_change_waiting_state_before_commit() {
     );
     assert_eq!(b.pending(id).await.unwrap().state, ApprovalState::Pending);
     assert!(!h.is_finished());
-    let retry = d.void_pending(turn(104), VoidReason::TurnCancelled).await;
+    let retry = d
+        .void_pending(turn(104), VoidReason::TurnCancelled)
+        .await
+        .unwrap()
+        .0;
     assert_eq!(retry, plan);
     b.store
         .commit(CommitRequest {

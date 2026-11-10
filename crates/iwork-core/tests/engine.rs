@@ -246,11 +246,13 @@ impl Bench {
 
     /// 扮演编排：回合以 `reason` 结束等待，作废计划与回合状态同一笔提交。返回作废事件。
     async fn void_turn(&self, d: &Decider_, t: TurnId, reason: VoidReason) -> Vec<DomainEvent> {
-        let events = d.void_pending(t, reason).await;
+        // 扮演编排：带着句柄提交，返回后丢句柄，再提醒
+        let (events, hold) = d.void_pending(t, reason).await.unwrap();
         let from = self.turn_state(t).expect("回合已登记");
         let mut all = vec![state_changed(t, from, TurnState::Cancelling)];
         all.extend(events.iter().cloned());
         self.store.seed(all);
+        drop(hold);
         d.committed(&events).await;
         events
     }
@@ -264,7 +266,7 @@ impl Bench {
     ) -> tokio::task::JoinHandle<PermissionDecision> {
         self.waiting(t, d.keys().assistant);
         let d = d.clone();
-        tokio::spawn(async move { d.decide(t, &req).await })
+        tokio::spawn(async move { d.decide(t, &req).await.decision })
     }
 
     async fn call(
@@ -274,7 +276,7 @@ impl Bench {
         req: PermissionRequest,
     ) -> PermissionDecision {
         self.waiting(t, d.keys().assistant);
-        d.decide(t, &req).await
+        d.decide(t, &req).await.decision
     }
 
     /// 等第 `n` 个（从 0 数）审批请求出现。

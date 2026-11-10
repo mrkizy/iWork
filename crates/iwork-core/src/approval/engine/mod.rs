@@ -71,7 +71,7 @@ use crate::approval::evaluate::remember::{offered_remember, remember_rule};
 use crate::approval::evaluate::{CallEvaluation, EvalContext, evaluate_call};
 use crate::approval::rules::{RuleSetError, build_ruleset};
 use crate::approval::session::SessionSnapshot;
-use crate::turn::PermissionDecider;
+use crate::turn::{PermissionDecider, VoidPlanError};
 use changes::{modes_after, plan_approval};
 use lock::AsyncLock;
 use review::{ReviewInput, ReviewOutcome, parse_review_output, review_prompt};
@@ -675,11 +675,10 @@ where
     T: Timer + 'static,
     R: PathResolver + 'static,
 {
-    async fn decide(&self, turn_id: TurnId, req: &PermissionRequest) -> PermissionDecision {
-        self.engine
-            .on_permission(&self.keys, turn_id, req)
-            .await
-            .decision
+    type VoidHold = VoidHold;
+
+    async fn decide(&self, turn_id: TurnId, req: &PermissionRequest) -> crate::turn::Decided {
+        self.engine.on_permission(&self.keys, turn_id, req).await
     }
 
     /// 只是提醒「有新事件」：追平，失败在里面记日志。
@@ -687,18 +686,19 @@ where
         self.engine.nudge().await;
     }
 
-    /// E4 过渡：旧接缝没有句柄与错误通道，计划交出后立刻放令牌（屏障标记留着）；E5 换成带句柄的接缝。
-    async fn void_pending(&self, turn_id: TurnId, reason: VoidReason) -> Vec<DomainEvent> {
-        match self
-            .engine
+    /// 拿令牌、追平、算作废计划，把令牌包成句柄交出去；编排那笔提交返回或到期才丢。
+    async fn void_pending(
+        &self,
+        turn_id: TurnId,
+        reason: VoidReason,
+    ) -> Result<(Vec<DomainEvent>, VoidHold), VoidPlanError> {
+        self.engine
             .void_plan(self.keys.conversation, turn_id, reason)
             .await
-        {
-            Ok((events, _hold)) => events,
-            Err(error) => {
-                tracing::error!(%error, turn = %turn_id, "算不出作废计划");
-                Vec::new()
-            }
-        }
+            .map_err(|error| match error {
+                EngineError::Storage(e) => VoidPlanError::Storage(e),
+                EngineError::Fold(e) => VoidPlanError::Unavailable(e.to_string()),
+                EngineError::Conflict => VoidPlanError::Unavailable(error.to_string()),
+            })
     }
 }
