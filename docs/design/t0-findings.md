@@ -170,7 +170,7 @@
 
 ④ 必须读文件内嵌的签名（`X509Certificate.CreateFromSignedFile`），不能用 `Get-AuthenticodeSignature`：拷来的 `cmd.exe` 签名后，Authenticode 哈希不含签名区，仍能匹配系统目录，`Get-AuthenticodeSignature` 优先返回微软的目录签名（run 42758068951 实测 `SignatureType=Catalog`、Subject 为 Microsoft Windows），两行哈希因此不同。Rust 实现按同一个 `WinVerifyTrust` 状态取签名者（方案 2.4），走的是内嵌签名，不受影响。
 
-结论：⑥(b) 说明进程映像名不反映改名后的当前名。改名后，原路径上的文件已经不是正在运行的映像，「两次查名 + 按句柄验」验到的会是这个新文件，**按句柄绑定不成立**。Windows 在 M1 暂不支持，`IMAGE_BINDING_VERIFIED` 保持 `false`。命名管道 DACL、两端 pid、按句柄验映像等 `cfg(windows)` 测试已在 CI `windows-latest` 上跑通（同一 run，按名字核对 12 条）。
+结论：⑥(b) 说明进程映像名不反映改名后的当前名。改名后，原路径上的文件已经不是正在运行的映像，「两次查名 + 按句柄验」验到的会是这个新文件，**按句柄绑定不成立**。Windows 在 M1 暂不支持，`IMAGE_BINDING_VERIFIED` 保持 `false`。命名管道 DACL、两端 pid、按句柄验映像等 `cfg(windows)` 测试已在 CI `windows-latest` 上跑通（同一 run：筛 `windows` 的 lib 测试实际执行 12 条，其中 9 条 `cfg(windows)` 测试逐名核对；另 3 条是 `peer::windows_image` 里各平台都编译的纯规则测试）。
 
 ### 6.5 fork+exec 冒充（Linux、macOS 都成立，已登记需求第 9 章已知限制（v1.73））
 
