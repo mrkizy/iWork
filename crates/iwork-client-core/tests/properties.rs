@@ -2,7 +2,6 @@
 
 mod support;
 
-use std::collections::BTreeSet;
 use std::time::{Duration, Instant, SystemTime};
 
 use iwork_client_core::derive::Ctx;
@@ -216,11 +215,14 @@ fn window_moves_remove_rows() {
 
 // ---------- 连假后台的两条 ----------
 
+// 假后台只在 Unix 上监听；M1 暂不支持 Windows。
+#[cfg(unix)]
 mod live {
     use super::*;
     use iwork_client_core::{App, DirectDialer, Options};
     use iwork_fake_daemon::{FakeDaemon, fixtures as f, self_trusting_identity};
     use pb::ui_intent::Kind as I;
+    use std::collections::BTreeSet;
     use support::web::WebState;
     use tokio::time::timeout;
 

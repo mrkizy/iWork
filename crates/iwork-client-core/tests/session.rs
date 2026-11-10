@@ -1,6 +1,9 @@
 //! 会话循环连假后台（方案 2.6：假数据走真协议）：验收 2 与第 7 节里要连后台的各条。
 //! 客户端永远用真 `Client`；假后台是同一进程里的真 ipc `Server`（`self_trusting_identity`，不用 DevTrust）。
 
+// 假后台只在 Unix 上监听（iwork-fake-daemon）；M1 暂不支持 Windows。
+#![cfg(unix)]
+
 mod support;
 
 use std::collections::BTreeSet;
@@ -146,6 +149,11 @@ async fn reconnect_keeps_view() {
     h.daemon.disconnect_all().await;
     h.daemon
         .append(f::user_message("m-after", "c-basic", "断线期间发的"));
+    // 先等新消息出现（等到断线被察觉、重连、续传都走完），再等界面稳定后查重复。
+    until(&h.app, &mut h.web, "断线期间的新消息", |s| {
+        s.rows.contains_key("m-after")
+    })
+    .await;
     settle(&h.app, &mut h.web).await;
     let keys = h.web.row_keys();
     let unique: BTreeSet<_> = keys.iter().collect();
