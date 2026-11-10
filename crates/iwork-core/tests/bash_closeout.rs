@@ -932,3 +932,34 @@ fn flat_floor_expansion_is_linear() {
     );
     assert_eq!(e.evaluation.verdict, deny_rule("deny.resource-limit"));
 }
+
+/// 4/F-1：很多不同路径给出同一个 basename 时，目录配对按唯一的（目录, basename）组合生成，
+/// 与词数线性；旧实现按候选两两拼接，4000 条要十几秒。
+#[test]
+fn same_basename_pairs_are_linear() {
+    let h = Harness::default();
+    for n in [1000usize, 4000] {
+        let words: String = (0..n).map(|i| format!(" d{i}/x")).collect();
+        let cmd = format!("timeout 5 cp{words}");
+        let t = std::time::Instant::now();
+        let (c, _) = h.eval(&bash_req(&cmd), Manual);
+        let spent = t.elapsed();
+        assert!(
+            spent < std::time::Duration::from_secs(3),
+            "{n} 条：{spent:?}"
+        );
+        // 「别的候选」的排除仍在：d0/x 与 d1/x 互为别的候选，d0/x/x 要有
+        assert!(
+            has(&c, ActionKind::Write, &ws("d0/x/x")),
+            "{n} 条：缺 d0/x/x"
+        );
+    }
+    // 对照：只有自己给出这个 basename 时不配
+    let c = h.eval(&bash_req("timeout 5 cp a/x b/y"), Manual).0;
+    assert!(
+        !has(&c, ActionKind::Write, &ws("a/x/x")),
+        "{:?}",
+        briefs(&c)
+    );
+    assert!(has(&c, ActionKind::Write, &ws("a/x/y")) && has(&c, ActionKind::Write, &ws("b/y/x")));
+}

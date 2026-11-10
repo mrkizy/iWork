@@ -5,7 +5,7 @@
 //! 参数规则全部满足 → 读 / 写 / 删除 → ⑤ 其余归执行（白名单程序降级时另带保底角色）。②–⑤ 的路径动作
 //! 按登记的参数角色精确提取；解析不了的调用另走 [`fallback_actions`]，不认结构、宁可多抽。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use iwork_domain::action::ActionKind;
 use iwork_shell::{PartialFacts, RedirectKind, ShellScript, SimpleCommand};
@@ -19,7 +19,8 @@ use super::credential::simple_commands;
 use super::expansion::{Budget, Exhausted, Expander};
 use super::find_syntax::{self, FIND};
 use super::paths::{
-    fallback_candidates, is_path_word, join_basename, split_assignment, value_variants,
+    basename, fallback_candidates, is_path_word, join_basename, join_dir, split_assignment,
+    value_variants,
 };
 use super::{PathOrigin, PathQuery, PendingAction, PendingTarget};
 
@@ -343,25 +344,33 @@ fn floor_scan<S: AsRef<str>>(
 
 /// 目录目标：每个候选 `d` 与别的候选的 basename 拼出写入候选。配对数是平方级，生成前按上界扣字节额度。
 fn dir_target_pairs(e: &mut Expander, dirs: &BTreeSet<String>) -> Result<(), Exhausted> {
-    let bases: BTreeSet<&str> = dirs
-        .iter()
-        .filter_map(|s| {
-            let base = s.trim_end_matches('/').rsplit('/').next()?;
-            (!base.is_empty() && base != "." && base != "..").then_some(base)
-        })
-        .collect();
+    // 唯一的 basename → 有几个候选给出它。生成时只按唯一的（目录, basename）组合，和额度估算一致；
+    // 「别的候选」：只有 d 自己给出这个 basename 时不配（4/F-1）
+    let mut bases: BTreeMap<&str, usize> = BTreeMap::new();
+    for s in dirs {
+        if let Some(base) = basename(s) {
+            *bases.entry(base).or_default() += 1;
+        }
+    }
     let dir_bytes: usize = dirs.iter().map(String::len).sum();
-    let base_bytes: usize = bases.iter().map(|b| b.len()).sum();
+    let base_bytes: usize = bases.keys().map(|b| b.len()).sum();
     let bound = bases
         .len()
         .saturating_mul(dir_bytes.saturating_add(dirs.len()))
         .saturating_add(dirs.len().saturating_mul(base_bytes));
     e.reserve(0, bound)?;
     for d in dirs {
-        for s in dirs.iter().filter(|s| *s != d) {
-            if let Some(joined) = join_basename(d, s) {
-                e.push(ActionKind::Write, &joined, PathOrigin::Hypothetical, false)?;
+        let own = basename(d);
+        for (base, sources) in &bases {
+            if own == Some(*base) && *sources == 1 {
+                continue;
             }
+            e.push(
+                ActionKind::Write,
+                &join_dir(d, base),
+                PathOrigin::Hypothetical,
+                false,
+            )?;
         }
     }
     Ok(())

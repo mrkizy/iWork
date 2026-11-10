@@ -20,15 +20,22 @@ pub fn views(r: &ResolvedPath) -> impl Iterator<Item = &CanonicalPath> {
 /// 目录目标语义的假设候选 `dir / basename(source)`（方案 3.4）。源的末级名去掉尾斜杠后取；
 /// 末级是 `.`、`..` 或为空时没有候选（写入的就是目的本身）。
 pub fn join_basename(dir: &str, source: &str) -> Option<String> {
+    basename(source).map(|base| join_dir(dir, base))
+}
+
+/// 源的末级名（去掉尾斜杠）；是 `.`、`..` 或为空时没有（写入的就是目的本身）。
+pub fn basename(source: &str) -> Option<&str> {
     let base = source.trim_end_matches('/').rsplit('/').next()?;
-    if base.is_empty() || base == "." || base == ".." {
-        return None;
-    }
-    Some(if dir.ends_with('/') {
+    (!base.is_empty() && base != "." && base != "..").then_some(base)
+}
+
+/// `dir / base`。
+pub fn join_dir(dir: &str, base: &str) -> String {
+    if dir.ends_with('/') {
         format!("{dir}{base}")
     } else {
         format!("{dir}/{base}")
-    })
+    }
 }
 
 /// `name=value`（不以 `-` 开头、`=` 前非空）的值部分；值里再有 `=` 原样保留。
