@@ -29,8 +29,8 @@
 | --- | --- | --- | --- | --- | --- |
 | T01 / T02 / T03 / T05 / T08 | 已合入（ADR 0001–0012；T05 Windows 偶发修复 `a6a5007`） | — | 已关 | T01 验收 5 截图未补；T03 基准待 T11 空载复测 | — |
 | T05 补丁 | 任务 `2026-11-10-m1-t05-dispatch`（prompt 前提交开始执行、会话 ID 绑定事件），use_worktree | developer `e6df3dbe`（看门狗说已停、没回报——先看它窗口 / 分支） | 未送审 | — | 10:10 催回报（worktree 有未提交改动）；拿到回报后开 reviewer；合入后关 T04 1/F-11、F-12 |
-| T04 | 方案 `docs/plans/T04.md`（未提交，1343 行） | architect `3b7032e0`；reviewer `e4187f1a` | `2026-11-10-m1-t04-plan` **第 3 轮不通过**（已满三轮）：新 3/F-1（重拉函数不全、Usage 旁路）、3/F-2（有证书包监测漏完整性依赖，资源最后到位就永不验签）、3/F-3（旧进程 signer 固定探针，跨包形态升级永不重启）、3/F-4（有证书 SelfIdentity 没有运行中 cdhash） | 2/F-1、2/F-2 原场景已解决可关；1/F-8 按 Q5 记 intentional | 第 5 轮：4/F-1～F-3 已关；新 5/F-1（important：未知事件检查排在恢复写入之后，「拒绝时库不变」守不住）——等产品负责人定怎么收 |
-| T06 | 方案 + `tools/t0/iwork-t0g.py`（未提交） | architect `4f7c1e8b`；reviewer `4674b8d1` | `2026-11-10-m1-t06-plan` 第 3 轮不通过，第 4 轮不通过：3/F-* 已关；新 4/F-1（漏 Scheduler.deferred_ask）、4/F-2（blocking，探针顺符号链接清空外部文件）、4/F-3/F-4（证据缺失判通过）；产品负责人批准第 5 轮按根因改（判据统一「拿不到正面证据就是 INCONCLUSIVE」、沙箱外探针只独占新建登记的哨兵文件），architect 在改；产品负责人要知道：G5/G9d 只在一次性环境跑（临时 macOS 用户或虚拟机里登录一次 Claude Code，方案 16.2 第 5 项） | 2/F-1～F-6 + 1/F-3/F-6/F-8/F-10 残留 | 改完原 reviewer 第 3 轮；ApprovalDelivered / Decided 引用 T07 |
+| T04 | 方案 `docs/plans/T04.md`（未提交，1343 行） | architect `3b7032e0`；reviewer `e4187f1a` | `2026-11-10-m1-t04-plan` **第 3 轮不通过**（已满三轮）：新 3/F-1（重拉函数不全、Usage 旁路）、3/F-2（有证书包监测漏完整性依赖，资源最后到位就永不验签）、3/F-3（旧进程 signer 固定探针，跨包形态升级永不重启）、3/F-4（有证书 SelfIdentity 没有运行中 cdhash） | 2/F-1、2/F-2 原场景已解决可关；1/F-8 按 Q5 记 intentional | 第 5 轮：4/F-1～F-3 已关；新 5/F-1（未知事件检查排在恢复写入之后）。产品负责人定：architect 改，supervisor 自己核对后定稿，不再开审查轮 |
+| T06 | 方案 + `tools/t0/iwork-t0g.py`（未提交） | architect `4f7c1e8b`；reviewer `4674b8d1` | `2026-11-10-m1-t06-plan` 第 3 轮不通过，第 5 轮复审中（4674b8d1）；第 4 轮：3/F-* 已关；新 4/F-1（漏 Scheduler.deferred_ask）、4/F-2（blocking，探针顺符号链接清空外部文件）、4/F-3/F-4（证据缺失判通过）；产品负责人批准第 5 轮按根因改（判据统一「拿不到正面证据就是 INCONCLUSIVE」、沙箱外探针只独占新建登记的哨兵文件），architect 在改；产品负责人要知道：G5/G9d 只在一次性环境跑（临时 macOS 用户或虚拟机里登录一次 Claude Code，方案 16.2 第 5 项） | 2/F-1～F-6 + 1/F-3/F-6/F-8/F-10 残留 | 改完原 reviewer 第 3 轮；ApprovalDelivered / Decided 引用 T07 |
 | T07 实施 | 分支 `cao/009e8660` @ `f716b15`（worktree `.cao/worktrees/009e8660`） | developer `f8877913`；A 侧 reviewer `4f01bbc2`；B 侧 reviewer `edeff392`（空闲） | `2026-11-10-m1-t07` A 侧第 7 轮：5/F-1、6/F-1～F-4 已修已关；三版 3582 格回归无新误拒 | A：3/F-2、7/F-2（重记 7/F-1，出处改为本任务引入：action/engine 都是本分支新文件；7/F-1 修好后一起关 fixed）；B：1/F-13、2/F-1、2/F-2、3/F-3～F-8（等引擎重做） | developer 第 8 轮修 3/F-2 + 7/F-2（命令原文只存一份 / 下游计入预算），回来送 4f01bbc2 第 8 轮；B 侧等引擎方案 |
 | T07 引擎方案 | `docs/plans/T07.md` 6.10 + `docs/plans/T02.md` 状态前提（未提交） | architect `890c712d`；reviewer `099b7f24` | `2026-11-10-m1-t07-engine-plan` **第 4 轮通过，定稿 `b6bf0a6`** | — | developer f8877913 在分支上按 6.10.14 做 E1–E7；真实观察者接线测试归 T10a 合入门槛 |
 | T09 | 方案 `docs/plans/T09.md`（未提交，429 行） | architect `62db2f05`；reviewer `9cbb7f89` | `2026-11-10-m1-t09-plan` 第 2 轮不通过：2/F-1（断线丢在飞的摘要重查）、2/F-2（reload 不释放 Tauri 旧帧暂存）、2/F-3（非时间线大 patch 超 1 MiB 永远发不出，blocking）；1/F-3～F-7 已解决可关，1/F-1、F-2 部分 | 见左 | 第 3 轮不通过（3/F-1 interceptor 守门无效、3/F-2 跨代旧响应覆盖），**方案定稿 `1df7d74`**，实施见下一行；设计窗口 Q9～Q12 待答 |
@@ -50,6 +50,8 @@
 - 每个合入单元用新的 developer 和 reviewer；审方案和审 diff 的 reviewer 分开。
 
 ## 5 踩过的坑
+
+- **磁盘满（2026-11-10 10:30）**：各 worktree 的 target 加起来七八十 G，reviewer 和 developer 的临时副本又各带一份 release target。已合入分支 worktree 的 `target/` 直接删（`2d513126`、`2e7bcbe5`、`49facf33`、`fecce968`）。派活时写明：临时副本跑完就删。
 
 - 新窗口太小消息投不进：`tmux resize-window -t cao-a46fd0b6:<窗口> -x 140 -y 45`。
 - 看门狗「停下没回报 / 卡住 / 在等回答」常是误报（等后台任务或 CI），先看窗口。非安全类权限框可 `answer_user_prompt`，但有倒计时会自动拦下。
