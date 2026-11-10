@@ -5,10 +5,9 @@
 
 ## 1 运行安排
 
-- **11:15 产品负责人要重新配置角色、用 `--new-supervisor` 重开 supervisor 窗口，旧对话可能丢失。** 新 supervisor 接手时注意：
-  - **在飞 worker 的回报会发给旧 supervisor 终端 `1bb602b5`**，新 supervisor 收不到。接手后先 `agent-scaffold ps` 看每个 worker 状态，用 `cao agent result <id>` 或直接看它的 tmux 窗口拿最后回复，再看各分支最新提交；必要时给 worker 发一条消息说明「以后回报发给新 supervisor」（若 CAO 不允许跨 supervisor 发消息，就让它停下，重新 assign 新 worker 接手同一 worktree）。
-  - 在飞的 4 个：T03 developer `fe00e889`（codex，worktree `.cao/worktrees/2e7bcbe5`）、T07 developer `5638c08f`（codex，worktree `.cao/worktrees/009e8660`）、T07 方案复核 reviewer `ed326a3d`（任务 2026-11-09-m1-t07-plan 第 9 轮）、T08 复审 reviewer `e2991248`（任务 2026-11-09-m1-t08 第 6 轮）。复审结论以账本为准：`agent-scaffold findings list --task <任务 ID>`。
-  - 旧 developer 终端 `2e7bcbe5`、`009e8660`、`49facf33` 是 use_worktree 建的，**删终端会清掉 worktree**，分支合入前不要删。
+- **12:30 机器重启、产品负责人重新生成了角色**：旧 CAO 会话 `cao-4b34c5da` 与其中所有 worker 都没了，新会话 `cao-a46fd0b6`，supervisor 终端 `f6c88a81`。worktree 都还在（`git worktree list`）。现在的角色：developer = claude_code `claude-opus-5-5`；code_reviewer = codex `gpt-6-astra`；architect = claude_code `claude-fable-5-2`。
+- **重新生成把 `.cao/project-prompts/*.md` 换成了空模板（未提交）**：原来 code_supervisor 的 7 条项目规则和 code_reviewer 的项目定级规则都在 git HEAD 里（`git show HEAD:.cao/project-prompts/code_reviewer.md`）。等产品负责人决定是否把旧内容填回新模板；在那之前，派 reviewer 时把定级规则写进派活消息。
+- 12:35 已派：T08 developer `4960bf0d`（worktree `.cao/worktrees/49facf33`，结束合并 + 6/F-1 变异 + 全量 + 推送 CI）；T03 developer `b271f92f`（worktree `.cao/worktrees/2e7bcbe5`，clippy 四组 + 基准前后对比 + 回报文档）。
 - 定时任务都只在旧会话里有效，重开后不存在；gh 已登录（账号 mrkizy），不用再提醒。
 - **推送**：main 推送已获同意；T05、T08 分支已获同意推送跑 CI。T03 分支推送跑 Windows CI **还没获同意**。
 - **重测试排队（产品负责人 2026-11-10 定）**：同一时间只跑一张卡的重测试，统一用 `lockf /tmp/iwork-heavy-test.lock <命令>`，规则写在 AGENTS.md 命令节。派活消息里要写明。
