@@ -168,10 +168,15 @@ impl ConnectionBudget {
         Push::Queued
     }
 
-    /// 缓冲里的事件转入发送队列：字节早已算过，转移不会改变占用，所以不再判上限。
+    /// 缓冲里的帧转入发送队列。缓冲预留时用的就是这一帧的完整编码长度，转移前后占用不变，所以不再判上限。
     pub(crate) fn move_buffered_to_queue(&mut self, o: Outbound, buffered_len: usize) {
+        debug_assert_eq!(
+            o.encoded_len(),
+            buffered_len,
+            "缓冲预留与发送队列必须用同一个完整编码长度"
+        );
         self.buffered_bytes -= buffered_len;
-        self.enqueue(o);
+        self.enqueue_with_len(o, buffered_len);
     }
 
     /// 缓冲里跳过不发的事件（已被快照或补发覆盖）。
@@ -217,6 +222,7 @@ impl ConnectionBudget {
         let Some(new_ev) = &new.event else {
             return false;
         };
+        let room = self.live_limit().saturating_sub(self.used());
         for (o, len) in self.queue.iter_mut().rev() {
             let Outbound::Transient {
                 ids: prev_ids,
@@ -237,11 +243,13 @@ impl ConnectionBudget {
             if !same_stream {
                 continue;
             }
-            // 找到同一条消息的上一片：订阅集合不同、文字接不上、拼完超长都不合并，也不再往前找。
+            // 找到同一条消息的上一片：订阅集合不同、文字接不上、拼完超长、合并后的净增长超出实时上限，
+            // 都不合并，也不再往前找（交给调用方关连接）。合并在副本上做，确定放得下才替换。
             if prev_ids.as_slice() != ids {
                 return false;
             }
-            let appended = match (&mut prev.event, new_ev) {
+            let mut merged = prev.clone();
+            let appended = match (&mut merged.event, new_ev) {
                 (Some(Transient::MessageDelta(p)), Transient::MessageDelta(n)) => {
                     append(&mut p.text, p.offset, &n.text, n.offset)
                 }
@@ -250,12 +258,21 @@ impl ConnectionBudget {
                 }
                 _ => unreachable!("same_stream 已确认两片同类"),
             };
-            if appended {
-                let new_len = o.encoded_len();
-                self.queue_bytes = self.queue_bytes - *len + new_len;
-                *len = new_len;
+            if !appended {
+                return false;
             }
-            return appended;
+            let merged_frame = Outbound::Transient {
+                ids: prev_ids.clone(),
+                event: merged,
+            };
+            let new_len = merged_frame.encoded_len();
+            if new_len - *len > room {
+                return false;
+            }
+            self.queue_bytes = self.queue_bytes - *len + new_len;
+            *o = merged_frame;
+            *len = new_len;
+            return true;
         }
         false
     }
@@ -389,12 +406,13 @@ mod tests {
     #[test]
     fn adjacent_deltas_of_same_message_merge_when_full() {
         let first = delta("m", 0, "ab", &[1]);
-        let mut b = ConnectionBudget::new(first.encoded_len() + 2, 1);
+        // 实时上限比第一片多 3 字节：第二片单独成帧放不下，合并只多 2 字节，放得下。
+        let mut b = ConnectionBudget::new(first.encoded_len() + 4, 1);
         assert_eq!(b.push_live(first), Push::Queued);
         assert_eq!(
             b.push_live(delta("m", 2, "cd", &[1])),
             Push::Queued,
-            "满了就合并"
+            "单独放不下就合并"
         );
         assert_eq!(texts(&b), ["abcd"]);
         assert_eq!(b.used(), b.queue[0].0.encoded_len(), "合并后字节重算");
@@ -434,6 +452,56 @@ mod tests {
             "隔着别的瞬时事件可以合并"
         );
         assert_eq!(texts(&b)[0], "ab");
+    }
+
+    #[test]
+    fn merge_never_exceeds_live_limit() {
+        // 实时上限刚好放下第一片：之后无论来多少片同一条消息的增量，合并都不能让占用越过上限。
+        let first = delta("m", 0, "ab", &[1]);
+        let live = first.encoded_len() + 8;
+        let mut b = ConnectionBudget::new(live + 1, 1);
+        assert_eq!(b.push_live(first), Push::Queued);
+        let mut offset = 2;
+        let mut merged = 0;
+        loop {
+            let r = b.push_live(delta("m", offset, "cdef", &[1]));
+            assert!(b.used() <= live, "占用 {} 越过实时上限 {live}", b.used());
+            if r == Push::Overflow {
+                break;
+            }
+            merged += 1;
+            offset += 4;
+        }
+        assert!(merged >= 1, "对照：放得下时仍会合并");
+        assert_eq!(b.queue.len(), 1);
+    }
+
+    #[test]
+    fn buffered_frame_moves_with_its_full_length() {
+        // 256 个订阅 id 的帧远大于裸事件：预留按完整帧计，转入队列后占用不变、不越过上限。
+        let ids: Vec<u32> = (0..256).collect();
+        let frame = Outbound::Persisted {
+            ids,
+            event: Arc::new(RoutedEvent::new(
+                pb::PersistedEvent {
+                    seq: 1,
+                    ..Default::default()
+                },
+                vec![StreamKey::all("project")],
+            )),
+        };
+        let len = frame.encoded_len();
+        let mut b = ConnectionBudget::new(len * 2, 1);
+        assert_eq!(b.reserve_buffer(len), Push::Queued);
+        assert_eq!(
+            b.reserve_buffer(len),
+            Push::Overflow,
+            "第二帧完整长度放不下"
+        );
+        let before = b.used();
+        b.move_buffered_to_queue(frame, len);
+        assert_eq!(b.used(), before, "转移前后占用不变");
+        assert!(b.used() <= b.limit());
     }
 
     #[test]

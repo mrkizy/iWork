@@ -69,9 +69,19 @@ enum Phase {
     Empty,
     /// 交接或补发中：匹配过滤的实时事件进缓冲（字节算预算）。
     Paused {
-        buffer: VecDeque<(Arc<RoutedEvent>, usize)>,
+        buffer: VecDeque<Buffered>,
     },
     Live,
+}
+
+/// 缓冲里的一条：已经做成完整的待发帧（带订阅 id）。预留预算与转入发送队列用的是同一个
+/// 完整编码长度 `len`，转移时字节数不变。订阅 id 在暂停期间不会变：范围只由 FIFO 里的操作改，
+/// 而暂停本身就是一个 FIFO 操作在执行。
+#[derive(Debug)]
+struct Buffered {
+    seq: u64,
+    frame: Outbound,
+    len: usize,
 }
 
 #[derive(Debug)]
@@ -126,12 +136,6 @@ impl Stream {
 
     pub(crate) fn active_scopes(&self) -> Vec<pb::SubscriptionScope> {
         self.scopes.values().map(|s| s.scope.clone()).collect()
-    }
-
-    fn matches(&self, routes: &[StreamKey]) -> bool {
-        self.filter
-            .iter()
-            .any(|k| routes.iter().any(|r| k.covers(r)))
     }
 
     /// 匹配这条事件的全部活动范围 id（`Event.subscription_ids`）。
@@ -202,22 +206,23 @@ impl Stream {
         };
     }
 
-    /// 唯一的持久事件发送入口。`seq ≤ cursor` 不发；否则带上匹配的范围 id 入队并推进游标。
-    fn deliver(&mut self, e: &Arc<RoutedEvent>, push: impl FnOnce(Outbound) -> Push) -> Push {
-        if e.seq() <= self.cursor {
-            return Push::Queued;
-        }
+    /// 持久事件的待发帧：带上匹配的全部活动范围 id。没有范围匹配（补发页里不属于当前范围的事件）返回 `None`。
+    fn persisted_frame(&self, e: &Arc<RoutedEvent>) -> Option<Outbound> {
         let ids = self.matching_ids(&e.routes);
-        if ids.is_empty() {
-            // 补发页里不属于当前任何范围的事件（理论上源已按键过滤）：不发，也不推进游标。
-            return Push::Queued;
-        }
-        let r = push(Outbound::Persisted {
+        (!ids.is_empty()).then(|| Outbound::Persisted {
             ids,
             event: Arc::clone(e),
-        });
+        })
+    }
+
+    /// 唯一的持久事件发送入口。`seq ≤ cursor` 不发；否则交给 `push` 入队，成功就推进游标。
+    fn deliver(&mut self, seq: u64, frame: Outbound, push: impl FnOnce(Outbound) -> Push) -> Push {
+        if seq <= self.cursor {
+            return Push::Queued;
+        }
+        let r = push(frame);
         if r == Push::Queued {
-            self.cursor = e.seq();
+            self.cursor = seq;
         }
         r
     }
@@ -228,22 +233,26 @@ impl Stream {
         e: &Arc<RoutedEvent>,
         budget: &mut ConnectionBudget,
     ) -> Result<bool, FailCause> {
-        if !self.matches(&e.routes) {
+        let Some(frame) = self.persisted_frame(e) else {
             return Ok(false);
-        }
+        };
         match &mut self.phase {
             Phase::Empty => Ok(false),
             Phase::Paused { buffer } => {
-                let len = e.encoded_len();
+                let len = frame.encoded_len();
                 match budget.reserve_buffer(len) {
                     Push::Queued => {
-                        buffer.push_back((Arc::clone(e), len));
+                        buffer.push_back(Buffered {
+                            seq: e.seq(),
+                            frame,
+                            len,
+                        });
                         Ok(false)
                     }
                     Push::Overflow => Err(FailCause::ReplayBufferFull),
                 }
             }
-            Phase::Live => match self.deliver(e, |o| budget.push_live(o)) {
+            Phase::Live => match self.deliver(e.seq(), frame, |o| budget.push_live(o)) {
                 Push::Queued => Ok(true),
                 Push::Overflow => Err(FailCause::QueueFull),
             },
@@ -279,7 +288,10 @@ impl Stream {
         e: &Arc<RoutedEvent>,
         budget: &mut ConnectionBudget,
     ) -> Push {
-        self.deliver(e, |o| budget.push_replay(o))
+        match self.persisted_frame(e) {
+            Some(frame) => self.deliver(e.seq(), frame, |o| budget.push_replay(o)),
+            None => Push::Queued,
+        }
     }
 
     /// 交接的插入：先送缓冲里 `seq ≤ at` 的事件，再把 `responses` 入队，游标推到 `at`，再送其余缓冲，恢复。
@@ -291,16 +303,16 @@ impl Stream {
         budget: &mut ConnectionBudget,
     ) {
         let mut buffer = self.take_buffer();
-        while buffer.front().is_some_and(|(e, _)| e.seq() <= at) {
-            let (e, len) = buffer.pop_front().expect("刚看过非空");
-            self.move_from_buffer(&e, len, budget);
+        while buffer.front().is_some_and(|b| b.seq <= at) {
+            let b = buffer.pop_front().expect("刚看过非空");
+            self.move_from_buffer(b, budget);
         }
         for r in responses {
             budget.push_response(r);
         }
         self.cursor = self.cursor.max(at);
-        for (e, len) in buffer {
-            self.move_from_buffer(&e, len, budget);
+        for b in buffer {
+            self.move_from_buffer(b, budget);
         }
         self.resume();
     }
@@ -313,13 +325,13 @@ impl Stream {
 
     /// 交接以业务错误结束：缓冲按序全部送出，游标只随送出的事件前进，恢复。
     pub(crate) fn drain_and_resume(&mut self, budget: &mut ConnectionBudget) {
-        for (e, len) in self.take_buffer() {
-            self.move_from_buffer(&e, len, budget);
+        for b in self.take_buffer() {
+            self.move_from_buffer(b, budget);
         }
         self.resume();
     }
 
-    fn take_buffer(&mut self) -> VecDeque<(Arc<RoutedEvent>, usize)> {
+    fn take_buffer(&mut self) -> VecDeque<Buffered> {
         match std::mem::replace(&mut self.phase, Phase::Empty) {
             Phase::Paused { buffer } => buffer,
             other => {
@@ -329,20 +341,15 @@ impl Stream {
         }
     }
 
-    fn move_from_buffer(
-        &mut self,
-        e: &Arc<RoutedEvent>,
-        len: usize,
-        budget: &mut ConnectionBudget,
-    ) {
+    fn move_from_buffer(&mut self, b: Buffered, budget: &mut ConnectionBudget) {
         let mut moved = false;
-        self.deliver(e, |o| {
-            budget.move_buffered_to_queue(o, len);
+        self.deliver(b.seq, b.frame, |o| {
+            budget.move_buffered_to_queue(o, b.len);
             moved = true;
             Push::Queued
         });
         if !moved {
-            budget.release_buffer(len);
+            budget.release_buffer(b.len);
         }
     }
 
@@ -357,5 +364,55 @@ impl Stream {
     /// 连接关闭：丢掉缓冲（字节由预算的 `clear` 一起归零）。
     pub(crate) fn clear(&mut self) {
         self.phase = Phase::Empty;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scope(i: u32) -> ScopeAdd {
+        ScopeAdd {
+            id: i,
+            scope: pb::SubscriptionScope::default(),
+            keys: vec![StreamKey::all("project")],
+        }
+    }
+
+    fn event(seq: u64) -> Arc<RoutedEvent> {
+        Arc::new(RoutedEvent::new(
+            pb::PersistedEvent {
+                seq,
+                ..Default::default()
+            },
+            vec![StreamKey::one("project", "p")],
+        ))
+    }
+
+    /// 256 个重叠范围让每条待发帧远大于裸事件：缓冲按完整帧预留，排空进队列后占用不变，都不越过上限。
+    #[test]
+    fn buffered_events_with_many_scope_ids_stay_within_budget() {
+        let mut stream = Stream::new();
+        stream.add_scopes((0..256).map(scope).collect(), 0);
+        let mut budget = ConnectionBudget::new(64 * 1024, 1024);
+        let mut buffered = 0;
+        for seq in 1.. {
+            match stream.on_persisted(&event(seq), &mut budget) {
+                Ok(_) => buffered += 1,
+                Err(cause) => {
+                    assert_eq!(cause, FailCause::ReplayBufferFull);
+                    break;
+                }
+            }
+            assert!(
+                budget.used() <= 64 * 1024 - 1024,
+                "缓冲越过实时上限：{}",
+                budget.used()
+            );
+        }
+        assert!(buffered > 0, "对照：放得下时会缓冲");
+        let before = budget.used();
+        stream.finish_replay(0, &mut budget);
+        assert_eq!(budget.used(), before, "转入发送队列前后占用不变");
     }
 }
