@@ -1,15 +1,16 @@
 //! 路径候选的展开：去重、全调用额度（3/F-2）。
 //!
-//! 解析不了的调用与白名单程序降级都要把字面词展开成许多路径候选（兜底拆词、保底角色、目录目标的
-//! 「词 / 别的词的 basename」）。展开量取决于命令文字，攻击者能让它变成平方级：所以每个候选按
-//! （种类, 原文, 来源, 参数标记）去重，整条调用的候选条数与候选文字字节数各有上限，**在分配之前**
-//! 先扣额度，超了就失败关闭（调用方打资源上限标记，三档拒）。不截断：截断等于少检查。
+//! Bash 调用的**全部**动作都经这里产出（5/F-1 的根因修法）：路径动作按（种类, 原文, 来源, 参数标记）
+//! 去重、扣额度；非路径动作（执行、推送、发布…）只扣条数。展开量取决于命令文字，攻击者能让它变成
+//! 平方级（兜底拆词、保底角色、目录目标的「目录 / 文件名」、`find` 的删除），所以整条调用的条数与
+//! 文字字节数各有上限，**在生成、拼接之前**先扣，超了就失败关闭（调用方打资源上限标记，三档拒）。
+//! 不截断：截断等于少检查。新增候选来源时只能调这里的方法，`bash.rs` 不直接构造路径动作。
 
 use std::collections::HashSet;
 
 use iwork_domain::action::ActionKind;
 
-use super::paths::{fallback_candidates, is_path_word};
+use super::paths::{basename, fallback_candidates, is_path_word, join_dir};
 use super::{PathOrigin, PathQuery, PendingAction, PendingTarget};
 
 /// 一条调用展开出的路径候选动作最多几条。
@@ -110,6 +111,80 @@ impl<'a> Expander<'a> {
     /// 额外扣条数（目录目标配对在生成前按配对数扣）。
     pub fn reserve(&mut self, items: usize, bytes: usize) -> Result<(), Exhausted> {
         self.budget.charge(items, bytes)
+    }
+
+    /// 一个不是路径的动作（执行、推送、发布、承载命令的动作）：不去重，只扣一条。
+    pub fn push_action(&mut self, action: PendingAction) -> Result<(), Exhausted> {
+        debug_assert!(
+            !matches!(action.target, PendingTarget::Path(_)),
+            "路径动作必须经 push 去重扣额度"
+        );
+        self.budget.charge(1, 0)?;
+        self.out.push(action);
+        Ok(())
+    }
+
+    /// 同一份额度、独立去重与输出的子收集器：先试着归类（白名单安全形态），成了再并回来。
+    pub fn child(&mut self) -> Expander<'_> {
+        Expander::new(self.budget)
+    }
+
+    /// 把子收集器的结果并回来（额度已扣过）。
+    pub fn adopt(&mut self, actions: Vec<PendingAction>) {
+        for a in &actions {
+            if let PendingTarget::Path(q) = &a.target {
+                self.seen.insert((
+                    a.kind,
+                    q.literal.clone(),
+                    q.origin == PathOrigin::Real,
+                    a.argument,
+                ));
+            }
+        }
+        self.out.extend(actions);
+    }
+
+    /// 目录目标：每个目的 `d` 与每个**唯一**的文件名配出写入候选 `d / 文件名`（按 `roles`）。
+    /// 配对数是平方级：按唯一（目的, 文件名）组合生成，拼接之前先按上界扣字节额度（5/F-1、4/F-1）。
+    /// `exclude_self` 时只有 `d` 自己给出的文件名不配（「别的候选」语义）。
+    pub fn dir_pairs(
+        &mut self,
+        roles: &[ActionKind],
+        dests: &[&str],
+        sources: &[&str],
+        exclude_self: bool,
+    ) -> Result<(), Exhausted> {
+        let dests: std::collections::BTreeSet<&str> =
+            dests.iter().copied().filter(|d| is_path_word(d)).collect();
+        let mut bases: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for s in sources {
+            if let Some(base) = basename(s) {
+                *bases.entry(base).or_default() += 1;
+            }
+        }
+        if dests.is_empty() || bases.is_empty() {
+            return Ok(());
+        }
+        let dest_bytes: usize = dests.iter().map(|d| d.len() + 1).sum();
+        let base_bytes: usize = bases.keys().map(|b| b.len()).sum();
+        let bound = bases
+            .len()
+            .saturating_mul(dest_bytes)
+            .saturating_add(dests.len().saturating_mul(base_bytes));
+        self.budget.charge(0, bound)?;
+        for d in &dests {
+            let own = basename(d);
+            for (base, count) in &bases {
+                if exclude_self && own == Some(*base) && *count == 1 {
+                    continue;
+                }
+                let joined = join_dir(d, base);
+                for kind in roles {
+                    self.push(*kind, &joined, PathOrigin::Hypothetical, false)?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 

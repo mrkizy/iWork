@@ -963,3 +963,51 @@ fn same_basename_pairs_are_linear() {
     );
     assert!(has(&c, ActionKind::Write, &ws("a/x/y")) && has(&c, ActionKind::Write, &ws("b/y/x")));
 }
+
+/// 5/F-1：三个曾绕过整条调用额度的候选来源，走完整的两阶段归一（取事实 + 纯归一）都限时。
+/// ① 同一条命令里大量 `find`：不为每个 `find` 重扫后缀；② `cp -t dst … src/x …` 的目录目标按唯一组合；
+/// ③ `git` 未登记粘值的超长组合短选项经额度入口，超额失败关闭。
+#[test]
+fn every_candidate_source_is_budgeted() {
+    let h = Harness::default();
+    let within = |what: &str, t: std::time::Instant| {
+        let spent = t.elapsed();
+        assert!(
+            spent < std::time::Duration::from_secs(3),
+            "{what}：{spent:?}"
+        );
+    };
+    // ①
+    let cmd = format!("timeout 5 {}-delete", "find ".repeat(2000));
+    let t = std::time::Instant::now();
+    let (c, e) = h.eval(&bash_req(&cmd), Manual);
+    within("find × 2000", t);
+    assert!(c.actions.len() < 100, "{} 个动作", c.actions.len());
+    // cwd 是工作区根：删 cwd 是底线
+    assert!(
+        matches!(e.evaluation.verdict, Verdict::Deny(DenyReason::Baseline(_))),
+        "{:?}",
+        e.evaluation.verdict
+    );
+    // ②
+    for n in [200usize, 2000] {
+        let cmd = format!("cp{}{}", " -t dst".repeat(n), " src/x".repeat(n));
+        let t = std::time::Instant::now();
+        let (c, _) = h.eval(&bash_req(&cmd), Manual);
+        within("cp -t × n", t);
+        assert!(c.actions.len() < 20, "{n}：{} 个动作", c.actions.len());
+        assert!(
+            has(&c, ActionKind::Write, &ws("dst/x")),
+            "{n}：{:?}",
+            briefs(&c)
+        );
+    }
+    // ③
+    let cmd = format!("git log -{}", "a".repeat(4000));
+    let t = std::time::Instant::now();
+    let (_, e) = h.eval(&bash_req(&cmd), Manual);
+    within("git 粘值", t);
+    assert_eq!(e.evaluation.verdict, deny_rule("deny.resource-limit"));
+    // 对照：短的组合短选项照常
+    assert_eq!(three_on(&h, "git log -n5"), ["Ask", "Allow", "Allow"]);
+}

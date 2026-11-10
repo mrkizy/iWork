@@ -107,8 +107,13 @@ impl Walk {
             Origin::Queued => &mut self.facts.queued_words,
         };
         target.extend(literals.iter().cloned());
-        for t in texts_to_reparse(literals) {
-            self.enqueue(t, Origin::Queued);
+        match texts_to_reparse(literals) {
+            Ok(texts) => {
+                for t in texts {
+                    self.enqueue(t, Origin::Queued);
+                }
+            }
+            Err(_) => self.facts.resource_limit = true,
         }
     }
 

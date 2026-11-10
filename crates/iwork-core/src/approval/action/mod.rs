@@ -156,10 +156,10 @@ impl Analysis {
             Fallback::ShellFacts(facts) => (std::borrow::Cow::Borrowed(facts), None),
             Fallback::ShellScript { command, script } => (
                 std::borrow::Cow::Owned(iwork_shell::literal_facts(command)),
-                Some(bash::precise_find_deletes(script)),
+                Some(script),
             ),
         };
-        let (actions, too_many) = bash::fallback_actions(&facts, precise.as_deref());
+        let (actions, too_many) = bash::fallback_actions(&facts, precise);
         let flags = CallFlags {
             resource_limit_hit: facts.resource_limit || too_many,
             unlexable: facts.lex_failed,

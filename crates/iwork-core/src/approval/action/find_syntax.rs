@@ -155,26 +155,14 @@ fn exec_segment_end(args: &[&str], from: usize) -> Option<usize> {
 /// 保守规则：一串没有命令结构的字面词里，`find` 之后又有 `-delete` 时，`find` 之后的**每一个**字面词
 /// （以 `-` 开头的、`-delete` 自己都算）与 cwd（`.`）都是可能的删除目标。不切、不数参数、不认 `-exec` 段。
 ///
-/// 多个 `find` 时各自后缀的并集就是「后面有 `-delete` 的最早那个 `find`」之后的全部词：一遍找到它，
-/// 不为每个 `find` 复制后缀（3/F-2 同类）。
-pub fn flat_delete<S: AsRef<str>>(words: &[S]) -> Vec<String> {
-    let Some(last_delete) = words.iter().rposition(|w| w.as_ref() == "-delete") else {
-        return Vec::new();
-    };
-    let Some(first_find) = words[..last_delete]
+/// 返回删除候选从哪个下标开始：多个 `find` 时各自后缀的并集就是「后面有 `-delete` 的最早那个 `find`」
+/// 之后的全部词，一遍找到它，不复制后缀（3/F-2、5/F-1）。调用方另加 cwd。
+pub fn flat_delete_start<S: AsRef<str>>(words: &[S]) -> Option<usize> {
+    let last_delete = words.iter().rposition(|w| w.as_ref() == "-delete")?;
+    let first_find = words[..last_delete]
         .iter()
-        .position(|w| program_id(w.as_ref()) == FIND)
-    else {
-        return Vec::new();
-    };
-    let mut out: Vec<String> = words[first_find + 1..]
-        .iter()
-        .map(|w| w.as_ref().to_owned())
-        .collect();
-    out.push(".".to_owned());
-    out.sort();
-    out.dedup();
-    out
+        .position(|w| program_id(w.as_ref()) == FIND)?;
+    Some(first_find + 1)
 }
 
 #[cfg(test)]
@@ -220,12 +208,15 @@ mod tests {
     #[test]
     fn flat_delete_every_word_after_find() {
         let w = ["LC_ALL=C", "find", "-f", "-dir/../..", "--", "-delete"];
+        assert_eq!(flat_delete_start(&w), Some(2));
+        // 多个 find：最早那个之后
         assert_eq!(
-            flat_delete(&w),
-            vec!["--", "-delete", "-dir/../..", "-f", "."]
+            flat_delete_start(&["find", "a", "find", "b", "-delete"]),
+            Some(1)
         );
-        // 对照：没有 -delete、没有 find
-        assert!(flat_delete(&["find", ".", "-name", "x"]).is_empty());
-        assert!(flat_delete(&["rm", "-delete"]).is_empty());
+        // 对照：没有 -delete、没有 find、-delete 在 find 前面
+        assert_eq!(flat_delete_start(&["find", ".", "-name", "x"]), None);
+        assert_eq!(flat_delete_start(&["rm", "-delete"]), None);
+        assert_eq!(flat_delete_start(&["-delete", "find", "x"]), None);
     }
 }

@@ -28,30 +28,56 @@ const REPARSE: &[(&str, Rule)] = &[
     ("watch", Rule::JoinedAndEachArg),
 ];
 
+/// 连起来的文字超过上限（[`crate::TEXT_LIMIT`]）：事实收不全，调用方按资源上限处理。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TooLarge;
+
 /// 一串字面词里要再解析的文字。程序名不要求是第一个词（包装词后面的照样认），
 /// 带路径前缀的按最后一段比；同一串里出现几次就处理几次。
-pub(crate) fn texts_to_reparse(words: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
+///
+/// 线性（5/F-1 同类）：逐参数入队时，后出现的程序的后缀是先出现的后缀的子集，只从最早一个起逐个取一次；
+/// 连起来的一段每次出现各不相同，先按后缀字节数算总量，超过上限就不拼、返回 [`TooLarge`]。
+pub(crate) fn texts_to_reparse(words: &[String]) -> Result<Vec<String>, TooLarge> {
+    let mut each_from: Option<usize> = None;
+    let mut joined_at: Vec<usize> = Vec::new();
+    // 从后往前：后面有没有命令选项（su、flock 要它）
+    let mut command_option_after = vec![false; words.len() + 1];
+    for i in (0..words.len()).rev() {
+        command_option_after[i] = command_option_after[i + 1] || is_command_option(&words[i]);
+    }
     for (i, w) in words.iter().enumerate() {
         let program = w.rsplit('/').next().unwrap_or(w);
         let Some((_, rule)) = REPARSE.iter().find(|(p, _)| *p == program) else {
             continue;
         };
-        let rest = &words[i + 1..];
-        match rule {
-            Rule::EachArg => each(rest, &mut out),
+        let qualifies = match rule {
+            Rule::EachArg => true,
             Rule::JoinedAndEachArg => {
-                out.push(rest.join(" "));
-                each(rest, &mut out);
+                joined_at.push(i);
+                true
             }
-            Rule::EachArgWithCommandOption => {
-                if rest.iter().any(|a| is_command_option(a)) {
-                    each(rest, &mut out);
-                }
-            }
+            Rule::EachArgWithCommandOption => command_option_after[i + 1],
+        };
+        if qualifies {
+            each_from = Some(each_from.map_or(i + 1, |f| f.min(i + 1)));
         }
     }
-    out
+    // 后缀字节数（含分隔空格）：连起来那几段的总量先算出来
+    let mut suffix_bytes = vec![0usize; words.len() + 1];
+    for i in (0..words.len()).rev() {
+        suffix_bytes[i] = suffix_bytes[i + 1] + words[i].len() + 1;
+    }
+    let total = joined_at
+        .iter()
+        .fold(0usize, |acc, i| acc.saturating_add(suffix_bytes[i + 1]));
+    if total > crate::TEXT_LIMIT {
+        return Err(TooLarge);
+    }
+    let mut out: Vec<String> = joined_at.iter().map(|i| words[i + 1..].join(" ")).collect();
+    if let Some(from) = each_from {
+        each(&words[from..], &mut out);
+    }
+    Ok(out)
 }
 
 /// 每个参数一段；形如 `--xxx=值` 的，`=` 后面的值也入队（`su --command='…'`）。
@@ -74,11 +100,11 @@ fn is_command_option(a: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::texts_to_reparse;
+    use super::{TooLarge, texts_to_reparse};
 
     fn t(words: &[&str]) -> Vec<String> {
         let words: Vec<String> = words.iter().map(|w| (*w).to_owned()).collect();
-        texts_to_reparse(&words)
+        texts_to_reparse(&words).unwrap()
     }
 
     #[test]
@@ -98,5 +124,17 @@ mod tests {
         assert!(t(&["flock", "/tmp/l", "make"]).is_empty());
         assert!(t(&["git", "commit", "-m", "Document .git/config format"]).is_empty());
         assert!(t(&["grep", "cat ~/.ssh/id_rsa", "notes.md"]).is_empty());
+    }
+
+    /// 5/F-1 同类：登记程序名大量重复时线性；连起来的文字总量超过上限时不拼、报超额。
+    #[test]
+    fn repeated_programs_stay_linear() {
+        let words: Vec<String> = std::iter::repeat_n("bash".to_string(), 50_000).collect();
+        let t0 = std::time::Instant::now();
+        let out = texts_to_reparse(&words).unwrap();
+        assert!(t0.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(out.len(), 49_999);
+        let words: Vec<String> = std::iter::repeat_n("eval".to_string(), 20_000).collect();
+        assert_eq!(texts_to_reparse(&words), Err(TooLarge));
     }
 }
