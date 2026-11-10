@@ -8,7 +8,9 @@ const DEV_SERVER_KEYS = ["devUrl", "beforeDevCommand"];
 const REFUSE_BARE_BUILD = "node scripts/refuse-bare-build.ts";
 // 裸调 tauri CLI 时必须被拒绝脚本挡住的钩子：build 先跑 beforeBuildCommand，单独的 bundle 只跑 beforeBundleCommand
 const GUARDED_HOOKS = ["beforeBuildCommand", "beforeBundleCommand"];
-const LOCAL_ADDRESS = /localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]/;
+// `ipc.localhost` 不算：它是 Tauri 自定义协议在 Linux / Windows 上的来源（发布 CSP 必须放行它，见下文
+// 「发布层 CSP」），不是开发服务器。
+const LOCAL_ADDRESS = /(?<!ipc\.)localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]/;
 
 describe("src-tauri/ 里只有层清单登记过的 Tauri 配置", () => {
   it("实际目录里没有未登记的配置文件", () => {
@@ -37,6 +39,15 @@ describe("src-tauri/ 里只有层清单登记过的 Tauri 配置", () => {
   });
 });
 
+describe("本机地址的判定", () => {
+  it("ipc.localhost 不算开发服务器，其余本机地址都算", () => {
+    expect("http://ipc.localhost").not.toMatch(LOCAL_ADDRESS);
+    for (const a of ["http://localhost:1420", "http://127.0.0.1:1420", "http://0.0.0.0", "http://[::1]"]) {
+      expect(a).toMatch(LOCAL_ADDRESS);
+    }
+  });
+});
+
 describe("发布配置不含开发服务器", () => {
   it("pnpm tauri build 的配置里没有开发服务器入口与本机地址", () => {
     const config = effectiveConfig("build");
@@ -62,5 +73,47 @@ describe("发布配置不含开发服务器", () => {
     for (const key of DEV_SERVER_KEYS) {
       expect(build, `build.${key}`).toHaveProperty(key);
     }
+  });
+});
+
+// 发布层 CSP（T09 方案 2.4 第 7 条、R7、E4）：必须放行 Tauri 的自定义协议（否则 invoke 退回 postMessage，
+// 帧拿不到）；不许内联脚本、eval 与远程来源。
+describe("发布层 CSP", () => {
+  const csp = (): Record<string, string[]> => {
+    const security = (effectiveConfig("build") as { app?: { security?: { csp?: unknown } } }).app?.security;
+    expect(typeof security?.csp, "发布配置必须写 CSP（不能是 null）").toBe("string");
+    const out: Record<string, string[]> = {};
+    for (const part of String(security?.csp).split(";")) {
+      const [name, ...values] = part.trim().split(/\s+/);
+      if (name) out[name] = values;
+    }
+    return out;
+  };
+
+  it("connect-src 放行 ipc: 与 http://ipc.localhost", () => {
+    expect(csp()["connect-src"]).toEqual(expect.arrayContaining(["ipc:", "http://ipc.localhost"]));
+  });
+
+  it("脚本只许应用自身来源：没有内联、eval、远程地址", () => {
+    const script = csp()["script-src"] ?? csp()["default-src"];
+    expect(script).toEqual(["'self'"]);
+    for (const [name, values] of Object.entries(csp())) {
+      expect(values, name).not.toContain("'unsafe-eval'");
+      for (const v of values) {
+        expect(v, `${name} 不许远程来源`).not.toMatch(/^https?:\/\/(?!ipc\.localhost$)/);
+      }
+    }
+  });
+
+  it("不许内嵌框架与插件对象", () => {
+    expect(csp()["frame-src"]).toEqual(["'none'"]);
+    expect(csp()["object-src"]).toEqual(["'none'"]);
+  });
+
+  // 对照：开发层另有 devCsp，放开开发服务器，但不进发布配置。
+  it("开发服务器只出现在开发层的 devCsp 里", () => {
+    const dev = effectiveConfig("dev") as { app?: { security?: { devCsp?: string } } };
+    expect(dev.app?.security?.devCsp).toMatch(/127\.0\.0\.1:1420/);
+    expect(JSON.stringify(effectiveConfig("build"))).not.toMatch(/devCsp/);
   });
 });

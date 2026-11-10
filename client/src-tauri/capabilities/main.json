@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-only",
+  "description": "只有主窗口、应用自身来源能调三个命令（T09 方案 R7）；不给文件、shell 等插件能力。",
+  "windows": ["main"],
+  "permissions": [
+    "allow-attach",
+    "allow-next-frame",
+    "allow-ui-intent",
+    "notification:default"
+  ]
+}

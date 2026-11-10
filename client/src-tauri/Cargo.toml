@@ -11,9 +11,17 @@ tauri-build.workspace = true
 
 [dependencies]
 iwork-client-core.workspace = true
+iwork-ipc.workspace = true
 iwork-proto.workspace = true
+prost.workspace = true
 tauri.workspace = true
+tauri-plugin-notification.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 
 [features]
 # 只转发到 iwork-client-core/dev → iwork-ipc/dev（DevTrust）；不是默认 feature。见 scripts/check-no-dev-trust.sh。
-dev = ["iwork-client-core/dev"]
+dev = ["iwork-client-core/dev", "iwork-ipc/dev"]
