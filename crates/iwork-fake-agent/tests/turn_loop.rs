@@ -257,7 +257,9 @@ async fn cancel_kills_whole_process_tree_when_runtime_ignores_it() {
     })
     .await;
     let tree_gone = cancelled_at.elapsed();
-    assert!(!process_exists(child), "子进程随进程组一起结束");
+    // 子进程随进程组一起结束。Windows 上 Job 活动进程数归零后，进程还要过一会儿才从
+    // tasklist 里消失，所以等它消失而不是只查一次。
+    wait_until(Duration::from_secs(5), || !process_exists(child)).await;
     eprintln!("取消到回合结束 {turn_ended:?}，到进程树清空 {tree_gone:?}");
     assert!(
         turn_ended >= Duration::from_millis(2900),
@@ -306,7 +308,8 @@ async fn cooperative_cancel_still_clears_children_and_next_turn_resumes() {
         cancelled_at.elapsed() < Duration::from_secs(2),
         "配合取消不用等满 3 秒"
     );
-    assert!(!process_exists(child), "回合标为 Cancelled 时子进程已结束");
+    // 回合标为 Cancelled 时子进程已被结束；Windows 上它从 tasklist 消失有延迟，等它消失。
+    wait_until(Duration::from_secs(5), || !process_exists(child)).await;
     let session = line.session().expect("会话对象还在");
     assert!(session.process_tree_is_empty().unwrap());
 
