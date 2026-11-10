@@ -277,6 +277,7 @@ pub fn ev_approval_evaluated_argument_path() -> DomainEvent {
         sub_actions: vec![action_argument_path()],
         call_shape: CallShape::SingleSimpleCommand.into(),
         snapshot_rule_paths: vec![],
+        grant_approval_id: None,
     }))
 }
 
@@ -1185,6 +1186,7 @@ pub fn ev_approval_evaluated() -> DomainEvent {
         sub_actions: vec![],
         call_shape: 0,
         snapshot_rule_paths: vec![],
+        grant_approval_id: None,
     }))
 }
 
@@ -1203,6 +1205,7 @@ pub fn ev_approval_evaluated_with_call() -> DomainEvent {
         sub_actions: vec![action_command(), action_paths()],
         call_shape: CallShape::Compound.into(),
         snapshot_rule_paths: vec![],
+        grant_approval_id: None,
     }))
 }
 
@@ -1392,6 +1395,7 @@ pub fn ev_approval_evaluated_rule_paths() -> DomainEvent {
                 resolved: s("/private/etc"),
             },
         ],
+        grant_approval_id: None,
     }))
 }
 
@@ -1406,4 +1410,33 @@ pub fn rule_flag_deny() -> Rule {
         label: s("deny.path-unresolved"),
         ..rule_argument_path()
     }
+}
+
+/// T07 E2：命中一次性放行的审计带放行出自的审批。
+pub fn ev_approval_evaluated_grant() -> DomainEvent {
+    ev(E::ApprovalEvaluated(ApprovalEvaluated {
+        turn_id: s(TURN),
+        action: Some(action_command()),
+        matched_rule_ids: vec![],
+        ruleset_version: s("m1-2"),
+        verdict: Some(Verdict {
+            kind: Some(verdict::Kind::Allow(VerdictAllow {})),
+        }),
+        layer_hit: RuleLayer::Default.into(),
+        duration_ms: 2,
+        snapshot_lists_seq: 8,
+        live_rules_seq: 9,
+        sub_actions: vec![action_command()],
+        call_shape: CallShape::SingleSimpleCommand.into(),
+        snapshot_rule_paths: vec![],
+        grant_approval_id: Some(s(APPROVAL)),
+    }))
+}
+
+/// T07 E2（T06 方案 2.6 第 2 条）：编排采纳了一条审批结果。
+pub fn ev_approval_delivered() -> DomainEvent {
+    ev(E::ApprovalDelivered(ApprovalDelivered {
+        approval_id: s(APPROVAL),
+        turn_id: s(TURN),
+    }))
 }

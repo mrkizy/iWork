@@ -672,6 +672,8 @@ where
             sub_actions: call.actions.clone(),
             call_shape: Some(call.shape.kind()),
             snapshot_rule_paths: keys.snapshot.rule_paths.clone(),
+            // E4 起由折叠按它了结一次性放行；在那之前放行仍按内存移除
+            grant_approval_id: None,
         }
         .into();
         let actor = format!("agent:{}", keys.assistant);

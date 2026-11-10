@@ -144,6 +144,8 @@ sample_types! {
         b::ev_approval_review_abandoned_executor_lost,
         b::ev_approval_evaluated_argument_path,
         b::ev_approval_evaluated_rule_paths,
+        b::ev_approval_evaluated_grant,
+        b::ev_approval_delivered,
     ],
 }
 

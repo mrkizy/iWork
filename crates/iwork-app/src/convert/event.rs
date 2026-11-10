@@ -157,6 +157,10 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
             turn_id: e.turn_id.to_string(),
             model: Some(model_selection_to_proto(&e.model)),
         }),
+        DomainEvent::ApprovalDelivered(e) => P::ApprovalDelivered(pb::ApprovalDelivered {
+            approval_id: e.approval_id.to_string(),
+            turn_id: e.turn_id.to_string(),
+        }),
         DomainEvent::ToolCallStarted(e) => P::ToolCallStarted(pb::ToolCallStarted {
             turn_id: e.turn_id.to_string(),
             tool_call_id: e.tool_call_id.0.clone(),
@@ -212,6 +216,7 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
                     })
                 })
                 .collect::<R<_>>()?,
+            grant_approval_id: e.grant_approval_id.map(|id| id.to_string()),
         }),
         DomainEvent::RuleRemembered(e) => P::RuleRemembered(pb::RuleRemembered {
             rule: Some(rule_to_proto(&e.rule)?),
@@ -678,6 +683,11 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
             model: required_model("TurnModelReported", "model", e.model.as_ref())?,
         }
         .into(),
+        P::ApprovalDelivered(e) => ev::ApprovalDelivered {
+            approval_id: parse_id("ApprovalDelivered", "approval_id", &e.approval_id)?,
+            turn_id: parse_id("ApprovalDelivered", "turn_id", &e.turn_id)?,
+        }
+        .into(),
         P::ToolCallStarted(e) => ev::ToolCallStarted {
             turn_id: parse_id("ToolCallStarted", "turn_id", &e.turn_id)?,
             tool_call_id: ToolCallId(e.tool_call_id),
@@ -749,6 +759,11 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
                         resolved: path_from_proto(&r.resolved),
                     })
                     .collect(),
+                grant_approval_id: parse_opt_id(
+                    K,
+                    "grant_approval_id",
+                    e.grant_approval_id.as_deref(),
+                )?,
             }
             .into()
         }

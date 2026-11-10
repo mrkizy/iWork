@@ -1175,6 +1175,15 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
             ),
         ),
         (
+            "approval_delivered",
+            boxed(
+                (approval_id(), turn_id()).prop_map(|(approval_id, turn_id)| ApprovalDelivered {
+                    approval_id,
+                    turn_id,
+                }),
+            ),
+        ),
+        (
             "approval_requested",
             boxed(approval().prop_map(|approval| ApprovalRequested { approval })),
         ),
@@ -1242,6 +1251,7 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                             }),
                             0..3,
                         ),
+                        proptest::option::of(approval_id()),
                     ),
                 )
                     .prop_map(
@@ -1259,6 +1269,7 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                                 sub_actions,
                                 call_shape,
                                 snapshot_rule_paths,
+                                grant_approval_id,
                             ),
                         )| ApprovalEvaluated {
                             turn_id,
@@ -1273,6 +1284,7 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                             sub_actions,
                             call_shape,
                             snapshot_rule_paths,
+                            grant_approval_id,
                         },
                     ),
             ),

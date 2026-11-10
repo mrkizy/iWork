@@ -158,6 +158,7 @@ fn owning_conversation(event: &DomainEvent) -> Option<&ConversationId> {
         | E::TurnModelReported(_)
         | E::ToolCallStarted(_)
         | E::ToolCallFinished(_)
+        | E::ApprovalDelivered(_)
         | E::ApprovalReviewUpdated(_)
         | E::ApprovalDecided(_)
         | E::ApprovalVoided(_)

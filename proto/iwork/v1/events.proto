@@ -57,6 +57,8 @@ message DomainEvent {
     TurnModelReported turn_model_reported = 83;
     ToolCallStarted tool_call_started = 84;
     ToolCallFinished tool_call_finished = 85;
+    // 86 已由 T05 的 TurnSessionBound 占用（另一分支），这里从 87 起
+    ApprovalDelivered approval_delivered = 87;
 
     // 审批 110–129
     ApprovalRequested approval_requested = 110;
@@ -294,6 +296,13 @@ message TurnModelReported {
   ModelSelection model = 2;
 }
 
+// 流：turn（turn_id）。编排采纳了一条审批结果、即将交给运行时：它是「这条批准已经用掉」的唯一依据。
+// 允许和拒绝都算审批结果，被拒绝的审批交付时同样有这条事件（T06 方案 2.6 第 2 条；T07 方案 6.10.8）。
+message ApprovalDelivered {
+  string approval_id = 1;
+  string turn_id = 2;
+}
+
 // 流：turn（turn_id）。ui-m1.md 第 04 页「工具活动」。
 message ToolCallStarted {
   string turn_id = 1;
@@ -362,6 +371,9 @@ message ApprovalEvaluated {
   CallShape call_shape = 11;
   // 会话快照里规则路径的解析结果，只含解析后与原位置不同的项，按 path 排序；重放据此重算别名，不读磁盘（T07 方案 4.3、6.8）。
   repeated RulePathResolution snapshot_rule_paths = 12;
+  // 这次求值命中的一次性放行出自哪条审批；没命中为空。结果是放行表示用它放行，不是放行表示它作废
+  // （T07 方案 6.10.6 第 1 条、PD1）。
+  optional string grant_approval_id = 13;
 }
 
 message RulePathResolution {

@@ -124,8 +124,10 @@ fn dispatch<C: EventCodec + ?Sized>(
         E::LocalImportPrompted(e) => runtimes::import_prompted(cx, e),
         E::LocalConfigImported(e) => runtimes::config_imported(cx, e),
         E::GlobalSettingsChanged(e) => settings::changed(cx, e),
-        // 没有查询读它们：审计流、密钥键名、恢复完成、作业结果（克隆结果由 ProjectAdded 落地）
+        // 没有查询读它们：审计流、密钥键名、恢复完成、作业结果（克隆结果由 ProjectAdded 落地）。
+        // 交付事件只给审批引擎的折叠用，不带状态前提、不改审批表（T07 方案 6.10.8）
         E::ApprovalEvaluated(_)
+        | E::ApprovalDelivered(_)
         | E::ApprovalStaleResultDropped(_)
         | E::McpSecretSet(_)
         | E::RecoveryCompleted(_)
