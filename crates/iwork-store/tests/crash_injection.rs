@@ -184,8 +184,17 @@ fn run_round(
         }
     }
     if !ready {
-        let msg = early_exit(&mut child, "在握手前")
-            .unwrap_or_else(|| format!("第 {round} 轮子进程关了 stdout 却没握手"));
+        // stdout 读到 EOF 时子进程可能还没被系统回收，只查一次 try_wait 会误报「关了 stdout」；给它一段宽限期
+        let exit_deadline = Instant::now() + Duration::from_secs(5);
+        let msg = loop {
+            if let Some(msg) = early_exit(&mut child, "在握手前") {
+                break msg;
+            }
+            if Instant::now() > exit_deadline {
+                break format!("第 {round} 轮子进程关了 stdout 却没握手");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         let _ = child.kill();
         let _ = child.wait();
         let _ = out_reader.join();
