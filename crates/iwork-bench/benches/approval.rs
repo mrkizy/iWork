@@ -11,7 +11,7 @@ use iwork_core::approval::denial::DenialMemory;
 use iwork_core::approval::env::{EnvPaths, Platform, ScopeKeys};
 use iwork_core::approval::evaluate::{EvalContext, evaluate_call};
 use iwork_core::approval::rules::build_ruleset;
-use iwork_core::approval::session::{snapshot_for, tool_set_for};
+use iwork_core::approval::session::{rule_paths_for, snapshot_for, tool_set_for};
 use iwork_domain::action::{ActionKind, CanonicalPath, ToolRef};
 use iwork_domain::approval_mode::ApprovalMode;
 use iwork_domain::common::{Actor, ToolGroups};
@@ -49,7 +49,8 @@ fn main() {
         home.0.clone(),
         OsPathResolver::detect_case_insensitive(&root).unwrap(),
     );
-    let snap = snapshot_for(ApprovalMode::Auto, &[], &scope, &env, Seq(0), &fs);
+    let rule_paths = rule_paths_for(&[], &scope, &env, &fs);
+    let snap = snapshot_for(ApprovalMode::Auto, &[], &scope, &env, Seq(0), &rule_paths);
     let remembered: Vec<RuleEntry> = (0..500u128)
         .map(|i| RuleEntry {
             id: RuleId::from_raw(RawUlid::from_u128(0x10_000 + i)),

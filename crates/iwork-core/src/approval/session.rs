@@ -6,6 +6,7 @@
 
 use iwork_domain::approval_mode::ApprovalMode;
 use iwork_domain::common::{ToolGroup, ToolGroups};
+use iwork_domain::event::RulePathResolution;
 use iwork_domain::id::Seq;
 use iwork_domain::rule::{RuleEffect, RuleEntry, RuleLayer, RuleMatcher, RuleSetVersion};
 use iwork_domain::session::{AllowWrite, NetworkPolicy, SessionConstraints, SessionToolSet};
@@ -18,7 +19,8 @@ use crate::approval::rules::{Boundaries, applies_to, builtin};
 use iwork_domain::action::CanonicalPath;
 use iwork_ports::fs::PathResolver;
 
-/// 会话绑定的规则部分：内置规则集 + 三张清单（范围过滤后）+ 临时敏感条目，以及由它们算出的约束与边界。
+/// 会话绑定的规则部分：内置规则集 + 三张清单（范围过滤后）+ 临时敏感条目 + 路径别名条目，
+/// 以及由它们算出的约束与边界。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSnapshot {
     pub rules: Vec<RuleEntry>,
@@ -27,21 +29,12 @@ pub struct SessionSnapshot {
     pub ruleset_version: RuleSetVersion,
     /// 读取三张清单时 `rule` 流的最新序号；进审计的 `snapshot_lists_seq`
     pub lists_seq: Seq,
+    /// 规则路径解析后与原位置不同的项，按原路径排序；别名条目由它算出，进审计的 `snapshot_rule_paths`
+    pub rule_paths: Vec<RulePathResolution>,
 }
 
-/// 会话启动时算快照。`user_lists` 是三张清单里的用户条目（内置条目由规则集给出）；按 `scope` 过滤。
-///
-/// 规则里的路径与动作路径要比较的是同一种东西：动作目标经 `PathResolver` 解析成真实位置，所以规则路径
-/// 也要解析。受保护路径本身是符号链接（`~/.ssh` 链到别处）、或系统别名（macOS `/etc` → `/private/etc`）时，
-/// 原条目保留（守住入口本身，如删除链接），另加一条指向真实位置的别名条目（审查 1/F-3）。
-pub fn snapshot_for(
-    mode: ApprovalMode,
-    user_lists: &[RuleEntry],
-    scope: &ScopeKeys,
-    env: &EnvPaths,
-    lists_seq: Seq,
-    fs: &impl PathResolver,
-) -> SessionSnapshot {
+/// 快照的基础条目（别名之前）：内置规则集 + 临时敏感条目 + 范围内的用户清单条目。
+fn base_rules(user_lists: &[RuleEntry], scope: &ScopeKeys, env: &EnvPaths) -> Vec<RuleEntry> {
     let mut rules = builtin::builtin_rules(env);
     rules.extend(builtin::transient_sensitive_rules(env));
     rules.extend(
@@ -50,34 +43,90 @@ pub fn snapshot_for(
             .filter(|e| e.security_list().is_some() && !e.is_builtin() && applies_to(e, scope))
             .cloned(),
     );
+    rules
+}
+
+/// 只会让结果更严的条目才生成别名（方案 4.3，closeout 1/F-3）：底线层的拒绝类条目、敏感目录、
+/// 自动执行配置。让结果更宽的（只读区放行、可写缓存、可写目录）不生成——`imports` 链到 `artifacts` 时，
+/// 照抄的放行会比数据目录的拒绝更具体，Read 工具就能直接读制品。
+fn is_protective(rule: &RuleEntry) -> bool {
+    match rule.layer {
+        RuleLayer::Baseline => rule.effect != RuleEffect::Allow,
+        RuleLayer::SensitiveDirs | RuleLayer::AutorunConfig => true,
+        _ => false,
+    }
+}
+
+/// 会话启动前的取事实（I/O，方案 4.3「规则路径的两个位置」）：快照里每条保护性条目的路径各解析一次，
+/// 留下解析后位置（完全解析）与原位置不同的项。结果交给 [`snapshot_for`]，也随审计事件落盘，
+/// 重放只用落盘的这份、不读磁盘。解析失败的路径没有别名（原条目照常守着写下的位置）。
+pub fn rule_paths_for(
+    user_lists: &[RuleEntry],
+    scope: &ScopeKeys,
+    env: &EnvPaths,
+    fs: &impl PathResolver,
+) -> Vec<RulePathResolution> {
+    let mut out: Vec<RulePathResolution> = base_rules(user_lists, scope, env)
+        .iter()
+        .filter(|r| is_protective(r))
+        .filter_map(|r| path_of(&r.matcher))
+        .filter_map(|path| {
+            let root = CanonicalPath(path.ancestors().last()?.to_path_buf());
+            let resolved = fs.resolve(&root, path.to_str()?).ok()?.target;
+            (!fs.same_path(&resolved, path)).then(|| RulePathResolution {
+                path: path.to_path_buf(),
+                resolved: resolved.0,
+            })
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// 会话启动时算快照（纯函数）。`user_lists` 是三张清单里的用户条目（内置条目由规则集给出），按 `scope`
+/// 过滤；`rule_paths` 是 [`rule_paths_for`] 的结果，或重放时审计事件里记下的那份。
+///
+/// 动作目标是解析过的路径，规则路径也要解析，否则受保护路径自身是链接（`~/.npmrc` 用 stow 管）或系统别名
+/// （macOS `/etc` → `/private/etc`）时两边对不上：保护性条目保留原条目（守住入口本身），另加一条指向
+/// 真实位置的别名条目。
+pub fn snapshot_for(
+    mode: ApprovalMode,
+    user_lists: &[RuleEntry],
+    scope: &ScopeKeys,
+    env: &EnvPaths,
+    lists_seq: Seq,
+    rule_paths: &[RulePathResolution],
+) -> SessionSnapshot {
+    let mut rules = base_rules(user_lists, scope, env);
     let aliases: Vec<RuleEntry> = rules
         .iter()
-        .filter_map(|r| real_location_alias(r, fs))
+        .filter(|r| is_protective(r))
+        .filter_map(|r| alias_of(r, rule_paths))
         .collect();
     rules.extend(aliases);
     let boundaries = Boundaries::from_rules(&rules);
     let constraints = constraints_for(mode, &rules, env);
+    let mut rule_paths = rule_paths.to_vec();
+    rule_paths.sort();
     SessionSnapshot {
         rules,
         constraints,
         boundaries,
         ruleset_version: builtin::version(),
         lists_seq,
+        rule_paths,
     }
 }
 
-/// 规则路径的真实位置与写法不同时，返回指向真实位置的别名条目；ID 由原条目 ID 与真实路径派生。
-fn real_location_alias(rule: &RuleEntry, fs: &impl PathResolver) -> Option<RuleEntry> {
+/// 规则路径在 `rule_paths` 里有真实位置时，返回指向真实位置的别名条目；ID 由原条目 ID 与真实路径派生。
+fn alias_of(rule: &RuleEntry, rule_paths: &[RulePathResolution]) -> Option<RuleEntry> {
     let path = path_of(&rule.matcher)?;
-    let root = CanonicalPath(path.ancestors().last()?.to_path_buf());
-    let real = fs.resolve(&root, path.to_str()?).ok()?.target;
-    if fs.same_path(&real, path) {
-        return None;
-    }
+    let real = &rule_paths.iter().find(|r| r.path == path)?.resolved;
     let mut alias = rule.clone();
-    alias.matcher = replace_path(&rule.matcher, &real.0);
-    alias.id = builtin::builtin_rule_id(&format!("alias:{}:{}", rule.id, real.0.display()));
-    alias.label = format!("{}（真实位置 {}）", rule.label, real.0.display());
+    alias.matcher = replace_path(&rule.matcher, real);
+    alias.id = builtin::builtin_rule_id(&format!("alias:{}:{}", rule.id, real.display()));
+    alias.label = format!("{}（真实位置 {}）", rule.label, real.display());
     Some(alias)
 }
 

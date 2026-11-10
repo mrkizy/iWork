@@ -12,7 +12,7 @@ use iwork_core::approval::engine::{
     ApprovalEngine, ConversationModes, DecideError, EnginePorts, MSG_TURN_CANCELLED,
     MSG_USER_DENIED, MSG_USER_NOT_EXECUTED, ModeError, SessionDecider, SessionKeys, UserDecision,
 };
-use iwork_core::approval::session::{snapshot_for, tool_set_for};
+use iwork_core::approval::session::tool_set_for;
 use iwork_core::turn::PermissionDecider;
 use iwork_domain::approval::{
     AbandonReason, ApprovalKind, ApprovalState, Decider, ReviewState, VoidReason,
@@ -55,7 +55,7 @@ fn keys_with(lists: &[RuleEntry], assistant: AssistantId) -> SessionKeys {
         assistant_version: 7,
         project: Some(project()),
         turn_kind: TurnKind::Assistant,
-        snapshot: Arc::new(snapshot_for(Manual, lists, &scope(), &env(), Seq(7), &fs())),
+        snapshot: Arc::new(snapshot_on(Manual, lists, &env(), Seq(7), &fs())),
         tool_set: tool_set_for(TurnKind::Assistant, &ToolGroups::new()),
         disabled_groups: ToolGroups::new(),
         cwd: cp(WS),

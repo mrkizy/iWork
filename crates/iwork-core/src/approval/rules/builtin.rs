@@ -21,8 +21,8 @@ use sha2::{Digest, Sha256};
 use crate::approval::env::{EnvPaths, Platform};
 use crate::approval::registry::{self, ToolClass};
 
-/// 内置规则集版本。
-pub const RULESET_VERSION: &str = "m1-1";
+/// 内置规则集版本。改任何条目都要升号（m1-2：加 UserDeny 层三条内置拒绝条目，T07 收口）。
+pub const RULESET_VERSION: &str = "m1-2";
 
 pub fn version() -> RuleSetVersion {
     RuleSetVersion(RULESET_VERSION.into())
@@ -473,6 +473,31 @@ pub fn builtin_rules(env: &EnvPaths) -> Vec<RuleEntry> {
             E::Deny,
             ALL,
         ));
+    }
+
+    // ④ 拒绝：命令或路径检查不完整时三档拒绝、不出卡片（方案 3.3、3.5、4.2）。和用户拒绝规则在同一层，
+    // 求值第 4 步原样产出 Deny(DenyRule(id))，排在必问与放行规则之前，求值流程不用改
+    // label 是回给 Agent 的「被规则拒绝：…」后半句
+    for (slug, flag, label) in [
+        (
+            "deny.resource-limit",
+            ActionFlag::ResourceLimitHit,
+            "命令文字超过 256 KiB，无法完整检查",
+        ),
+        (
+            "deny.unlexable",
+            ActionFlag::Unlexable,
+            "命令有语法错误，无法检查，请修正后重发",
+        ),
+        (
+            "deny.path-unresolved",
+            ActionFlag::PathUnresolved,
+            "路径查不清（权限不足等），无法检查；请先解决再重发",
+        ),
+    ] {
+        let mut e = entry(slug, L::UserDeny, M::Flag(flag), E::Deny, ALL);
+        e.label = label.into();
+        v.push(e);
     }
 
     // ⑤ 必问

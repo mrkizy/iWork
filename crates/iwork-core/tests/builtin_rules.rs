@@ -24,8 +24,10 @@ fn builtin_ids_stable() {
             e.label, e.id, e.layer, e.effect, e.applies_in, e.matcher
         ));
     }
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/snapshots/builtin_m1-1_macos.txt");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "tests/snapshots/builtin_{}_macos.txt",
+        iwork_core::approval::rules::builtin::RULESET_VERSION
+    ));
     if std::env::var_os("IWORK_UPDATE_SNAPSHOTS").is_some() {
         std::fs::write(&path, &text).unwrap();
     }
@@ -52,7 +54,7 @@ fn builtin_ids_unique_and_versioned() {
     let ids: BTreeSet<_> = rules.iter().map(|e| e.id).collect();
     assert_eq!(ids.len(), rules.len());
     assert!(rules.iter().all(|e| e.is_builtin() && !revocable(e)));
-    assert_eq!(builtin::version().0, "m1-1");
+    assert_eq!(builtin::version().0, "m1-2");
 }
 
 /// 需求第 9 章凭据目录清单逐条：期望路径手写，不从条目推。

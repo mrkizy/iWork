@@ -133,14 +133,7 @@ fn out_of_bounds_reads() {
     let docs_ws = "/home/u/Documents/proj";
     h.fs.add(format!("{docs_ws}/a.rs"));
     let e2 = env_at(docs_ws);
-    h.snap = iwork_core::approval::session::snapshot_for(
-        Manual,
-        &[],
-        &scope(),
-        &e2,
-        iwork_domain::id::Seq(0),
-        &h.fs,
-    );
+    h.snap = snapshot_on(Manual, &[], &e2, iwork_domain::id::Seq(0), &h.fs);
     let call = {
         let none = std::collections::BTreeSet::new();
         let cwd = cp(docs_ws);

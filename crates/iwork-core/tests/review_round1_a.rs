@@ -3,7 +3,6 @@
 mod support;
 
 use iwork_core::approval::denial::{DenialEvent, DenialMemory};
-use iwork_core::approval::session::snapshot_for;
 use iwork_domain::action::CallShapeKind;
 use iwork_domain::approval_mode::ApprovalMode;
 use iwork_domain::id::Seq;
@@ -25,7 +24,7 @@ fn denied(v: &Verdict) -> bool {
 
 /// 用给定的文件系统重算会话快照（规则路径按它解析）。
 fn harness_on(fs: FakeFs, lists: &[RuleEntry]) -> Harness {
-    let snap = snapshot_for(Manual, lists, &scope(), &env(), Seq(0), &fs);
+    let snap = snapshot_on(Manual, lists, &env(), Seq(0), &fs);
     Harness {
         snap,
         fs,

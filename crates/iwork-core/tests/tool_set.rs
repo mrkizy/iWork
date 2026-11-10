@@ -3,9 +3,7 @@
 mod support;
 
 use iwork_core::approval::rules::builtin::builtin_rules;
-use iwork_core::approval::session::{
-    constraints_for, in_tool_set, snapshot_for, tool_set_for, tools_to_disable,
-};
+use iwork_core::approval::session::{constraints_for, in_tool_set, tool_set_for, tools_to_disable};
 use iwork_domain::approval_mode::ApprovalMode;
 use iwork_domain::common::{Timestamp, ToolGroup, ToolGroups};
 use iwork_domain::id::{RawUlid, RuleId, Seq};
@@ -152,14 +150,7 @@ fn snapshot_includes_scoped_user_lists_and_transient_sensitive() {
             RuleScope::Global,
         ),
     ];
-    let s = snapshot_for(
-        ApprovalMode::Manual,
-        &lists,
-        &scope(),
-        &env(),
-        Seq(41),
-        &fs(),
-    );
+    let s = snapshot_on(ApprovalMode::Manual, &lists, &env(), Seq(41), &fs());
     assert_eq!(s.lists_seq, Seq(41));
     assert!(s.constraints.excluded_commands.contains(&CommandPattern {
         program: "terraform".into(),
@@ -180,5 +171,5 @@ fn snapshot_includes_scoped_user_lists_and_transient_sensitive() {
             .sensitive_dirs
             .contains(&cp("/home/u/iWork/assistants/bob"))
     );
-    assert_eq!(s.ruleset_version.0, "m1-1");
+    assert_eq!(s.ruleset_version.0, "m1-2");
 }

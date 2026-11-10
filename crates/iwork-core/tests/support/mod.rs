@@ -109,7 +109,19 @@ use iwork_domain::id::Seq;
 use iwork_ports::agent::{PermissionRequest, RawToolInput};
 
 pub fn snapshot() -> SessionSnapshot {
-    snapshot_for(ApprovalMode::Manual, &[], &scope(), &env(), Seq(0), &fs())
+    snapshot_on(ApprovalMode::Manual, &[], &env(), Seq(0), &fs())
+}
+
+/// 会话启动时的两段：先经文件系统取规则路径的事实，再纯函数算快照（方案 4.3、6.9）。
+pub fn snapshot_on(
+    mode: ApprovalMode,
+    lists: &[RuleEntry],
+    env: &EnvPaths,
+    seq: Seq,
+    fs: &fake_fs::FakeFs,
+) -> SessionSnapshot {
+    let rule_paths = iwork_core::approval::session::rule_paths_for(lists, &scope(), env, fs);
+    snapshot_for(mode, lists, &scope(), env, seq, &rule_paths)
 }
 
 pub fn bash_req(command: &str) -> PermissionRequest {
