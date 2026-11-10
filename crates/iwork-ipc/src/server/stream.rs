@@ -150,14 +150,17 @@ impl Stream {
         self.filter = keys;
     }
 
-    /// 登记范围（同 id 先移除再加，即替换），重算过滤，并把流暂停为缓冲。
+    /// 登记范围（同 id 替换），重算过滤，并把流暂停为缓冲。返回续传判定要比对的游标。
     ///
-    /// 空流（没有范围、游标为 0）上第一次带 `from_seq > 0` 的登记是重连：游标先置为 `from_seq`，
-    /// 于是「`from_seq == cursor` 才续传」的条件成立。
-    pub(crate) fn add_scopes(&mut self, adds: Vec<ScopeAdd>, from_seq: u64) {
-        if self.scopes.is_empty() && self.cursor == 0 && from_seq > 0 {
-            self.cursor = from_seq;
-        }
+    /// 空流（没有范围、游标为 0）上第一次登记是重连：这时可续传的起点就是客户端声明的 `from_seq`。
+    /// 这里**只返回**这个起点，不改游标：要等确定走续传才用 [`Stream::adopt_cursor`] 采纳它；
+    /// 走快照时游标由快照的 seq 决定，否则一个超前的 `from_seq` 会让快照之后的事件被当成「已送出」吞掉。
+    pub(crate) fn add_scopes(&mut self, adds: Vec<ScopeAdd>, from_seq: u64) -> u64 {
+        let resume_base = if self.scopes.is_empty() && self.cursor == 0 {
+            from_seq
+        } else {
+            self.cursor
+        };
         for a in adds {
             self.scopes.insert(
                 a.id,
@@ -169,6 +172,12 @@ impl Stream {
         }
         self.rebuild_filter();
         self.pause();
+        resume_base
+    }
+
+    /// 确定续传后采纳客户端的起点。只会把游标往前推（空流上从 0 推到 `from_seq`），不回退。
+    pub(crate) fn adopt_cursor(&mut self, from_seq: u64) {
+        self.cursor = self.cursor.max(from_seq);
     }
 
     /// 移除范围，只缩过滤，游标与状态不动；空了转 Empty（游标保留，之后可续传）。

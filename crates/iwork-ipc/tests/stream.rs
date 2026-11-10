@@ -586,3 +586,21 @@ async fn publish_after_baseline_is_not_reported_out_of_order() {
     assert_eq!(h.upsert("project:p1", 2), 2);
     assert_eq!(next_persisted(&mut inc).await, 2);
 }
+
+/// 超前的 from_seq 走快照后，游标是 snapshot_seq，不是客户端声称的超前值：之后的实时事件照常送达。
+#[tokio::test]
+async fn ahead_from_seq_snapshot_then_live_events_arrive() {
+    let h = start(server_cfg());
+    for i in 1..=20 {
+        h.upsert("project:p1", i);
+    }
+    let (client, mut inc) = h.connect_ok().await;
+    client.subscribe(1, sidebar(), 99).await.unwrap();
+    assert_eq!(subscribed(&next_item(&mut inc).await).snapshot_seq, 20);
+    assert_eq!(h.upsert("project:p1", 21), 21);
+    assert_eq!(
+        next_persisted(&mut inc).await,
+        21,
+        "快照之后的事件不能被超前游标吞掉"
+    );
+}

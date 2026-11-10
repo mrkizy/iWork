@@ -762,9 +762,9 @@ async fn subscribe<H: RequestHandler, S: EventSource>(
     let adds = batch.into_iter().map(|(_, a)| a).collect();
     let max_scopes = shared.cfg.max_scopes;
     // 先登记后读 head：从这一刻起匹配新过滤的实时事件都进缓冲。
-    let Some((cursor, too_many)) = conn.with_stream(|stream, _| {
-        stream.add_scopes(adds, from_seq);
-        (stream.cursor(), stream.scope_count() > max_scopes)
+    let Some((resume_base, too_many)) = conn.with_stream(|stream, _| {
+        let base = stream.add_scopes(adds, from_seq);
+        (base, stream.scope_count() > max_scopes)
     }) else {
         return;
     };
@@ -792,10 +792,11 @@ async fn subscribe<H: RequestHandler, S: EventSource>(
         Err(_) => return conn.fail(FailCause::HandoverTimeout, None),
     };
     let resume = from_seq > 0
-        && from_seq == cursor
+        && from_seq == resume_base
         && from_seq <= head
         && head - from_seq <= shared.cfg.replay_limit;
     if resume {
+        conn.with_stream(|stream, _| stream.adopt_cursor(from_seq));
         conn.set_in_flight(format!("replay({from_seq},{head}]"));
         for (rid, id) in &ids {
             conn.push_response(subscribed(*rid, *id, None, 0));
