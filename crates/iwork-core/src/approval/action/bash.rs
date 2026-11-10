@@ -42,15 +42,19 @@ pub struct CommandActions {
 /// 已解析的脚本 → 每条简单命令一组动作；任一子命令触发整条解析不了时返回 `Err(原因)`。
 /// 整条调用一份额度（[`Budget`]），每条命令的动作都经 [`Expander`] 产出；额度用完整条解析不了，
 /// 兜底再展开一次仍超额就按资源上限拒。
-pub fn classify_script(script: &ShellScript) -> Result<Vec<CommandActions>, Why> {
+///
+/// `budget` 由调用方给出并在失败后交给兜底：额度耗尽时它带着耗尽标记（6/F-3），兜底不会重开一份。
+pub fn classify_script(
+    script: &ShellScript,
+    budget: &mut Budget,
+) -> Result<Vec<CommandActions>, Why> {
     let commands = simple_commands(script);
     if commands.is_empty() {
         return Err("空命令".into());
     }
     let mut out = Vec::new();
-    let mut budget = Budget::default();
     for c in commands {
-        let mut e = Expander::new(&mut budget);
+        let mut e = Expander::new(budget);
         classify_simple(c, &mut e)?;
         let words: Vec<&str> = c.words.iter().map(|w| w.literal.as_str()).collect();
         out.push(CommandActions {
@@ -67,6 +71,9 @@ pub fn classify_script(script: &ShellScript) -> Result<Vec<CommandActions>, Why>
 /// 沙箱外执行是整条调用的约束（方案 3.8，实施审查 1/F-2）：已有执行动作的命令由归一改种类；
 /// 没有执行类动作的命令（白名单读写删、纯重定向、推送、发布、丢弃改动）额外加一个沙箱外执行动作
 /// 承载它，原有的路径动作与具体种类动作一个都不动。
+///
+/// 「全部动作经 [`Expander`]」的唯一例外：这里直接追加，因为每组最多一条、目标是已有的命令目标
+/// （不是路径、不展开），总数不超过简单命令的条数。
 pub fn add_outside_sandbox(groups: &mut [CommandActions]) {
     for g in groups {
         if !g.actions.iter().any(|a| a.kind == ActionKind::Execute) {
@@ -115,7 +122,20 @@ fn push_argument(e: &mut Expander, word: &str) -> Result<(), Exhausted> {
 
 /// 一个词的全部兜底候选（读 + 写，走不通时只丢它）；`tagged` 决定是否打参数标记。
 fn push_candidates(e: &mut Expander, word: &str, tagged: bool) -> Result<(), Exhausted> {
+    push_candidates_except(e, word, None, tagged)
+}
+
+/// 同上，跳过等于 `except` 的那个候选（它的角色已另有定论）。
+fn push_candidates_except(
+    e: &mut Expander,
+    word: &str,
+    except: Option<&str>,
+    tagged: bool,
+) -> Result<(), Exhausted> {
     for cand in e.candidates(word)? {
+        if Some(cand.as_str()) == except {
+            continue;
+        }
         for kind in [ActionKind::Read, ActionKind::Write] {
             e.push(kind, &cand, PathOrigin::Hypothetical, tagged)?;
         }
@@ -358,38 +378,24 @@ fn find_actions(args: &[&str], e: &mut Expander) -> Result<(), Why> {
     Ok(())
 }
 
-/// `find` 的删除目标经 `push_delete` 交出（精确规则，parse 成功、归类放弃的调用）。每条简单命令里：只有一个
-/// `find` 时按它的语法切；有几个 `find`（后面的 `find` 是前面某个的参数，结构已经不可靠）时改用保守规则，
-/// 不为每个 `find` 重扫后缀（5/F-1）——保守规则的结果是各个精确切法结果的并集的超集。
-fn precise_find_deletes(
-    script: &ShellScript,
-    push_delete: &mut impl FnMut(&str) -> Result<(), Exhausted>,
-) -> Result<(), Exhausted> {
+/// `find` 的删除目标经 `push_delete` 交出（精确规则，parse 成功、归类放弃的调用）：每条简单命令里**每个**
+/// `find` 都按它自己的语法切——字面词里出现第二个 `find` 不等于结构丢了（`find src -name find …`），
+/// 精确语义不变（6/F-2）。每次切分前按要扫的词数扣扫描额度，多个 `find` 叠出的平方级扫描超额就失败关闭。
+fn precise_find_deletes(script: &ShellScript, e: &mut Expander) -> Result<(), Exhausted> {
     for c in simple_commands(script) {
         let words: Vec<&str> = c.words.iter().map(|w| w.literal.as_str()).collect();
-        let mut finds = words
-            .iter()
-            .enumerate()
-            .filter(|(_, w)| commands::program_id(w) == FIND)
-            .map(|(i, _)| i);
-        match (finds.next(), finds.next()) {
-            (Some(i), None) => {
-                let call = find_syntax::split(&words[i + 1..]);
-                if call.delete {
-                    for t in call.delete_targets() {
-                        push_delete(t)?;
-                    }
+        for (i, w) in words.iter().enumerate() {
+            if commands::program_id(w) != FIND {
+                continue;
+            }
+            let rest = &words[i + 1..];
+            e.charge_scan(rest.len())?;
+            let call = find_syntax::split(rest);
+            if call.delete {
+                for t in call.delete_targets() {
+                    e.push(ActionKind::Delete, t, PathOrigin::Hypothetical, false)?;
                 }
             }
-            (Some(_), Some(_)) => {
-                if let Some(start) = find_syntax::flat_delete_start(&words) {
-                    for t in &words[start..] {
-                        push_delete(t)?;
-                    }
-                    push_delete(".")?;
-                }
-            }
-            _ => {}
         }
     }
     Ok(())
@@ -764,11 +770,12 @@ fn dd_form(args: &[&str], e: &mut Expander) -> Result<(), Stop> {
 pub fn fallback_actions(
     facts: &PartialFacts,
     precise_find: Option<&ShellScript>,
+    mut budget: Budget,
 ) -> (Vec<PendingAction>, bool) {
-    let mut budget = Budget::default();
     let mut e = Expander::new(&mut budget);
     let expanded = fallback_paths(&mut e, facts, precise_find);
-    (e.out, expanded.is_err())
+    let out = e.out;
+    (out, expanded.is_err() || budget.exhausted())
 }
 
 fn fallback_paths(
@@ -802,17 +809,22 @@ fn fallback_paths(
         if kind.writes() {
             e.push(ActionKind::Write, target, hypo, false)?;
         }
-        push_candidates(e, target, false)?;
+        // 完整重定向目标只按重定向种类定角色；拆出来、不同于目标本身的候选才补读写（6/F-1）
+        push_candidates_except(e, target, Some(target), false)?;
     }
     for w in facts.literal_words.iter().chain(&facts.queued_words) {
         push_candidates(e, w, false)?;
     }
-    let mut delete = |t: &str| e.push(ActionKind::Delete, t, hypo, false);
-    match precise_find {
-        Some(script) => precise_find_deletes(script, &mut delete)?,
-        None => flat_deletes(&facts.literal_words, &mut delete)?,
+    if let Some(script) = precise_find {
+        precise_find_deletes(script, e)?;
+    } else {
+        flat_deletes(&facts.literal_words, &mut |t: &str| {
+            e.push(ActionKind::Delete, t, hypo, false)
+        })?;
     }
-    flat_deletes(&facts.queued_words, &mut delete)?;
+    flat_deletes(&facts.queued_words, &mut |t: &str| {
+        e.push(ActionKind::Delete, t, hypo, false)
+    })?;
     // 白名单程序名后面的词按保底角色（原文与队列里的词各自扁平处理，没有命令边界）
     floor_scan(e, &facts.literal_words, None, true)?;
     floor_scan(e, &facts.queued_words, None, true)

@@ -18,6 +18,7 @@ pub mod tool_input;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use expansion::Budget;
 use iwork_domain::action::{
     Action, ActionFingerprint, ActionFlags, ActionKind, ActionTarget, CallShapeKind, CanonicalPath,
     SandboxPlacement, ToolRef,
@@ -126,10 +127,12 @@ pub enum Fallback {
     Actions(Vec<PendingAction>),
     /// `parse` 放弃：第一遍事实已随 `Unparsable` 带回
     ShellFacts(PartialFacts),
-    /// `parse` 成功：事实要时再调 `iwork_shell::literal_facts`；`find` 的删除用小 AST 上的精确切法
+    /// `parse` 成功：事实要时再调 `iwork_shell::literal_facts`；`find` 的删除用小 AST 上的精确切法。
+    /// `budget` 是结构化归类用剩的额度（含耗尽标记）：一次调用只有一份，兜底接着用，不重开（6/F-3）
     ShellScript {
         command: String,
         script: ShellScript,
+        budget: Budget,
     },
 }
 
@@ -151,15 +154,22 @@ impl Analysis {
     /// 解析不了时的动作与整条调用的标记。纯函数；`parse` 成功的 Bash 调用每次调都重新取事实，
     /// 只在归类放弃或有真实路径走不通时才会走到。
     pub fn fallback(&self) -> (Vec<PendingAction>, CallFlags) {
-        let (facts, precise) = match &self.fallback {
+        let (facts, precise, budget) = match &self.fallback {
             Fallback::Actions(actions) => return (actions.clone(), CallFlags::default()),
-            Fallback::ShellFacts(facts) => (std::borrow::Cow::Borrowed(facts), None),
-            Fallback::ShellScript { command, script } => (
+            Fallback::ShellFacts(facts) => {
+                (std::borrow::Cow::Borrowed(facts), None, Budget::default())
+            }
+            Fallback::ShellScript {
+                command,
+                script,
+                budget,
+            } => (
                 std::borrow::Cow::Owned(iwork_shell::literal_facts(command)),
                 Some(script),
+                *budget,
             ),
         };
-        let (actions, too_many) = bash::fallback_actions(&facts, precise);
+        let (actions, too_many) = bash::fallback_actions(&facts, precise, budget);
         let flags = CallFlags {
             resource_limit_hit: facts.resource_limit || too_many,
             unlexable: facts.lex_failed,
@@ -381,7 +391,8 @@ fn analyze_bash(a: &mut Analysis, input: &ToolInput, boundaries: &Boundaries) {
                     a.placement,
                     SandboxPlacement::Outside | SandboxPlacement::Ambiguous
                 );
-            a.structured = bash::classify_script(&script).map(|mut groups| {
+            let mut budget = Budget::default();
+            a.structured = bash::classify_script(&script, &mut budget).map(|mut groups| {
                 if outside {
                     bash::add_outside_sandbox(&mut groups);
                 }
@@ -405,6 +416,7 @@ fn analyze_bash(a: &mut Analysis, input: &ToolInput, boundaries: &Boundaries) {
             a.fallback = Fallback::ShellScript {
                 command: command.to_owned(),
                 script,
+                budget,
             };
         }
     }

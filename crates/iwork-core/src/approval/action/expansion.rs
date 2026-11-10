@@ -22,11 +22,17 @@ pub const MAX_EXPANSION_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Exhausted;
 
-/// 整条调用共用的额度。
-#[derive(Debug, Clone, Copy)]
+/// 一条调用里 `find` 语法切分最多扫多少个词（每个 `find` 扫一遍它后面的词，6/F-2）。
+pub const MAX_SCAN_WORDS: usize = 64 * 1024;
+
+/// 整条调用共用的额度。一次调用只有一份：结构化归类没用完的部分（或耗尽标记）原样交给兜底（6/F-3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
     items: usize,
     bytes: usize,
+    scan: usize,
+    /// 有过一次扣不够：之后的展开结果不完整，调用方必须按资源上限拒（粘性，复制时一起带走）
+    exhausted: bool,
 }
 
 impl Default for Budget {
@@ -34,18 +40,45 @@ impl Default for Budget {
         Self {
             items: MAX_EXPANSION_ITEMS,
             bytes: MAX_EXPANSION_BYTES,
+            scan: MAX_SCAN_WORDS,
+            exhausted: false,
         }
     }
 }
 
 impl Budget {
-    /// 预先扣掉 `items` 条、`bytes` 字节；不够就失败，不扣。
+    /// 预先扣掉 `items` 条、`bytes` 字节；不够就失败、记下耗尽，不扣。
     pub fn charge(&mut self, items: usize, bytes: usize) -> Result<(), Exhausted> {
-        let items_left = self.items.checked_sub(items).ok_or(Exhausted)?;
-        let bytes_left = self.bytes.checked_sub(bytes).ok_or(Exhausted)?;
-        self.items = items_left;
-        self.bytes = bytes_left;
-        Ok(())
+        match (self.items.checked_sub(items), self.bytes.checked_sub(bytes)) {
+            (Some(i), Some(b)) if !self.exhausted => {
+                self.items = i;
+                self.bytes = b;
+                Ok(())
+            }
+            _ => {
+                self.exhausted = true;
+                Err(Exhausted)
+            }
+        }
+    }
+
+    /// 语法扫描前先扣要扫的词数。
+    pub fn charge_scan(&mut self, words: usize) -> Result<(), Exhausted> {
+        match self.scan.checked_sub(words) {
+            Some(left) if !self.exhausted => {
+                self.scan = left;
+                Ok(())
+            }
+            _ => {
+                self.exhausted = true;
+                Err(Exhausted)
+            }
+        }
+    }
+
+    /// 是否有过扣不够。
+    pub fn exhausted(&self) -> bool {
+        self.exhausted
     }
 }
 
@@ -106,6 +139,11 @@ impl<'a> Expander<'a> {
     pub fn candidates(&mut self, word: &str) -> Result<Vec<String>, Exhausted> {
         self.budget.charge(0, candidate_bytes_bound(word))?;
         Ok(fallback_candidates(word).into_iter().collect())
+    }
+
+    /// 语法扫描前先扣词数（`find` 切分，6/F-2）。
+    pub fn charge_scan(&mut self, words: usize) -> Result<(), Exhausted> {
+        self.budget.charge_scan(words)
     }
 
     /// 额外扣条数（目录目标配对在生成前按配对数扣）。
@@ -227,7 +265,11 @@ mod tests {
         // 单横线长词的拆分是平方级：先扣额度，超了直接失败
         let word = format!("-{}", "a".repeat(4096));
         assert_eq!(e.candidates(&word), Err(Exhausted));
-        // 对照：普通词照常
-        assert!(e.candidates("src/a.rs").is_ok());
+        // 耗尽是粘性的（6/F-3）：之后的展开都不完整，再扣也失败，调用方据此拒
+        assert_eq!(e.candidates("src/a.rs"), Err(Exhausted));
+        assert!(b.exhausted());
+        // 对照：新的一份额度里普通词照常
+        let mut fresh = Budget::default();
+        assert!(Expander::new(&mut fresh).candidates("src/a.rs").is_ok());
     }
 }

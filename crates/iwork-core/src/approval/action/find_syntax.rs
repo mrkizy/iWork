@@ -67,6 +67,7 @@ fn is_leading_flag(w: &str) -> bool {
 
 /// 按 `find` 的语法切 `find` 后面的字面词（精确规则）。
 pub fn split<'a>(args: &[&'a str]) -> FindCall<'a> {
+    let ends = SegmentEnds::new(args);
     let mut call = FindCall::default();
     let mut i = 0;
     // 1. 前置选项
@@ -100,7 +101,7 @@ pub fn split<'a>(args: &[&'a str]) -> FindCall<'a> {
     while let Some(&w) = args.get(i) {
         if FIND_EXEC_PREDICATES.contains(&w) {
             // 找不到结束符的段不吞到底，落到下面按没登记的词处理
-            if let Some(end) = exec_segment_end(args, i + 1) {
+            if let Some(end) = ends.after(i + 1) {
                 call.unregistered = true;
                 i = end + 1;
                 continue;
@@ -146,10 +147,44 @@ pub fn split<'a>(args: &[&'a str]) -> FindCall<'a> {
     call
 }
 
-/// `-exec` 段的结束位置：`;`，或紧跟在 `{}` 后面的 `+`。
-fn exec_segment_end(args: &[&str], from: usize) -> Option<usize> {
-    (from..args.len())
-        .find(|&j| args[j] == ";" || (args[j] == "+" && j > from && args[j - 1] == "{}"))
+/// `-exec` 段的结束位置：`;`，或紧跟在 `{}` 后面的 `+`（`{}` 也在段里）。一遍预先算好每个位置之后最近的
+/// 结束符，每次查询常数时间：没闭合的段不再每次扫到末尾，`split` 整体线性（6/F-4）。
+struct SegmentEnds {
+    /// `semicolon[j]`：下标不小于 `j` 的第一个 `;`
+    semicolon: Vec<Option<usize>>,
+    /// `plus[j]`：下标不小于 `j`、前一个词是 `{}` 的第一个 `+`
+    plus: Vec<Option<usize>>,
+}
+
+impl SegmentEnds {
+    fn new(args: &[&str]) -> Self {
+        let n = args.len();
+        let mut semicolon = vec![None; n + 1];
+        let mut plus = vec![None; n + 1];
+        for j in (0..n).rev() {
+            semicolon[j] = if args[j] == ";" {
+                Some(j)
+            } else {
+                semicolon[j + 1]
+            };
+            plus[j] = if args[j] == "+" && j > 0 && args[j - 1] == "{}" {
+                Some(j)
+            } else {
+                plus[j + 1]
+            };
+        }
+        Self { semicolon, plus }
+    }
+
+    /// 从 `from` 开始的段在哪结束；`+` 前面的 `{}` 必须在段里（下标不小于 `from`）。
+    fn after(&self, from: usize) -> Option<usize> {
+        let semi = self.semicolon.get(from).copied().flatten();
+        let plus = self.plus.get(from + 1).copied().flatten();
+        match (semi, plus) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
 }
 
 /// 保守规则：一串没有命令结构的字面词里，`find` 之后又有 `-delete` 时，`find` 之后的**每一个**字面词
@@ -200,6 +235,9 @@ mod tests {
         assert!(c.delete && c.unregistered);
         assert_eq!(s("-HL -O3 -D tree . -print").roots, vec!["."]);
         assert_eq!(s("-newer ref").read_targets(), vec![".", "ref"]);
+        // + 前面的 {} 必须在段里：-exec 后紧跟 + 不算结束
+        let c = s(". -exec + {} + -delete");
+        assert!(c.delete && c.unregistered);
         // 没登记的前置选项之后的 -f：值仍算可能的起点（以 - 开头也算）
         let c = s("-Z -f -dir/../.. -- -delete");
         assert!(c.maybe_roots.contains(&"-dir/../..") && c.delete);
@@ -218,5 +256,26 @@ mod tests {
         assert_eq!(flat_delete_start(&["find", ".", "-name", "x"]), None);
         assert_eq!(flat_delete_start(&["rm", "-delete"]), None);
         assert_eq!(flat_delete_start(&["-delete", "find", "x"]), None);
+    }
+}
+
+#[cfg(test)]
+mod linear {
+    use super::split;
+
+    /// 6/F-4：大量没闭合的 -exec 段，切分线性。旧实现 4000 个要扫 800 万次。
+    #[test]
+    fn unclosed_exec_segments_are_linear() {
+        let mut words = vec!["src"];
+        words.extend(std::iter::repeat_n("-exec", 40_000));
+        words.push("-delete");
+        let t = std::time::Instant::now();
+        let call = split(&words);
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            t.elapsed()
+        );
+        assert!(call.delete && call.unregistered);
     }
 }

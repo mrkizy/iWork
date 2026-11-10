@@ -983,12 +983,14 @@ fn every_candidate_source_is_budgeted() {
     let (c, e) = h.eval(&bash_req(&cmd), Manual);
     within("find × 2000", t);
     assert!(c.actions.len() < 100, "{} 个动作", c.actions.len());
-    // cwd 是工作区根：删 cwd 是底线
-    assert!(
-        matches!(e.evaluation.verdict, Verdict::Deny(DenyReason::Baseline(_))),
-        "{:?}",
-        e.evaluation.verdict
-    );
+    // 每个 find 都按精确语法切（6/F-2），2000 个叠出的平方级扫描超过扫描额度：失败关闭，按资源上限拒
+    assert_eq!(e.evaluation.verdict, deny_rule("deny.resource-limit"));
+    // 对照：find 少时精确切法照常产出删除（cwd 是工作区根：删 cwd 是底线）
+    let cmd = format!("timeout 5 {}-delete", "find ".repeat(20));
+    assert!(matches!(
+        h.verdict(&bash_req(&cmd), Manual),
+        Verdict::Deny(DenyReason::Baseline(_))
+    ));
     // ②
     for n in [200usize, 2000] {
         let cmd = format!("cp{}{}", " -t dst".repeat(n), " src/x".repeat(n));
@@ -1010,4 +1012,81 @@ fn every_candidate_source_is_budgeted() {
     assert_eq!(e.evaluation.verdict, deny_rule("deny.resource-limit"));
     // 对照：短的组合短选项照常
     assert_eq!(three_on(&h, "git log -n5"), ["Ask", "Allow", "Allow"]);
+}
+
+/// 6/F-1（回归）：完整重定向目标只按重定向种类定角色；只读区读出的附件不能因为多出「写」被底线拒。
+#[test]
+fn redirect_target_keeps_its_own_role() {
+    let h = Harness::default();
+    let cmd = format!("timeout 5 cat < '{DATA}/attachments/a.png'");
+    let (c, _) = h.eval(&bash_req(&cmd), Manual);
+    assert!(
+        !has(&c, ActionKind::Write, &format!("{DATA}/attachments/a.png")),
+        "{:?}",
+        briefs(&c)
+    );
+    unparsable_ask(&h, &cmd);
+    // 对照：写重定向照样是写，命中只读区底线
+    let cmd = format!("timeout 5 cat a > '{DATA}/attachments/a.png'");
+    assert_base(&h, &cmd);
+}
+
+/// 6/F-2（回归）：字面词里出现第二个 find 不等于结构丢了；parse 成功时每个 find 都按精确语法切。
+#[test]
+fn second_find_word_keeps_precise_semantics() {
+    let h = Harness::default();
+    for cmd in [
+        "find src -name find -exec grep -F -- -delete {} +",
+        "find . -path find -name x -exec grep -l -- -delete {} +",
+    ] {
+        let c = h.eval(&bash_req(cmd), Manual).0;
+        assert!(
+            !c.actions.iter().any(|a| a.kind == ActionKind::Delete),
+            "{cmd}：{:?}",
+            briefs(&c)
+        );
+        unparsable_ask(&h, cmd);
+    }
+    // 对照：-exec 段执行的另一个 find 带 -delete，它自己的切法里删除照样产出
+    let c = h
+        .eval(
+            &bash_req("find . -name '*.x' -exec find src -delete \\;"),
+            Manual,
+        )
+        .0;
+    assert!(has(&c, ActionKind::Delete, &ws("src")), "{:?}", briefs(&c));
+}
+
+/// 6/F-3：结构化归类超额、兜底本身不超额时，一次调用只有一份额度——耗尽标记带到最终结果，三档按资源上限拒。
+#[test]
+fn structured_exhaustion_reaches_final_flags() {
+    let h = Harness::default();
+    let cmd = "echo x; ".repeat(6000);
+    for m in MODES3 {
+        let (c, e) = h.eval(&bash_req(&cmd), m);
+        assert_eq!(c.shape.kind(), CallShapeKind::Unparsable, "{m:?}");
+        assert_eq!(
+            e.evaluation.verdict,
+            deny_rule("deny.resource-limit"),
+            "{m:?}"
+        );
+    }
+    // 对照：不超额的同类命令照常
+    let cmd = "echo x; ".repeat(100);
+    assert_eq!(three_on(&h, &cmd), ["Ask", "Allow", "Allow"]);
+}
+
+/// 6/F-4：没闭合的 -exec 段很多时，走完整的两阶段归一也限时。
+#[test]
+fn unclosed_exec_segments_through_normalize() {
+    let h = Harness::default();
+    let cmd = format!("find src{} -delete", " -exec".repeat(4000));
+    let t = std::time::Instant::now();
+    let (c, _) = h.eval(&bash_req(&cmd), Manual);
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(2),
+        "{:?}",
+        t.elapsed()
+    );
+    assert!(has(&c, ActionKind::Delete, &ws("src")), "{:?}", briefs(&c));
 }
