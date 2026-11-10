@@ -618,24 +618,24 @@ pub async fn next_item(incoming: &mut Incoming) -> IncomingItem {
 /// 收下一条持久事件的 seq（跳过瞬时事件）；碰到别的项报错。
 pub async fn next_persisted(incoming: &mut Incoming) -> u64 {
     loop {
-        match next_item(incoming).await {
-            IncomingItem::Event(pb::Event {
-                body: Some(pb::event::Body::Persisted(p)),
-                ..
-            }) => return p.seq,
-            IncomingItem::Event(_) => continue,
-            other => panic!("期望持久事件，得到 {other:?}"),
+        let item = next_item(incoming).await;
+        if let Some(seq) = persisted_seq(&item) {
+            return seq;
         }
+        assert!(
+            matches!(item, IncomingItem::Event(_)),
+            "期望持久事件，得到 {item:?}"
+        );
     }
 }
 
 pub fn persisted_seq(item: &IncomingItem) -> Option<u64> {
-    match item {
-        IncomingItem::Event(pb::Event {
-            body: Some(pb::event::Body::Persisted(p)),
-            ..
-        }) => Some(p.seq),
-        _ => None,
+    if let IncomingItem::Event(e) = item
+        && let Some(pb::event::Body::Persisted(p)) = &e.body
+    {
+        Some(p.seq)
+    } else {
+        None
     }
 }
 

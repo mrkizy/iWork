@@ -15,16 +15,12 @@ pub const HEADER_LEN: usize = 5;
 
 /// 一帧。
 #[derive(Debug, Clone, PartialEq)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "每帧解码一次、移动一次就交出去；装箱等于热路径上每帧多一次分配"
-)]
 pub enum Frame {
     Hello(pb::Hello),
     Welcome(pb::Welcome),
     Request(pb::Request),
     Response(pb::Response),
-    Event(pb::Event),
+    Event(Box<pb::Event>),
     Chunk(pb::Chunk),
 }
 
@@ -155,7 +151,7 @@ pub fn decode_frame(
         FrameType::Welcome => Frame::Welcome(pb::Welcome::decode(payload).map_err(malformed)?),
         FrameType::Request => Frame::Request(pb::Request::decode(payload).map_err(malformed)?),
         FrameType::Response => Frame::Response(pb::Response::decode(payload).map_err(malformed)?),
-        FrameType::Event => Frame::Event(pb::Event::decode(payload).map_err(malformed)?),
+        FrameType::Event => Frame::Event(Box::new(pb::Event::decode(payload).map_err(malformed)?)),
         FrameType::Chunk => Frame::Chunk(pb::Chunk::decode(payload).map_err(malformed)?),
         FrameType::Unspecified => unreachable!("上面已拒绝"),
     }))
@@ -322,10 +318,10 @@ mod tests {
                 request_id: 7,
                 body: None,
             }),
-            Frame::Event(pb::Event {
+            Frame::Event(Box::new(pb::Event {
                 subscription_ids: vec![1, 2],
                 body: None,
-            }),
+            })),
             Frame::Chunk(pb::Chunk {
                 upload_id: "u".into(),
                 data: vec![1, 2, 3].into(),

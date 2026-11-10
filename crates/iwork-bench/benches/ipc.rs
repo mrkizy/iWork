@@ -247,10 +247,8 @@ async fn ipc_publish_fanout(conns: usize, secs: u64) {
             let _keep = c;
             let mut lat = Vec::with_capacity(total as usize);
             while (lat.len() as u64) < total {
-                if let Some(IncomingItem::Event(pb::Event {
-                    body: Some(pb::event::Body::Persisted(p)),
-                    ..
-                })) = inc.next().await
+                if let Some(IncomingItem::Event(e)) = inc.next().await
+                    && let Some(pb::event::Body::Persisted(p)) = &e.body
                 {
                     let t0 = sent.lock().unwrap()[p.seq as usize - 1];
                     lat.push(t0.elapsed());
@@ -352,10 +350,10 @@ async fn ipc_view_query_handover(query_ms: u64) {
             let mut lat = Vec::new();
             while counter.load(Ordering::SeqCst) < total {
                 match inc.next().await {
-                    Some(IncomingItem::Event(pb::Event {
-                        body: Some(pb::event::Body::Persisted(p)),
-                        ..
-                    })) => {
+                    Some(IncomingItem::Event(e)) => {
+                        let Some(pb::event::Body::Persisted(p)) = &e.body else {
+                            continue;
+                        };
                         lat.push(sent.lock().unwrap()[p.seq as usize - 1].elapsed());
                         counter.fetch_add(1, Ordering::SeqCst);
                     }

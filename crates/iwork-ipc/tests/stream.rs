@@ -17,12 +17,12 @@ fn subscribed(item: &IncomingItem) -> &pb::Subscribed {
 }
 
 fn event_ids(item: &IncomingItem) -> (u64, Vec<u32>) {
-    match item {
-        IncomingItem::Event(pb::Event {
-            subscription_ids,
-            body: Some(pb::event::Body::Persisted(p)),
-        }) => (p.seq, subscription_ids.clone()),
-        other => panic!("期望持久事件，得到 {other:?}"),
+    if let IncomingItem::Event(e) = item
+        && let Some(pb::event::Body::Persisted(p)) = &e.body
+    {
+        (p.seq, e.subscription_ids.clone())
+    } else {
+        panic!("期望持久事件，得到 {item:?}");
     }
 }
 

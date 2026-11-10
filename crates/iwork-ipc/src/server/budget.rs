@@ -343,10 +343,10 @@ mod tests {
         };
         let mut theirs = BytesMut::new();
         crate::frame::encode_frame(
-            &crate::frame::Frame::Event(pb::Event {
+            &crate::frame::Frame::Event(Box::new(pb::Event {
                 subscription_ids: ids.clone(),
                 body: Some(pb::event::Body::Persisted(event.event.clone())),
-            }),
+            })),
             &mut theirs,
         );
         assert_eq!(mine, theirs);
