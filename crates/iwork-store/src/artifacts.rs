@@ -1,4 +1,4 @@
-//! 制品存储 `FsArtifactStore`（技术设计 5.4、9.2；方案 2.10、ADR-T02-c）。
+//! 制品存储 `FsArtifactStore`（技术设计 5.4、9.2；方案 2.10、ADR-0009）。
 //!
 //! - 写入：`<区>/tmp/<随机>.part` 边写边算 sha256 → fsync → **先**在写线程上登记或刷新
 //!   `artifact_objects.created_at` → 再改名到 `<区>/sha256/<前 2 位>/<其余>`。写到一半崩溃只会在
