@@ -19,7 +19,7 @@
 ## 2 等产品负责人定的事（重开后先问）
 
 1. **T07 1/F-12：审批对 git 命令文字的分类能不能放在 core。** AGENTS.md「核心不写 git 特例」与 T07 方案 3.4（core 里 classify_git、git push 必问等）冲突。supervisor 建议在 AGENTS.md 架构约定加一句澄清：「审批按命令文字识别 git 等程序的子命令（如 git push 必问）属于审批规则，可以出现在 core 的规则登记表里；版本控制操作的差异仍收在 VcsProvider，核心不写 git 特例。」同意后改 AGENTS.md 与 `.cao/project-prompts/code_reviewer.md`，F-12 记 `intentional`。
-2. **T03 fork+exec 冒充绕过对端校验**（`docs/design/t0-findings.md` 6.5，在 T03 分支上）：攻击进程 connect → fork 留连接 → exec 正版程序，校验看到正版、收发的是攻击者子进程；Linux、macOS 都复现，两个方向都有。supervisor 建议登记需求第 9 章已知限制：沙箱默认不放行本机 socket，能利用它的只有已在沙箱外跑任意代码的同用户程序，它本来就能直接改数据库；macOS 能修一半、Linux 没有对应手段，不加只管一半的机制。
+2. ~~T03 fork+exec 冒充~~：产品负责人 11:20 定「登记」，已写进需求 v1.73 第 9 章已知限制。T03 合入时 t0-findings 6.5「未修」措辞改成「已登记已知限制」。
 3. **T03 推送分支跑 Windows CI**：Windows 映像绑定没实测，代码统一返回 Unavailable，M1 在 Windows 上会拒绝启动。建议加 Windows job 跑 `tools/t0/iwork-t03-windows-authenticode.ps1` 和 Windows 测试，需同意推送 `cao/2e7bcbe5`。
 4. **T07 方案第 8 轮（实施审查补）不通过**，见第 3 节 T07 行；其中「`cp -r` 递归复制只检查目的目录与目的/源目录名两层」是要产品负责人接受的已知限制。
 
