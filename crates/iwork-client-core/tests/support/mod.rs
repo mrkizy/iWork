@@ -2,6 +2,8 @@
 
 #![allow(dead_code, reason = "各测试文件用其中一部分")]
 
+pub mod web;
+
 use iwork_client_core::store::{Item, QueryPurpose, ScopeKind, Store};
 use iwork_proto::pb;
 use pb::domain_event::Event as E;

@@ -294,8 +294,9 @@ impl Timeline {
                 if let Some(text) = body_text(m.body.as_ref()) {
                     self.text.insert(id.clone(), text.to_owned());
                 }
-                let mut c = self.insert(RowKey::entity(seq), id, Row::Message(m));
-                c.merge(self.rebuild_derived());
+                let project = m.context_project_id.clone();
+                let mut c = self.insert(RowKey::entity(seq), id.clone(), Row::Message(m));
+                c.merge(self.derive_after_message(seq, &id, project));
                 c
             }
             E::MessageCompleted(e) => {
@@ -373,8 +374,8 @@ impl Timeline {
                     return None;
                 }
                 t.created_seq = seq;
+                let mut c = self.derive_after_turn(&t);
                 self.turns.insert(t.id.clone(), t);
-                let mut c = self.rebuild_derived();
                 c.header = true;
                 c
             }
@@ -529,9 +530,63 @@ impl Timeline {
         if !self.admit_new(&id, false) {
             return TimelineChange::default();
         }
-        let mut c = self.insert(RowKey::entity(seq), id, Row::Note { kind, text });
-        c.merge(self.rebuild_derived());
-        c
+        // 当次说明总是先于它说明的那个锚点到达，锚点进来时再判断要不要贴重建得出的行。
+        self.insert(RowKey::entity(seq), id, Row::Note { kind, text })
+    }
+
+    /// 实时的新消息：只和前一条消息比（事件按 seq 递增到达，新消息总在最后），不全量重算——
+    /// 这是流式热路径，全量重算会让一万条消息的对话每条都扫一遍。
+    fn derive_after_message(
+        &mut self,
+        seq: u64,
+        id: &str,
+        project: Option<String>,
+    ) -> TimelineChange {
+        let prev = self
+            .rows
+            .range(..RowKey::derived(seq))
+            .rev()
+            .find_map(|(k, r)| match r {
+                Row::Message(p) => Some((k.seq, p.context_project_id.clone())),
+                _ => None,
+            });
+        match prev {
+            Some((ps, pp))
+                if pp != project && !self.has_note_between(ps, seq, NoteKind::DmProject) =>
+            {
+                self.insert(
+                    RowKey::derived(seq),
+                    format!("divider:{id}"),
+                    Row::Divider {
+                        project_id: project,
+                    },
+                )
+            }
+            _ => TimelineChange::default(),
+        }
+    }
+
+    /// 实时的新回合：只和前一个回合比。
+    fn derive_after_turn(&mut self, t: &pb::Turn) -> TimelineChange {
+        let prev = self
+            .turns
+            .values()
+            .filter(|p| p.created_seq != 0 && p.created_seq < t.created_seq)
+            .max_by_key(|p| p.created_seq);
+        match prev {
+            Some(p)
+                if model_id(p) != model_id(t)
+                    && !self.has_note_between(p.created_seq, t.created_seq, NoteKind::Model) =>
+            {
+                let model = t.model.clone().unwrap_or_default();
+                self.insert(
+                    RowKey::derived(t.created_seq),
+                    format!("model:{}", t.id),
+                    Row::ModelSwitch { model },
+                )
+            }
+            _ => TimelineChange::default(),
+        }
     }
 
     fn rows_mentioning_attachment(&self) -> TimelineChange {

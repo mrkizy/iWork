@@ -2692,12 +2692,17 @@ dependencies = [
 name = "iwork-client-core"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "iwork-fake-daemon",
  "iwork-ipc",
  "iwork-proto",
  "proptest",
  "prost",
  "prost-types",
+ "tempfile",
+ "tokio",
  "tracing",
+ "ulid",
 ]
 
 [[package]]

@@ -9,12 +9,18 @@ publish.workspace = true
 [dependencies]
 iwork-ipc.workspace = true
 iwork-proto.workspace = true
+bytes.workspace = true
 prost.workspace = true
 prost-types.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tracing.workspace = true
+ulid = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+iwork-fake-daemon.workspace = true
 proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "test-util"] }
 
 [features]
 # 只转发到 iwork-ipc/dev（DevTrust）；不是默认 feature。见 scripts/check-no-dev-trust.sh。

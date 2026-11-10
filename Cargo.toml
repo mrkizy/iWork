@@ -67,3 +67,4 @@ iwork-host = { path = "crates/iwork-host" }
 iwork-ipc = { path = "crates/iwork-ipc" }
 iwork-claude-hook = { path = "crates/iwork-claude-hook" }
 iwork-client-core = { path = "crates/iwork-client-core" }
+iwork-fake-daemon = { path = "crates/iwork-fake-daemon" }
