@@ -1,0 +1,236 @@
+seq: 1011
+get_conversation {
+  conversation {
+    id: "01JC0C0000000000000000CNV1"
+    project {
+      project_id: "01JC0P0000000000000000PRJ1"
+    }
+    state: CONVERSATION_STATE_ACTIVE
+    last_read_seq: 42
+    unread: 2
+    model_override {
+      model_id: "opus"
+      effort: "high"
+    }
+    approval_mode: APPROVAL_MODE_FULL_ACCESS
+    updated_at {
+      seconds: 1762000200
+      nanos: 123000000
+    }
+    title: "\346\212\212\347\231\273\345\275\225\351\241\265\346\224\271\346\210\220\346\267\261\350\211\262"
+    title_source: TITLE_SOURCE_USER
+    last_turn_state: TURN_STATE_FAILED
+    last_message_first_line: "\345\245\275\347\232\204\357\274\214\346\210\221\345\205\210\347\234\213\344\270\200\344\270\213"
+  }
+  messages: [{
+    id: "01JC0M0000000000000000MSG1"
+    conversation_id: "01JC0C0000000000000000CNV1"
+    author {
+      assistant {
+        assistant_id: "01JC0A0000000000000000AST1"
+        name_snapshot: "\345\256\241\346\237\245\345\221\230"
+      }
+    }
+    context_project_id: "01JC0P0000000000000000PRJ1"
+    status: MESSAGE_STATUS_STREAMING
+    body {
+      inline_text: "\346\255\243\345\234\250\347\234\213\342\200\246\342\200\246"
+    }
+    attachment_ids: ["01JC0F0000000000000000ATT1"]
+    created_at {
+      seconds: 1762000400
+      nanos: 123000000
+    }
+    turn_id: "01JC0T0000000000000000TRN1"
+    created_seq: 1001
+  }]
+  turns: [{
+    id: "01JC0T0000000000000000TRN1"
+    conversation_id: "01JC0C0000000000000000CNV1"
+    assistant_id: "01JC0A0000000000000000AST1"
+    assistant_version: 4
+    runtime_id: "01JC0X0000000000000000RTM1"
+    model {
+      model_id: "opus"
+      effort: "high"
+    }
+    runtime_session_id: "sess-1"
+    state: TURN_STATE_COMPLETED
+    state_reason: "\345\256\241\346\211\271\347\255\211\345\276\205\345\210\260\344\270\212\351\231\220"
+    started_at {
+      seconds: 1762000500
+      nanos: 123000000
+    }
+    ended_at {
+      seconds: 1762000600
+      nanos: 123000000
+    }
+    kind: TURN_KIND_ASSISTANT
+    created_seq: 1000
+    ended_seq: 1010
+    usage {
+      input_tokens: 1200
+      output_tokens: 340
+      cache_read_tokens: 5000
+      cache_write_tokens: 60
+      cost_usd: 0.25
+    }
+    celebrate: true
+    change_summary {
+      files_changed: 2
+      insertions: 10
+      deletions: 3
+      paths: ["src/a.rs", "src/b.rs"]
+    }
+  }]
+  tool_calls: [{
+    turn_id: "01JC0T0000000000000000TRN1"
+    tool_call_id: "toolu_01"
+    tool_name: "Edit"
+    action {
+      kind: ACTION_KIND_WRITE
+      target {
+        paths {
+          paths: ["/tmp/a.txt", "/tmp/b.txt"]
+        }
+      }
+      tool_name: "Edit"
+      raw_summary: "\346\224\271\344\270\244\344\270\252\346\226\207\344\273\266"
+    }
+    finished: true
+    ok: true
+    output_artifact {
+      sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+      area: ARTIFACT_AREA_ARTIFACTS
+      size: 4096
+    }
+    created_seq: 1002
+  }]
+  approvals: [{
+    id: "01JC0V0000000000000000APR1"
+    turn_id: "01JC0T0000000000000000TRN1"
+    conversation_id: "01JC0C0000000000000000CNV1"
+    kind: APPROVAL_KIND_OUTSIDE_SANDBOX
+    action {
+      kind: ACTION_KIND_OUTSIDE_SANDBOX
+      target {
+        command {
+          program: "npm"
+          subcommand: "publish"
+          argv: ["npm", "publish", "--access=public"]
+        }
+      }
+      tool_name: "Bash"
+      raw_summary: "npm publish --access=public"
+      out_of_bounds: true
+      bypass_sandbox_requested: true
+      opaque_script: true
+    }
+    matched_rule_ids: ["01JC0R0000000000000000RXE1"]
+    ruleset_version: "2026.11.1"
+    state: APPROVAL_STATE_APPROVED
+    review: REVIEW_STATE_PASSED
+    review_reason: "\347\255\211\345\276\205\345\256\241\346\237\245"
+    offered_remember: [REMEMBER_SCOPE_ONCE, REMEMBER_SCOPE_PROJECT]
+    remember_label: "\346\234\254\351\241\271\347\233\256\345\206\205 `npm publish \342\200\246` \344\270\215\345\206\215\351\227\256"
+    requested_at {
+      seconds: 1762000700
+      nanos: 123000000
+    }
+    decided_at {
+      seconds: 1762000800
+      nanos: 123000000
+    }
+    review_id: "01JC0V0000000000000000RVW1"
+    created_seq: 1001
+    decider: APPROVAL_DECIDER_USER
+  }, {
+    id: "01JC0V0000000000000000APR1"
+    turn_id: "01JC0T0000000000000000TRN1"
+    conversation_id: "01JC0C0000000000000000CNV1"
+    kind: APPROVAL_KIND_OUTSIDE_SANDBOX
+    action {
+      kind: ACTION_KIND_OUTSIDE_SANDBOX
+      target {
+        command {
+          program: "npm"
+          subcommand: "publish"
+          argv: ["npm", "publish", "--access=public"]
+        }
+      }
+      tool_name: "Bash"
+      raw_summary: "npm publish --access=public"
+      out_of_bounds: true
+      bypass_sandbox_requested: true
+      opaque_script: true
+    }
+    matched_rule_ids: ["01JC0R0000000000000000RXE1"]
+    ruleset_version: "2026.11.1"
+    state: APPROVAL_STATE_VOIDED
+    review: REVIEW_STATE_IN_PROGRESS
+    review_reason: "\347\255\211\345\276\205\345\256\241\346\237\245"
+    offered_remember: [REMEMBER_SCOPE_ONCE, REMEMBER_SCOPE_PROJECT]
+    remember_label: "\346\234\254\351\241\271\347\233\256\345\206\205 `npm publish \342\200\246` \344\270\215\345\206\215\351\227\256"
+    requested_at {
+      seconds: 1762000700
+      nanos: 123000000
+    }
+    decided_at {
+      seconds: 1762000800
+      nanos: 123000000
+    }
+    review_id: "01JC0V0000000000000000RVW1"
+    created_seq: 1001
+    void_reason: VOID_REASON_TURN_CANCELLED
+  }]
+  user_actions: [{
+    id: "01JC0D0000000000000000CRD1"
+    turn_id: "01JC0T0000000000000000TRN1"
+    conversation_id: "01JC0C0000000000000000CNV1"
+    command {
+      command: "ssh-add -l"
+      cwd: "/Users/me"
+    }
+    reason: "\345\210\227\345\207\272\345\267\262\345\212\240\350\275\275\347\232\204\345\257\206\351\222\245"
+    proposal_hash: "\336\255\276\357\001\002\003\004\005\006\007\010\t\n\013\014\r\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034"
+    state: USER_ACTION_STATE_UNKNOWN
+    exit {
+      code: 2
+    }
+    output_artifact {
+      sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+      area: ARTIFACT_AREA_ARTIFACTS
+      size: 4096
+    }
+    error: "\345\220\216\345\217\260\346\234\215\345\212\241\344\270\255\346\226\255"
+    void_reason: VOID_REASON_CONVERSATION_DELETED
+    created_seq: 1005
+  }]
+  attachments: [{
+    id: "01JC0F0000000000000000ATT1"
+    conversation_id: "01JC0C0000000000000000CNV1"
+    sha256: "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+    size: 1024
+    mime: "image/png"
+    name: "\346\210\252\345\233\276.png"
+    origin {
+      pasted {
+        sha256: "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+        area: ARTIFACT_AREA_ATTACHMENTS
+        size: 1024
+      }
+    }
+    needs_confirmation: true
+    created_at {
+      seconds: 1762001100
+      nanos: 123000000
+    }
+  }]
+  usage_total {
+    input_tokens: 1200
+    output_tokens: 340
+    cache_read_tokens: 5000
+    cache_write_tokens: 60
+    cost_usd: 0.25
+  }
+}

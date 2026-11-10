@@ -52,7 +52,13 @@ fn scope_entry(scope: &Scope) -> Option<ScopeEntry> {
             streams: vec![all(K::Project), all(K::Conversation), all(K::Assistant)],
             snapshot: vec![
                 Q::ListProjects(pb::ListProjects {}),
-                Q::ListConversations(pb::ListConversations { project_id: None }),
+                Q::ListConversations(pb::ListConversations {
+                    project_id: None,
+                    title_contains: None,
+                    before: None,
+                    // 侧栏快照不分页（T09 方案 G8）。
+                    limit: 0,
+                }),
                 Q::ListAssistants(pb::ListAssistants {}),
             ],
         },

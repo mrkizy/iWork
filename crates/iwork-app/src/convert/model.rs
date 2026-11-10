@@ -659,6 +659,11 @@ pub fn conversation_to_proto(c: &Conversation) -> pb::Conversation {
         model_override: c.model_override.as_ref().map(model_selection_to_proto),
         approval_mode: c.approval_mode.map(approval_mode_to_proto),
         updated_at: Some(timestamp_to_proto(c.updated_at)),
+        // T10 填真值（T09 方案 G1、G4、G8）：领域对象还没有这些字段，查询受理从投影填。
+        title: String::new(),
+        title_source: pb::TitleSource::Unspecified.into(),
+        last_turn_state: None,
+        last_message_first_line: String::new(),
     }
 }
 
@@ -736,6 +741,8 @@ pub fn message_to_proto(m: &Message) -> pb::Message {
         attachment_ids: ids_to_strings(&m.attachments),
         created_at: Some(timestamp_to_proto(m.created_at)),
         turn_id: m.turn_id.map(|t| t.to_string()),
+        // T10 填真值（T09 方案 G2）：查询受理从投影的 appended_seq 填。
+        created_seq: 0,
     }
 }
 
@@ -796,6 +803,12 @@ pub fn turn_to_proto(t: &Turn) -> pb::Turn {
         ended_at: t.ended_at.map(timestamp_to_proto),
         kind: turn_kind_to_proto(t.kind),
         interrupt_reason,
+        // T10 填真值（T09 方案 G2、G3）：查询受理从投影填。
+        created_seq: 0,
+        ended_seq: 0,
+        usage: None,
+        celebrate: false,
+        change_summary: None,
     }
 }
 
@@ -947,6 +960,11 @@ pub fn approval_to_proto(a: &Approval) -> R<pb::Approval> {
         requested_at: Some(timestamp_to_proto(a.requested_at)),
         decided_at: None,
         review_id,
+        // T10 填真值（T09 方案 G2、G3）：created_seq 由查询受理从投影填；终态的 decider / void_reason 随
+        // convert 改动（四种状态无损转出）一起填。
+        created_seq: 0,
+        decider: None,
+        void_reason: None,
     })
 }
 
@@ -1047,6 +1065,8 @@ pub fn user_action_card_to_proto(c: &UserActionCard) -> R<pb::UserActionCard> {
         output_artifact: c.output_artifact.as_ref().map(artifact_ref_to_proto),
         error: f.error,
         void_reason: f.void_reason,
+        // T10 填真值（T09 方案 G2）：查询受理从投影填。
+        created_seq: 0,
     })
 }
 

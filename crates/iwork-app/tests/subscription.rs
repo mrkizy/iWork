@@ -42,6 +42,9 @@ fn scope_table() -> Vec<(pb::SubscriptionScope, Vec<StreamKey>, Vec<pb::Query>)>
                 query(Q::ListProjects(pb::ListProjects {})),
                 query(Q::ListConversations(pb::ListConversations {
                     project_id: None,
+                    title_contains: None,
+                    before: None,
+                    limit: 0,
                 })),
                 query(Q::ListAssistants(pb::ListAssistants {})),
             ],

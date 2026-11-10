@@ -200,6 +200,7 @@ pub fn view_result(seq: u64, entities: &BTreeMap<String, u64>) -> pb::QueryResul
                         ..Default::default()
                     })
                     .collect(),
+                has_more: false,
             },
         )),
     }

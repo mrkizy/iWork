@@ -1,0 +1,15 @@
+{
+  "seq": "1014",
+  "listPendingItems": {
+    "items": [
+      {
+        "resume": {
+          "turnId": "01JC0T0000000000000000TRN1",
+          "conversationId": "01JC0C0000000000000000CNV1",
+          "reason": "INTERRUPT_REASON_APPROVAL_WAIT_LIMIT",
+          "createdSeq": "1009"
+        }
+      }
+    ]
+  }
+}
