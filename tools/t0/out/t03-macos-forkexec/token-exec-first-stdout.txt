@@ -1,0 +1,16 @@
+attacker connected pid=54845
+forked child=54846; parent 54845 exec trusted
+tick=0 LOCAL_PEERPID=54845 token(rc=0 pid=54845 pidversion=52547156) CopyGuest=-67065 CheckValidity=-67065
+tick=1 LOCAL_PEERPID=54845 token(rc=0 pid=54845 pidversion=52547158) CopyGuest=0 CheckValidity=0
+  recv: listening sock=$TMPDIR//iwork-t03-fx.Dpa7am/s.sock.decoy hold=30s
+tick=2 LOCAL_PEERPID=54845 token(rc=0 pid=54845 pidversion=52547158) CopyGuest=0 CheckValidity=0
+tick=3 LOCAL_PEERPID=54846 token(rc=0 pid=54846 pidversion=52547157) CopyGuest=0 CheckValidity=0
+  recv: data from child pid=54846 i=0
+tick=4 LOCAL_PEERPID=54846 token(rc=0 pid=54846 pidversion=52547157) CopyGuest=0 CheckValidity=0
+  recv: data from child pid=54846 i=1
+tick=5 LOCAL_PEERPID=54846 token(rc=0 pid=54846 pidversion=52547157) CopyGuest=0 CheckValidity=0
+  recv: data from child pid=54846 i=2
+tick=6 LOCAL_PEERPID=54846 token(rc=0 pid=54846 pidversion=52547157) CopyGuest=0 CheckValidity=0
+  recv: data from child pid=54846 i=3
+tick=7 LOCAL_PEERPID=54846 token(rc=0 pid=54846 pidversion=52547157) CopyGuest=0 CheckValidity=0
+  recv: data from child pid=54846 i=4

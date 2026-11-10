@@ -103,4 +103,6 @@ internal = ["iwork-proto"]
 transitive_exempt = ["agent-client-protocol", "tokio"]
 
 [crates.iwork-bench]
-internal = []
+# T03：ipc 热路径基准（推送扇出、补发、快照、握手）。T11 收编其余基准时再按需加。
+internal = ["iwork-ipc", "iwork-proto"]
+transitive_exempt = ["tokio"]

@@ -1,0 +1,11 @@
+listening sock=$TMPDIR//iwork-t03-macos.l9Xfcn/probe.sock hold=7s
+tick=0 conn=1 pid=90503 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-b3/live signer=cdhash:2173bad191da1563734d6eadc121ac9c2d0f05e5
+tick=1 conn=1 pid=90503 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-b3/live signer=cdhash:2173bad191da1563734d6eadc121ac9c2d0f05e5
+-- action: cat $TMPDIR//iwork-t03-macos.l9Xfcn/bin/linker > live
+tick=2 conn=1 pid=90503 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-b3/live signer=unavailable:SecCodeCheckValidity 失败（OSStatus -67034）
+tick=3 conn=1 pid=90503 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-b3/live signer=unavailable:SecCodeCheckValidity 失败（OSStatus -67034）
+tick=4 conn=1 pid=90503 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-b3/live signer=unavailable:SecCodeCheckValidity 失败（OSStatus -67034）
+tick=5 conn=1 pid=90503 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-b3/live signer=unavailable:SecCodeCheckValidity 失败（OSStatus -67034）
+tick=6 conn=1 pid=90503 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-b3/live signer=unavailable:SecCodeCheckValidity 失败（OSStatus -67034）
+-- client exit=143
+hold elapsed

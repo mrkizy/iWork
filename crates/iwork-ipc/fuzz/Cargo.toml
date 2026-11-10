@@ -1,0 +1,41 @@
+# cargo-fuzz 目标（方案 7.3）。独立 workspace，用 nightly 构建：根 Cargo.toml 已 exclude 本目录。
+# 本地：cargo +nightly fuzz run frame_decode -- -max_total_time=60（在 crates/iwork-ipc 下执行）
+[package]
+name = "iwork-ipc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1"
+iwork-ipc = { path = ".." }
+iwork-proto = { path = "../../iwork-proto" }
+tokio = { version = "1", features = ["rt", "io-util", "time", "macros"] }
+tokio-util = "0.7"
+
+[[bin]]
+name = "frame_decode"
+path = "fuzz_targets/frame_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "connection_prehello"
+path = "fuzz_targets/connection_prehello.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "connection_established"
+path = "fuzz_targets/connection_established.rs"
+test = false
+doc = false
+bench = false

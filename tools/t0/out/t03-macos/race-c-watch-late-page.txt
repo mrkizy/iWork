@@ -1,0 +1,18 @@
+listening
+getsockopt(LOCAL_PEERTOKEN) rc=0 len=32 (sizeof audit_token_t=32)
+SecCodeCopyGuestWithAttributes=0
+PAUSE
+dyn=0 static=0
+-- action: printf "\xff" | dd of=live bs=1 seek=16384 conv=notrunc 2>/dev/null; echo "-- tampered"; sleep 3; kill -USR1 $(cat live.pid); echo "-- SIGUSR1 sent"; sleep 1; sed "s/^/-- peer: /" client.out; kill -0 $(cat live.pid) 2>/dev/null && echo "-- peer alive" || echo "-- peer dead"
+-- tampered
+dyn=0 static=-67061
+dyn=0 static=-67061
+dyn=0 static=-67061
+-- SIGUSR1 sent
+dyn=0 static=-67061
+-- peer: connected pid=92721
+-- peer: late=7
+-- peer alive
+dyn=0 static=-67061
+dyn=0 static=-67061
+dyn=0 static=-67061

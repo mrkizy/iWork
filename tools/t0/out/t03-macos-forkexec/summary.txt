@@ -1,0 +1,106 @@
+# T03 N1 补充：fork+exec  2026-11-10 03:57:03  macOS 27.2 (26B5086k) arm64
+trusted（证书 A）leaf sha256=7c3596a9683e069db6bc6d0907b0d444c7f25232f4c757f399e701defb318910
+
+## probe-check-then-exec
+    listening sock=$TMPDIR//iwork-t03-fx.Dpa7am/s.sock hold=8s
+    attacker connected pid=53421
+    tick=0 conn=1 pid=53421 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    tick=1 conn=1 pid=53421 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    forked child=53479; parent 53421 exec trusted
+    tick=2 conn=1 pid=53479 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    listening sock=$TMPDIR//iwork-t03-fx.Dpa7am/s.sock.decoy hold=30s
+    tick=3 conn=1 pid=53479 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    tick=4 conn=1 pid=53479 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    tick=5 conn=1 pid=53479 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    tick=6 conn=1 pid=53479 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    tick=7 conn=1 pid=53479 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    hold elapsed
+
+## probe-exec-first
+    listening sock=$TMPDIR//iwork-t03-fx.Dpa7am/s.sock hold=8s
+    attacker connected pid=53788
+    forked child=53789; parent 53788 exec trusted
+    tick=0 conn=1 pid=53788 user=uid:501 exe=- signer=unavailable:SecCodeCopyGuestWithAttributes 失败（OSStatus -67065）
+    listening sock=$TMPDIR//iwork-t03-fx.Dpa7am/s.sock.decoy hold=30s
+    tick=1 conn=1 pid=53789 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    tick=2 conn=1 pid=53789 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    tick=3 conn=1 pid=53789 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    tick=4 conn=1 pid=53789 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    tick=5 conn=1 pid=53789 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    tick=6 conn=1 pid=53789 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    tick=7 conn=1 pid=53789 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    hold elapsed
+
+## probe-exec-first-stdout
+    listening sock=$TMPDIR//iwork-t03-fx.Dpa7am/s.sock hold=8s
+    attacker connected pid=54039
+    forked child=54040; parent 54039 exec trusted
+    tick=0 conn=1 pid=54039 user=uid:501 exe=- signer=unavailable:SecCodeCopyGuestWithAttributes 失败（OSStatus -67065）
+    tick=1 conn=1 pid=54039 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/trusted signer=certificate:7c3596a9683e069db6bc6d0907b0d444c7f25232f4c757f399e701defb318910
+    tick=2 conn=1 pid=54039 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/trusted signer=certificate:7c3596a9683e069db6bc6d0907b0d444c7f25232f4c757f399e701defb318910
+    tick=3 conn=1 pid=54040 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    tick=4 conn=1 pid=54040 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    tick=5 conn=1 pid=54040 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    tick=6 conn=1 pid=54040 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    tick=7 conn=1 pid=54040 user=uid:501 exe=/private$TMPDIR/iwork-t03-fx.Dpa7am/attacker signer=cdhash:6d1ebe3ed048b5055106c2fe147cd079d725317a
+    hold elapsed
+
+## token-check-then-exec
+    attacker connected pid=54249
+    tick=0 LOCAL_PEERPID=54249 token(rc=0 pid=54249 pidversion=52546118) CopyGuest=0 CheckValidity=0
+    tick=1 LOCAL_PEERPID=54249 token(rc=0 pid=54249 pidversion=52546118) CopyGuest=0 CheckValidity=0
+    forked child=54320; parent 54249 exec trusted
+    tick=2 LOCAL_PEERPID=54320 token(rc=0 pid=54320 pidversion=52546240) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54320 i=0
+    listening sock=$TMPDIR//iwork-t03-fx.Dpa7am/s.sock.decoy hold=30s
+    tick=3 LOCAL_PEERPID=54320 token(rc=0 pid=54320 pidversion=52546240) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54320 i=1
+    tick=4 LOCAL_PEERPID=54320 token(rc=0 pid=54320 pidversion=52546240) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54320 i=2
+    tick=5 LOCAL_PEERPID=54320 token(rc=0 pid=54320 pidversion=52546240) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54320 i=3
+    tick=6 LOCAL_PEERPID=54320 token(rc=0 pid=54320 pidversion=52546240) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54320 i=4
+    tick=7 LOCAL_PEERPID=54320 token(rc=0 pid=54320 pidversion=52546240) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54320 i=5
+
+## token-exec-first
+    attacker connected pid=54532
+    forked child=54533; parent 54532 exec trusted
+    tick=0 LOCAL_PEERPID=54532 token(rc=0 pid=54532 pidversion=52546594) CopyGuest=-67065 CheckValidity=-67065
+      recv: data from child pid=54533 i=0
+    listening sock=$TMPDIR//iwork-t03-fx.Dpa7am/s.sock.decoy hold=30s
+    tick=1 LOCAL_PEERPID=54533 token(rc=0 pid=54533 pidversion=52546595) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54533 i=1
+    tick=2 LOCAL_PEERPID=54533 token(rc=0 pid=54533 pidversion=52546595) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54533 i=2
+    tick=3 LOCAL_PEERPID=54533 token(rc=0 pid=54533 pidversion=52546595) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54533 i=3
+    tick=4 LOCAL_PEERPID=54533 token(rc=0 pid=54533 pidversion=52546595) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54533 i=4
+    tick=5 LOCAL_PEERPID=54533 token(rc=0 pid=54533 pidversion=52546595) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54533 i=5
+    tick=6 LOCAL_PEERPID=54533 token(rc=0 pid=54533 pidversion=52546595) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54533 i=6
+    tick=7 LOCAL_PEERPID=54533 token(rc=0 pid=54533 pidversion=52546595) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54533 i=7
+
+## token-exec-first-stdout
+    attacker connected pid=54845
+    forked child=54846; parent 54845 exec trusted
+    tick=0 LOCAL_PEERPID=54845 token(rc=0 pid=54845 pidversion=52547156) CopyGuest=-67065 CheckValidity=-67065
+    tick=1 LOCAL_PEERPID=54845 token(rc=0 pid=54845 pidversion=52547158) CopyGuest=0 CheckValidity=0
+      recv: listening sock=$TMPDIR//iwork-t03-fx.Dpa7am/s.sock.decoy hold=30s
+    tick=2 LOCAL_PEERPID=54845 token(rc=0 pid=54845 pidversion=52547158) CopyGuest=0 CheckValidity=0
+    tick=3 LOCAL_PEERPID=54846 token(rc=0 pid=54846 pidversion=52547157) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54846 i=0
+    tick=4 LOCAL_PEERPID=54846 token(rc=0 pid=54846 pidversion=52547157) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54846 i=1
+    tick=5 LOCAL_PEERPID=54846 token(rc=0 pid=54846 pidversion=52547157) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54846 i=2
+    tick=6 LOCAL_PEERPID=54846 token(rc=0 pid=54846 pidversion=52547157) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54846 i=3
+    tick=7 LOCAL_PEERPID=54846 token(rc=0 pid=54846 pidversion=52547157) CopyGuest=0 CheckValidity=0
+      recv: data from child pid=54846 i=4
+
+完成。原始输出在 ~/LiWork/iWork/.cao/worktrees/2e7bcbe5/tools/t0/out/t03-macos-forkexec

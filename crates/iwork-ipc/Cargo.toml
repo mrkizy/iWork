@@ -6,5 +6,59 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# 只给开发期用：TrustPolicy::DevTrust（跳过签名校验，同用户照查）、两个 example、帧的 JSON 输出。
+# 不是默认 feature；发布构建里不存在（scripts/check-no-dev-trust.sh 检查 feature 图与产物）。
+dev = ["dep:prost-reflect"]
+
 [dependencies]
 iwork-proto.workspace = true
+prost.workspace = true
+bytes.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tokio-util.workspace = true
+futures-core.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+prost-reflect = { workspace = true, optional = true }
+ulid = { workspace = true, features = ["std"] }
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation-sys.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    # WTHelperProvDataFromStateData / WTHelperGetProvSignerFromChain 要这两个特性才导出。
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemServices",
+] }
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["net", "test-util"] }
+
+[[example]]
+name = "ipc-tool"
+required-features = ["dev"]
+
+[[example]]
+name = "peer-probe"
+required-features = ["dev"]

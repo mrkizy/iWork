@@ -13,3 +13,7 @@ tauri-build.workspace = true
 iwork-client-core.workspace = true
 iwork-proto.workspace = true
 tauri.workspace = true
+
+[features]
+# 只转发到 iwork-client-core/dev → iwork-ipc/dev（DevTrust）；不是默认 feature。见 scripts/check-no-dev-trust.sh。
+dev = ["iwork-client-core/dev"]
