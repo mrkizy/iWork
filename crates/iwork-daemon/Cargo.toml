@@ -18,6 +18,11 @@ iwork-vcs-git.workspace = true
 iwork-host.workspace = true
 iwork-ipc.workspace = true
 
+[features]
+# 开发开关 --dev-trust（跳过签名校验，同用户照查）。不是默认 feature；发布构建里不存在：
+# scripts/check-no-dev-trust.sh 查 feature 图、产物字符串与「发布进程收到 --dev-trust 拒绝启动」。
+dev = ["iwork-ipc/dev"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
 tempfile.workspace = true

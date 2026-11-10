@@ -106,3 +106,78 @@
 2. 适配器版本与 CLI 版本可能不一致（codex-acp 内置旧内核）。运行时登记须同时记录 CLI 版本、适配器版本、协议版本。
 3. 不依赖适配器的默认模式与默认模型：建会话后由 iWork 显式设置。
 4. 厂商 CLI 会读取用户自己的配置（hook、权限模式、技能），iWork 的判定必须在其之上且不可被其放宽。
+
+## 6 T03 本机通信实测（2026-11-10）
+
+为 `iwork-ipc` 的对端校验（T03 方案 2.4b、第 8 节 N1–N3）补的实测：每个平台要证明「核验到的是对端**正在运行的映像**，不是路径上的文件」，证明不了的平台全部分支返回 `Unavailable`、M1 暂不支持（方案 Q1）。脚本在 `tools/t0/iwork-t03-*`，原始输出在 `tools/t0/out/t03-*`（家目录与临时目录已脱敏）。
+
+### 6.1 结论速览
+
+| 平台 | 映像绑定 | 取法 | M1 |
+| --- | --- | --- | --- |
+| Linux | 成立（N3） | `SO_PEERCRED` uid/pid；打开 `/proc/<pid>/exe` 得 fd，从 fd 读全文 SHA-256；路径从同一个 fd 反查 | 支持 |
+| macOS | 成立（N1） | `LOCAL_PEERTOKEN` 审计令牌 → 动态 `SecCode` → 读签名信息 → 把读到的身份钉成 requirement → 全量 `SecStaticCodeCheckValidity` → `SecCodeCheckValidity` | 支持 |
+| Windows | **不成立**（N2，6.4）：改名运行中进程的 exe 后，`QueryFullProcessImageNameW` 仍返回旧路径 | 代码已按方案写好（两次查名 + 按句柄 `WinVerifyTrust`），由常量 `IMAGE_BINDING_VERIFIED = false` 统一返回 `Unavailable` | **暂不支持**：`SelfIdentity::detect` 在 Windows 上失败 |
+| Linux、macOS | **fork+exec 冒充能绕过**（6.5） | — | 已登记需求第 9 章已知限制（v1.73） |
+
+### 6.2 Linux（N3）
+
+环境：Docker（OrbStack）`rust:1`，内核 Linux 7.0.11 aarch64。脚本 `tools/t0/iwork-t03-linux-procexe.sh`。做法：把 `/bin/sleep` 复制出来运行，换掉文件之后再打开 `/proc/<pid>/exe` 算哈希。
+
+| 情形 | 操作 | `/proc/<pid>/exe` 读到的哈希 | readlink |
+| --- | --- | --- | --- |
+| 改名替换 | `mv peer peer.old`，原路径放别的程序 | 不变 | 跟着 inode 的新名字 |
+| mv 覆盖 | 别的程序 `mv -f` 到原路径 | 不变 | 原路径 + ` (deleted)` |
+| 原地改字节 / 截断重写 | `dd conv=notrunc`、`cp` | 不变：写入被拒（`ETXTBSY`） | 原路径 |
+| 删除 | `rm` | 不变，仍可读 | 原路径 + ` (deleted)` |
+| 进程已退出 | — | 打不开 → `Unavailable` | — |
+
+改名到别的目录会被「同安装目录」检查拦下。
+
+### 6.3 macOS（N1）
+
+环境：macOS 27.2（26B5086k）arm64。脚本 `tools/t0/iwork-t03-macos-codesign.sh`，自签证书放临时钥匙串、跑完删除。不需要 `security-framework` crate，手写 FFI。
+
+- `getsockopt(SOL_LOCAL, LOCAL_PEERTOKEN)` 返回 0、32 字节；交给 `SecCodeCopyGuestWithAttributes(kSecGuestAttributeAudit)` 返回 0。
+- 各种二进制：链接器 ad-hoc（cargo 原样产物）与 `codesign -s -` → `Image(CdHash)`，与 `codesign -dvvv` 一致；同一张自签证书签的两个二进制 → `Certificate`，叶证书 SHA-256 相同；另一张证书 → 不同；签名后改字节 → `Unavailable`（-67061）；未签名 arm64 内核拒绝执行；未签名 x86_64（Rosetta）→ `Unavailable`。
+- requirement 语言的 `certificate leaf = H"…"` 只收 SHA-1，所以钉身份用 SHA-1，对外报的仍是同一份 DER 的 SHA-256。
+
+换文件反例（对端连着时动它的可执行文件）：
+
+| 反例 | 结果 |
+| --- | --- |
+| mv 走再放别的文件 | 始终是原映像 |
+| rm 再放别的文件 | 原映像 → `Unavailable`（-67034）；从未报成新文件 |
+| 原地 dd 改一字节 | `Unavailable`（-67061） |
+| 改一个还没调入的代码页再让它执行 | 只做动态校验时一直通过（进程执行的仍是原始指令）；加全量静态校验后 `Unavailable` |
+| 读签名信息与钉身份校验之间停 4 秒换文件 | 钉住的校验通过，读到的始终是运行中的证书 |
+
+与方案的两处差别：读身份后钉成 requirement 再验（头文件说动态对象的签名信息「有一部分来自磁盘」，只有 `SecCodeCheckValidity` 承诺不受磁盘改动影响）；加一步全量静态校验（否则「改未调入的页」验不出来），代价是每次建连哈希一遍对端映像，量级与 Linux 相同。`kSecCodeInfoMainExecutable` 的路径在 rm+替换后会指向新文件，只用于审计与「同安装目录」检查，此时签名身份本来就是 `Unavailable`。
+
+### 6.4 Windows（N2）
+
+环境：GitHub Actions `windows-latest`（Windows 10.0.26100），PowerShell 5.1。脚本 `tools/t0/iwork-t03-windows-authenticode.ps1`，CI job `windows-n2` 在 runner 上现建自签代码签名证书（`CurrentUser\My`，跑完删除），不用任何仓库密钥。记录：run 42762534066（另有 42758184421 结果相同），artifact `t03-windows-n2`（`transcript.txt`）。被测程序是拷出来的 `cmd.exe`（本身只有系统目录签名，没有内嵌签名）。
+
+| 项 | 操作 | 结果 |
+| --- | --- | --- |
+| ① 自签 | `Set-AuthenticodeSignature` 签过的拷贝，按方案参数调 `WinVerifyTrust` | `0x800B0109`（`CERT_E_UNTRUSTEDROOT`），符合预期 |
+| ② 篡改 | 签名后改一个字节 | `0x80096010`（`TRUST_E_BAD_DIGEST`），符合预期 |
+| ③ 未签名 | 原样拷贝 | `0x800B0100`（`TRUST_E_NOSIGNATURE`），符合预期：`WinVerifyTrust` 按文件验时不查系统目录 |
+| ④ 叶证书 SHA-256 | 证书本身的 DER 与从文件内嵌签名取回的 DER 各算一次 | 相同 |
+| ⑤ 管道两端 pid | 同一进程里建管道两端，`GetNamedPipeClientProcessId` / `GetNamedPipeServerProcessId` | 都返回本进程 pid，调用都成功 |
+| ⑥(a) 原地写 | 进程运行中打开它的 exe 写 | 被拒（文件被另一进程占用） |
+| ⑥(b) 改名 | 运行中把 `live.exe` 改名为 `live.old.exe`，原路径放入别的文件，再查 `QueryFullProcessImageNameW(PROCESS_NAME_NATIVE)` | **仍返回旧路径 `…\live.exe`** |
+
+④ 必须读文件内嵌的签名（`X509Certificate.CreateFromSignedFile`），不能用 `Get-AuthenticodeSignature`：拷来的 `cmd.exe` 签名后，Authenticode 哈希不含签名区，仍能匹配系统目录，`Get-AuthenticodeSignature` 优先返回微软的目录签名（run 42758068951 实测 `SignatureType=Catalog`、Subject 为 Microsoft Windows），两行哈希因此不同。Rust 实现按同一个 `WinVerifyTrust` 状态取签名者（方案 2.4），走的是内嵌签名，不受影响。
+
+结论：⑥(b) 说明进程映像名不反映改名后的当前名。改名后，原路径上的文件已经不是正在运行的映像，「两次查名 + 按句柄验」验到的会是这个新文件，**按句柄绑定不成立**。Windows 在 M1 暂不支持，`IMAGE_BINDING_VERIFIED` 保持 `false`。命名管道 DACL、两端 pid、按句柄验映像等 `cfg(windows)` 测试已在 CI `windows-latest` 上跑通（同一 run：筛 `windows` 的 lib 测试实际执行 12 条，其中 9 条 `cfg(windows)` 测试逐名核对；另 3 条是 `peer::windows_image` 里各平台都编译的纯规则测试）。
+
+### 6.5 fork+exec 冒充（Linux、macOS 都成立，已登记需求第 9 章已知限制（v1.73））
+
+「核验运行中的映像」证明了「pid 正在跑的是哪份映像」，但方案还隐含了一条没写出来的假设：**校验时那个 pid 就是之后在这条连接上收发数据的进程**。这条假设不成立。
+
+- **Linux**（`tools/t0/iwork-t03-linux-forkexec.py`）：攻击进程 connect → fork，子进程留着 socket → 父进程 exec 原版二进制。`SO_PEERCRED` 的 pid 是 connect 那一刻的进程，`/proc/<pid>/exe` 此时正是原版，哈希匹配；收到的数据来自攻击者子进程。实测输出：`hash==legit True`、`received: b'from attacker child pid 8'`。同用户 ptrace 也能做到类似效果。
+- **macOS**（`tools/t0/iwork-t03-macos-forkexec.sh`）：`LOCAL_PEERPID` / `LOCAL_PEERTOKEN` 给的是「最后在这条连接上读写过的进程」，令牌带 pidversion，exec 后旧令牌作废（-67065），所以单靠 exec 骗不过；但如果被信任程序 exec 之后自己往这条连接写过字节（例如它的 stdout/stderr 被接到这个 socket），服务端在 accept 后判定时就会看到被信任映像，而实际控制连接的是攻击者子进程。攻击者能在服务端 accept 之前完成 fork、exec 与这一次写入。
+- 两个方向都存在：冒充客户端（exec 被信任的客户端）、冒充后台（exec 出来的后台往继承的 fd 写日志）。
+- 前提：攻击者是同用户、能在本机运行代码。这比方案已知限制 L2（能在后台启动前改安装目录）门槛低，不需要改任何文件。
+- 实现里没有为它加任何机制（安全设计原则：不擅自加机制）。可选方向（未实现、未评估）：macOS 记下判定通过时的完整审计令牌，之后每帧前再读一次比对，变了就断开；Linux 没有等价的「最后读写者」信息。产品负责人已决定记为已知限制、不另加机制（需求第 9 章，v1.73）。

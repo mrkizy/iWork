@@ -1,4 +1,5 @@
-//! iWork 协议：Protobuf 生成类型、描述符、协议主版本，以及握手与兼容检查两个纯函数模块。
+//! iWork 协议：Protobuf 生成类型、描述符、协议主版本，以及几个两端共用的纯 Rust 模块：
+//! 握手门（[`handshake`]）、兼容检查（[`compat`]）、帧上限（[`limits`]）、事件路由键与查询分道（[`routing`]）。
 //!
 //! `.proto` 在仓库根的 `proto/iwork/`，构建时由 protox 编译、prost-build 生成（生成代码不入库）。
 
@@ -11,3 +12,5 @@ pub const FILE_DESCRIPTOR_SET: &[u8] =
 
 pub mod compat;
 pub mod handshake;
+pub mod limits;
+pub mod routing;

@@ -15,6 +15,10 @@ iwork-ports.workspace = true
 iwork-host.workspace = true
 iwork-shell.workspace = true
 serde_json.workspace = true
+iwork-ipc.workspace = true
+iwork-proto.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 
 [[bench]]
 name = "placeholder"
@@ -23,4 +27,9 @@ harness = false
 # T07：审批求值热路径（方案第 10 节）
 [[bench]]
 name = "approval"
+harness = false
+
+# T03 方案第 6 节：ipc 热路径的绝对值（新建热路径，没有「前」可比）。T11 收编进 CI。
+[[bench]]
+name = "ipc"
 harness = false

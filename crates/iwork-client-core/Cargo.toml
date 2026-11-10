@@ -9,3 +9,7 @@ publish.workspace = true
 [dependencies]
 iwork-ipc.workspace = true
 iwork-proto.workspace = true
+
+[features]
+# 只转发到 iwork-ipc/dev（DevTrust）；不是默认 feature。见 scripts/check-no-dev-trust.sh。
+dev = ["iwork-ipc/dev"]

@@ -1,0 +1,25 @@
+date: 2026-11-09T19:14:47Z
+kernel: Linux 7.0.11-orbstack-00360-gc9bc4d96ac70 aarch64
+coreutils: sleep (GNU coreutils) 9.7
+原件 /bin/sleep sha256=f42cf7276848ac3dfd4d90295233c1f12f5cdc7da2e5715e75a15f2c790acbd6
+替身 /bin/true sha256=c5884f055e6a99450a4712bc03cc6551f8e28c80c81a3787174e78737860c530
+
+== (a) 改名替换：mv 走原件，再在原路径放替身；以及 mv 覆盖（rename 到原路径）
+路径上的文件现在 sha256=c5884f055e6a9945
+[a1 mv-away+new-file] exe-hash=SAME before=f42cf7276848ac3d now=f42cf7276848ac3d readlink="/tmp/tmp.ODVH9bhsTM/a-peer.old"
+[a2 mv-over] exe-hash=SAME before=f42cf7276848ac3d now=f42cf7276848ac3d readlink="/tmp/tmp.ODVH9bhsTM/a2-peer (deleted)"
+
+== (b) 原地覆盖：对运行中的映像文件写入
+dd 改一字节 exit=1 stderr="dd: failed to open '/tmp/tmp.ODVH9bhsTM/b-peer': Text file busy "
+[b1 dd-notrunc] exe-hash=SAME before=f42cf7276848ac3d now=f42cf7276848ac3d readlink="/tmp/tmp.ODVH9bhsTM/b-peer"
+cp 截断重写 exit=1 stderr="cp: cannot create regular file '/tmp/tmp.ODVH9bhsTM/b2-peer': Text file busy "
+[b2 cp-truncate] exe-hash=SAME before=f42cf7276848ac3d now=f42cf7276848ac3d readlink="/tmp/tmp.ODVH9bhsTM/b2-peer"
+
+== (c) 删除
+路径还在吗：no
+[c rm] exe-hash=SAME before=f42cf7276848ac3d now=f42cf7276848ac3d readlink="/tmp/tmp.ODVH9bhsTM/c-peer (deleted)"
+
+== (d) 进程退出后再读（pid 已不在）
+[d exited] sha256sum: /proc/144/exe: No such file or directory
+
+完成，结果在 /w/t0/out/t03-linux

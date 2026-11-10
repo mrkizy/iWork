@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "client/src-tauri"]
+# cargo-fuzz 目标是独立 workspace（nightly 构建），不进 cargo test --workspace 与依赖方向检查。
+exclude = ["crates/iwork-ipc/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -40,16 +42,18 @@ base64 = "0.22"
 # Bash 语法解析，只许 iwork-shell 用（T07 方案 3.3、ADR-T07-a）
 brush-parser = "0.4"
 tauri-build = "2.7"
+tokio-util = { version = "0.7", features = ["codec"] }
 # 读 git 仓库（gitoxide）。只开 status（含 dirwalk、index、blob-diff），不要默认的网络与 CLI 便利功能
 gix = { version = "0.90", default-features = false, features = ["status", "sha1"] }
 # Windows 上 canonicalize 去掉 `\\?\` 前缀；其他平台等同 std::fs::canonicalize
 dunce = "1"
 # 读 `.iwork/project.toml`；只要解析，不要写出与 serde 派生
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
-rusqlite = { version = "0.41", features = ["bundled"] }
-# 提议哈希、调用摘要（T07 方案 5.4、6.2）等
-sha2 = "0.10"
 tracing = "0.1"
+sha2 = "0.10"
+hex = "0.4"
+core-foundation-sys = "0.8"
+rusqlite = { version = "0.41", features = ["bundled"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 iwork-proto = { path = "crates/iwork-proto" }

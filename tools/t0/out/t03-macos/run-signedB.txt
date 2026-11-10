@@ -1,0 +1,11 @@
+listening sock=$TMPDIR//iwork-t03-macos.l9Xfcn/probe.sock hold=7s
+tick=0 conn=1 pid=86757 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/signedB signer=certificate:5571cfea65f9ca169153ebcbd08cb6e74d4bc0ff93eb6307f6180a30a20926fe
+tick=1 conn=1 pid=86757 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/signedB signer=certificate:5571cfea65f9ca169153ebcbd08cb6e74d4bc0ff93eb6307f6180a30a20926fe
+-- action: true
+tick=2 conn=1 pid=86757 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/signedB signer=certificate:5571cfea65f9ca169153ebcbd08cb6e74d4bc0ff93eb6307f6180a30a20926fe
+tick=3 conn=1 pid=86757 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/signedB signer=certificate:5571cfea65f9ca169153ebcbd08cb6e74d4bc0ff93eb6307f6180a30a20926fe
+tick=4 conn=1 pid=86757 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/signedB signer=certificate:5571cfea65f9ca169153ebcbd08cb6e74d4bc0ff93eb6307f6180a30a20926fe
+tick=5 conn=1 pid=86757 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/signedB signer=certificate:5571cfea65f9ca169153ebcbd08cb6e74d4bc0ff93eb6307f6180a30a20926fe
+tick=6 conn=1 error=取对端凭据失败：getsockopt(LOCAL_PEERPID)：Socket is not connected (os error 57)
+-- client exit=143
+hold elapsed

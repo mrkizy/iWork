@@ -1,0 +1,11 @@
+listening sock=$TMPDIR//iwork-t03-macos.l9Xfcn/probe.sock hold=7s
+tick=0 conn=1 pid=88694 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-a2/live signer=certificate:58f342e009804c6d63919e7da3c4a2fc435d052c18ce24cf2e76dbd3704fed31
+tick=1 conn=1 pid=88694 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-a2/live signer=certificate:58f342e009804c6d63919e7da3c4a2fc435d052c18ce24cf2e76dbd3704fed31
+-- action: rm live && cp $TMPDIR//iwork-t03-macos.l9Xfcn/bin/signedB live
+tick=2 conn=1 pid=88694 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-a2/live signer=unavailable:SecCodeCheckValidity 失败（OSStatus -67034）
+tick=3 conn=1 pid=88694 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-a2/live signer=unavailable:SecCodeCheckValidity 失败（OSStatus -67034）
+tick=4 conn=1 pid=88694 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-a2/live signer=unavailable:SecCodeCheckValidity 失败（OSStatus -67034）
+tick=5 conn=1 pid=88694 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-a2/live signer=unavailable:SecCodeCheckValidity 失败（OSStatus -67034）
+tick=6 conn=1 pid=88694 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/live-a2/live signer=unavailable:SecCodeCheckValidity 失败（OSStatus -67034）
+-- client exit=143
+hold elapsed

@@ -1,0 +1,11 @@
+listening sock=$TMPDIR//iwork-t03-macos.l9Xfcn/probe.sock hold=7s
+tick=0 conn=1 pid=88053 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/unsigned_x86 signer=unavailable:未签名：签名信息里既没有证书也没有 cdhash
+tick=1 conn=1 pid=88053 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/unsigned_x86 signer=unavailable:未签名：签名信息里既没有证书也没有 cdhash
+-- action: true
+tick=2 conn=1 pid=88053 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/unsigned_x86 signer=unavailable:未签名：签名信息里既没有证书也没有 cdhash
+tick=3 conn=1 pid=88053 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/unsigned_x86 signer=unavailable:未签名：签名信息里既没有证书也没有 cdhash
+tick=4 conn=1 pid=88053 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/unsigned_x86 signer=unavailable:未签名：签名信息里既没有证书也没有 cdhash
+tick=5 conn=1 pid=88053 user=uid:501 exe=/private$TMPDIR/iwork-t03-macos.l9Xfcn/bin/unsigned_x86 signer=unavailable:未签名：签名信息里既没有证书也没有 cdhash
+-- client exit=143
+tick=6 conn=1 error=取对端凭据失败：getsockopt(LOCAL_PEERPID)：Socket is not connected (os error 57)
+hold elapsed

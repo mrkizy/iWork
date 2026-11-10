@@ -27,7 +27,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 - 协议：Protobuf，Rust 侧用 prost 生成，TypeScript 侧用 protobuf-es 生成；生成代码不手改、不入库（构建时生成）。
 - 存储：SQLite（rusqlite，WAL）。版本控制读操作用 gitoxide（`gix`），写操作调本机 `git`。
 
-工具链：Rust 版本由根目录 `rust-toolchain.toml` 固定（经 rustup 自动安装，不用系统自带或 Homebrew 的 rustc）；pnpm 版本由 `client/package.json` 的 `packageManager` 固定；脚本需要 bash 与 jq。CI 是 `.github/workflows/ci.yml`，三平台跑下面除基准外的全部检查。CI 的运行状态不登录也能查（`curl https://api.github.com/repos/mrkizy/iWork/actions/runs?branch=<分支>`），失败日志要登录 GitHub 后用 `gh run view <run-id> --log-failed` 看；Windows 行为本机验证不了，以 CI 为准，拿不到日志时交 supervisor 请产品负责人登录 `gh`，不要只凭推断改。
+工具链：Rust 版本由根目录 `rust-toolchain.toml` 固定（经 rustup 自动安装，不用系统自带或 Homebrew 的 rustc）；pnpm 版本由 `client/package.json` 的 `packageManager` 固定；脚本需要 bash 与 jq。CI 是 `.github/workflows/ci.yml`，三平台跑下面除基准外的全部检查。CI 的运行状态不登录也能查（`curl https://api.github.com/repos/mrkizy/iWork/actions/runs?branch=<分支>`），失败日志要登录 GitHub 后用 `gh run view <run-id> --log-failed` 看；Windows 行为本机验证不了，以 CI 为准，拿不到日志时交 supervisor 请产品负责人登录 `gh`，不要只凭推断改。Windows 上用 PowerShell 5.1 跑的 `.ps1` 脚本含中文时必须存成带 BOM 的 UTF-8，否则按 ANSI 读、整个脚本解析失败（T03 实测）。
 
 命令（T01 建立后以此为准；改动须同步本节）：
 
@@ -39,7 +39,16 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 - 协议兼容：新加或改了 `.proto` 字段后跑 `cargo run -p iwork-proto --example update-contract -- --additive` 把新字段登记进 `proto/compat/v1/contract.binpb`；它拒绝改号、改类型、删字段；加了样本构造函数后跑 `cargo run -p iwork-proto --example dump-compat -- proto/compat/v1/samples` 写出新的金样本（只增不改，已有样本内容不同会拒绝）。规则见 `proto/compat/README.md`
 - 前端：`pnpm -C client install --frozen-lockfile`、`pnpm -C client gen`（从 `proto/` 生成 TS 到 `client/src/gen/`，不入库）、`pnpm -C client typecheck`、`pnpm -C client test`（含开发服务器只绑 127.0.0.1、发布配置不含开发入口两项检查）
 - 客户端：Tauri 配置分三层，层清单只写在 `client/scripts/tauri-layers.ts`，包装脚本与 CI 检查共用它。开发用 `pnpm -C client tauri dev`（叠加 `tauri.dev.conf.json`）；发布构建用 `pnpm -C client tauri build`（叠加 `tauri.build.conf.json`）。tauri CLI 只支持 dev 和 build 两个子命令，且只能经这两条包装命令调用：包装脚本拒绝其他子命令（bundle、android、ios 等）、调用方自带的 `-c/--config` 和环境变量 `TAURI_CONFIG`；裸跑 `tauri build`、`tauri bundle` 会被拒；`client/src-tauri/` 下多出层清单没登记的 Tauri 配置文件时 `pnpm -C client test` 失败。`cargo build`/`cargo run -p iwork-client` 不需要 `dist/`，但 `cargo run` 起来的窗口是空的（没有开发服务器也没有嵌入资源），看界面要用 `tauri dev`
-- 性能基准：`cargo bench -p iwork-bench`（T01 建空 crate，T11 填实现）；存储写入基准初版 `cargo bench -p iwork-store --bench write_commit`（每组一行 JSON 到 stdout，macOS 上 fullfsync 开、关各一组；T11 收编后改这一条）；审批求值热路径单跑 `cargo bench -p iwork-bench --bench approval`（T07）
+- 性能基准：`cargo bench -p iwork-bench`（T01 建空 crate，T11 填实现）；存储写入基准初版 `cargo bench -p iwork-store --bench write_commit`（每组一行 JSON 到 stdout，macOS 上 fullfsync 开、关各一组；T11 收编后改这一条）；审批求值热路径单跑 `cargo bench -p iwork-bench --bench approval`（T07）；ipc 热路径：`cargo bench -p iwork-bench --bench ipc`（`IWORK_BENCH_FANOUT_SECS` 调推送扇出时长）
+- 本机通信（T03）：
+  - 不开 TCP/UDP：`scripts/check-no-tcp.sh`（源码层面；`--selftest` 证明检查会红；运行时监听检查归 T11）
+  - 发布构建没有 `--dev-trust`：`scripts/check-no-dev-trust.sh`（feature 图 + release 产物 grep 含阳性对照 + 发布进程拒绝该参数；`--graph-only` 只查 feature 图，`--artifacts F...` 追加检查打包产物）
+  - 安装清单：`scripts/write-install-manifest.sh <目录>`（无证书构建的打包步骤调用，写 `iwork-manifest.json`）
+  - fuzz（nightly + cargo-fuzz，在 `crates/iwork-ipc` 下）：`cargo +nightly fuzz run frame_decode -- -max_total_time=60`，另两个目标 `connection_prehello`、`connection_established`
+  - 续传性质测试完整一轮：`PROPTEST_CASES=2000 cargo test -p iwork-ipc --test stream_proptest`
+  - 另一用户连接被拒（只 Linux，需要另一个系统用户）：见 `crates/iwork-ipc/tests/peer_other_user.rs` 文件头
+  - 调试客户端（dev feature）：`cargo run -p iwork-ipc --features dev --example ipc-tool -- hello`；`-- --endpoint <sock> serve` 起一个玩具后台自测
+  - 对端身份探针（dev feature，平台实测用）：`cargo run -p iwork-ipc --features dev --example peer-probe -- --help`
 - 审批对拍语料：`cargo run -p iwork-core --example dump-credential-corpus` 导出需凭据命令的匹配语料（JSON），供 T06 对固定版本的 Claude Code 实测回填；内置规则集快照更新用 `IWORK_UPDATE_SNAPSHOTS=1 cargo test -p iwork-core --test builtin_rules`（改内置条目必须同时升 `RULESET_VERSION`）
 - 重测试排队（产品负责人 2026-11-10 定：同一时间只跑一张卡的重测试）：`cargo test --workspace`、`cargo clippy --workspace`、崩溃注入、`PROPTEST_CASES` 调大的属性测试、fuzz、`cargo bench`、release 构建、docker 里的测试，一律套 `lockf /tmp/iwork-heavy-test.lock <命令>` 跑（macOS 自带 `lockf`，拿不到锁就排队等）；单个 crate 的少量定向测试不用套。临时验证副本里跑也一样套
 
@@ -66,7 +75,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 
 ## 性能
 
-阈值见需求文档第 14 章，只统计 iWork 自身进程。基准进 CI，超阈值记为回归并在审查中标出，不阻止合入。动到热路径（事件推送、帧合并、存储写入、hook）必须附基准前后对比。
+阈值见需求文档第 14 章，只统计 iWork 自身进程。基准进 CI，超阈值记为回归并在审查中标出，不阻止合入。动到热路径（事件推送、帧合并、存储写入、hook）必须附基准前后对比。本机负载高时（loadavg 明显高于核数，或杀毒软件在扫编译产物）基准绝对值不可信：前后两个版本在同一时段交替跑多轮、取中位数，只报相对值并写明负载。正式性能验收在 mac120 的夜间空闲时段测（见 `docs/tasks/M1/T11.md`）。
 
 ## 不要擅自推翻的决定
 
