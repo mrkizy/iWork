@@ -29,7 +29,7 @@
 | T03 | 方案定稿 `ae913d3`；实施分支 `cao/2e7bcbe5` @ `d45eaea`（WIP） | **新 developer `fe00e889`**（codex，在 worktree `.cao/worktrees/2e7bcbe5` 里做）；旧 developer `2e7bcbe5` 保留勿删 | 实施 `2026-11-10-m1-t03` 第 1 轮不通过（10 条） | F-1～F-8 已修；F-9 剩客户端模型重写与两种变异；F-10 没做；全量检查与 ipc 基准前后对比没跑（基线要空闲时套锁重跑 c3e8cda 副本） | 新 developer 做完回报后，开新 reviewer（Claude）做第 2 轮；另见第 2 节 2、3 |
 | T05 | 已合入 main `a6987d4` | — | 已关 | — | — |
 | （方案复盘） | T03、T07 方案 | retrospector `f77efc99` 已复盘（给 architect 存 3 条 lesson），终端可删 | — | — | — |
-| T07 | 方案 main `d2effd5`（实施审查补第 8 轮修改）；实施分支 `cao/009e8660` @ `95f5ac6` | **新 developer `2e2bc684`**（codex，在 worktree `.cao/worktrees/009e8660` 里做）；旧 developer `009e8660` 保留勿删；方案复核新 reviewer `ed326a3d` | 实施 `2026-11-10-m1-t07` 第 1 轮不通过（25 条）；方案补丁 `2026-11-09-m1-t07-plan` 第 9 轮复核中 | A 块 F-3/4/5/8/9/10/11 已修；B 块 F-13～F-25 新 developer 在做；F-1/2/6/7 等方案第 9 轮通过；F-12 等产品负责人 | 方案第 9 轮通过后把方案补丁要点发给新 developer |
+| T07 | 方案 main `d2effd5`（实施审查补第 8 轮修改）；实施分支 `cao/009e8660` @ `95f5ac6` | **新 developer `5638c08f`**（codex，在 worktree `.cao/worktrees/009e8660` 里做）；旧 developer `009e8660` 保留勿删；方案复核新 reviewer `ed326a3d` | 实施 `2026-11-10-m1-t07` 第 1 轮不通过（25 条）；方案补丁 `2026-11-09-m1-t07-plan` 第 9 轮复核中 | A 块 F-3/4/5/8/9/10/11 已修；B 块 F-13～F-25 新 developer 在做；F-1/2/6/7 等方案第 9 轮通过；F-12 等产品负责人 | 方案第 9 轮通过后把方案补丁要点发给新 developer |
 | T08 | 分支 `cao/49facf33` @ `1f85580`（已推送） | 旧 developer `49facf33` 保留勿删；第 6 轮新 reviewer `e2991248` | `2026-11-09-m1-t08` 第 6 轮复审中（只审 bbefd46..1f85580） | — | **CI run 42745754671 三平台全绿**；第 6 轮通过后开新 developer 在 worktree `.cao/worktrees/49facf33` 里把 ADR 0006 改成 0010，再合入 |
 | T04、T06、T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
 
