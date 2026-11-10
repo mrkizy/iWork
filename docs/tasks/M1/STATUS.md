@@ -34,10 +34,10 @@
 | 卡 | 产物 | worker（终端） | 审查任务 ID / 轮次 | 还开着的问题 | 下一步 |
 | --- | --- | --- | --- | --- | --- |
 | T01 | 已合入 main `bb6d69a` | — | `2026-11-09-m1-t01` 已关 | 验收 5 空窗口截图未补（屏幕锁定） | 有空时补截图 |
-| T02 | 分支 `cao/fecce968` @ `24adbca` | developer `fecce968`；reviewer A `3036f50a`、B `6723c1bb` | `2026-11-10-m1-t02` 第 2 轮：第 1 轮 7 条全关 | 2/F-1（返工缺热路径前后基准） | developer 补基准 → A 块核 → 合入 main（统一 ADR 编号） |
+| T02 | 分支 `cao/fecce968` @ `24adbca` | developer `fecce968`；reviewer A `3036f50a`、B `6723c1bb` | `2026-11-10-m1-t02` 两轮审查通过，账本全关 | — | developer 在分支上 merge main + ADR 定号 0007–0009，回报后 supervisor 合入 main |
 | T03 | 实施分支 `cao/2e7bcbe5` @ `c3e8cda` | developer `2e7bcbe5`；reviewer A `b520b815`、B `9c2a6c04` | `2026-11-10-m1-t03` 第 1 轮不通过（10 条：6 blocking、4 important） | 1/F-1～F-10 | developer 返工中；**待产品负责人定**：fork+exec 冒充（建议已知限制）、Windows CI job（等 gh 登录与推送同意） |
 | T05 | 已合入 main `a6987d4` | —（worker 已删，retrospector 已复盘） | `2026-11-09-m1-t05` 已关 | — | — |
-| T07 | 实施分支 `cao/009e8660` @ `dea62cd`（9 提交，+14255） | developer `009e8660`；reviewer A `2eb2187c`（解析、归一、规则、求值）、B `c2ab0fc2`（引擎、类型、审计、恢复） | `2026-11-10-m1-t07` 第 1 轮审查中 | — | 等审查结论 |
+| T07 | 实施分支 `cao/009e8660` @ `dea62cd` | developer `009e8660`；architect `62a1aeb0`；reviewer A `2eb2187c`、B `c2ab0fc2` | `2026-11-10-m1-t07` 第 1 轮不通过（25 条：22 blocking、3 important） | 1/F-1～F-25 | developer 先修实现类（F-3～F-5、F-8～F-11、F-13～F-25）；architect 改方案 3.4 / 3.6（F-1 保底角色、F-2 沙箱外约束作用于整条调用、F-7 目录目标、F-6 命令替换事实），改好再修；**F-12 待产品负责人定**：core 里审批对 git 命令文字的分类是否允许 |
 | T08 | 分支 `cao/49facf33` @ `bbefd46`（本地，远端还在 `52f35cc`） | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 5 轮通过，全部 finding 已关 | — | 只差 CI：run 42660636464（52f35cc）三平台 test 失败，supervisor 在临时副本里用无 git 身份的干净环境复现；合入前需三平台全绿 |
 | T04、T06、T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
 
