@@ -68,8 +68,9 @@ jobs:
 
       # T03：iwork-ipc 里 cfg(windows) 的测试（命名管道 DACL、两端 pid、按句柄验映像）要在 Windows 上真跑到。
       #   上面的 workspace 测试已经包含它们；这里按名字核对每一条都出现且通过，防止 cfg 写错后悄悄变成 0 条。
+      #   独立于上一步：workspace 里别的 crate 测试失败时这里照样跑。
       - name: iwork-ipc 的 Windows 专属测试真的跑了（Windows）
-        if: runner.os == 'Windows'
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
         run: |
           cargo test -p iwork-ipc --lib -- windows 2>&1 | tee ipc-windows-tests.log
           for t in \
