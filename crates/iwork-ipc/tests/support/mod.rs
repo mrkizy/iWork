@@ -329,6 +329,10 @@ pub struct TestHandler {
     /// 命令到达 handler 的顺序（command_id）。
     pub commands: Arc<Mutex<Vec<String>>>,
     pub handled: Arc<AtomicUsize>,
+    /// 正在执行的 handle 调用数。handler 任务被中止时，守卫随 future 一起丢弃，计数会回落。
+    pub in_flight: Arc<AtomicUsize>,
+    /// 会写视图的查询读完 head 之后执行到的次数（迟到返回的取消断言用）。
+    pub reads_finished: Arc<AtomicUsize>,
     pub chunks: Arc<AtomicUsize>,
     pub closed: Arc<AtomicUsize>,
     pub command_delay: Arc<Mutex<Duration>>,
@@ -351,6 +355,7 @@ impl TestHandler {
 impl RequestHandler for TestHandler {
     async fn handle(&self, _ctx: &ConnectionContext, req: pb::Request) -> pb::Response {
         self.handled.fetch_add(1, Ordering::SeqCst);
+        let _in_flight = InFlight::enter(&self.in_flight);
         let body = match req.body {
             Some(pb::request::Body::Command(c)) => {
                 let d = *self.command_delay.lock().unwrap();
@@ -383,6 +388,7 @@ impl RequestHandler for TestHandler {
                     // 「读事务」：读到的 head 就是 S。
                     let s = self.world.head();
                     self.world.delay().await;
+                    self.reads_finished.fetch_add(1, Ordering::SeqCst);
                     if let Some(f) = self.after_read.lock().unwrap().as_mut() {
                         f();
                     }
@@ -416,6 +422,34 @@ impl RequestHandler for TestHandler {
     async fn connection_closed(&self, _ctx: &ConnectionContext) {
         self.closed.fetch_add(1, Ordering::SeqCst);
     }
+}
+
+/// 进入时加一、离开（含 future 被丢弃）时减一。
+struct InFlight(Arc<AtomicUsize>);
+
+impl InFlight {
+    fn enter(n: &Arc<AtomicUsize>) -> Self {
+        n.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(n))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// 在期限内等计数变成 `want`。
+pub async fn wait_count(n: &AtomicUsize, want: usize, within: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while n.load(Ordering::SeqCst) != want {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    true
 }
 
 // ---------------------------------------------------------------- 启动

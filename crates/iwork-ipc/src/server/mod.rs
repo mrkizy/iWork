@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 mod budget;
 mod connection;
 mod handler;
+mod lanes;
 mod stream;
 
 pub use handler::{
@@ -50,6 +51,9 @@ pub struct ServerConfig {
     pub max_scopes: usize,
     /// 并行查询道的并发上限。默认 4。
     pub query_concurrency: usize,
+    /// 每连接同时存在的请求上限（排队 + 执行中：命令、交接 FIFO、等查询道名额的查询）。
+    /// 用完就停止读 socket，直到有请求完成。默认 64。
+    pub max_pending_requests: usize,
     /// 等 `Hello` 的上限。默认 5s。
     pub handshake_timeout: Duration,
     /// 停机时每条连接把队列写完的上限。默认 1s。
@@ -71,6 +75,7 @@ impl ServerConfig {
             handover_timeout: Duration::from_secs(10),
             max_scopes: 256,
             query_concurrency: 4,
+            max_pending_requests: 64,
             handshake_timeout: Duration::from_secs(5),
             shutdown_flush: Duration::from_secs(1),
             trust: TrustPolicy::RequireSigner,
