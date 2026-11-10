@@ -282,3 +282,48 @@ async fn client_incoming_is_bounded_and_backpressures() {
     }
     assert!(n < 400 && n > 0, "Incoming 有界：积压 {n} 条");
 }
+
+/// 客户端一直不读：QueueFull 之后连接必须在有限时间内真的关掉（handler.connection_closed 被调用），
+/// 不依赖客户端恢复读取。
+#[tokio::test]
+async fn stalled_client_is_closed_without_resuming_reads() {
+    let h = start(small_budget());
+    *h.world.pad.lock().unwrap() = 1000;
+    let (a, mut a_inc) = connect_small(&h).await;
+    a.subscribe(1, sidebar(), 0).await.unwrap();
+    next_item(&mut a_inc).await;
+    for i in 0..1000 {
+        h.upsert("project:p1", i);
+        tokio::task::yield_now().await;
+    }
+    // a、a_inc 都活着但从不再读。
+    let closed = &h.handler.closed;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while closed.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "停读的连接 3 秒内没有被关掉");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop((a, a_inc));
+}
+
+/// 客户端一直不读、写端阻塞时停机：serve 在停机刷新期限之后有界返回。
+#[tokio::test]
+async fn shutdown_completes_while_client_stalls() {
+    let h = start(small_budget());
+    *h.world.pad.lock().unwrap() = 1000;
+    let (a, mut a_inc) = connect_small(&h).await;
+    a.subscribe(1, sidebar(), 0).await.unwrap();
+    next_item(&mut a_inc).await;
+    // 刚好塞满管道与客户端配额、但不超服务端预算：写端阻塞而连接没有被 fail。
+    for i in 0..150 {
+        h.upsert("project:p1", i);
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    h.shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(3), h.server)
+        .await
+        .expect("停机应在刷新期限（1s）后有界完成")
+        .unwrap();
+    drop((a, a_inc));
+}

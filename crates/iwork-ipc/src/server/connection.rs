@@ -253,8 +253,12 @@ pub(crate) async fn run<H, S, C>(
             request_id: 0,
             body: Some(pb::response::Body::Error(e)),
         };
-        write_one(&mut wr, &Frame::Response(resp)).await;
-        let _ = wr.shutdown().await;
+        // 握手阶段的写也有期限：对端不读时不能把连接任务挂住。
+        let _ = tokio::time::timeout(shared.cfg.handshake_timeout, async {
+            write_one(&mut wr, &Frame::Response(resp)).await;
+            wr.shutdown().await
+        })
+        .await;
         return;
     }
     if hello.resume_token.is_some() {
@@ -278,7 +282,12 @@ pub(crate) async fn run<H, S, C>(
         protocol_major: shared.cfg.protocol_major,
         protocol_minor: shared.cfg.protocol_minor,
     };
-    if !write_one(&mut wr, &Frame::Welcome(welcome)).await {
+    let sent = tokio::time::timeout(
+        shared.cfg.handshake_timeout,
+        write_one(&mut wr, &Frame::Welcome(welcome)),
+    )
+    .await;
+    if sent != Ok(true) {
         return;
     }
     reader.decoder_mut().set_max_len(MAX_FRAME_LEN);
@@ -349,8 +358,12 @@ async fn write_one<W: AsyncWrite + Unpin>(wr: &mut W, frame: &Frame) -> bool {
     wr.write_all(&buf).await.is_ok() && wr.flush().await.is_ok()
 }
 
+/// 写任务。每次写都和连接的取消令牌一起等：客户端停读、socket 写不动时，`fail_connection` 或停机
+/// 一取消就放弃这次写、丢掉写端，连接的收尾不依赖对端恢复读取。
 async fn write_loop<W: AsyncWrite + Unpin>(conn: Arc<ConnShared>, mut wr: W) {
     let mut buf = BytesMut::with_capacity(WRITE_BATCH);
+    // 一次写到一半被取消后，流里留着半帧：之后不能再写任何东西（包括最后一帧），只能关掉。
+    let mut torn = false;
     loop {
         enum Next {
             Write,
@@ -361,24 +374,24 @@ async fn write_loop<W: AsyncWrite + Unpin>(conn: Arc<ConnShared>, mut wr: W) {
             let mut st = conn.lock();
             if st.closed.is_some() {
                 Next::Close(st.final_frame.take().map(Box::new))
-            } else if st.budget.pop_batch(WRITE_BATCH, &mut buf) > 0 {
-                Next::Write
             } else if conn.cancel.is_cancelled() {
                 Next::Close(None)
+            } else if st.budget.pop_batch(WRITE_BATCH, &mut buf) > 0 {
+                Next::Write
             } else {
                 Next::Idle
             }
         };
         match next {
             Next::Close(final_frame) => {
-                if let Some(f) = final_frame {
+                if let Some(f) = final_frame.filter(|_| !torn) {
                     let _ = tokio::time::timeout(
                         FINAL_FRAME_WRITE,
                         write_one(&mut wr, &Frame::Response(*f)),
                     )
                     .await;
                 }
-                let _ = wr.shutdown().await;
+                let _ = tokio::time::timeout(FINAL_FRAME_WRITE, wr.shutdown()).await;
                 return;
             }
             Next::Idle => {
@@ -388,14 +401,19 @@ async fn write_loop<W: AsyncWrite + Unpin>(conn: Arc<ConnShared>, mut wr: W) {
                 }
             }
             Next::Write => {
-                let ok = wr.write_all(&buf).await.is_ok() && wr.flush().await.is_ok();
+                let written = tokio::select! {
+                    r = async { wr.write_all(&buf).await?; wr.flush().await } => Some(r.is_ok()),
+                    () = conn.cancel.cancelled() => None,
+                };
                 buf.clear();
-                if !ok {
-                    conn.fail(FailCause::PeerClosed, None);
-                    continue;
+                match written {
+                    Some(true) => {
+                        conn.read_resume.notify_one();
+                        conn.replay_space.notify_one();
+                    }
+                    Some(false) => conn.fail(FailCause::PeerClosed, None),
+                    None => torn = true,
                 }
-                conn.read_resume.notify_one();
-                conn.replay_space.notify_one();
             }
         }
     }
