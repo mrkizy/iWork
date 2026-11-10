@@ -15,7 +15,6 @@ iwork-ipc.workspace = true
 iwork-proto.workspace = true
 prost.workspace = true
 tauri.workspace = true
-tauri-plugin-notification.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 

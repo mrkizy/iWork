@@ -6,7 +6,6 @@
   "permissions": [
     "allow-attach",
     "allow-next-frame",
-    "allow-ui-intent",
-    "notification:default"
+    "allow-ui-intent"
   ]
 }

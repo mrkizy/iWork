@@ -1,14 +1,10 @@
 //! 壳的副作用：选端点、系统通知、打开外链、菜单「完全退出 iWork」、退出。
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
 use iwork_client_core::{App, DirectDialer, Effect, ShellEvent};
 use iwork_ipc::LocalEndpoint;
 use iwork_ipc::peer::SelfIdentity;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Manager};
-use tauri_plugin_notification::NotificationExt;
 use tokio::sync::mpsc;
 
 const QUIT_MENU_ID: &str = "quit-fully";
@@ -34,17 +30,6 @@ pub fn spawn(handle: AppHandle, core: App, mut effects: mpsc::UnboundedReceiver<
     if let Err(e) = install_menu(&handle, core.clone()) {
         tracing::warn!(target: "iwork_client", error = %e, "菜单装不上");
     }
-    // 通知 id → 对话：点击时按 id 找回对话；平台没带回通知（或找不到）就跳到最近一条待处理项（E2 的退路）。
-    let sent: Arc<Mutex<HashMap<i32, String>>> = Arc::default();
-    let on_click = core.clone();
-    let lookup = Arc::clone(&sent);
-    let _ = handle.notification().on_action(move |a| {
-        let conversation = a
-            .notification()
-            .and_then(|n| lookup.lock().ok()?.get(&n.id()).cloned());
-        on_click.shell(ShellEvent::NotificationClicked(conversation));
-    });
-    let mut next_id: i32 = 1;
     tauri::async_runtime::spawn(async move {
         while let Some(e) = effects.recv().await {
             match e {
@@ -53,21 +38,10 @@ pub fn spawn(handle: AppHandle, core: App, mut effects: mpsc::UnboundedReceiver<
                     body,
                     conversation_id,
                 } => {
-                    let id = next_id;
-                    next_id = next_id.wrapping_add(1).max(1);
-                    if let (Some(c), Ok(mut m)) = (conversation_id, sent.lock()) {
-                        m.insert(id, c);
-                    }
-                    if let Err(err) = handle
-                        .notification()
-                        .builder()
-                        .id(id)
-                        .title(title)
-                        .body(body)
-                        .show()
-                    {
-                        tracing::warn!(target: "iwork_client", error = %err, "系统通知发不出去");
-                    }
+                    // 系统通知怎么落地待定：tauri-plugin-notification 带进被依赖策略禁用的 notify-rust 与三条
+                    // unmaintained 公告（zbus 系），已交 supervisor。先记日志；点击跳转的会话侧接线
+                    // （ShellEvent::NotificationClicked → NavigatePatch）已就绪。
+                    tracing::info!(target: "iwork_client", %title, %body, ?conversation_id, "待发系统通知");
                 }
                 Effect::OpenExternal(url) => open_external(&url),
                 Effect::Exit => handle.exit(0),

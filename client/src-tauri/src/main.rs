@@ -70,7 +70,6 @@ fn is_app_origin(url: &tauri::Url) -> bool {
 fn main() {
     let dialer = effects::dialer().unwrap_or_else(|e| panic!("找不到后台服务的端点：{e}"));
     tauri::Builder::default()
-        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![attach, next_frame, ui_intent])
         .setup(move |app| {
             let (core, effects) = tauri::async_runtime::block_on(async { App::start(dialer, Options::default()) });
