@@ -17,3 +17,4 @@ iWork：本机运行的 ADE（Agent Development Environment），Rust daemon + T
 - 任务完成后在卡片末尾“完成记录”里追加：日期、合入提交、偏离设计之处（若有）及用户确认记录。
 - 同一时间只跑一张卡的重测试（产品负责人 2026-11-10 定）：派活消息里写明重测试套 `lockf /tmp/iwork-heavy-test.lock <命令>`（规则在 `AGENTS.md` 命令节）。
 - 用 use_worktree 建的 developer 终端，删终端会清掉它的 worktree；分支合入前不要删。
+- 派返工时写清每条问题属于哪一类、根因可能在哪，要求作者先给出根因判断再改；不把 reviewer 的「最小修法」原样转成指令。同一类问题第二次复发，由 supervisor 先叫停，和作者一起换机制，再派活。
