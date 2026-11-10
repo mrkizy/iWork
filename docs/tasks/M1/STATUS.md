@@ -33,10 +33,10 @@
 | --- | --- | --- | --- | --- | --- |
 | T01 | 已合入 main `bb6d69a` | — | `2026-11-09-m1-t01` 已关 | 验收 5 空窗口截图未补 | 有空时补截图 |
 | T02 | **已合入 main `2018280`**（ADR 0007–0009） | developer `fecce968` 待删（删除超时，重开后再删）；retrospector 已复盘（给 developer 存 2 条 lesson），终端 `91a45c1b` 可删 | `2026-11-10-m1-t02` 已关（两轮 8 条全 fixed） | — | — |
-| T03 | 方案定稿 `ae913d3`；实施分支 `cao/2e7bcbe5` @ `d45eaea`（WIP） | **新 developer `fe00e889`**（codex，在 worktree `.cao/worktrees/2e7bcbe5` 里做）；旧 developer `2e7bcbe5` 保留勿删 | 实施 `2026-11-10-m1-t03` 第 1 轮不通过（10 条） | F-1～F-8 已修；F-9 剩客户端模型重写与两种变异；F-10 没做；全量检查与 ipc 基准前后对比没跑（基线要空闲时套锁重跑 c3e8cda 副本） | 新 developer 做完回报后，开新 reviewer（Claude）做第 2 轮；另见第 2 节 2、3 |
+| T03 | 实施分支 `cao/2e7bcbe5` @ `4422491`（已推送） | developer `b271f92f` | 实施 `2026-11-10-m1-t03` 第 1 轮 10 条已修，回报 docs/tasks/M1/T03-review-round1.md | F-1～F-10 待第 2 轮核 | developer 合 main + 写 N2 结论进 t0-findings + 看 CI；之后开 A/B 两块新 reviewer 做第 2 轮。**N2 实测：Windows 按句柄绑定不成立，M1 暂不支持 Windows（产品负责人此前批准的默认规则）** |
 | T05 | 已合入 main `a6987d4` | — | 已关 | turn_loop.rs:260/309 Windows 偶发（只查一次进程是否存在） | 已派 developer（新 worktree，任务 2026-11-10-m1-t05-flake）改成 wait_until，推分支跑 CI |
 | （方案复盘） | T03、T07 方案 | retrospector `f77efc99` 已复盘（给 architect 存 3 条 lesson），终端可删 | — | — | — |
-| T07 | 方案 main `13f3fbb`（收口）；实施分支 `cao/009e8660` @ `14e4513` | architect `e7a8c21c`；方案复核 reviewer `6da87074`（codex）；旧 developer 终端已随重启消失，worktree 在 | 实施 `2026-11-10-m1-t07` 第 1 轮：A 块 7 条、B 块 13 条已修待审，F-12 已关（intentional）；方案 `2026-11-09-m1-t07-plan` 第 10 轮复核中（9/F-1～F-7） | F-1、F-2、F-6、F-7 等方案定稿后实施；方案定稿后 developer 还要把 nested_facts 挪进 iwork-shell 队列、实现 literal_facts / 两种视图 / find -delete / deny.unlexable | 复核通过后：把已知限制 (a)～(h) 汇总给产品负责人过目再写进需求第 9 章；派 developer 按收口实施剩余项，然后 A/B 两块第 2 轮代码审查 |
+| T07 | **方案定稿 `4e27665`**（需求 v1.74 登记已知限制）；实施分支 `cao/009e8660` @ `14e4513` | developer `f8877913`（在 worktree 里按定稿方案实施剩余项）；architect `e7a8c21c`、方案复核 `6da87074` 可删 | 实施 `2026-11-10-m1-t07` 第 1 轮：A 块 7 条、B 块 13 条已修，F-12 已关；方案收口任务 `2026-11-10-m1-t07-plan-closeout` 已全关 | F-1、F-2、F-6、F-7 与收口新规则待实施 | 实施完成后 A/B 两块第 2 轮代码审查 |
 | T08 | **已合入 main `c1aaf6b`**（ADR 0010） | developer `4960bf0d` 可删；旧 worktree `.cao/worktrees/49facf33` 分支已合入 | `2026-11-09-m1-t08` 已关（七轮） | — | 补任务卡完成记录 |
 | T04、T06、T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
 
