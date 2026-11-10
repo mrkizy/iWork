@@ -11,6 +11,7 @@ pub mod bash;
 pub mod commands;
 pub mod credential;
 pub mod credential_corpus;
+pub mod find_syntax;
 pub mod paths;
 pub mod tool_input;
 
@@ -23,7 +24,8 @@ use iwork_domain::action::{
 use iwork_domain::approval::ApprovalCallRecord;
 use iwork_domain::common::Sha256;
 use iwork_ports::agent::PermissionRequest;
-use iwork_ports::fs::{PathResolveError, PathResolver};
+use iwork_ports::fs::{PathResolveError, PathResolver, ResolveCertainty, ResolvedPath};
+use iwork_shell::{PartialFacts, ShellScript};
 use sha2::Digest;
 
 use crate::approval::env::EnvPaths;
@@ -45,10 +47,26 @@ pub struct PendingAction {
     pub argument: bool,
 }
 
+/// 一个待解析的路径词，以及它是真实目标还是候选（方案 3.1、3.5 那张表）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathQuery {
+    pub literal: String,
+    pub origin: PathOrigin,
+}
+
+/// 路径从哪来：决定「走不通」时怎么办（「查不清」两者一样，整条拒）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathOrigin {
+    /// 归类成功的调用里命令真会动的路径：走不通 → 整条解析不了，询问，不猜
+    Real,
+    /// 候选：目录目标语义虚构的「目的 / 源名」、兜底候选、`find` 删除规则的候选。走不通 → 只丢它
+    Hypothetical,
+}
+
 /// 目标：路径还是原文，其余已是最终形状。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingTarget {
-    Path(String),
+    Path(PathQuery),
     Command {
         program: String,
         subcommand: Option<String>,
@@ -89,8 +107,8 @@ pub struct Analysis {
     pub tool: ToolRef,
     /// 归类成功时的形状与动作；`Err` 是整条解析不了的原因
     pub structured: Result<(CallShape, Vec<PendingAction>), String>,
-    /// 解析不了时用的动作（Bash 才有；其他工具解析不了时只有一个无目标的动作）
-    pub fallback: Vec<PendingAction>,
+    /// 解析不了时用的动作从哪来（见 [`Analysis::fallback`]）
+    pub fallback: Fallback,
     pub placement: SandboxPlacement,
     pub bypass_sandbox_requested: bool,
     pub description: Option<String>,
@@ -98,6 +116,55 @@ pub struct Analysis {
     /// Edit 的新旧文字（亲手执行补丁卡片用）
     pub edit: Option<(String, String, String)>,
     pub raw_input_digest: Sha256,
+}
+
+/// 解析不了时的动作来源。Bash 的事实按需才取：归类成功的调用（热路径上的多数）用不上它。
+#[derive(Debug, Clone)]
+pub enum Fallback {
+    /// 非 Bash 工具：现成的动作
+    Actions(Vec<PendingAction>),
+    /// `parse` 放弃：第一遍事实已随 `Unparsable` 带回
+    ShellFacts(PartialFacts),
+    /// `parse` 成功：事实要时再调 `iwork_shell::literal_facts`；`find` 的删除用小 AST 上的精确切法
+    ShellScript {
+        command: String,
+        script: ShellScript,
+    },
+}
+
+/// 整条调用的标记：命中 `UserDeny` 层的内置拒绝条目（方案 3.3、3.5、4.2）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CallFlags {
+    pub resource_limit_hit: bool,
+    pub unlexable: bool,
+    pub path_unresolved: bool,
+}
+
+impl CallFlags {
+    fn any(&self) -> bool {
+        self.resource_limit_hit || self.unlexable || self.path_unresolved
+    }
+}
+
+impl Analysis {
+    /// 解析不了时的动作与整条调用的标记。纯函数；`parse` 成功的 Bash 调用每次调都重新取事实，
+    /// 只在归类放弃或有真实路径走不通时才会走到。
+    pub fn fallback(&self) -> (Vec<PendingAction>, CallFlags) {
+        let (facts, precise) = match &self.fallback {
+            Fallback::Actions(actions) => return (actions.clone(), CallFlags::default()),
+            Fallback::ShellFacts(facts) => (std::borrow::Cow::Borrowed(facts), None),
+            Fallback::ShellScript { command, script } => (
+                std::borrow::Cow::Owned(iwork_shell::literal_facts(command)),
+                Some(bash::precise_find_deletes(script)),
+            ),
+        };
+        let flags = CallFlags {
+            resource_limit_hit: facts.resource_limit,
+            unlexable: facts.lex_failed,
+            path_unresolved: false,
+        };
+        (bash::fallback_actions(&facts, precise.as_deref()), flags)
+    }
 }
 
 /// 归一的上下文。全部来自会话（快照、环境），不碰磁盘。
@@ -110,10 +177,10 @@ pub struct NormalizeContext<'a> {
     pub cwd: &'a CanonicalPath,
 }
 
-/// 路径事实：字面原文 → 规范路径或失败。
+/// 路径事实：字面原文 → 两种视图或失败。同一个词作真实目标与作候选时解析结果相同，按原文存一份。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PathFacts {
-    pub resolved: BTreeMap<String, Result<CanonicalPath, PathResolveError>>,
+    pub resolved: BTreeMap<String, Result<ResolvedPath, PathResolveError>>,
 }
 
 /// 归一结果。
@@ -185,6 +252,13 @@ pub fn raw_input_digest(tool: &str, raw: &str) -> Sha256 {
     Sha256(h.finalize().into())
 }
 
+fn real_path(raw: &str) -> PendingTarget {
+    PendingTarget::Path(PathQuery {
+        literal: raw.to_owned(),
+        origin: PathOrigin::Real,
+    })
+}
+
 fn single(kind: ActionKind, target: PendingTarget) -> PendingAction {
     PendingAction {
         kind,
@@ -207,7 +281,7 @@ pub fn analyze(
     let mut a = Analysis {
         tool: req.tool.clone(),
         structured: Err(String::new()),
-        fallback: Vec::new(),
+        fallback: Fallback::Actions(Vec::new()),
         placement: SandboxPlacement::Inside,
         bypass_sandbox_requested: bypass,
         description: None,
@@ -225,18 +299,18 @@ pub fn analyze(
                     a.raw_summary = format!("{tool} {p}");
                     a.structured = Ok((
                         CallShape::Tool,
-                        vec![single(ActionKind::Read, PendingTarget::Path(p.to_owned()))],
+                        vec![single(ActionKind::Read, real_path(p))],
                     ));
                 }
                 None if default_cwd => {
                     a.structured = Ok((
                         CallShape::Tool,
-                        vec![single(ActionKind::Read, PendingTarget::Path(".".into()))],
+                        vec![single(ActionKind::Read, real_path("."))],
                     ));
                 }
                 None => a.structured = Err(format!("{tool} 缺字段 {field}")),
             }
-            a.fallback = vec![single(ActionKind::Read, PendingTarget::None)];
+            a.fallback = Fallback::Actions(vec![single(ActionKind::Read, PendingTarget::None)]);
         }
         Some(ToolClass::Write { field }) => {
             match input.str(field) {
@@ -244,7 +318,7 @@ pub fn analyze(
                     a.raw_summary = format!("{tool} {p}");
                     a.structured = Ok((
                         CallShape::Tool,
-                        vec![single(ActionKind::Write, PendingTarget::Path(p.to_owned()))],
+                        vec![single(ActionKind::Write, real_path(p))],
                     ));
                     if tool == registry::PATCH_TOOL
                         && let (Some(old), Some(new)) = (
@@ -257,7 +331,7 @@ pub fn analyze(
                 }
                 None => a.structured = Err(format!("{tool} 缺字段 {field}")),
             }
-            a.fallback = vec![single(ActionKind::Write, PendingTarget::None)];
+            a.fallback = Fallback::Actions(vec![single(ActionKind::Write, PendingTarget::None)]);
         }
         Some(ToolClass::Network { url_field }) => {
             let target = match url_field {
@@ -289,22 +363,26 @@ fn analyze_bash(a: &mut Analysis, input: &ToolInput, boundaries: &Boundaries) {
     a.description = input.str(BASH_DESCRIPTION_FIELD).map(str::to_owned);
     let Some(command) = input.str(BASH_COMMAND_FIELD) else {
         a.structured = Err(format!("Bash 缺字段 {BASH_COMMAND_FIELD}"));
-        a.fallback = bash::fallback_actions(&Default::default(), None);
+        a.fallback = Fallback::ShellFacts(PartialFacts::default());
         return;
     };
     a.raw_summary = command.to_owned();
     match iwork_shell::parse(command) {
         Err(u) => {
-            a.fallback =
-                bash::fallback_actions(&u.facts, u.facts.literal_words.first().map(String::as_str));
             a.structured = Err(u.why);
+            a.fallback = Fallback::ShellFacts(u.facts);
         }
         Ok(script) => {
-            let facts = bash::facts_of(&script);
-            a.fallback =
-                bash::fallback_actions(&facts, facts.literal_words.first().map(String::as_str));
             a.placement = credential::classify(&script, &boundaries.credential_commands);
-            a.structured = bash::classify_script(&script).map(|actions| {
+            let outside = a.bypass_sandbox_requested
+                || matches!(
+                    a.placement,
+                    SandboxPlacement::Outside | SandboxPlacement::Ambiguous
+                );
+            a.structured = bash::classify_script(&script).map(|mut groups| {
+                if outside {
+                    bash::add_outside_sandbox(&mut groups);
+                }
                 let single = script.items.len() == 1
                     && script.items[0].pipeline.len() == 1
                     && !script.items[0].negated
@@ -320,45 +398,123 @@ fn analyze_bash(a: &mut Analysis, input: &ToolInput, boundaries: &Boundaries) {
                 } else {
                     CallShape::Compound
                 };
-                (shape, actions)
+                (shape, groups.into_iter().flat_map(|g| g.actions).collect())
             });
+            a.fallback = Fallback::ShellScript {
+                command: command.to_owned(),
+                script,
+            };
         }
     }
 }
 
-fn paths_of(pending: &[PendingAction]) -> impl Iterator<Item = &str> {
+fn paths_of(pending: &[PendingAction]) -> impl Iterator<Item = &PathQuery> {
     pending.iter().filter_map(|p| match &p.target {
-        PendingTarget::Path(w) => Some(w.as_str()),
+        PendingTarget::Path(q) => Some(q),
         _ => None,
     })
 }
 
-/// 第二段（I/O）：解析出现的路径词。兜底动作的候选只在归类失败或有路径解析不了时才解析
+/// 第二段（I/O）：解析出现的路径词。兜底动作的候选只在归类失败、或有真实目标走不通时才解析
 /// （它们只在那时用得上；热路径上省掉大部分 lstat）。
 pub fn gather_path_facts(a: &Analysis, cwd: &CanonicalPath, fs: &impl PathResolver) -> PathFacts {
     let mut facts = PathFacts::default();
-    let resolve = |facts: &mut PathFacts, w: &str| {
-        if !facts.resolved.contains_key(w) {
+    let resolve = |facts: &mut PathFacts, q: &PathQuery| {
+        if !facts.resolved.contains_key(&q.literal) {
             facts
                 .resolved
-                .insert(w.to_owned(), fs.resolve(cwd, w).map(|r| r.target));
+                .insert(q.literal.clone(), fs.resolve(cwd, &q.literal));
         }
     };
     let need_fallback = match &a.structured {
         Ok((_, pending)) => {
-            for w in paths_of(pending) {
-                resolve(&mut facts, w);
+            let mut real_disproved = false;
+            for q in paths_of(pending) {
+                resolve(&mut facts, q);
+                real_disproved |= q.origin == PathOrigin::Real
+                    && matches!(
+                        facts.resolved.get(&q.literal),
+                        Some(Err(e)) if e.certainty() == ResolveCertainty::Disproved
+                    );
             }
-            facts.resolved.values().any(Result::is_err)
+            real_disproved
         }
         Err(_) => true,
     };
     if need_fallback {
-        for w in paths_of(&a.fallback) {
-            resolve(&mut facts, w);
+        let (fallback, _) = a.fallback();
+        for q in paths_of(&fallback) {
+            resolve(&mut facts, q);
         }
     }
     facts
+}
+
+/// 一个待解析动作换成规范目标后的结果（方案 3.5 那张表）。
+enum Finished {
+    /// 路径目标的每种视图各一个（相同时一个）；其余目标恰好一个
+    Targets(Vec<ActionTarget>),
+    /// 候选走不通：只丢它
+    Dropped,
+    /// 真实目标走不通：整条解析不了
+    Disproved(String),
+    /// 查不清：整条拒（`PathUnresolved`）
+    Unresolved,
+}
+
+fn finish_target(t: &PendingTarget, facts: &PathFacts) -> Finished {
+    let other = |t: ActionTarget| Finished::Targets(vec![t]);
+    match t {
+        PendingTarget::Path(q) => match facts.resolved.get(&q.literal) {
+            Some(Ok(r)) => Finished::Targets(
+                paths::views(r)
+                    .map(|p| ActionTarget::Path(p.clone()))
+                    .collect(),
+            ),
+            Some(Err(e)) => match (e.certainty(), q.origin) {
+                (ResolveCertainty::Unknown, _) => Finished::Unresolved,
+                (ResolveCertainty::Disproved, PathOrigin::Hypothetical) => Finished::Dropped,
+                (ResolveCertainty::Disproved, PathOrigin::Real) => {
+                    Finished::Disproved(format!("路径无法解析：{}（{e}）", q.literal))
+                }
+            },
+            // 取事实漏了这个词是程序缺陷：失败即关闭，按查不清拒
+            None => {
+                debug_assert!(false, "路径没有取事实：{}", q.literal);
+                Finished::Unresolved
+            }
+        },
+        PendingTarget::Command {
+            program,
+            subcommand,
+            argv,
+        } => other(ActionTarget::Command {
+            program: program.clone(),
+            subcommand: subcommand.clone(),
+            argv: argv.clone(),
+        }),
+        PendingTarget::ToolName(n) => other(ActionTarget::ToolName(n.clone())),
+        PendingTarget::Remote(r) => other(ActionTarget::Remote(r.clone())),
+        PendingTarget::None => other(ActionTarget::None),
+    }
+}
+
+/// 一组待解析动作换成规范目标。真实目标走不通时返回 `Err(原因)`；查不清的记进 `flags`。
+fn finish_all<'p>(
+    pending: &'p [PendingAction],
+    facts: &PathFacts,
+    flags: &mut CallFlags,
+) -> Result<Vec<(&'p PendingAction, ActionTarget)>, String> {
+    let mut out = Vec::with_capacity(pending.len());
+    for p in pending {
+        match finish_target(&p.target, facts) {
+            Finished::Targets(ts) => out.extend(ts.into_iter().map(|t| (p, t))),
+            Finished::Dropped => {}
+            Finished::Unresolved => flags.path_unresolved = true,
+            Finished::Disproved(why) => return Err(why),
+        }
+    }
+    Ok(out)
 }
 
 /// 第三段（纯）：换成规范路径，算标记。`fs` 只用来比较路径（大小写规则），不碰磁盘。
@@ -368,33 +524,22 @@ pub fn normalize(
     facts: &PathFacts,
     fs: &impl PathResolver,
 ) -> NormalizedCall {
-    let resolve = |w: &str| -> Result<CanonicalPath, String> {
-        match facts.resolved.get(w) {
-            Some(Ok(p)) => Ok(p.clone()),
-            Some(Err(e)) => Err(format!("路径无法解析：{w}（{e}）")),
-            None => Err(format!("路径没有取事实：{w}")),
-        }
-    };
+    let mut flags = CallFlags::default();
     let structured = a
         .structured
         .as_ref()
         .map_err(Clone::clone)
-        .and_then(|(shape, pending)| {
-            let mut out = Vec::with_capacity(pending.len());
-            for p in pending {
-                out.push((p, finish_target(&p.target, &resolve)?));
-            }
-            Ok((shape.clone(), out))
-        });
+        .and_then(|(shape, pending)| Ok((shape.clone(), finish_all(pending, facts, &mut flags)?)));
+    let fallback_store;
     let (shape, resolved): (CallShape, Vec<(&PendingAction, ActionTarget)>) = match structured {
         Ok(x) => x,
         Err(why) => {
-            // 解析不了：兜底动作里解析失败的路径丢掉，不影响别的候选
-            let actions = a
-                .fallback
-                .iter()
-                .filter_map(|p| finish_target(&p.target, &resolve).ok().map(|t| (p, t)))
-                .collect();
+            let (fallback, fallback_flags) = a.fallback();
+            fallback_store = fallback;
+            flags.resource_limit_hit |= fallback_flags.resource_limit_hit;
+            flags.unlexable |= fallback_flags.unlexable;
+            // 兜底动作全是候选，不会走到「真实目标走不通」
+            let actions = finish_all(&fallback_store, facts, &mut flags).unwrap_or_default();
             (CallShape::Unparsable { why }, actions)
         }
     };
@@ -415,6 +560,24 @@ pub fn normalize(
             false,
         ));
     }
+    if flags.any() {
+        // 承载整条调用的动作：命中 UserDeny 层的内置拒绝条目（方案 4.2），排在最后，底线命中的动作仍在它前面
+        let mut carrier = finish_action(
+            a,
+            ctx,
+            fs,
+            &single(
+                ActionKind::Unclassified,
+                PendingTarget::ToolName(a.tool.0.clone()),
+            ),
+            ActionTarget::ToolName(a.tool.0.clone()),
+            false,
+        );
+        carrier.flags.resource_limit_hit = flags.resource_limit_hit;
+        carrier.flags.unlexable = flags.unlexable;
+        carrier.flags.path_unresolved = flags.path_unresolved;
+        actions.push(carrier);
+    }
     NormalizedCall {
         tool: a.tool.clone(),
         actions,
@@ -427,27 +590,6 @@ pub fn normalize(
         edit: a.edit.clone(),
         raw_input_digest: a.raw_input_digest,
     }
-}
-
-fn finish_target(
-    t: &PendingTarget,
-    resolve: &impl Fn(&str) -> Result<CanonicalPath, String>,
-) -> Result<ActionTarget, String> {
-    Ok(match t {
-        PendingTarget::Path(w) => ActionTarget::Path(resolve(w)?),
-        PendingTarget::Command {
-            program,
-            subcommand,
-            argv,
-        } => ActionTarget::Command {
-            program: program.clone(),
-            subcommand: subcommand.clone(),
-            argv: argv.clone(),
-        },
-        PendingTarget::ToolName(n) => ActionTarget::ToolName(n.clone()),
-        PendingTarget::Remote(r) => ActionTarget::Remote(r.clone()),
-        PendingTarget::None => ActionTarget::None,
-    })
 }
 
 fn finish_action(
@@ -467,7 +609,7 @@ fn finish_action(
     if kind == ActionKind::Write && path.is_some_and(|t| is_autorun(t, ctx.boundaries, fs)) {
         kind = ActionKind::WriteAutorunConfig;
     }
-    // 沙箱外执行是调用级约束，只改执行动作的种类；推送、发布、删除等必问种类保留（方案 3.8）
+    // 沙箱外执行是调用级约束：执行动作改种类；没有执行动作的命令在归类时已另加了沙箱外动作（方案 3.8）
     let outside = a.bypass_sandbox_requested
         || matches!(
             a.placement,

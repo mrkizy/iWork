@@ -404,12 +404,22 @@ fn default_layer_total() {
         }
     }
     assert_eq!(checked, 11 * 128 * 3);
-    // default.push 不可达：必问层先接走
+    // default.push 不可达：必问层先接走。git push 在需凭据清单内，另有一个沙箱外动作（方案 3.8），
+    // 这里只看 Push 子动作本身
     for m in MODES {
+        let (call, e) = Harness::default().eval(&bash_req("git push"), m);
+        let i = call
+            .actions
+            .iter()
+            .position(|a| a.kind == ActionKind::Push)
+            .expect("有 Push 动作");
         assert_eq!(
-            bash_verdict("git push", m),
-            Verdict::Ask(AskReason::MustAsk)
+            e.per_action[i].verdict,
+            Verdict::Ask(AskReason::MustAsk),
+            "{m:?}"
         );
+        assert_eq!(e.per_action[i].layer_hit, RuleLayer::MustAsk, "{m:?}");
+        assert!(e.constraints.must_ask);
     }
 }
 

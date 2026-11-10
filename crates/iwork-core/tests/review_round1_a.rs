@@ -147,18 +147,34 @@ fn quoted_tilde_is_relative() {
 #[test]
 fn absolute_path_programs() {
     let h = Harness::default();
+    // 带前缀的需凭据命令判 Ambiguous，按沙箱外求值并另带沙箱外动作（方案 3.7、3.8）；必问约束仍在
     for m in [Manual, Auto, FullAccess] {
-        assert_eq!(
-            h.verdict(&bash_req("/usr/bin/git push origin main"), m),
-            Verdict::Ask(AskReason::MustAsk),
-            "{m:?}"
+        let (_, e) = h.eval(&bash_req("/usr/bin/git push origin main"), m);
+        assert!(e.constraints.must_ask, "{m:?}");
+        assert!(
+            matches!(
+                e.evaluation.verdict,
+                Verdict::OutsideSandbox(_) | Verdict::Ask(AskReason::MustAsk)
+            ),
+            "{m:?}：{:?}",
+            e.evaluation.verdict
         );
     }
+    assert_eq!(
+        three(&bash_req("/usr/bin/git push origin main")),
+        ["Outside", "Outside", "Ask"]
+    );
     let (_, e) = h.eval(&bash_req("/usr/local/bin/npm publish"), Auto);
-    assert_eq!(e.evaluation.verdict, Verdict::Ask(AskReason::MustAsk));
+    assert!(matches!(e.evaluation.verdict, Verdict::OutsideSandbox(_)));
+    assert!(e.constraints.must_ask);
     assert!(!e.constraints.review_eligible());
+    // 带前缀的 git 判 Ambiguous：丢弃改动的 Delete 种类保留，另加沙箱外动作
     assert_eq!(
         three(&bash_req("/usr/bin/git reset --hard")),
+        ["Outside", "Outside", "Allow"]
+    );
+    assert_eq!(
+        three(&bash_req("git reset --hard")),
         ["Ask", "Ask", "Allow"]
     );
     for cmd in [
@@ -218,9 +234,9 @@ fn brace_after_literal_braces() {
             "{cmd}"
         );
     }
-    // 对照：find -exec 的 {} 仍是字面
+    // 对照：单独的 {} 仍是字面
     assert_ne!(
-        norm(&bash_req("find . -exec rm {} ;")).shape.kind(),
+        norm(&bash_req("touch {}")).shape.kind(),
         CallShapeKind::Unparsable
     );
 }

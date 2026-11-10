@@ -55,19 +55,21 @@ const CASES: &[(&str, CallShapeKind, [&str; 3])] = &[
     ("echo x > /tmp/scratch", S, ["Ask", "Allow", "Allow"]),
     ("touch ~/.npm/x", S, ["Ask", "Allow", "Allow"]),
     // —— 必问 ——
-    ("git push origin main", S, ["Ask", "Ask", "Ask"]),
+    // 需凭据清单内的必问命令另有一个沙箱外动作（方案 3.8）：代表结果是沙箱外询问，全开档仍问
+    ("git push origin main", S, ["Outside", "Outside", "Ask"]),
     ("rm src/a.rs", S, ["Ask", "Ask", "Allow"]),
     ("git reset --hard", S, ["Ask", "Ask", "Allow"]),
     ("git restore .", S, ["Ask", "Ask", "Allow"]),
     ("git clean -fd", S, ["Ask", "Ask", "Allow"]),
     ("git checkout -- src/a.rs", S, ["Ask", "Ask", "Allow"]),
     ("git stash drop", S, ["Ask", "Ask", "Allow"]),
-    ("npm publish", S, ["Ask", "Ask", "Allow"]),
-    ("pnpm publish", S, ["Ask", "Ask", "Allow"]),
-    ("yarn publish", S, ["Ask", "Ask", "Allow"]),
-    ("cargo publish", S, ["Ask", "Ask", "Allow"]),
-    ("docker push img", S, ["Ask", "Ask", "Allow"]),
-    ("twine upload dist/x", S, ["Ask", "Ask", "Allow"]),
+    ("npm publish", S, ["Outside", "Outside", "Allow"]),
+    ("pnpm publish", S, ["Outside", "Outside", "Allow"]),
+    ("yarn publish", S, ["Outside", "Outside", "Allow"]),
+    ("cargo publish", S, ["Outside", "Outside", "Allow"]),
+    ("docker push img", S, ["Outside", "Outside", "Allow"]),
+    ("twine upload dist/x", S, ["Outside", "Outside", "Allow"]),
+    ("gradle publish", S, ["Ask", "Ask", "Allow"]),
     (
         "echo '{}' > .claude/settings.json",
         S,
@@ -107,8 +109,13 @@ const CASES: &[(&str, CallShapeKind, [&str; 3])] = &[
     ("git log -n5", S, ["Ask", "Allow", "Allow"]),
     ("LC_ALL=C dd of=out.bin", U, ["Ask", "Ask", "Ask"]),
     // —— 危险选项：归执行而不是读 ——
-    ("find . -delete", S, ["Ask", "Allow", "Allow"]),
-    ("find . -exec rm {} ;", S, ["Ask", "Allow", "Allow"]),
+    // find：cwd 是工作区根时删起点就是删工作区（收口 9/F-2，单条命令出卡片）；-exec 段整条解析不了
+    (
+        "find . -delete",
+        S,
+        ["UserAction", "UserAction", "UserAction"],
+    ),
+    ("find . -exec rm {} ;", U, ["Ask", "Ask", "Ask"]),
     ("sort -o res in", S, ["Ask", "Allow", "Allow"]),
     ("awk '{print > \"x\"}' f", S, ["Ask", "Allow", "Allow"]),
     ("xxd in res", S, ["Ask", "Allow", "Allow"]),
@@ -276,28 +283,46 @@ fn unparsable_always_asks() {
     }
 }
 
-/// 发布类：必问、自动档不经 AI 审查、只能允许一次。
+/// 发布类：必问、自动档不经 AI 审查、只能允许一次。在需凭据清单内的（npm publish 等）另有一个
+/// 沙箱外动作承载整条命令（方案 3.8），代表结果是沙箱外询问；Publish 子动作本身仍被必问层接走。
 #[test]
 fn publish_commands_are_must_ask() {
     let h = Harness::default();
-    for cmd in [
-        "npm publish",
-        "pnpm publish",
-        "yarn publish",
-        "cargo publish",
-        "docker push img",
-        "twine upload dist/x",
+    for (cmd, listed) in [
+        ("npm publish", true),
+        ("pnpm publish", true),
+        ("yarn publish", true),
+        ("cargo publish", true),
+        ("docker push img", true),
+        ("twine upload dist/x", true),
+        // 对照：不在需凭据清单内
+        ("gradle publish", false),
     ] {
         let (call, e) = h.eval(&bash_req(cmd), ApprovalMode::Auto);
-        assert!(
-            call.actions.iter().any(|a| a.kind == ActionKind::Publish),
-            "{cmd:?}"
-        );
+        let i = call
+            .actions
+            .iter()
+            .position(|a| a.kind == ActionKind::Publish)
+            .unwrap_or_else(|| panic!("{cmd:?} 没有 Publish"));
         assert_eq!(
-            e.evaluation.verdict,
+            e.per_action[i].verdict,
             Verdict::Ask(AskReason::MustAsk),
             "{cmd:?}"
         );
+        assert!(e.constraints.must_ask, "{cmd:?}");
+        if listed {
+            assert!(
+                matches!(e.evaluation.verdict, Verdict::OutsideSandbox(_)),
+                "{cmd:?}：{:?}",
+                e.evaluation.verdict
+            );
+        } else {
+            assert_eq!(
+                e.evaluation.verdict,
+                Verdict::Ask(AskReason::MustAsk),
+                "{cmd:?}"
+            );
+        }
         assert!(!e.constraints.review_eligible(), "{cmd:?}");
         let (offered, _) =
             iwork_core::approval::evaluate::remember::offered_remember(&call, &e, &scope());

@@ -34,6 +34,8 @@ pub enum Value {
     PatternFile,
     /// 不取值，但把全部位置参数改成写（`install -d`）
     AllWriteFlag,
+    /// 不取值，目的明确不是目录（`cp -T`）：只检查目的本身，不展开「目的 / 源文件名」
+    NoTargetDirFlag,
 }
 
 /// 位置参数的角色。
@@ -44,6 +46,19 @@ pub enum Operands {
     /// 前 `skip` 个不是路径（模式、权限位），其余是这些角色
     After { skip: usize, roles: &'static [Role] },
     /// 最后一个是目的，其余是源；目的目录由 `-t` 给出时全部是源
+    SourcesThenDest {
+        source: &'static [Role],
+        dest: &'static [Role],
+    },
+}
+
+/// 保底角色（方案 3.4，实施审查 1/F-1、8/F-4）：程序带未登记选项、不是安全形态时，位置参数仍按这些
+/// 角色产出路径动作。标准是「这个程序在**任何**选项组合下可能对位置操作数做的最重的事」，降级只能更严。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Floor {
+    /// 每个位置参数都是这些角色
+    All(&'static [Role]),
+    /// 最后一个是目的（按目录目标语义展开），其余是源
     SourcesThenDest {
         source: &'static [Role],
         dest: &'static [Role],
@@ -64,6 +79,8 @@ pub struct ArgSpec {
     pub long_values: &'static [(&'static str, Value)],
     pub operands: Operands,
     pub max_operands: Option<usize>,
+    /// 不是安全形态时的保底角色
+    pub floor: Floor,
 }
 
 const fn spec(program: &'static str, flags: &'static str, operands: Operands) -> ArgSpec {
@@ -75,6 +92,18 @@ const fn spec(program: &'static str, flags: &'static str, operands: Operands) ->
         long_values: &[],
         operands,
         max_operands: None,
+        floor: floor_of(operands),
+    }
+}
+
+/// 保底角色默认取安全形态下的角色：模式、权限位这类前置参数也按同样角色记（只会多抽）；
+/// 没有路径角色的（`basename`、`tr`）按读。写文件只经选项值的程序（`sort -o`）由降级时叠加的
+/// 兜底候选覆盖。例外（`uniq` 的第二个操作数是输出文件）在白名单表里单独写。
+const fn floor_of(operands: Operands) -> Floor {
+    match operands {
+        Operands::All(&[]) => Floor::All(&[R]),
+        Operands::All(roles) | Operands::After { roles, .. } => Floor::All(roles),
+        Operands::SourcesThenDest { source, dest } => Floor::SourcesThenDest { source, dest },
     }
 }
 
@@ -200,6 +229,7 @@ pub const SAFE_COMMANDS: &[ArgSpec] = &[
     },
     ArgSpec {
         max_operands: Some(1),
+        floor: Floor::All(&[R, W]),
         ..spec("uniq", "cdui", READ)
     },
     spec("comm", "123", READ),
@@ -246,11 +276,12 @@ pub const SAFE_COMMANDS: &[ArgSpec] = &[
     ),
     spec("tee", "a", WRITE),
     ArgSpec {
-        short_values: &[('t', Value::TargetDir)],
+        short_values: &[('t', Value::TargetDir), ('T', Value::NoTargetDirFlag)],
+        long_flags: &["no-target-directory"],
         long_values: &[("target-directory", Value::TargetDir)],
         ..spec(
             "cp",
-            "rRpanfvT",
+            "rRpanfv",
             Operands::SourcesThenDest {
                 source: &[R],
                 dest: &[W],
@@ -273,10 +304,11 @@ pub const SAFE_COMMANDS: &[ArgSpec] = &[
         )
     },
     ArgSpec {
-        short_values: &[('t', Value::TargetDir)],
+        short_values: &[('t', Value::TargetDir), ('T', Value::NoTargetDirFlag)],
+        long_flags: &["no-target-directory"],
         ..spec(
             "mv",
-            "fnvT",
+            "fnv",
             Operands::SourcesThenDest {
                 source: &[R, D],
                 dest: &[W],
@@ -330,7 +362,11 @@ pub fn safe_command(program: &str) -> Option<&'static ArgSpec> {
     SAFE_COMMANDS.iter().find(|s| s.program == program)
 }
 
-/// `find` 允许的表达式词：取一个值的谓词。
+/// `find` 的前置选项（方案 3.4「`find` 按它自己的语法切」第 1 步）：不带值、可以合写的字母。
+pub const FIND_LEADING_LETTERS: &str = "HLPEXdsx";
+/// `find` 带一个值的前置选项（`-D <值>`）。`-f <路径>` 的值是起点，单独处理；`-O<级别>` 粘值。
+pub const FIND_LEADING_VALUE: &[&str] = &["-D"];
+/// `find` 表达式里取一个非路径值的谓词。
 pub const FIND_VALUE_PREDICATES: &[&str] = &[
     "-name",
     "-iname",
@@ -343,21 +379,16 @@ pub const FIND_VALUE_PREDICATES: &[&str] = &[
     "-maxdepth",
     "-mindepth",
     "-regex",
-    "-iregex",
-    "-wholename",
-    "-user",
-    "-group",
-    "-perm",
 ];
-/// `find` 允许的表达式词：不取值的。
+/// `find` 表达式里不取值的谓词与运算符（纯测试，加 `-delete` 动作）。
 pub const FIND_FLAG_PREDICATES: &[&str] = &[
     "-print", "-print0", "-prune", "-empty", "-not", "-o", "-a", "-and", "-or", "(", ")", "!",
-    "-true", "-false", "-depth",
+    "-delete",
 ];
 /// `find` 取路径值的谓词（`-newer FILE` 读它）。
 pub const FIND_PATH_PREDICATES: &[&str] = &["-newer"];
-/// `find` 起点之前允许的选项。
-pub const FIND_LEADING_FLAGS: &[&str] = &["-L", "-H", "-P"];
+/// `find` 的执行类谓词：到 `;` 或紧跟在 `{}` 后面的 `+` 为止是一段，段里的词属于被执行的命令。
+pub const FIND_EXEC_PREDICATES: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
 /// `dd` 允许的键：`if=` 读、`of=` 写，其余取非路径值。
 pub const DD_KEYS: &[(&str, Option<Role>)] = &[

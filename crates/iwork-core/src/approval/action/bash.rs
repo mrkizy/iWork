@@ -2,20 +2,23 @@
 //! 由 `PathResolver` 取来事实后在 `normalize` 里换成规范路径。
 //!
 //! 归类顺序（按顺序查的登记表）：① 整条解析不了的触发 → ② `git` 子命令 → ③ 发布类 → ④ 白名单
-//! 参数规则全部满足 → 读 / 写 / 删除 → ⑤ 其余归执行。②–⑤ 的路径动作按登记的参数角色精确提取；
-//! 解析不了的调用另走 [`fallback_actions`]，不认结构、宁可多抽。
+//! 参数规则全部满足 → 读 / 写 / 删除 → ⑤ 其余归执行（白名单程序降级时另带保底角色）。②–⑤ 的路径动作
+//! 按登记的参数角色精确提取；解析不了的调用另走 [`fallback_actions`]，不认结构、宁可多抽。
 
 use iwork_domain::action::ActionKind;
 use iwork_shell::{PartialFacts, RedirectKind, ShellScript, SimpleCommand};
 
 use super::commands::{
-    self, ArgSpec, DD_KEYS, FIND_FLAG_PREDICATES, FIND_LEADING_FLAGS, FIND_PATH_PREDICATES,
-    FIND_VALUE_PREDICATES, GIT_GLOBAL_FLAGS, GIT_RELOCATING, INLINE_CODE_OPTIONS, OPAQUE_PROGRAMS,
-    OPAQUE_SUBCOMMANDS, Operands, PUBLISH_COMMANDS, Role, SHELLS, UNPARSABLE_PROGRAMS, Value,
+    self, ArgSpec, DD_KEYS, Floor, GIT_GLOBAL_FLAGS, GIT_RELOCATING, INLINE_CODE_OPTIONS,
+    OPAQUE_PROGRAMS, OPAQUE_SUBCOMMANDS, Operands, PUBLISH_COMMANDS, Role, SHELLS,
+    UNPARSABLE_PROGRAMS, Value,
 };
 use super::credential::simple_commands;
-use super::paths::{fallback_candidates, is_path_word, split_assignment, value_variants};
-use super::{PendingAction, PendingTarget};
+use super::find_syntax::{self, FIND};
+use super::paths::{
+    fallback_candidates, is_path_word, join_basename, split_assignment, value_variants,
+};
+use super::{PathOrigin, PathQuery, PendingAction, PendingTarget};
 
 /// 这些程序的未登记短选项粘值不让整条解析不了，改为按兜底候选抽读 + 写：`git` 的种类由子命令决定
 /// （推送、丢弃改动按种类必问），`git clean -fd`、`git log -n5` 这类组合短选项是日常写法（方案 11.3 验收 4b
@@ -28,23 +31,62 @@ struct NotSafe;
 /// 整条解析不了的原因。
 pub type Why = String;
 
-/// 已解析的脚本 → 动作；任一子命令触发整条解析不了时返回 `Err(原因)`。
-pub fn classify_script(script: &ShellScript) -> Result<Vec<PendingAction>, Why> {
+/// 一条简单命令归类出的动作。
+pub struct CommandActions {
+    /// 承载这条命令的目标（`Command{program, subcommand, argv}`），沙箱外执行的额外动作用它
+    pub command: PendingTarget,
+    pub actions: Vec<PendingAction>,
+}
+
+/// 已解析的脚本 → 每条简单命令一组动作；任一子命令触发整条解析不了时返回 `Err(原因)`。
+pub fn classify_script(script: &ShellScript) -> Result<Vec<CommandActions>, Why> {
     let commands = simple_commands(script);
     if commands.is_empty() {
         return Err("空命令".into());
     }
     let mut out = Vec::new();
     for c in commands {
-        classify_simple(c, &mut out)?;
+        let mut actions = Vec::new();
+        classify_simple(c, &mut actions)?;
+        let words: Vec<&str> = c.words.iter().map(|w| w.literal.as_str()).collect();
+        out.push(CommandActions {
+            command: command_target(
+                &words,
+                words.get(1).copied().filter(|a| !a.starts_with('-')),
+            ),
+            actions,
+        });
     }
     Ok(out)
 }
 
+/// 沙箱外执行是整条调用的约束（方案 3.8，实施审查 1/F-2）：已有执行动作的命令由归一改种类；
+/// 没有执行类动作的命令（白名单读写删、纯重定向、推送、发布、丢弃改动）额外加一个沙箱外执行动作
+/// 承载它，原有的路径动作与具体种类动作一个都不动。
+pub fn add_outside_sandbox(groups: &mut [CommandActions]) {
+    for g in groups {
+        if !g.actions.iter().any(|a| a.kind == ActionKind::Execute) {
+            g.actions.push(PendingAction {
+                kind: ActionKind::OutsideSandbox,
+                target: g.command.clone(),
+                opaque: false,
+                argument: false,
+            });
+        }
+    }
+}
+
 fn path(kind: ActionKind, word: &str) -> PendingAction {
+    path_with(kind, word, PathOrigin::Real)
+}
+
+fn path_with(kind: ActionKind, word: &str, origin: PathOrigin) -> PendingAction {
     PendingAction {
         kind,
-        target: PendingTarget::Path(word.to_owned()),
+        target: PendingTarget::Path(PathQuery {
+            literal: word.to_owned(),
+            origin,
+        }),
         opaque: false,
         argument: false,
     }
@@ -76,10 +118,16 @@ fn push_argument(out: &mut Vec<PendingAction>, word: &str) {
     }
 }
 
-/// 读 + 写、但不打参数标记：兜底一类的候选（组合短选项的切分、单横线谓词），工作区内照常按写求值。
-fn push_untagged(out: &mut Vec<PendingAction>, word: &str) {
+/// 兜底一类的候选（[`fallback_candidates`] 切出来的、目录目标语义虚构的）：读 + 写，路径走不通时只丢它。
+/// `tagged` 决定是否打参数标记（打了的在工作区内不单独再问，方案 3.4 补充）。
+fn push_candidate(out: &mut Vec<PendingAction>, word: &str, tagged: bool) {
     if is_path_word(word) {
-        out.extend([path(ActionKind::Read, word), path(ActionKind::Write, word)]);
+        for kind in [ActionKind::Read, ActionKind::Write] {
+            out.push(PendingAction {
+                argument: tagged,
+                ..path_with(kind, word, PathOrigin::Hypothetical)
+            });
+        }
     }
 }
 
@@ -147,17 +195,20 @@ fn classify_simple(c: &SimpleCommand, out: &mut Vec<PendingAction>) -> Result<()
             .filter(|(i, _)| !consumed.contains(i))
             .map(|(_, a)| *a)
             .collect();
-        return extract_external(program, &rest, out, false);
+        return extract_external(program, &rest, out);
     }
     // ④ 白名单
+    if program == FIND {
+        return find_actions(args, out);
+    }
     let safe = match program {
-        "find" => find_form(args),
         "dd" => dd_form(args),
         _ => match commands::safe_command(program) {
             Some(spec) => safe_form(spec, args),
             None => Err(NotSafe),
         },
     };
+    let sub = args.first().copied().filter(|a| !a.starts_with('-'));
     match safe {
         Ok(actions) => {
             out.extend(actions);
@@ -165,16 +216,157 @@ fn classify_simple(c: &SimpleCommand, out: &mut Vec<PendingAction>) -> Result<()
         }
         // ⑤ 执行
         Err(NotSafe) => {
-            let sub = args.first().copied().filter(|a| !a.starts_with('-'));
-            out.push(command_action(
+            let execute = command_action(
                 ActionKind::Execute,
                 &words,
                 sub,
                 is_opaque(literal_program, sub),
-            ));
-            // find 的谓词是单横线长词（-delete、-exec），不是短选项粘值
-            extract_external(program, args, out, program == "find")
+            );
+            // 白名单程序降级：只能更严，不丢已知约束（实施审查 1/F-1）——保底角色 + 兜底候选。
+            // 保底动作排在执行动作前面：同样是询问时，代表动作取靠前的，必问的原因才显得出来
+            let floor_known = match (program, commands::safe_command(program)) {
+                ("dd", _) => {
+                    dd_floor(args, out);
+                    true
+                }
+                (_, Some(spec)) => {
+                    floor_actions(spec.floor, args, out);
+                    true
+                }
+                (_, None) => false,
+            };
+            out.push(execute);
+            if floor_known {
+                push_all_candidates(args, out);
+                Ok(())
+            } else {
+                extract_external(program, args, out)
+            }
         }
+    }
+}
+
+/// 每个参数的兜底候选（读 + 写，打参数标记）。
+fn push_all_candidates(args: &[&str], out: &mut Vec<PendingAction>) {
+    for a in args {
+        for cand in fallback_candidates(a) {
+            push_candidate(out, &cand, true);
+        }
+    }
+}
+
+/// 降级时的位置参数：`--` 之前不以 `-` 开头的词与 `--` 之后的全部词。选项的值也会被当成操作数，只会多抽。
+fn floor_operands<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut after_dashdash = false;
+    for a in args {
+        if after_dashdash || !a.starts_with('-') {
+            out.push(*a);
+        } else if *a == "--" {
+            after_dashdash = true;
+        }
+    }
+    out
+}
+
+fn floor_actions(floor: Floor, args: &[&str], out: &mut Vec<PendingAction>) {
+    let operands = floor_operands(args);
+    match floor {
+        Floor::All(roles) => {
+            for o in operands {
+                push_roles(out, roles, o);
+            }
+        }
+        Floor::SourcesThenDest { source, dest } => match operands.split_last() {
+            // 只有一个操作数：目的可能由未登记的选项给出，它既可能是源也可能是目的
+            Some((only, [])) => {
+                push_roles(out, source, only);
+                push_roles(out, dest, only);
+            }
+            Some((d, sources)) => {
+                for s in sources {
+                    push_roles(out, source, s);
+                }
+                push_dest(out, dest, d, sources, true);
+            }
+            None => {}
+        },
+    }
+}
+
+/// `dd` 降级：`if=` 记读、`of=` 记写，不管别的键认不认。
+fn dd_floor(args: &[&str], out: &mut Vec<PendingAction>) {
+    for a in args {
+        if let Some((k, v)) = a.split_once('=')
+            && let Some((_, Some(role))) = DD_KEYS.iter().find(|(key, _)| *key == k)
+        {
+            push_roles(out, &[*role], v);
+        }
+    }
+}
+
+/// 目录目标语义（方案 3.4，实施审查 1/F-7）：目的可能是目录，真正写入的是「目录 / 源文件名」。
+/// 目的本身是真实目标；每个源再产出一个假设候选 `d / basename(s)`，`-T` 时不产出。
+fn push_dest(
+    out: &mut Vec<PendingAction>,
+    roles: &[Role],
+    dest: &str,
+    sources: &[&str],
+    maybe_dir: bool,
+) {
+    push_roles(out, roles, dest);
+    if !maybe_dir {
+        return;
+    }
+    for s in sources {
+        if let Some(joined) = join_basename(dest, s) {
+            for r in roles {
+                out.push(path_with(role_kind(*r), &joined, PathOrigin::Hypothetical));
+            }
+        }
+    }
+}
+
+/// `find`：按它自己的语法切（parse 成功、全部字面）。只有登记过的词才是安全形态；
+/// 带没登记的词整条解析不了（不登记保底角色，收口 9/F-2），删除约束由兜底规则照样产出。
+fn find_actions(args: &[&str], out: &mut Vec<PendingAction>) -> Result<(), Why> {
+    let call = find_syntax::split(args);
+    if call.unregistered {
+        return Err("find 带没登记的词".into());
+    }
+    for r in call.read_targets() {
+        push_roles(out, &[Role::Read], r);
+    }
+    if call.delete {
+        for r in call.delete_targets() {
+            push_roles(out, &[Role::Delete], r);
+        }
+    }
+    Ok(())
+}
+
+/// 一条已解析的简单命令里 `find` 的删除目标（精确规则，用在 parse 成功、归类放弃的调用上）。
+pub fn precise_find_deletes(script: &ShellScript) -> Vec<String> {
+    let mut out = Vec::new();
+    for c in simple_commands(script) {
+        let words: Vec<&str> = c.words.iter().map(|w| w.literal.as_str()).collect();
+        for (i, w) in words.iter().enumerate() {
+            if commands::program_id(w) == FIND {
+                let call = find_syntax::split(&words[i + 1..]);
+                if call.delete {
+                    out.extend(call.delete_targets().into_iter().map(str::to_owned));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn command_target(words: &[&str], subcommand: Option<&str>) -> PendingTarget {
+    PendingTarget::Command {
+        program: words.first().copied().unwrap_or("?").to_owned(),
+        subcommand: subcommand.map(str::to_owned),
+        argv: words.iter().skip(1).map(|w| (*w).to_owned()).collect(),
     }
 }
 
@@ -186,11 +378,7 @@ fn command_action(
 ) -> PendingAction {
     PendingAction {
         kind,
-        target: PendingTarget::Command {
-            program: words[0].to_owned(),
-            subcommand: subcommand.map(str::to_owned),
-            argv: words[1..].iter().map(|w| (*w).to_owned()).collect(),
-        },
+        target: command_target(words, subcommand),
         opaque,
         argument: false,
     }
@@ -215,12 +403,7 @@ fn publish_match(program: &str, args: &[&str]) -> Option<(usize, &'static [&'sta
 
 /// 表外程序的参数规则（方案 3.4）：位置参数、`--` 之后、`name=value` 的值、`--opt=VALUE` 的值记读 +
 /// 写；登记过的路径选项按角色；没登记的短选项带粘值整条解析不了。
-fn extract_external(
-    program: &str,
-    args: &[&str],
-    out: &mut Vec<PendingAction>,
-    single_dash_long: bool,
-) -> Result<(), Why> {
+fn extract_external(program: &str, args: &[&str], out: &mut Vec<PendingAction>) -> Result<(), Why> {
     let registered = commands::path_options(program);
     let mut after_dashdash = false;
     let mut i = 0;
@@ -254,15 +437,13 @@ fn extract_external(
                     push_roles(out, roles, v);
                     i += 1;
                 }
-            } else if single_dash_long {
-                push_untagged(out, w);
             } else if letters.chars().count() >= 2 {
                 if !GLUED_AS_CANDIDATES.contains(&program) {
                     return Err(format!("{program} 的选项 {w} 粘着值（未登记的短选项）"));
                 }
                 // 组合短选项或粘值分不清：每个切分位置之后的剩余部分都按角色未知的路径抽（与兜底同一规则）
                 for cand in fallback_candidates(w) {
-                    push_untagged(out, &cand);
+                    push_candidate(out, &cand, false);
                 }
             }
         }
@@ -286,11 +467,11 @@ fn classify_git(words: &[&str], out: &mut Vec<PendingAction>) -> Result<(), Why>
         if w == "-c" {
             // 配置值可能指向路径（core.hooksPath=.git/hooks）：按参数规则抽
             if let Some(v) = words.get(i + 1) {
-                extract_external("git", &[v], out, false)?;
+                extract_external("git", &[v], out)?;
             }
             i += 2;
         } else if let Some(v) = w.strip_prefix("-c") {
-            extract_external("git", &[v], out, false)?;
+            extract_external("git", &[v], out)?;
             i += 1;
         } else if GIT_GLOBAL_FLAGS.contains(&w) {
             i += 1;
@@ -330,7 +511,7 @@ fn classify_git(words: &[&str], out: &mut Vec<PendingAction>) -> Result<(), Why>
         // 丢弃改动的 git 命令目标是命令，不是路径：必问层按种类命中，不会撞上「删除工作区」底线（F-13）
         out.push(command_action(kind, words, sub, false));
     }
-    extract_external("git", rest, out, false)
+    extract_external("git", rest, out)
 }
 
 /// `-d`、`-D`、`--delete`，以及含 d / D 的组合短选项（`-Df`）。
@@ -342,23 +523,22 @@ fn is_branch_delete(a: &str) -> bool {
 fn safe_form(spec: &ArgSpec, args: &[&str]) -> Result<Vec<PendingAction>, NotSafe> {
     let mut out = Vec::new();
     let mut operands: Vec<Operand> = Vec::new();
-    let mut target_dir = false;
+    // `-t DIR` 给出的目的目录：位置参数解析完后才知道源，再按目录目标语义展开
+    let mut target_dirs: Vec<String> = Vec::new();
     let mut pattern_given = false;
     let mut all_write = false;
+    let mut no_target_dir = false;
     let mut after_dashdash = false;
     let mut apply = |value: Value, v: &str, out: &mut Vec<PendingAction>| match value {
         Value::Word => {}
         Value::Path(roles) => push_roles(out, roles, v),
-        Value::TargetDir => {
-            target_dir = true;
-            push_roles(out, &[Role::Write], v);
-        }
+        Value::TargetDir => target_dirs.push(v.to_owned()),
         Value::PatternWord => pattern_given = true,
         Value::PatternFile => {
             pattern_given = true;
             push_roles(out, &[Role::Read], v);
         }
-        Value::AllWriteFlag => unreachable!("不取值的选项不走这里"),
+        Value::AllWriteFlag | Value::NoTargetDirFlag => unreachable!("不取值的选项不走这里"),
     };
     let mut i = 0;
     while i < args.len() {
@@ -377,7 +557,7 @@ fn safe_form(spec: &ArgSpec, args: &[&str]) -> Result<Vec<PendingAction>, NotSaf
                 None => (long, None),
             };
             if inline.is_none() && spec.long_flags.contains(&name) {
-                // 不取值
+                no_target_dir |= name == "no-target-directory";
             } else if let Some((_, value)) = spec.long_values.iter().find(|(n, _)| *n == name) {
                 let v = match inline {
                     Some(v) => v,
@@ -402,8 +582,9 @@ fn safe_form(spec: &ArgSpec, args: &[&str]) -> Result<Vec<PendingAction>, NotSaf
                 let Some((_, value)) = spec.short_values.iter().find(|(s, _)| *s == c) else {
                     return Err(NotSafe);
                 };
-                if *value == Value::AllWriteFlag {
-                    all_write = true;
+                if matches!(value, Value::AllWriteFlag | Value::NoTargetDirFlag) {
+                    all_write |= *value == Value::AllWriteFlag;
+                    no_target_dir |= *value == Value::NoTargetDirFlag;
                     j += 1;
                     continue;
                 }
@@ -447,13 +628,13 @@ fn safe_form(spec: &ArgSpec, args: &[&str]) -> Result<Vec<PendingAction>, NotSaf
                 roles[0]
             }
             Operands::SourcesThenDest { source, dest } => {
-                let (sources, dests) = if target_dir {
-                    (&operands[..], &[][..])
-                } else {
+                let (sources, dests) = if target_dirs.is_empty() {
                     if operands.len() < 2 {
                         return Err(NotSafe);
                     }
                     operands.split_at(operands.len() - 1)
+                } else {
+                    (&operands[..], &[][..])
                 };
                 if sources.is_empty() {
                     return Err(NotSafe);
@@ -461,8 +642,13 @@ fn safe_form(spec: &ArgSpec, args: &[&str]) -> Result<Vec<PendingAction>, NotSaf
                 for o in sources {
                     push_operand(&mut out, source, o);
                 }
-                for o in dests {
-                    push_operand(&mut out, dest, o);
+                let source_words: Vec<&str> = sources.iter().map(|o| o.word).collect();
+                for d in dests
+                    .iter()
+                    .map(|o| o.word)
+                    .chain(target_dirs.iter().map(String::as_str))
+                {
+                    push_dest(&mut out, dest, d, &source_words, !no_target_dir);
                 }
                 dest[0]
             }
@@ -496,41 +682,6 @@ fn push_operand(out: &mut Vec<PendingAction>, roles: &[Role], o: &Operand) {
     push_roles(out, roles, o.word);
 }
 
-/// `find`：起点目录记读；表达式词只认纯测试谓词，其余（`-delete`、`-exec`…）不是安全形态。
-fn find_form(args: &[&str]) -> Result<Vec<PendingAction>, NotSafe> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while args.get(i).is_some_and(|a| FIND_LEADING_FLAGS.contains(a)) {
-        i += 1;
-    }
-    let mut starts = 0;
-    while let Some(&a) = args.get(i) {
-        if a.starts_with('-') || a == "(" || a == "!" {
-            break;
-        }
-        push_roles(&mut out, &[Role::Read], a);
-        starts += 1;
-        i += 1;
-    }
-    if starts == 0 {
-        push_roles(&mut out, &[Role::Read], ".");
-    }
-    while let Some(&a) = args.get(i) {
-        if FIND_FLAG_PREDICATES.contains(&a) {
-            i += 1;
-        } else if FIND_VALUE_PREDICATES.contains(&a) {
-            args.get(i + 1).ok_or(NotSafe)?;
-            i += 2;
-        } else if FIND_PATH_PREDICATES.contains(&a) {
-            push_roles(&mut out, &[Role::Read], args.get(i + 1).ok_or(NotSafe)?);
-            i += 2;
-        } else {
-            return Err(NotSafe);
-        }
-    }
-    Ok(out)
-}
-
 /// `dd`：只认登记的 `key=value`，且要有 `of=`。
 fn dd_form(args: &[&str]) -> Result<Vec<PendingAction>, NotSafe> {
     let mut out = Vec::new();
@@ -546,35 +697,62 @@ fn dd_form(args: &[&str]) -> Result<Vec<PendingAction>, NotSafe> {
     if has_of { Ok(out) } else { Err(NotSafe) }
 }
 
-/// 解析不了的调用的动作（方案 3.6）：字面重定向按真实目标与读写角色，再连同全部字面词按
-/// [`fallback_candidates`] 抽读 + 写；另加一个承载整条命令文字的执行动作。
-pub fn fallback_actions(facts: &PartialFacts, first_word: Option<&str>) -> Vec<PendingAction> {
+/// 解析不了的调用的动作（方案 3.6）。路径来源只有第一遍的扁平事实：字面重定向按真实目标与读写角色，
+/// 再连同全部字面词（原文与队列里的）按 [`fallback_candidates`] 抽读 + 写；`find … -delete` 的删除约束
+/// 不随解析不了丢掉：parse 成功时用精确切法的结果（`precise_find`），否则对原文的字面词用保守规则；
+/// 队列里的词恒用保守规则。另加一个承载整条命令文字的执行动作。全部是候选：走不通的只丢它自己。
+pub fn fallback_actions(
+    facts: &PartialFacts,
+    precise_find: Option<&[String]>,
+) -> Vec<PendingAction> {
     let mut out = Vec::new();
     for (kind, target) in &facts.literal_redirects {
-        push_redirect(&mut out, *kind, target);
+        if kind.reads() {
+            out.push(path_with(
+                ActionKind::Read,
+                target,
+                PathOrigin::Hypothetical,
+            ));
+        }
+        if kind.writes() {
+            out.push(path_with(
+                ActionKind::Write,
+                target,
+                PathOrigin::Hypothetical,
+            ));
+        }
         for cand in fallback_candidates(target) {
             if &cand != target {
-                push_argument(&mut out, &cand);
+                push_candidate(&mut out, &cand, false);
             }
         }
     }
-    for w in &facts.literal_words {
+    for w in facts.literal_words.iter().chain(&facts.queued_words) {
         for cand in fallback_candidates(w) {
-            push_argument(&mut out, &cand);
+            push_candidate(&mut out, &cand, false);
         }
     }
-    // 词本身是一段命令（eval "…"、bash -c '…'）：再解析一层，里面的字面词与重定向同样抽
-    for nested in nested_facts(facts, NESTED_DEPTH) {
-        out.extend(
-            fallback_actions(&nested, None)
-                .into_iter()
-                .filter(|a| a.kind != ActionKind::Execute),
-        );
+    let original_deletes = match precise_find {
+        Some(precise) => precise.to_vec(),
+        None => find_syntax::flat_delete(&facts.literal_words),
+    };
+    for d in original_deletes
+        .iter()
+        .chain(&find_syntax::flat_delete(&facts.queued_words))
+    {
+        out.push(path_with(ActionKind::Delete, d, PathOrigin::Hypothetical));
     }
     out.push(PendingAction {
         kind: ActionKind::Execute,
         target: PendingTarget::Command {
-            program: first_word.unwrap_or("?").to_owned(),
+            // 程序名取第一个不是 name=value 的词（前置赋值在命令名前面）
+            program: facts
+                .literal_words
+                .iter()
+                .find(|w| split_assignment(w).is_none())
+                .or(facts.literal_words.first())
+                .map_or("?", String::as_str)
+                .to_owned(),
             subcommand: None,
             argv: Vec::new(),
         },
@@ -582,43 +760,4 @@ pub fn fallback_actions(facts: &PartialFacts, first_word: Option<&str>) -> Vec<P
         argument: false,
     });
     out
-}
-
-/// 嵌套命令文字最多再解析几层。
-const NESTED_DEPTH: usize = 2;
-
-/// 含空白或重定向符号的字面词当作命令文字再解析一层，返回其中的事实。
-fn nested_facts(facts: &PartialFacts, depth: usize) -> Vec<PartialFacts> {
-    if depth == 0 {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for w in &facts.literal_words {
-        if !w.contains([' ', '\t', '\n', '>', '<', ';', '|', '&']) {
-            continue;
-        }
-        let inner = match iwork_shell::parse(w) {
-            Ok(script) => facts_of(&script),
-            Err(u) => u.facts,
-        };
-        out.extend(nested_facts(&inner, depth - 1));
-        out.push(inner);
-    }
-    out
-}
-
-/// 已解析成功但归类放弃的脚本：事实取自小 AST 里全部简单命令（扁平，不带参数结构）。
-pub fn facts_of(script: &ShellScript) -> PartialFacts {
-    let mut facts = PartialFacts::default();
-    for c in simple_commands(script) {
-        for r in &c.redirects {
-            facts
-                .literal_redirects
-                .push((r.kind, r.target.literal.clone()));
-        }
-        facts
-            .literal_words
-            .extend(c.words.iter().map(|w| w.literal.clone()));
-    }
-    facts
 }

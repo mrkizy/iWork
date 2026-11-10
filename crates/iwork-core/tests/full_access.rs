@@ -34,8 +34,9 @@ fn full_access_table() {
         ),
         (bash_req("rm src/a.rs"), ["Ask", "Ask", "Allow"]),
         (bash_req("git pull"), ["Outside", "Outside", "Allow"]),
-        (bash_req("git push"), ["Ask", "Ask", "Ask"]),
-        (bash_req("npm publish"), ["Ask", "Ask", "Allow"]),
+        // 需凭据清单内：另有沙箱外动作（方案 3.8），手动、自动按沙箱外问，全开档仍问
+        (bash_req("git push"), ["Outside", "Outside", "Ask"]),
+        (bash_req("npm publish"), ["Outside", "Outside", "Allow"]),
         (
             write_req(&format!("{WS}/.claude/settings.json")),
             ["Ask", "Ask", "Allow"],

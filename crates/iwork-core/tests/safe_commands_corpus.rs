@@ -53,6 +53,7 @@ const SAFE: &[(&str, ActionKind)] = &[
     ("fgrep foo a", ActionKind::Read),
     ("rg -n foo src", ActionKind::Read),
     ("find src -name x", ActionKind::Read),
+    ("find src -name '*.log' -delete", ActionKind::Delete),
     ("sort -n a", ActionKind::Read),
     ("uniq -c a", ActionKind::Read),
     ("comm -12 a b", ActionKind::Read),
@@ -105,7 +106,6 @@ fn unregistered_options_become_execute() {
         "sort -o res a",
         "uniq a b",
         "ls --hyperlink=x",
-        "find . -delete",
         "find . -fprint x",
         "cp a",
         "dd if=a",
@@ -144,4 +144,139 @@ fn option_value_roles() {
     let c = norm(&bash_req("xxd in .git/config"));
     assert!(c.actions.iter().any(|a| a.kind == ActionKind::Execute));
     assert!(has(&c, ActionKind::Write, &format!("{WS}/.git/config")));
+}
+
+use ActionKind::{Delete as D, Read as R, Write as W};
+
+/// 实施审查 1/F-1、8/F-4：白名单程序带未登记选项时降成执行，**同时**保留保底角色的路径动作（只能更严）。
+/// 每个白名单程序一行，期望手写。
+const FLOOR: &[(&str, &[(ActionKind, &str)])] = &[
+    ("cat --zz-unknown a", &[(R, "a")]),
+    ("head --zz-unknown a", &[(R, "a")]),
+    ("tail --zz-unknown a", &[(R, "a")]),
+    ("wc --zz-unknown a", &[(R, "a")]),
+    ("stat --zz-unknown a", &[(R, "a")]),
+    ("md5 --zz-unknown a", &[(R, "a")]),
+    ("md5sum --zz-unknown a", &[(R, "a")]),
+    ("shasum --zz-unknown a", &[(R, "a")]),
+    ("sha1sum --zz-unknown a", &[(R, "a")]),
+    ("sha256sum --zz-unknown a", &[(R, "a")]),
+    ("od --zz-unknown a", &[(R, "a")]),
+    ("strings --zz-unknown a", &[(R, "a")]),
+    ("cmp --zz-unknown a", &[(R, "a")]),
+    ("diff --zz-unknown a", &[(R, "a")]),
+    ("ls --zz-unknown a", &[(R, "a")]),
+    ("du --zz-unknown a", &[(R, "a")]),
+    ("readlink --zz-unknown a", &[(R, "a")]),
+    ("realpath --zz-unknown a", &[(R, "a")]),
+    ("basename --zz-unknown a", &[(R, "a")]),
+    ("dirname --zz-unknown a", &[(R, "a")]),
+    ("cut --zz-unknown a", &[(R, "a")]),
+    ("tr --zz-unknown a", &[(R, "a")]),
+    ("nl --zz-unknown a", &[(R, "a")]),
+    ("tac --zz-unknown a", &[(R, "a")]),
+    ("rev --zz-unknown a", &[(R, "a")]),
+    ("column --zz-unknown a", &[(R, "a")]),
+    ("fold --zz-unknown a", &[(R, "a")]),
+    ("fmt --zz-unknown a", &[(R, "a")]),
+    ("expand --zz-unknown a", &[(R, "a")]),
+    ("unexpand --zz-unknown a", &[(R, "a")]),
+    ("grep --zz-unknown a", &[(R, "a")]),
+    ("egrep --zz-unknown a", &[(R, "a")]),
+    ("fgrep --zz-unknown a", &[(R, "a")]),
+    ("rg --zz-unknown a", &[(R, "a")]),
+    ("sort --zz-unknown a", &[(R, "a")]),
+    ("comm --zz-unknown a", &[(R, "a")]),
+    ("join --zz-unknown a", &[(R, "a")]),
+    ("paste --zz-unknown a", &[(R, "a")]),
+    (
+        "uniq --zz-unknown a b",
+        &[(R, "a"), (W, "a"), (R, "b"), (W, "b")],
+    ),
+    ("touch --zz-unknown a", &[(W, "a")]),
+    ("mkdir --zz-unknown a", &[(W, "a")]),
+    ("truncate --zz-unknown a", &[(W, "a")]),
+    ("chmod --zz-unknown a", &[(W, "a")]),
+    ("chown --zz-unknown a", &[(W, "a")]),
+    ("chgrp --zz-unknown a", &[(W, "a")]),
+    ("tee --zz-unknown a", &[(W, "a")]),
+    ("cp --zz-unknown a d", &[(R, "a"), (W, "d"), (W, "d/a")]),
+    (
+        "install --zz-unknown a d",
+        &[(R, "a"), (W, "d"), (W, "d/a")],
+    ),
+    ("ln --zz-unknown a d", &[(R, "a"), (W, "d"), (W, "d/a")]),
+    (
+        "mv --zz-unknown a d",
+        &[(R, "a"), (D, "a"), (W, "d"), (W, "d/a")],
+    ),
+    ("rm --zz-unknown a", &[(D, "a")]),
+    ("rmdir --zz-unknown a", &[(D, "a")]),
+    ("unlink --zz-unknown a", &[(D, "a")]),
+    ("shred --zz-unknown a", &[(D, "a")]),
+    ("dd if=a of=b conv=notrunc", &[(R, "a"), (W, "b")]),
+];
+
+#[test]
+fn degraded_keeps_floor_roles() {
+    for (cmd, want) in FLOOR {
+        let c = norm(&bash_req(cmd));
+        assert!(
+            c.actions.iter().any(|a| a.kind == ActionKind::Execute),
+            "{cmd}：{:?}",
+            briefs(&c)
+        );
+        for (kind, rel) in *want {
+            assert!(
+                has(&c, *kind, &format!("{WS}/{rel}")),
+                "{cmd} 缺 {kind:?} {rel}：{:?}",
+                briefs(&c)
+            );
+        }
+    }
+    for spec in SAFE_COMMANDS {
+        assert!(
+            FLOOR
+                .iter()
+                .any(|(c, _)| c.split_whitespace().next() == Some(spec.program)),
+            "{} 缺保底用例",
+            spec.program
+        );
+    }
+    // 对照：保底只在降级时产出，登记形态不多出删除
+    let c = norm(&bash_req("cat a"));
+    assert!(!c.actions.iter().any(|a| a.kind == ActionKind::Delete));
+}
+
+/// 实施审查 1/F-1：rm 带未登记的长选项删工作区根仍是底线；删普通文件仍是必问（不是自动放行）。
+#[test]
+fn degraded_rm_keeps_delete_constraints() {
+    use iwork_domain::approval_mode::ApprovalMode::{Auto, FullAccess, Manual};
+    use iwork_domain::rule::{AskReason, DenyReason, Verdict};
+    let cmd = format!("rm --recursive --force {WS}");
+    let c = norm(&bash_req(&cmd));
+    assert!(has(&c, ActionKind::Delete, WS), "{:?}", briefs(&c));
+    for m in [Manual, Auto, FullAccess] {
+        let v = bash_verdict(&cmd, m);
+        assert!(
+            matches!(
+                v,
+                Verdict::Deny(DenyReason::Baseline(_)) | Verdict::UserAction(_)
+            ),
+            "{m:?}：{v:?}"
+        );
+    }
+    let h = Harness::default();
+    assert_eq!(
+        h.verdict(&bash_req("rm --no-preserve-root a"), Manual),
+        Verdict::Ask(AskReason::MustAsk)
+    );
+    assert_eq!(
+        h.verdict(&bash_req("rm --no-preserve-root a"), Auto),
+        Verdict::Ask(AskReason::MustAsk)
+    );
+    assert_eq!(
+        h.verdict(&bash_req("rm --no-preserve-root a"), FullAccess),
+        Verdict::Allow
+    );
 }

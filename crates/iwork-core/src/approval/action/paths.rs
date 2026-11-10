@@ -7,6 +7,30 @@
 
 use std::collections::BTreeSet;
 
+use iwork_domain::action::CanonicalPath;
+use iwork_ports::fs::ResolvedPath;
+
+/// 一个路径目标要检查的位置（方案 3.5「链接的两种视图都过底线」，一处真值）：先 `entry`（末级不跟随）
+/// 后 `target`（完全解析），相同时只出一个。不看动作种类：读、写、删都取两种视图，所有产出路径动作的
+/// 地方都经这里。
+pub fn views(r: &ResolvedPath) -> impl Iterator<Item = &CanonicalPath> {
+    std::iter::once(&r.entry).chain((r.entry != r.target).then_some(&r.target))
+}
+
+/// 目录目标语义的假设候选 `dir / basename(source)`（方案 3.4）。源的末级名去掉尾斜杠后取；
+/// 末级是 `.`、`..` 或为空时没有候选（写入的就是目的本身）。
+pub fn join_basename(dir: &str, source: &str) -> Option<String> {
+    let base = source.trim_end_matches('/').rsplit('/').next()?;
+    if base.is_empty() || base == "." || base == ".." {
+        return None;
+    }
+    Some(if dir.ends_with('/') {
+        format!("{dir}{base}")
+    } else {
+        format!("{dir}/{base}")
+    })
+}
+
 /// `name=value`（不以 `-` 开头、`=` 前非空）的值部分；值里再有 `=` 原样保留。
 pub fn split_assignment(literal: &str) -> Option<&str> {
     if literal.starts_with('-') {
@@ -88,6 +112,18 @@ mod tests {
         assert_eq!(c("X=~/a"), vec!["./~/a", "X=~/a", "~/a"]);
         assert_eq!(c("-"), vec!["-"]);
         assert!(c("").is_empty());
+    }
+
+    #[test]
+    fn basename_join() {
+        assert_eq!(
+            join_basename(".", "src/config").as_deref(),
+            Some("./config")
+        );
+        assert_eq!(join_basename("dir/", "a").as_deref(), Some("dir/a"));
+        assert_eq!(join_basename("d", "src/").as_deref(), Some("d/src"));
+        assert_eq!(join_basename("d", "."), None);
+        assert_eq!(join_basename("d", "../.."), None);
     }
 
     #[test]
