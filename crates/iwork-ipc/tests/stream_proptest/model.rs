@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use iwork_ipc::client::{Client, Incoming, IncomingItem};
+use iwork_ipc::client::{Client, ClientError, Incoming, IncomingItem};
 use iwork_proto::pb;
 
 use crate::support::*;
@@ -239,14 +239,16 @@ impl Model {
         Arc::clone(&self.conn.as_ref().expect("已连接").0)
     }
 
-    pub fn query(&mut self, conv: &str) -> u64 {
-        let (id, rx) = self
-            .client()
-            .view_query_nowait(get_conversation(conv))
-            .expect("发查询");
+    pub fn query(&mut self, conv: &str) -> Option<u64> {
+        let (id, rx) = match self.client().view_query_nowait(get_conversation(conv)) {
+            Ok(sent) => sent,
+            // 写端已经得知关闭，Incoming 里仍可能有尚未应用的事件：先按顺序读完到 Closed，再重连。
+            Err(ClientError::Closed) => return None,
+            Err(e) => panic!("发查询：{e:?}"),
+        };
         drop(rx);
         self.view.queries.insert(id, conv.into());
-        id
+        Some(id)
     }
 
     async fn next(&mut self, h: &Harness, wait: Duration) -> Option<u64> {
@@ -290,7 +292,8 @@ impl Model {
             let generation = self.reconnects;
             let id = self.query("c1");
             while generation == self.reconnects {
-                if self.next(h, Duration::from_secs(10)).await == Some(id) {
+                let received = self.next(h, Duration::from_secs(10)).await;
+                if id.is_some() && received == id {
                     assert_eq!(
                         self.view.visible(),
                         visible(&h.world.projection_at(h.world.head()), &self.view.active()),

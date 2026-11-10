@@ -7,3 +7,4 @@
 cc a7c9d176b21e7a4aee576950cd7a177149c769e5ca79c05c601bcf69f339ad1b # shrinks to acts = [ViewQuery { conv: 1 }, Commit { entity: 0, delete: false }, Pump, Subscribe { id: 1, scope: 0 }, Disconnect], small_budget = false
 cc 6ba9eae6cacaadb1eab6840b2f5947f6911e115f9badc62f4b94da132f04c063 # shrinks to acts = [Subscribe { id: 1, scope: 0 }, Commit { entity: 0, delete: false }, Pump, Disconnect, Burst { n: 5 }, TearNextSnapshot], small_budget = false
 cc 74c3bc3732273aed93570b63781aef0b2e639bde511af534fa4bc6b1643d3d55 # shrinks to acts = [Subscribe { id: 3, scope: 0 }, Unsubscribe { id: 3 }, Subscribe { id: 3, scope: 0 }, Pump, Commit { entity: 0, delete: false }], small_budget = false
+cc 13f5bd5b6b0260720f29fd6a9a05003f34398d4730e08a2698a0e082a349ff73 # shrinks to acts = [Disconnect, Burst { n: 34 }, Commit { entity: 0, delete: false }], small_budget = true
