@@ -2694,6 +2694,10 @@ version = "0.1.0"
 dependencies = [
  "iwork-ipc",
  "iwork-proto",
+ "proptest",
+ "prost",
+ "prost-types",
+ "tracing",
 ]
 
 [[package]]
@@ -2752,6 +2756,22 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "iwork-fake-daemon"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "iwork-app",
+ "iwork-ipc",
+ "iwork-proto",
+ "prost",
+ "prost-types",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
