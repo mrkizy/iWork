@@ -661,7 +661,7 @@ async fn subscribe<H: RequestHandler, S: EventSource>(
             .iter()
             .map(|(rid, id)| subscribed(*rid, *id, snapshot.take(), s))
             .collect();
-        conn.with_stream(|stream, budget| stream.insert_at(s, responses, budget));
+        conn.with_stream(|stream, budget| stream.insert_snapshot_at(s, responses, budget));
         conn.set_in_flight(String::new());
     }
 }

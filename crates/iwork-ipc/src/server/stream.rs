@@ -317,6 +317,24 @@ impl Stream {
         self.resume();
     }
 
+    /// 订阅快照的插入（方案 2.8 第 6–8 步）：快照覆盖**全部**活动范围，缓冲里 `seq ≤ at` 的事件都已在快照里，
+    /// 跳过不发；先发快照响应，游标推到 `at`，再送其余缓冲，恢复。这样客户端拿到快照之前不会收到任何
+    /// 比快照旧的事件（全新连接用 `from_seq = 0` 重连时，那些事件可能比客户端自己的游标还旧）。
+    ///
+    /// 会写视图的查询不能这样做：它的结果只覆盖一个视图，`≤ at` 的事件对别的视图仍然要送，用 [`Stream::insert_at`]。
+    pub(crate) fn insert_snapshot_at(
+        &mut self,
+        at: u64,
+        responses: Vec<pb::Response>,
+        budget: &mut ConnectionBudget,
+    ) {
+        for r in responses {
+            budget.push_response(r);
+        }
+        self.cursor = self.cursor.max(at);
+        self.drain_and_resume(budget);
+    }
+
     /// 补发读完 `(cursor, to]`：游标至少到 `to`，排空缓冲，恢复。
     pub(crate) fn finish_replay(&mut self, to: u64, budget: &mut ConnectionBudget) {
         self.cursor = self.cursor.max(to);
