@@ -33,10 +33,10 @@
 | --- | --- | --- | --- | --- | --- |
 | T01 | 已合入 main `bb6d69a` | — | `2026-11-09-m1-t01` 已关 | 验收 5 空窗口截图未补 | 有空时补截图 |
 | T02 | **已合入 main `2018280`**（ADR 0007–0009） | developer `fecce968` 待删（删除超时，重开后再删）；retrospector 已复盘（给 developer 存 2 条 lesson），终端 `91a45c1b` 可删 | `2026-11-10-m1-t02` 已关（两轮 8 条全 fixed） | — | — |
-| T03 | 实施分支 `cao/2e7bcbe5` @ `4422491`（已推送） | developer `b271f92f` | 实施 `2026-11-10-m1-t03` 第 1 轮 10 条已修，回报 docs/tasks/M1/T03-review-round1.md | F-1～F-10 待第 2 轮核 | HEAD `5e59dc8`，CI run 42766861250 全绿；第 2 轮审查中：A 块 `2ebe217e`、B 块 `215a49bc`。**N2 实测：Windows 按句柄绑定不成立，M1 暂不支持 Windows（产品负责人此前批准的默认规则）** |
+| T03 | 实施分支 `cao/2e7bcbe5` @ `125159f` | developer `b271f92f` | `2026-11-10-m1-t03` 三轮审查通过，账本全关 | — | developer 做 merge main + ADR 定号 0011/0012 + CI，回报后 supervisor 合入 |
 | T05 | 已合入 main `a6987d4`；Windows 偶发测试修复已合入 `a6a5007` | — | 已关；`2026-11-10-m1-t05-flake` 1 轮通过 | — | — |
 | （方案复盘） | T03、T07 方案 | retrospector `f77efc99` 已复盘（给 architect 存 3 条 lesson），终端可删 | — | — | — |
-| T07 | 方案定稿 `4e27665`；实施分支 `cao/009e8660` @ `2e0ff5c`（全量 516 条通过） | developer `f8877913`；第 2 轮 reviewer A `4f01bbc2`、B `edeff392` | 实施 `2026-11-10-m1-t07` 第 2 轮审查中 | 待复核：A 块 F-1～F-11（F-12 已关）、B 块 F-13～F-25 | **待产品负责人知悉**：developer 方案外把 timeout 等 14 个包装词登记成整条 Unparsable（`timeout 60 cargo test` 三档都问、记不住）；git push 等清单内命令的代表结果变成 OutsideSandbox，已让 A 块核全开档是否仍询问 |
+| T07 | 方案定稿 `4e27665`（+57b5c4d 实施审查第 2 轮补）；实施分支 `cao/009e8660` @ `2e0ff5c` | developer `f8877913`；reviewer A `4f01bbc2`、B `edeff392` | 实施 `2026-11-10-m1-t07` 第 2 轮不通过：8 条新（2/F-1～F-8）+ 残留 1/F-1、F-7、F-10、F-13 | 共 12 条开 | developer 第 3 轮返工中；回报后原 A/B 第 3 轮复审 |
 | T08 | **已合入 main `c1aaf6b`**（ADR 0010） | developer `4960bf0d` 可删；旧 worktree `.cao/worktrees/49facf33` 分支已合入 | `2026-11-09-m1-t08` 已关（七轮） | — | 补任务卡完成记录 |
 | T04、T06、T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
 
