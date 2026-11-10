@@ -5,7 +5,7 @@
 
 ## 1 运行安排
 
-- **10:53 产品负责人要关窗口更新软件，所有对话可能丢失。重新打开后先不派活，等产品负责人说再继续。** 已让在干活的 developer（T03 `2e7bcbe5`、T07 `009e8660`、T08 `49facf33`）立刻做 WIP 提交并停下；它们的进度以各自分支上的最新提交为准（见第 3 节）。
+- **11:02 产品负责人说「继续」，已恢复派活**（10:53 曾要求关窗口前停下）。 已让在干活的 developer（T03 `2e7bcbe5`、T07 `009e8660`、T08 `49facf33`）立刻做 WIP 提交并停下；它们的进度以各自分支上的最新提交为准（见第 3 节）。
 - 定时任务都只在旧会话里有效，重开后不存在；gh 已登录（账号 mrkizy），不用再提醒。
 - **推送**：main 推送已获同意；T05、T08 分支已获同意推送跑 CI。T03 分支推送跑 Windows CI **还没获同意**。
 - **重测试排队（产品负责人 2026-11-10 定）**：同一时间只跑一张卡的重测试，统一用 `lockf /tmp/iwork-heavy-test.lock <命令>`，规则写在 AGENTS.md 命令节。派活消息里要写明。
@@ -28,7 +28,7 @@
 | T05 | 已合入 main `a6987d4` | — | 已关 | — | — |
 | （方案复盘） | T03、T07 方案 | retrospector `f77efc99` 已复盘（给 architect 存 3 条 lesson），终端可删 | — | — | — |
 | T07 | 方案定稿 `a597d87`（实施时补了两行：PermissionDecider 接缝 `54ee753`、ArgumentPath `2d92a17`）；实施分支 `cao/009e8660` @ `88e7a7f`（WIP，已 merge main） | developer `009e8660`；architect `62a1aeb0`；代码 reviewer A `2eb2187c`、B `c2ab0fc2` | 实施 `2026-11-10-m1-t07` 第 1 轮不通过（25 条：22 blocking）；方案补丁 `2026-11-09-m1-t07-plan` 第 8 轮不通过（4 条） | 实施：A 块 F-3/4/5/8/9/10/11 已修（WIP `88e7a7f`，反例测试 review_round1_a.rs 只剩 redirect_dash 里 tee 一条未过），B 块 F-13～F-25 **还没开始**；F-1、F-2、F-6、F-7 等方案补丁；F-12 等产品负责人。方案第 8 轮：8/F-1 命令替换递归超 8 层按空处理仍可批准底线写；8/F-2 文件目标也追加「目标/源名」子路径，ENOTDIR 让普通复制降成 Unparsable、堵住亲手执行卡片；8/F-3 mv、ln 替换链接被当成写穿链接；8/F-4 find 的保底只有 Read，`find <根> -delete` 丢删除（旧缺口）。方案层面 F-2 已解决；F-1 原例已解决（find 同族另记） | 重开后：architect 改方案第 8 轮四条（`docs/plans/T07.md` 当前未提交改动已由 supervisor 先提交保存），reviewer `2eb2187c` 复核；再把方案补丁转给 developer |
-| T08 | 分支 `cao/49facf33` @ `1f85580`（已推送；CI run 42745754671 进行中） | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 五轮通过，全关 | CI run 42660636464 失败原因已查明：① ubuntu/macOS `tests/git.rs:1127` 对照文件 calm.r 在 CI 上是 racy，按规则被保守列出，测试前提错（要把对照文件 mtime 设到索引时间之前）；② Windows `iwork-daemon/tests/project_identity.rs` canonicalize 返回 `\\?\` 路径，git clone 不认、比较两边不一致 | 两处已修（`1f85580`），本机全量、clippy（含 Windows 交叉）通过；重开后看 run 42745754671（`gh run view 42745754671 --repo mrkizy/iWork`），三平台全绿就合入（ADR 0006 撞号，让 developer 在分支上改成下一个空号） |
+| T08 | 分支 `cao/49facf33` @ `1f85580`（已推送） | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 6 轮复审中（只审 bbefd46..1f85580） | — | **CI run 42745754671 三平台全绿**；第 6 轮复审通过后让 developer 把 ADR 0006 改成 0010 再合入 |
 | T04、T06、T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
 
 查开着的问题：`agent-scaffold findings list --task <任务 ID> --open`。
