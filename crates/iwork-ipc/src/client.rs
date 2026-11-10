@@ -219,6 +219,7 @@ pub struct Incoming {
 impl Drop for Incoming {
     fn drop(&mut self) {
         // 读任务可能正停在等配额上：关闭配额让它立刻醒来并退出，不靠对端关连接。
+        // 停在等 socket 上的情况由 rx 随之丢弃唤醒（read_loop 里的 incoming.closed()）。
         self.space.close();
     }
 }
@@ -269,6 +270,16 @@ impl IncomingTx {
             Err(_) => return false,
         }
         self.tx.send((item, need)).is_ok()
+    }
+
+    /// 消费端还在吗。不写入 `Incoming` 的响应（`Direct`、`Ack`）用它判断读任务该不该继续。
+    fn is_open(&self) -> bool {
+        !self.tx.is_closed()
+    }
+
+    /// 消费端丢掉 `Incoming` 时完成。读任务等 socket 时和它一起等。
+    async fn closed(&self) {
+        self.tx.closed().await;
     }
 
     /// 流结束的最后一项：不占配额（每条连接只有一项），消费端不在了就算了。
@@ -594,15 +605,21 @@ async fn next_frame<R: tokio::io::AsyncRead + Unpin>(
 }
 
 /// 唯一的读任务：按帧到达顺序分发，`Incoming` 满了就停在这里不读 socket。
-/// 唯一的读任务：按帧到达顺序分发，`Incoming` 满了就停在这里不读 socket。
 /// 对端关闭、读出错、协议错误或 `Incoming` 被丢弃都会结束它，并让在飞的请求以 `Closed` 结束。
+/// `Incoming` 被丢弃时读任务可能停在两处：等配额（`Incoming::drop` 关闭配额唤醒它），
+/// 或等 socket（这里和 `incoming.closed()` 一起等）。两处都退到同一个收尾 `inner.close_all()`。
 async fn read_loop<R: tokio::io::AsyncRead + Unpin>(
     mut reader: FramedRead<R, FrameCodec>,
     inner: Arc<Inner>,
     incoming: IncomingTx,
 ) {
     let reason = loop {
-        let frame = match next_frame(&mut reader).await {
+        let next = tokio::select! {
+            biased;
+            () = incoming.closed() => break None,
+            next = next_frame(&mut reader) => next,
+        };
+        let frame = match next {
             None => break Some(CloseReason::PeerClosed),
             Some(Err(CodecError::Io(e))) => break Some(CloseReason::Io(e.to_string())),
             Some(Err(CodecError::Frame(e))) => break Some(CloseReason::Protocol(e.to_string())),
@@ -629,7 +646,7 @@ async fn read_loop<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
-/// 分发一个响应。返回 false 表示 `Incoming` 已被丢弃。
+/// 分发一个响应。返回 false 表示 `Incoming` 已被丢弃（读任务随即收尾，不管这一项走不走 `Incoming`）。
 async fn dispatch_response(
     inner: &Inner,
     incoming: &IncomingTx,
@@ -640,12 +657,12 @@ async fn dispatch_response(
     if r.request_id == 0 {
         return match r.body {
             Some(Body::Error(e)) => incoming.push(IncomingItem::ServerError(e), wire_len).await,
-            _ => true,
+            _ => incoming.is_open(),
         };
     }
     let Some(p) = inner.take(r.request_id) else {
         tracing::warn!(target: "iwork_ipc", request_id = r.request_id, "收到没人等的响应");
-        return true;
+        return incoming.is_open();
     };
     let rid = r.request_id;
     match p {
@@ -654,14 +671,14 @@ async fn dispatch_response(
                 Some(Body::Error(e)) => Err(ClientError::Server(e)),
                 _ => Ok(r),
             });
-            true
+            incoming.is_open()
         }
         Pending::Ordered(tx) => {
             // 先把载荷排进 Incoming，再唤醒 future：future 完成时对应项已经排好。
             let item = match r.body {
                 Some(Body::Error(e)) => {
                     let _ = tx.send(Err(ClientError::Server(e)));
-                    return true;
+                    return incoming.is_open();
                 }
                 Some(Body::Result(result)) => IncomingItem::ViewResult {
                     request_id: rid,
@@ -673,7 +690,7 @@ async fn dispatch_response(
                 },
                 _ => {
                     let _ = tx.send(Err(ClientError::UnexpectedResponse));
-                    return true;
+                    return incoming.is_open();
                 }
             };
             let alive = incoming.push(item, wire_len).await;
@@ -689,7 +706,7 @@ async fn dispatch_response(
                 Some(Body::Error(e)) => Err(ClientError::Server(e)),
                 _ => Ok(()),
             });
-            true
+            incoming.is_open()
         }
     }
 }

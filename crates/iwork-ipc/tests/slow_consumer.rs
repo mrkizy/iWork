@@ -380,3 +380,27 @@ async fn dropping_client_and_full_incoming_leaves_no_tasks() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+/// Incoming 是空的（读任务停在等 socket，不是等配额）时丢掉 Incoming：在飞的命令照样立刻以 Closed 结束，
+/// 之后的请求也直接失败。handler 30 秒才返回，所以结束只能来自读任务看到 Incoming 关闭（第 2 轮 2/F-1）。
+#[tokio::test]
+async fn dropping_empty_incoming_ends_in_flight_requests() {
+    let h = start(server_cfg());
+    *h.handler.command_delay.lock().unwrap() = Duration::from_secs(30);
+    let (client, inc) = h.connect_ok().await;
+    let client = Arc::new(client);
+    let c = client.clone();
+    let req = tokio::spawn(async move { c.request(command("x")).await });
+    assert!(wait_count(&h.handler.in_flight, 1, Duration::from_secs(1)).await);
+    drop(inc);
+    let r = tokio::time::timeout(Duration::from_millis(500), req)
+        .await
+        .expect("丢掉空的 Incoming 后在飞请求应立刻结束")
+        .unwrap();
+    assert_eq!(r.unwrap_err(), iwork_ipc::client::ClientError::Closed);
+    assert_eq!(
+        client.request(command("y")).await.unwrap_err(),
+        iwork_ipc::client::ClientError::Closed,
+        "Incoming 关闭后新请求应直接失败"
+    );
+}
