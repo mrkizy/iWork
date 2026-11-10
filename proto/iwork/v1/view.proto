@@ -35,7 +35,17 @@ message ViewChange {
     ConnectionPatch connection = 16;
     // 「全部对话」列表页（T09 方案 2.7）。
     ConversationListPatch conversation_list = 17;
+    // 请网页跳到某个对话（点击系统通知后）。
+    NavigatePatch navigate = 18;
   }
+}
+
+// 跳转请求：seq 单调递增，网页按 seq 去重，只跳一次。
+message NavigatePatch {
+  uint64 seq = 1;
+  string conversation_id = 2;
+  // 跳到对话里的这一行；空表示停在最新。
+  string row_key = 3;
 }
 
 // ---------- 通用小件 ----------
@@ -205,6 +215,10 @@ message ComposerView {
   bool runtime_locked = 10;
   // 档位按钮。
   ApprovalModeView approval_mode = 11;
+  // 上一次添加附件被拒的原因（如拖入的文件超过 20MB）；下一次成功添加后清掉。
+  optional string attach_error = 12;
+  // 输入框上方的附件托盘：本对话已上传、还没随消息发出的附件。
+  repeated AttachmentChip tray = 13;
 }
 
 enum Tone {
@@ -574,6 +588,8 @@ message ConnectionView {
   // 会发命令的按钮可不可点（断线时不可点，D8）。
   bool commands_enabled = 6;
   optional DiagnosticsView diagnostics = 7;
+  // 菜单点了「完全退出 iWork」：网页弹确认框，确认后发 QuitIntent{confirm: true}。
+  bool quit_requested = 8;
 }
 
 message DiagnosticsView {
@@ -667,7 +683,13 @@ message UiIntent {
     ToggleIntent set_autostart = 84;
     RuleIntent revoke_rule = 85;
     RuntimeIntent redetect_runtime = 86;
+    // 「完全退出 iWork」确认框的结果：确认则关后台服务并退出，取消则关掉确认框。
+    QuitIntent quit = 87;
   }
+}
+
+message QuitIntent {
+  bool confirm = 1;
 }
 
 // 网页当前可见的视图（整份声明，替换上一次）。

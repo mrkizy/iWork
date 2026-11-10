@@ -173,7 +173,31 @@ pub fn composer(store: &Store, tl: &Timeline) -> pb::ComposerView {
         // 对话开始后运行时一节置灰（ui-m1.md 第 2 节第 14 条）。
         runtime_locked: !tl.turns.is_empty(),
         approval_mode: Some(approval_mode(store, conv, assistant)),
+        attach_error: store.attach_error.clone(),
+        tray: tray(tl),
     }
+}
+
+/// 附件托盘：本对话已上传、还没被任何消息引用的附件（从时间线算，不另存一份）。
+fn tray(tl: &Timeline) -> Vec<pb::AttachmentChip> {
+    let used: std::collections::BTreeSet<&str> = tl
+        .rows()
+        .filter_map(|(_, r)| match r {
+            crate::store::Row::Message(m) => Some(m.attachment_ids.iter().map(String::as_str)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    tl.attachments
+        .values()
+        .filter(|a| !used.contains(a.id.as_str()))
+        .map(|a| pb::AttachmentChip {
+            attachment_id: a.id.clone(),
+            name: a.name.clone(),
+            size_label: text::size_label(a.size),
+            needs_confirmation: a.needs_confirmation,
+        })
+        .collect()
 }
 
 /// 输入框被挡住的一条说明。

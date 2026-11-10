@@ -125,10 +125,11 @@ pub enum ViewKey {
     Connection,
     ConversationList,
     Conversation,
+    Navigate,
 }
 
 impl ViewKey {
-    pub const ALL: [ViewKey; 8] = [
+    pub const ALL: [ViewKey; 9] = [
         ViewKey::Sidebar,
         ViewKey::Pending,
         ViewKey::Settings,
@@ -137,6 +138,7 @@ impl ViewKey {
         ViewKey::Connection,
         ViewKey::ConversationList,
         ViewKey::Conversation,
+        ViewKey::Navigate,
     ];
 }
 
@@ -241,6 +243,12 @@ pub struct Store {
     pub focused: bool,
     pub connection: Connection,
     pub overloaded: bool,
+    /// 菜单点了「完全退出 iWork」，等网页的确认框。
+    pub quit_requested: bool,
+    /// 上一次添加附件被拒的原因（拖入时没有回包可带，放在输入框上方）。
+    pub attach_error: Option<String>,
+    /// 最近一次跳转请求（点击系统通知）：(seq, 对话, 行)。
+    pub navigate: Option<(u64, String, String)>,
     subs: BTreeMap<u32, Sub>,
     pub dirty: DirtySet,
 }
@@ -370,6 +378,25 @@ impl Store {
             l.loading = true;
             self.dirty.mark(ViewKey::ConversationList);
         }
+    }
+
+    pub fn set_quit_requested(&mut self, on: bool) {
+        self.quit_requested = on;
+        self.dirty.mark(ViewKey::Connection);
+    }
+
+    pub fn set_attach_error(&mut self, e: Option<String>) {
+        if self.attach_error != e {
+            self.attach_error = e;
+            self.dirty.mark(ViewKey::Conversation);
+            self.dirty.conversation.header = true;
+        }
+    }
+
+    pub fn request_navigate(&mut self, conversation_id: String, row_key: String) {
+        let seq = self.navigate.as_ref().map_or(1, |n| n.0 + 1);
+        self.navigate = Some((seq, conversation_id, row_key));
+        self.dirty.mark(ViewKey::Navigate);
     }
 
     pub fn take_dirty(&mut self) -> DirtySet {

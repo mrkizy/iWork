@@ -331,3 +331,23 @@ fn approval_events_follow_terminal_contract() {
         other => panic!("{other:?}"),
     }
 }
+
+/// 当次说明（档位切换）进时间线；时间线重建时丢弃（方案 D5）。
+#[test]
+fn mode_change_note_is_live_only() {
+    let mut s = store_with_open();
+    s.apply(persisted(
+        10,
+        &[CONV],
+        E::ApprovalModeChanged(pb::ApprovalModeChanged {
+            target: Some(pb::ApprovalModeTarget {
+                kind: Some(pb::approval_mode_target::Kind::ConversationId(CID.into())),
+            }),
+            mode: Some(pb::ApprovalMode::Auto as i32),
+            cause: pb::ApprovalModeChangeCause::User as i32,
+        }),
+    ));
+    assert_eq!(row_ids(&s), ["note:10"]);
+    s.apply(snapshot(CONV, 20, vec![page(20, vec![], false)]));
+    assert!(row_ids(&s).is_empty());
+}

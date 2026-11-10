@@ -292,6 +292,7 @@ fn every_patch_kind_survives_chunking() {
         }],
     ));
     s.apply(msg_event(10, "m"));
+    s.request_navigate(CID.into(), "m".into());
     v.conversation_list = v.conversation_list.clone();
     drain(&mut s, &mut e, &mut w, t);
     let st = &w.state;
@@ -304,6 +305,7 @@ fn every_patch_kind_survives_chunking() {
         ("add_project", st.add_project.is_some()),
         ("connection", st.connection.is_some()),
         ("conversation_list", st.list.is_some()),
+        ("navigate", st.navigate.is_some()),
     ];
     for name in &variants {
         let hit = got

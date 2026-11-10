@@ -2660,6 +2660,7 @@ dependencies = [
 name = "iwork-bench"
 version = "0.1.0"
 dependencies = [
+ "iwork-client-core",
  "iwork-ipc",
  "iwork-proto",
  "tokio",

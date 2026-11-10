@@ -39,6 +39,10 @@ pub enum Local {
     SetFocused(bool),
     LoadMoreConversations,
     Retry,
+    /// 「完全退出 iWork」确认框的结果。
+    Quit {
+        confirm: bool,
+    },
 }
 
 /// 壳要做的副作用（通知、打开外链）。
@@ -50,6 +54,8 @@ pub enum Effect {
         body: String,
         conversation_id: Option<String>,
     },
+    /// 用户确认了「完全退出 iWork」：壳结束进程。
+    Exit,
 }
 
 pub fn reject(code: &str, message: &str) -> Action {
@@ -224,6 +230,7 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
             Action::Command(Cmd::SetAutostart(pb::SetAutostart { enabled: x.on }))
         }
         I::RevokeRule(x) => Action::Command(Cmd::RevokeRule(pb::RevokeRule { rule_id: x.rule_id })),
+        I::Quit(x) => Action::Local(Local::Quit { confirm: x.confirm }),
         I::RedetectRuntime(x) => Action::Command(Cmd::RedetectRuntime(pb::RedetectRuntime {
             runtime_id: x.runtime_id,
         })),

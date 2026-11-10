@@ -53,6 +53,21 @@ pub enum Request {
         oneshot::Sender<Result<pb::FrameChunk, FrameError>>,
     ),
     Intent(pb::UiIntent, oneshot::Sender<pb::IntentAck>),
+    /// 壳自己观察到的事（不经网页）。
+    Shell(ShellEvent),
+}
+
+/// 壳观察到、要交给会话的事。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShellEvent {
+    /// 窗口获得或失去焦点。
+    Focused(bool),
+    /// 文件拖进窗口：Rust 侧拿到的绝对路径，附到当前可见的对话。
+    Dropped(Vec<String>),
+    /// 点了系统通知：跳到那个对话（拿不到对话 id 时为 None，跳到最近一条待处理项）。
+    NotificationClicked(Option<String>),
+    /// 菜单「完全退出 iWork」：先让网页弹确认框。
+    QuitRequested,
 }
 
 /// 一次拨号的结果，连同拨号器一起还回来。
@@ -67,6 +82,8 @@ enum Internal {
     QueryFailed {
         request_id: u64,
     },
+    /// 拖入的附件处理完：错误说明或成功（None）。
+    AttachDone(Option<String>),
 }
 
 struct InFlight {
@@ -327,7 +344,52 @@ impl<D: Dialer> Session<D> {
                 });
             }
             Request::Intent(intent, tx) => self.on_intent(intent, tx),
+            Request::Shell(e) => self.on_shell(e),
         }
+    }
+
+    fn on_shell(&mut self, e: ShellEvent) {
+        match e {
+            ShellEvent::Focused(f) => self.store.set_focused(f),
+            ShellEvent::Dropped(paths) => {
+                let Some(cid) = self.store.visible.conversation_id.clone() else {
+                    return;
+                };
+                let (tx, rx) = oneshot::channel();
+                self.on_attach(
+                    pb::ui_intent::Kind::AttachPaths(pb::AttachPaths {
+                        conversation_id: cid,
+                        paths,
+                    }),
+                    tx,
+                );
+                // 拖入没有回包可带错误：结果回来后放进输入框上方的提示。
+                let internal = self.internal_tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(ack) = rx.await {
+                        let _ = internal.send(Internal::AttachDone(ack.error.map(|e| e.message)));
+                    }
+                });
+            }
+            ShellEvent::NotificationClicked(conv) => {
+                let target = conv
+                    .map(|c| (c, String::new()))
+                    .or_else(|| self.latest_pending_target());
+                if let Some((c, row)) = target {
+                    self.store.request_navigate(c, row);
+                }
+            }
+            ShellEvent::QuitRequested => self.store.set_quit_requested(true),
+        }
+    }
+
+    /// 最近一条有对话的待处理项：(对话, 行)。
+    fn latest_pending_target(&self) -> Option<(String, String)> {
+        self.store.summary.pending.iter().rev().find_map(|p| {
+            let c = crate::derive::pending_conversation(p)?.to_owned();
+            let row = crate::derive::pending::item_id(p)?.to_owned();
+            Some((c, row))
+        })
     }
 
     fn on_intent(&mut self, intent: pb::UiIntent, tx: oneshot::Sender<pb::IntentAck>) {
@@ -377,6 +439,36 @@ impl<D: Dialer> Session<D> {
             Local::LoadMoreConversations => {
                 self.list_append = true;
                 self.store.set_list_loading();
+            }
+            Local::Quit { confirm } => {
+                self.store.set_quit_requested(false);
+                if confirm {
+                    // 关后台服务（连着时）再退出；连不上也照样退出客户端。
+                    let effects = self.effects.clone();
+                    match self.client.clone() {
+                        Some(client) => {
+                            tokio::spawn(async move {
+                                let cmd = pb::Command {
+                                    command_id: ulid::Ulid::generate().to_string(),
+                                    kind: Some(pb::command::Kind::ShutdownDaemon(
+                                        pb::ShutdownDaemon {
+                                            cancel_running: true,
+                                        },
+                                    )),
+                                };
+                                let _ = tokio::time::timeout(
+                                    Duration::from_secs(3),
+                                    client.request(pb::request::Body::Command(cmd)),
+                                )
+                                .await;
+                                let _ = effects.send(Effect::Exit);
+                            });
+                        }
+                        None => {
+                            let _ = effects.send(Effect::Exit);
+                        }
+                    }
+                }
             }
             Local::Retry => {
                 if self.client.is_none() {
@@ -560,6 +652,7 @@ impl<D: Dialer> Session<D> {
                     }
                 }
             }
+            Internal::AttachDone(e) => self.store.set_attach_error(e),
             Internal::QueryFailed { request_id } => {
                 if let Some(p) = self.queries.remove(&request_id) {
                     tracing::warn!(target: "iwork_client", request_id, purpose = ?p, "视图查询失败");

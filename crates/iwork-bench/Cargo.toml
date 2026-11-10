@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 
 [dev-dependencies]
+iwork-client-core.workspace = true
 iwork-ipc.workspace = true
 iwork-proto.workspace = true
 tokio.workspace = true
@@ -21,4 +22,9 @@ harness = false
 # T03 方案第 6 节：ipc 热路径的绝对值（新建热路径，没有「前」可比）。T11 收编进 CI。
 [[bench]]
 name = "ipc"
+harness = false
+
+# T09 方案第 6 节：客户端帧热路径（新热路径，以它为基线）。
+[[bench]]
+name = "view"
 harness = false

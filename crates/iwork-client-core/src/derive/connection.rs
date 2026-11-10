@@ -9,6 +9,7 @@ pub fn connection(store: &Store) -> pb::ConnectionView {
     let mut v = pb::ConnectionView {
         overload_notice: store.overloaded.then(|| text::OVERLOADED.to_owned()),
         commands_enabled: store.connection == Connection::Live,
+        quit_requested: store.quit_requested,
         ..Default::default()
     };
     match &store.connection {

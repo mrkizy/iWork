@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 pub use intent::Effect;
 pub use session::dial::{DialError, Dialer, DirectDialer};
-pub use session::{FrameError, Request, Stats};
+pub use session::{FrameError, Request, ShellEvent, Stats};
 
 /// 会话的句柄。克隆便宜；全部句柄丢掉后会话结束。
 #[derive(Clone)]
@@ -91,6 +91,11 @@ impl App {
             return closed();
         }
         rx.await.unwrap_or_else(|_| closed())
+    }
+
+    /// 壳观察到的事（焦点、拖入、通知点击、退出菜单）。
+    pub fn shell(&self, e: ShellEvent) {
+        let _ = self.tx.send(Request::Shell(e));
     }
 
     /// 观测值（测试与基准用）。
