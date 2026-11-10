@@ -72,8 +72,8 @@ finite_enum! {
         AiReviewFailed,
         AiReviewErrored,
         AiReviewTimedOut,
-        /// 有效档位切回手动：手动档不经 AI 审查，进行中的审查作废、转问用户
-        ModeChangedToManual,
+        /// 有效档位离开自动：手动与全开都不经 AI 审查，未放行的审查转问用户
+        ModeChangedFromAuto,
         /// 进行中的审查失去执行者（后台服务崩溃重启）：放弃、转问用户（T07 Q9）
         AiReviewAbandoned,
     }
@@ -158,7 +158,7 @@ pub const APPROVAL_TRANSITIONS: &[Transition<ApprovalState, ApprovalTriggerKind>
     (A::Pending, AT::AiReviewFailed, A::Pending),
     (A::Pending, AT::AiReviewErrored, A::Pending),
     (A::Pending, AT::AiReviewTimedOut, A::Pending),
-    (A::Pending, AT::ModeChangedToManual, A::Pending),
+    (A::Pending, AT::ModeChangedFromAuto, A::Pending),
     (A::Pending, AT::AiReviewAbandoned, A::Pending),
 ];
 
@@ -198,7 +198,7 @@ finite_enum! {
         Failed,
         Errored,
         TimedOut,
-        ModeChangedToManual,
+        ModeChangedFromAuto,
         /// 审查回合失去执行者（T07 Q9）
         ExecutorLost,
     }
@@ -215,7 +215,7 @@ pub const REVIEW_TRANSITIONS: &[Transition<ReviewPhase, ReviewTrigger>] = &[
     (R::InProgress, RT::Failed, R::Failed),
     (R::InProgress, RT::Errored, R::Errored),
     (R::InProgress, RT::TimedOut, R::TimedOut),
-    (R::InProgress, RT::ModeChangedToManual, R::Abandoned),
+    (R::InProgress, RT::ModeChangedFromAuto, R::Abandoned),
     (R::InProgress, RT::ExecutorLost, R::Abandoned),
 ];
 
@@ -242,7 +242,7 @@ impl ApprovalTriggerKind {
             AT::AiReviewFailed => Some(RT::Failed),
             AT::AiReviewErrored => Some(RT::Errored),
             AT::AiReviewTimedOut => Some(RT::TimedOut),
-            AT::ModeChangedToManual => Some(RT::ModeChangedToManual),
+            AT::ModeChangedFromAuto => Some(RT::ModeChangedFromAuto),
             AT::AiReviewAbandoned => Some(RT::ExecutorLost),
         }
     }
@@ -266,6 +266,7 @@ pub enum ReviewState {
     },
     Passed {
         review_id: ReviewId,
+        reason: String,
     },
     Failed {
         review_id: ReviewId,
@@ -286,8 +287,8 @@ pub enum ReviewState {
 /// 进行中的审查为什么被放弃。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AbandonReason {
-    /// 有效档位切回手动
-    ModeChangedToManual,
+    /// 有效档位离开自动
+    ModeChangedFromAuto,
     /// 审查回合失去执行者：后台服务在审查进行中崩溃重启（T07 Q9）
     ExecutorLost,
 }
@@ -309,7 +310,7 @@ impl ReviewState {
         match self {
             Self::NotReviewed => None,
             Self::InProgress { review_id }
-            | Self::Passed { review_id }
+            | Self::Passed { review_id, .. }
             | Self::Failed { review_id, .. }
             | Self::Errored { review_id }
             | Self::TimedOut { review_id }
@@ -334,6 +335,7 @@ pub enum ApprovalTrigger {
     },
     AiReviewPassed {
         review_id: ReviewId,
+        reason: String,
     },
     AiReviewFailed {
         review_id: ReviewId,
@@ -345,7 +347,7 @@ pub enum ApprovalTrigger {
     AiReviewTimedOut {
         review_id: ReviewId,
     },
-    ModeChangedToManual,
+    ModeChangedFromAuto,
     /// 恢复时发现审查进行中但没有执行者（T07 Q9）。`review_id` 必须是当前进行中的那次
     AiReviewAbandoned {
         review_id: ReviewId,
@@ -364,7 +366,7 @@ impl ApprovalTrigger {
             Self::AiReviewFailed { .. } => AT::AiReviewFailed,
             Self::AiReviewErrored { .. } => AT::AiReviewErrored,
             Self::AiReviewTimedOut { .. } => AT::AiReviewTimedOut,
-            Self::ModeChangedToManual => AT::ModeChangedToManual,
+            Self::ModeChangedFromAuto => AT::ModeChangedFromAuto,
             Self::AiReviewAbandoned { .. } => AT::AiReviewAbandoned,
         }
     }
@@ -373,7 +375,7 @@ impl ApprovalTrigger {
     pub fn review_id(&self) -> Option<ReviewId> {
         match self {
             Self::AiReviewStarted { review_id }
-            | Self::AiReviewPassed { review_id }
+            | Self::AiReviewPassed { review_id, .. }
             | Self::AiReviewFailed { review_id, .. }
             | Self::AiReviewErrored { review_id }
             | Self::AiReviewTimedOut { review_id }
@@ -382,7 +384,7 @@ impl ApprovalTrigger {
             | Self::UserDeny
             | Self::ModeSwitchAllows
             | Self::Void { .. }
-            | Self::ModeChangedToManual => None,
+            | Self::ModeChangedFromAuto => None,
         }
     }
 }
@@ -581,8 +583,9 @@ impl Approval {
             ApprovalTrigger::AiReviewStarted { review_id } => ReviewState::InProgress {
                 review_id: *review_id,
             },
-            ApprovalTrigger::AiReviewPassed { review_id } => ReviewState::Passed {
+            ApprovalTrigger::AiReviewPassed { review_id, reason } => ReviewState::Passed {
                 review_id: *review_id,
+                reason: reason.clone(),
             },
             ApprovalTrigger::AiReviewFailed { review_id, reason } => ReviewState::Failed {
                 review_id: *review_id,
@@ -594,12 +597,12 @@ impl Approval {
             ApprovalTrigger::AiReviewTimedOut { review_id } => ReviewState::TimedOut {
                 review_id: *review_id,
             },
-            ApprovalTrigger::ModeChangedToManual => ReviewState::Abandoned {
+            ApprovalTrigger::ModeChangedFromAuto => ReviewState::Abandoned {
                 review_id: self
                     .review
                     .review_id()
-                    .expect("REVIEW_TRANSITIONS 只允许 InProgress 收到 ModeChangedToManual，它一定有 review_id"),
-                reason: AbandonReason::ModeChangedToManual,
+                    .expect("REVIEW_TRANSITIONS 只允许 InProgress 收到 ModeChangedFromAuto，它一定有 review_id"),
+                reason: AbandonReason::ModeChangedFromAuto,
             },
             ApprovalTrigger::AiReviewAbandoned { review_id } => ReviewState::Abandoned {
                 review_id: *review_id,

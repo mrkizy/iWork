@@ -51,6 +51,8 @@ fn keys_with(lists: &[RuleEntry], assistant: AssistantId) -> SessionKeys {
     SessionKeys {
         conversation: conversation(),
         assistant,
+        runtime_id: iwork_domain::id::RuntimeId::from_raw(RawUlid::from_u128(0x888)),
+        assistant_version: 7,
         project: Some(project()),
         turn_kind: TurnKind::Assistant,
         snapshot: Arc::new(snapshot_for(Manual, lists, &scope(), &env(), Seq(7), &fs())),
@@ -167,7 +169,8 @@ impl Bench {
         };
         self.engine
             .on_event(Seq(100), &MessageAppended { message: m }.into())
-            .await;
+            .await
+            .unwrap();
     }
 
     fn count(&self, pred: impl Fn(&DomainEvent) -> bool) -> usize {
@@ -612,7 +615,7 @@ async fn to_manual_abandons_review() {
     assert!(matches!(
         a.review,
         ReviewState::Abandoned {
-            reason: AbandonReason::ModeChangedToManual,
+            reason: AbandonReason::ModeChangedFromAuto,
             ..
         }
     ));
@@ -889,8 +892,9 @@ async fn engine_recovers_pending_from_events() {
     let fresh = Bench::new(Some(Auto)).await;
     let abandoned = fresh
         .engine
-        .recover(&b.store.stored(), |_| Some(keys()))
-        .await;
+        .recover(&b.store.stored(), |_, _| Some(keys()))
+        .await
+        .unwrap();
     assert_eq!(abandoned.len(), 1);
     fresh.engine.committed(&abandoned).await;
     let recovered = fresh.engine.pending_approval(reviewing).await.unwrap();
@@ -954,7 +958,8 @@ async fn snapshot_pins_excluded_commands() {
             Seq(50),
             &iwork_domain::event::SecurityListEntryRemoved { entry_id: tf.id }.into(),
         )
-        .await;
+        .await
+        .unwrap();
     assert!(b.engine.rebuild_session_needed(conversation()).await);
     let h = b.ask(&old, turn(1), bash_req("terraform apply"));
     let id = b.approval(0).await;
@@ -1027,7 +1032,7 @@ async fn audit_snapshot_reconstructible() {
             .unwrap();
     }
     let seq = Seq(b.store.stored().len() as u64);
-    b.engine.on_event(seq, &revoke).await;
+    b.engine.on_event(seq, &revoke).await.unwrap();
     let h = b.ask(&d, turn(3), write_req("src/c.rs"));
     let id = b.approval(1).await;
     b.engine

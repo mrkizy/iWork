@@ -11,14 +11,16 @@ AC05 的拒绝记忆与等待上限中断后的一次性放行都是「某些动
 
 1. 两者都在引擎内存里，键是对话，与待审批、审查任务同在一把决策锁下。锁是 core 自写的无运行时异步互斥（`engine::lock::AsyncLock`，无 `unsafe`），锁内可以 `await` 一次提交，保证「判定 → 计算转换计划 → 提交事件 → 更新状态 → 答复」对同一对话串行。
 2. 拒绝记忆记被拒调用的**全部**子动作指纹；`Approval.call` 持久化恢复所需的最小调用记录（Q8）。一次性放行绑定回合与这份记录（两个摘要都要相等），七步跑完只豁免询问，命中即消费。AI 审查通过、切档放行、一次性放行答复前都用当前状态重判资格（`still_eligible`）；AI 审查结果先在克隆上判 Stale、再复查、只施加一次。
-3. 两者是审批流与对话流事件的确定性函数：`DenialMemory::apply` 在线与重放共用；`ApprovalEngine::recover` 启动时按事件重建待审批（全部 detached）、拒绝记忆与活规则，进行中的审查按失去执行者放弃（Q9）。
+3. 两者是审批流与对话流事件的确定性函数：`DenialMemory::apply` 在线与重放共用；`ApprovalEngine::recover` 启动时按事件重建待审批（全部 detached）、拒绝记忆与活规则，进行中的审查按失去执行者放弃（Q9），放弃计划也在恢复事务确认后才应用。恢复查询 `keys_for(conversation_id, turn_id)` 按原回合定位助手、私聊项目和快照，不能只按对话取一个键。亲手执行卡片独立保存助手归属并重放全部卡片状态事件，恢复后的回答通道为 detached。
 4. **与回合编排的接缝**（supervisor 2026-11-10 确认，偏离方案 2.4 / 6.1 / 6.2 / 6.7 的写法，判定逻辑不变）：
    - 引擎为每条会话给出 `decider_for(keys) -> SessionDecider`，实现 T05 的 `turn::PermissionDecider`，交给 `SessionLine::new`；方案里的 `handler_for` 都读作 `decider_for`。
    - 回合状态（`PermissionAsked` / `PermissionDecided`）只由编排写；引擎只提交审批流与审计流事件。
    - 回合级作废（取消、放弃、回合失败）走 `void_pending`，返回的 `ApprovalVoided` / 卡片作废事件由编排与回合状态同一次提交；对话、助手删除走 `ApprovalEngine::void_for_event`，事件由 T10 提交。
    - 第 1 轮返工给 T05 `PermissionDecider` 加默认空实现的 `committed(events)` 回调：`void_pending` / `void_for_event` 只返回计划，不提前更新等待表；runner 的提交接缝只在存储确认成功后调用回调。T10 提交删除事务后同样调用 `ApprovalEngine::committed`。提交失败或等待回执时取消，审批内存保持原样，计划可以重试。回合状态仍只由编排写。
    - 等待上限中断：编排丢掉等审批的请求（回答通道接收端随之丢弃），审批保持 `Pending`；用户允许时 `decide` 返回 `resume_turn`，续接后重新 `decide` 时由一次性放行命中。
-   - AI 审查在等用户答复的同一个 future 里与答复并行跑；用户先决定、作废或切档放行时审查作废。
+   - AI 审查在等用户答复的同一个 future 里与答复并行跑；用户先决定、作废或切档放行时审查作废。`SessionKeys` 由调用方给出审查端口的 `runtime_id` 与 `assistant_version`，引擎用真实 `Turn{SystemAiReview}` 记录排队、状态、用量、额度、实际模型及收尾；这些系统回合仍由引擎这一个写者拥有。
+   - 同一个截止时间覆盖建连、prompt、更新流与关闭；到期先写超时、转问用户，取消与关闭最多再等三秒。离开自动档时，切档命令与私聊项目切换共用放弃计划，未被自动放行的审查统一放弃；领域触发与原因改名 `ModeChangedFromAuto`，旧事件的无理由 Abandoned 仍能读取。事件消费 `on_event` 与恢复 `recover` 返回 Result；项目切换引起的放弃提交失败时保留旧内存并把错误交回调用方重试。
+   - 通过和不通过都保存理由；通过理由复用 proto 的 `reason`，旧 Passed 事件缺少理由时读为空串。审查上下文按 `(conversation, context_project_id)` 保存任务目标与最多 2000 字符的助手输出尾部，在线与恢复共用消息事件更新函数。正文落成制品（`MessageBody::Artifact`）的消息不进审查上下文，跳过后保留已有摘要；T10 接制品消息时要给引擎供给有界摘要，本轮不增加 `ArtifactStore` 泛型（supervisor 2026-11-10 确认）。
 
 ## 备选及放弃原因
 

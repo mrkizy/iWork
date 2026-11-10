@@ -402,7 +402,10 @@ pub fn review_state() -> impl Strategy<Value = ReviewState> + Clone {
 pub fn started_review_state() -> impl Strategy<Value = ReviewState> + Clone {
     prop_oneof![
         review_id().prop_map(|review_id| ReviewState::InProgress { review_id }),
-        review_id().prop_map(|review_id| ReviewState::Passed { review_id }),
+        review_id().prop_map(|review_id| ReviewState::Passed {
+            review_id,
+            reason: "需要".into()
+        }),
         (review_id(), text())
             .prop_map(|(review_id, reason)| ReviewState::Failed { review_id, reason }),
         review_id().prop_map(|review_id| ReviewState::Errored { review_id }),
@@ -410,7 +413,7 @@ pub fn started_review_state() -> impl Strategy<Value = ReviewState> + Clone {
         (
             review_id(),
             pick(vec![
-                AbandonReason::ModeChangedToManual,
+                AbandonReason::ModeChangedFromAuto,
                 AbandonReason::ExecutorLost
             ])
         )

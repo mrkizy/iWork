@@ -289,12 +289,14 @@ pub fn approval_state_to_proto(state: ApprovalState) -> (i32, Option<i32>, Optio
 
 /// 审查子状态 → (review, review_id, reason)。
 /// 「失去执行者」放弃时 `reason` 字段的固定文字（T07 Q9）。proto 没有放弃原因的枚举（方案定
-/// proto 不变），用这段文字区分两种放弃；其余放弃都是切回手动，编码时不带文字。
+/// proto 不变），用这段文字区分两种放弃；其余放弃都是离开自动，编码时不带文字。
 pub const REVIEW_ABANDONED_EXECUTOR_LOST: &str = "后台服务重启，审查中止";
 
 pub fn review_state_to_proto(review: &ReviewState) -> (i32, Option<String>, Option<String>) {
     let reason = match review {
-        ReviewState::Failed { reason, .. } => Some(reason.clone()),
+        ReviewState::Passed { reason, .. } | ReviewState::Failed { reason, .. } => {
+            Some(reason.clone())
+        }
         ReviewState::Abandoned {
             reason: AbandonReason::ExecutorLost,
             ..
@@ -309,7 +311,7 @@ pub fn review_state_to_proto(review: &ReviewState) -> (i32, Option<String>, Opti
 }
 
 /// 由 (review, review_id, reason) 拼回审查子状态。NOT_REVIEWED 时忽略 review_id；
-/// 其余状态 review_id 必填；FAILED 时 reason 必填；ABANDONED 时 reason 区分放弃原因
+/// 其余状态 review_id 必填；PASSED 兼容旧事件缺少 reason（空串）；FAILED 时 reason 必填；ABANDONED 时 reason 区分放弃原因
 /// （见 [`REVIEW_ABANDONED_EXECUTOR_LOST`]）；其他状态的 reason 被忽略（domain 不存）。
 pub fn review_state_from_proto(
     kind: &'static str,
@@ -329,7 +331,10 @@ pub fn review_state_from_proto(
     Ok(match phase {
         ReviewPhase::NotReviewed => unreachable!("上面已返回"),
         ReviewPhase::InProgress => ReviewState::InProgress { review_id },
-        ReviewPhase::Passed => ReviewState::Passed { review_id },
+        ReviewPhase::Passed => ReviewState::Passed {
+            review_id,
+            reason: reason.unwrap_or_default().to_owned(),
+        },
         ReviewPhase::Failed => ReviewState::Failed {
             review_id,
             reason: required(kind, "reason", reason)?.to_owned(),
@@ -342,7 +347,7 @@ pub fn review_state_from_proto(
             reason: if reason == Some(REVIEW_ABANDONED_EXECUTOR_LOST) {
                 AbandonReason::ExecutorLost
             } else {
-                AbandonReason::ModeChangedToManual
+                AbandonReason::ModeChangedFromAuto
             },
         },
     })

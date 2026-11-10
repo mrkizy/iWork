@@ -165,6 +165,7 @@ impl UpdateStream for FakeUpdates {
 struct Gated {
     waiting: Mutex<VecDeque<(TurnId, oneshot::Sender<PermissionDecision>)>>,
     voided: Mutex<Vec<(TurnId, VoidReason)>>,
+    committed_events: Mutex<Vec<DomainEvent>>,
 }
 
 impl Gated {
@@ -182,6 +183,12 @@ impl Gated {
 }
 
 impl PermissionDecider for Gated {
+    async fn committed(&self, events: &[DomainEvent]) {
+        self.committed_events
+            .lock()
+            .unwrap()
+            .extend_from_slice(events);
+    }
     async fn decide(&self, turn_id: TurnId, _req: &PermissionRequest) -> PermissionDecision {
         let (tx, rx) = oneshot::channel();
         self.waiting.lock().unwrap().push_back((turn_id, tx));
@@ -649,6 +656,11 @@ async fn storage_failure_at_any_stage_stops_the_runtime() {
             Err(TurnRunError::Storage(StorageError::Busy | StorageError::Io { .. })) => {}
             other => panic!("要原样交回存储错误：{other:?}"),
         }
+        assert_eq!(
+            *b.decider.committed_events.lock().unwrap(),
+            *b.store.events.lock().unwrap(),
+            "确认回调只包含成功提交的事务"
+        );
         assert_eq!(b.ctl.closes.load(Ordering::SeqCst), 1, "运行时被关闭");
         assert!(line.session().is_none(), "不能继续用的会话已清掉");
         if let Some(ask) = pending_ask {

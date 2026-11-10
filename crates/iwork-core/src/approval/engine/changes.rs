@@ -75,6 +75,11 @@ pub(super) fn apply_approval_changes(state: &mut ConversationState, events: &[Do
             DomainEvent::ApprovalReviewUpdated(e) => {
                 if let Some(p) = state.pending.get_mut(&e.approval_id) {
                     p.approval.review = e.review.clone();
+                    if !matches!(e.review, ReviewState::InProgress { .. })
+                        && let Some(stop) = p.stop_review.take()
+                    {
+                        let _ = stop.send(());
+                    }
                 }
             }
             DomainEvent::ApprovalDecided(e) => {
@@ -90,16 +95,18 @@ pub(super) fn apply_approval_changes(state: &mut ConversationState, events: &[Do
                     }
                 }
             }
+            DomainEvent::TurnFinished(e) => {
+                state.grants.retain(|_, grant| grant.turn != e.turn_id);
+            }
             DomainEvent::UserActionStateChanged(e) => {
                 if let Some(c) = state.cards.get_mut(&e.card_id) {
                     c.card.state = e.state.clone();
                 }
-                if let Some(message) = card_settled_message(&e.state) {
-                    if let Some(mut c) = state.cards.remove(&e.card_id) {
-                        if let Some(tx) = c.reply.take() {
-                            let _ = tx.send(message);
-                        }
-                    }
+                if let Some(message) = card_settled_message(&e.state)
+                    && let Some(mut c) = state.cards.remove(&e.card_id)
+                    && let Some(tx) = c.reply.take()
+                {
+                    let _ = tx.send(message);
                 }
             }
             _ => {}
@@ -123,11 +130,33 @@ impl LiveRules {
             self.versions.insert(id, seq);
             self.entries.retain(|r| r.id != id);
             if let Some(rule) = rule {
-                if is_live_layer(rule.layer) {
-                    self.entries.push(rule.clone());
-                }
+                self.entries.push(rule.clone());
             }
         }
         self.seq = self.seq.max(seq);
     }
+}
+
+/// 所有档位来源共用：离开 Auto 后，只有本次已经放行的审批可以跳过放弃。
+pub(super) fn plan_reviews_leaving_auto(
+    state: &ConversationState,
+    modes: &ConversationModes,
+    released: &[ApprovalId],
+) -> Result<Vec<DomainEvent>, ApprovalApplyError> {
+    let mut events = Vec::new();
+    for (id, pending) in &state.pending {
+        let assistant = pending.keys.assistant;
+        if state.modes.effective(assistant) == ApprovalMode::Auto
+            && modes.effective(assistant) != ApprovalMode::Auto
+            && matches!(pending.approval.review, ReviewState::InProgress { .. })
+            && !released.contains(id)
+        {
+            events.extend(plan_approval(
+                &pending.approval,
+                ApprovalTrigger::ModeChangedFromAuto,
+                modes.effective(assistant),
+            )?);
+        }
+    }
+    Ok(events)
 }

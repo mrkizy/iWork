@@ -119,7 +119,13 @@ fn approval_scenarios() {
     assert!(a.awaits_user());
     let before = a.clone();
     assert_eq!(
-        a.apply(Tr::AiReviewPassed { review_id: r1 }, &AUTO),
+        a.apply(
+            Tr::AiReviewPassed {
+                review_id: r1,
+                reason: "需要".into()
+            },
+            &AUTO
+        ),
         Err(stale(
             ApprovalTriggerKind::AiReviewPassed,
             r1,
@@ -143,7 +149,7 @@ fn approval_scenarios() {
 
     // 2. 切回手动：进行中的审查作废、转问用户；之后的「通过」在手动档下作废
     let mut a = reviewing(r1);
-    let applied = a.apply(Tr::ModeChangedToManual, &MANUAL).unwrap();
+    let applied = a.apply(Tr::ModeChangedFromAuto, &MANUAL).unwrap();
     assert_eq!(
         applied,
         Applied {
@@ -155,13 +161,19 @@ fn approval_scenarios() {
         a.review,
         ReviewState::Abandoned {
             review_id: r1,
-            reason: AbandonReason::ModeChangedToManual
+            reason: AbandonReason::ModeChangedFromAuto
         }
     );
     assert!(a.awaits_user());
     let before = a.clone();
     assert!(matches!(
-        a.apply(Tr::AiReviewPassed { review_id: r1 }, &MANUAL),
+        a.apply(
+            Tr::AiReviewPassed {
+                review_id: r1,
+                reason: "需要".into()
+            },
+            &MANUAL
+        ),
         Err(ApprovalApplyError::Stale { .. })
     ));
     assert_eq!((a.state, &a), (A::Pending, &before));
@@ -170,7 +182,13 @@ fn approval_scenarios() {
     let mut a = reviewing(r1);
     a.apply(Tr::UserDeny, &AUTO).unwrap();
     assert_eq!(
-        a.apply(Tr::AiReviewPassed { review_id: r1 }, &AUTO),
+        a.apply(
+            Tr::AiReviewPassed {
+                review_id: r1,
+                reason: "需要".into()
+            },
+            &AUTO
+        ),
         Err(stale(
             ApprovalTriggerKind::AiReviewPassed,
             r1,
@@ -182,7 +200,13 @@ fn approval_scenarios() {
     // 4. 对照：本次、进行中、自动档，三条都满足才放行
     let mut a = reviewing(r1);
     let applied = a
-        .apply(Tr::AiReviewPassed { review_id: r1 }, &AUTO)
+        .apply(
+            Tr::AiReviewPassed {
+                review_id: r1,
+                reason: "需要".into(),
+            },
+            &AUTO,
+        )
         .unwrap();
     assert_eq!(
         applied,
@@ -197,13 +221,25 @@ fn approval_scenarios() {
             decider: Decider::AiReview
         }
     );
-    assert_eq!(a.review, ReviewState::Passed { review_id: r1 });
+    assert_eq!(
+        a.review,
+        ReviewState::Passed {
+            review_id: r1,
+            reason: "需要".into()
+        }
+    );
 
     // 5. 错 id：当前是 r2，r1 的结果作废
     let mut a = reviewing(r2);
     let before = a.clone();
     assert_eq!(
-        a.apply(Tr::AiReviewPassed { review_id: r1 }, &AUTO),
+        a.apply(
+            Tr::AiReviewPassed {
+                review_id: r1,
+                reason: "需要".into()
+            },
+            &AUTO
+        ),
         Err(stale(
             ApprovalTriggerKind::AiReviewPassed,
             r1,
@@ -354,7 +390,13 @@ fn approval_review_abandoned_on_executor_lost() {
     );
     assert!(a.awaits_user());
     assert_eq!(
-        a.apply(Tr::AiReviewPassed { review_id: r1 }, &AUTO),
+        a.apply(
+            Tr::AiReviewPassed {
+                review_id: r1,
+                reason: "需要".into()
+            },
+            &AUTO
+        ),
         Err(stale(
             ApprovalTriggerKind::AiReviewPassed,
             r1,
@@ -400,14 +442,17 @@ fn any_trigger() -> impl Strategy<Value = ApprovalTrigger> {
         Just(Tr::ModeSwitchAllows),
         prop::sample::select(VoidReason::all()).prop_map(|reason| Tr::Void { reason }),
         any_review_id().prop_map(|review_id| Tr::AiReviewStarted { review_id }),
-        any_review_id().prop_map(|review_id| Tr::AiReviewPassed { review_id }),
+        any_review_id().prop_map(|review_id| Tr::AiReviewPassed {
+            review_id,
+            reason: "需要".into()
+        }),
         any_review_id().prop_map(|review_id| Tr::AiReviewFailed {
             review_id,
             reason: "r".into()
         }),
         any_review_id().prop_map(|review_id| Tr::AiReviewErrored { review_id }),
         any_review_id().prop_map(|review_id| Tr::AiReviewTimedOut { review_id }),
-        Just(Tr::ModeChangedToManual),
+        Just(Tr::ModeChangedFromAuto),
         any_review_id().prop_map(|review_id| Tr::AiReviewAbandoned { review_id }),
     ]
 }

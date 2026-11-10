@@ -22,6 +22,8 @@ use iwork_ports::store::{
 pub struct MemStore {
     pub events: Arc<Mutex<Vec<StoredEvent>>>,
     pub fail_next: Arc<AtomicBool>,
+    pub commit_entered: Arc<AtomicBool>,
+    pub before_commit: Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>,
     pub receipt_gate: Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>,
 }
 
@@ -43,6 +45,11 @@ impl StoragePort for MemStore {
     async fn commit(&self, req: CommitRequest) -> Result<CommitReceipt, StorageError> {
         if self.fail_next.swap(false, Ordering::SeqCst) {
             return Err(StorageError::Busy);
+        }
+        let before = self.before_commit.lock().unwrap().take();
+        if let Some(before) = before {
+            self.commit_entered.store(true, Ordering::SeqCst);
+            before.notified().await;
         }
         let receipt = {
             let mut events = self.events.lock().unwrap();
@@ -119,17 +126,25 @@ impl IdGenerator for Ids {
     }
 }
 
-/// 定时器：`fire` 为真时立刻到期，否则永不到期（让审查结果先回来）。
+/// 定时器：可立即到期，也可由 expire 精确触发；默认保持等待。
 #[derive(Default, Clone)]
 pub struct FakeTimer {
     pub fire: Arc<std::sync::atomic::AtomicBool>,
+    pub expired: Arc<tokio::sync::Notify>,
 }
 
 impl Timer for FakeTimer {
     async fn sleep(&self, _d: Duration) {
         if !self.fire.load(Ordering::SeqCst) {
-            std::future::pending::<()>().await;
+            self.expired.notified().await;
         }
+    }
+}
+
+impl FakeTimer {
+    pub fn expire(&self) {
+        self.fire.store(true, Ordering::SeqCst);
+        self.expired.notify_one();
     }
 }
 
@@ -140,6 +155,10 @@ pub enum ReviewScript {
     Says(String),
     /// 输出永不结束（配合定时器到期 = 超时）
     Hangs,
+    OpenHangs,
+    CloseHangs(String),
+    CancelHangs,
+    Updates(Vec<AgentUpdate>),
     /// 运行时进程退出
     Crashes,
     /// 等 `gate` 打开后再输出
@@ -150,6 +169,8 @@ pub enum ReviewScript {
 pub struct FakeReviewer {
     pub scripts: Arc<Mutex<VecDeque<ReviewScript>>>,
     pub specs: Arc<Mutex<Vec<SessionSpec>>>,
+    pub inputs: Arc<Mutex<Vec<Vec<ContentBlock>>>>,
+    pub phases: Arc<Mutex<Vec<&'static str>>>,
 }
 
 impl FakeReviewer {
@@ -158,7 +179,11 @@ impl FakeReviewer {
     }
 }
 
-pub struct FakeReviewSession(ReviewScript);
+pub struct FakeReviewSession(
+    ReviewScript,
+    Arc<Mutex<Vec<Vec<ContentBlock>>>>,
+    Arc<Mutex<Vec<&'static str>>>,
+);
 pub struct FakeReviewUpdates(
     VecDeque<AgentUpdate>,
     Option<Arc<tokio::sync::Notify>>,
@@ -176,13 +201,21 @@ impl AgentPort for FakeReviewer {
         _h: H,
     ) -> Result<FakeReviewSession, AgentError> {
         self.specs.lock().unwrap().push(spec);
+        self.phases.lock().unwrap().push("open");
         let s = self
             .scripts
             .lock()
             .unwrap()
             .pop_front()
             .unwrap_or(ReviewScript::Crashes);
-        Ok(FakeReviewSession(s))
+        if matches!(s, ReviewScript::OpenHangs) {
+            std::future::pending::<()>().await;
+        }
+        Ok(FakeReviewSession(
+            s,
+            self.inputs.clone(),
+            self.phases.clone(),
+        ))
     }
 }
 
@@ -191,9 +224,11 @@ impl AgentSession for FakeReviewSession {
     fn runtime_session_id(&self) -> Option<&str> {
         None
     }
-    async fn prompt(&self, _b: Vec<ContentBlock>) -> Result<FakeReviewUpdates, AgentError> {
+    async fn prompt(&self, b: Vec<ContentBlock>) -> Result<FakeReviewUpdates, AgentError> {
+        self.1.lock().unwrap().push(b);
+        self.2.lock().unwrap().push("prompt");
         Ok(match &self.0 {
-            ReviewScript::Says(t) => FakeReviewUpdates(
+            ReviewScript::Says(t) | ReviewScript::CloseHangs(t) => FakeReviewUpdates(
                 [
                     AgentUpdate::Text {
                         offset: 0,
@@ -217,7 +252,12 @@ impl AgentSession for FakeReviewSession {
                 Some(gate.clone()),
                 false,
             ),
-            ReviewScript::Hangs => FakeReviewUpdates(VecDeque::new(), None, true),
+            ReviewScript::Updates(updates) => {
+                FakeReviewUpdates(updates.clone().into(), None, false)
+            }
+            ReviewScript::Hangs | ReviewScript::OpenHangs | ReviewScript::CancelHangs => {
+                FakeReviewUpdates(VecDeque::new(), None, true)
+            }
             ReviewScript::Crashes => FakeReviewUpdates(
                 [AgentUpdate::Failed(AgentError::ProcessExited {
                     message: "boom".into(),
@@ -229,9 +269,17 @@ impl AgentSession for FakeReviewSession {
         })
     }
     async fn cancel(&self) -> Result<(), AgentError> {
+        self.2.lock().unwrap().push("cancel");
+        if matches!(self.0, ReviewScript::CancelHangs) {
+            std::future::pending::<()>().await;
+        }
         Ok(())
     }
     async fn close(self) -> Result<(), AgentError> {
+        self.2.lock().unwrap().push("close");
+        if matches!(self.0, ReviewScript::CloseHangs(_)) {
+            std::future::pending::<()>().await;
+        }
         Ok(())
     }
 }
