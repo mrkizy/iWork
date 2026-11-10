@@ -327,3 +327,56 @@ async fn shutdown_completes_while_client_stalls() {
         .unwrap();
     drop((a, a_inc));
 }
+
+/// Incoming 满着（读任务停在等配额上）时丢掉 Incoming：在飞的请求立刻以 Closed 结束，不挂住。
+#[tokio::test]
+async fn dropping_full_incoming_ends_in_flight_requests() {
+    let h = start(server_cfg());
+    *h.world.pad.lock().unwrap() = 1000;
+    let (client, mut inc) = connect_small(&h).await;
+    client.subscribe(1, sidebar(), 0).await.unwrap();
+    next_item(&mut inc).await;
+    for i in 0..200 {
+        h.upsert("project:p1", i);
+        tokio::task::yield_now().await;
+    }
+    let client = Arc::new(client);
+    let c = client.clone();
+    let req = tokio::spawn(async move { c.request(command("x")).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!req.is_finished(), "Incoming 满着，读任务读不到这条响应");
+    drop(inc);
+    let r = tokio::time::timeout(Duration::from_secs(1), req)
+        .await
+        .expect("丢掉 Incoming 后在飞请求应立刻结束")
+        .unwrap();
+    assert_eq!(r.unwrap_err(), iwork_ipc::client::ClientError::Closed);
+}
+
+/// Incoming 满着时把 Client 与 Incoming 一起丢掉：客户端的读写任务都退出，不留在运行时里。
+#[tokio::test]
+async fn dropping_client_and_full_incoming_leaves_no_tasks() {
+    let h = start(server_cfg());
+    *h.world.pad.lock().unwrap() = 1000;
+    let rt = tokio::runtime::Handle::current();
+    let baseline = rt.metrics().num_alive_tasks();
+    let (client, mut inc) = connect_small(&h).await;
+    client.subscribe(1, sidebar(), 0).await.unwrap();
+    next_item(&mut inc).await;
+    for i in 0..200 {
+        h.upsert("project:p1", i);
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(rt.metrics().num_alive_tasks() > baseline);
+    drop((client, inc));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while rt.metrics().num_alive_tasks() > baseline {
+        assert!(
+            Instant::now() < deadline,
+            "丢掉 Client 与 Incoming 后仍有 {} 个任务没退出",
+            rt.metrics().num_alive_tasks() - baseline
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}

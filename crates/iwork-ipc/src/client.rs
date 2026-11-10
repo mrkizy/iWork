@@ -32,7 +32,6 @@ use bytes::BytesMut;
 use iwork_proto::limits::{MAX_CHUNK_DATA, MAX_FRAME_LEN};
 use iwork_proto::pb::{self, ErrorCode};
 use iwork_proto::routing::{QueryLane, query_lane};
-use prost::Message;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio_util::codec::FramedRead;
@@ -211,22 +210,26 @@ pub enum IncomingItem {
     Closed(CloseReason),
 }
 
-impl IncomingItem {
-    fn byte_len(&self) -> usize {
-        match self {
-            IncomingItem::Event(e) => e.encoded_len(),
-            IncomingItem::ViewResult { result, .. } => result.encoded_len(),
-            IncomingItem::Subscribed { subscribed, .. } => subscribed.encoded_len(),
-            IncomingItem::ServerError(e) => e.encoded_len(),
-            IncomingItem::Closed(_) => 0,
-        }
-    }
-}
-
-/// 客户端唯一的有序出口。按编码字节有界：满了读任务停止读 socket。
+/// 客户端唯一的有序出口。按线上字节有界：满了读任务停止读 socket。
+///
+/// 每一项按产生它的那一帧的完整线上长度计费，至少 1；单项超过 `incoming_limit` 时按整个上限计费——
+/// 要等 `Incoming` 清空才放行、独占全部配额。所以占用的上界是 `max(incoming_limit, 单帧上限 4MiB)`。
+/// 丢弃 `Incoming` 会关闭配额：读任务随即退出，在飞的请求都以 `ClientError::Closed` 结束。
 pub struct Incoming {
     rx: mpsc::UnboundedReceiver<(IncomingItem, u32)>,
     space: Arc<Semaphore>,
+}
+
+impl Drop for Incoming {
+    fn drop(&mut self) {
+        // 读任务可能正停在等配额上：关闭配额让它立刻醒来并退出，不靠对端关连接。
+        self.space.close();
+    }
+}
+
+/// 一项占多少配额（见 [`Incoming`] 的计费规则）。
+fn incoming_charge(wire_len: usize, limit: u32) -> u32 {
+    u32::try_from(wire_len).unwrap_or(u32::MAX).clamp(1, limit)
 }
 
 impl Incoming {
@@ -262,17 +265,19 @@ struct IncomingTx {
 }
 
 impl IncomingTx {
-    async fn push(&self, item: IncomingItem) {
-        let need = u32::try_from(item.byte_len())
-            .unwrap_or(u32::MAX)
-            .min(self.limit);
-        if need > 0 {
-            match self.space.acquire_many(need).await {
-                Ok(p) => p.forget(),
-                Err(_) => return,
-            }
+    /// 按 `wire_len` 拿配额后入队。消费端已丢弃时返回 false，读任务应当退出。
+    async fn push(&self, item: IncomingItem, wire_len: usize) -> bool {
+        let need = incoming_charge(wire_len, self.limit);
+        match self.space.acquire_many(need).await {
+            Ok(p) => p.forget(),
+            Err(_) => return false,
         }
-        let _ = self.tx.send((item, need));
+        self.tx.send((item, need)).is_ok()
+    }
+
+    /// 流结束的最后一项：不占配额（每条连接只有一项），消费端不在了就算了。
+    fn push_closed(&self, reason: CloseReason) {
+        let _ = self.tx.send((IncomingItem::Closed(reason), 0));
     }
 }
 
@@ -579,6 +584,8 @@ async fn next_frame<R: tokio::io::AsyncRead + Unpin>(
 }
 
 /// 唯一的读任务：按帧到达顺序分发，`Incoming` 满了就停在这里不读 socket。
+/// 唯一的读任务：按帧到达顺序分发，`Incoming` 满了就停在这里不读 socket。
+/// 对端关闭、读出错、协议错误或 `Incoming` 被丢弃都会结束它，并让在飞的请求以 `Closed` 结束。
 async fn read_loop<R: tokio::io::AsyncRead + Unpin>(
     mut reader: FramedRead<R, FrameCodec>,
     inner: Arc<Inner>,
@@ -586,37 +593,49 @@ async fn read_loop<R: tokio::io::AsyncRead + Unpin>(
 ) {
     let reason = loop {
         let frame = match next_frame(&mut reader).await {
-            None => break CloseReason::PeerClosed,
-            Some(Err(CodecError::Io(e))) => break CloseReason::Io(e.to_string()),
-            Some(Err(CodecError::Frame(e))) => break CloseReason::Protocol(e.to_string()),
+            None => break Some(CloseReason::PeerClosed),
+            Some(Err(CodecError::Io(e))) => break Some(CloseReason::Io(e.to_string())),
+            Some(Err(CodecError::Frame(e))) => break Some(CloseReason::Protocol(e.to_string())),
             Some(Ok(f)) => f,
         };
-        match frame {
-            Frame::Event(e) => incoming.push(IncomingItem::Event(e)).await,
-            Frame::Response(r) => dispatch_response(&inner, &incoming, r).await,
+        let wire_len = frame.encoded_len();
+        let consumer_alive = match frame {
+            Frame::Event(e) => incoming.push(IncomingItem::Event(e), wire_len).await,
+            Frame::Response(r) => dispatch_response(&inner, &incoming, r, wire_len).await,
             other => {
-                break CloseReason::Protocol(format!(
+                break Some(CloseReason::Protocol(format!(
                     "已建立后收到 {}",
                     other.frame_type().as_str_name()
-                ));
+                )));
             }
+        };
+        if !consumer_alive {
+            break None;
         }
     };
     inner.close_all();
-    incoming.push(IncomingItem::Closed(reason)).await;
+    if let Some(reason) = reason {
+        incoming.push_closed(reason);
+    }
 }
 
-async fn dispatch_response(inner: &Inner, incoming: &IncomingTx, r: pb::Response) {
+/// 分发一个响应。返回 false 表示 `Incoming` 已被丢弃。
+async fn dispatch_response(
+    inner: &Inner,
+    incoming: &IncomingTx,
+    r: pb::Response,
+    wire_len: usize,
+) -> bool {
     use pb::response::Body;
     if r.request_id == 0 {
-        if let Some(Body::Error(e)) = r.body {
-            incoming.push(IncomingItem::ServerError(e)).await;
-        }
-        return;
+        return match r.body {
+            Some(Body::Error(e)) => incoming.push(IncomingItem::ServerError(e), wire_len).await,
+            _ => true,
+        };
     }
     let Some(p) = inner.take(r.request_id) else {
         tracing::warn!(target: "iwork_ipc", request_id = r.request_id, "收到没人等的响应");
-        return;
+        return true;
     };
     let rid = r.request_id;
     match p {
@@ -625,38 +644,42 @@ async fn dispatch_response(inner: &Inner, incoming: &IncomingTx, r: pb::Response
                 Some(Body::Error(e)) => Err(ClientError::Server(e)),
                 _ => Ok(r),
             });
+            true
         }
         Pending::Ordered(tx) => {
             // 先把载荷排进 Incoming，再唤醒 future：future 完成时对应项已经排好。
-            let outcome = match r.body {
-                Some(Body::Error(e)) => Err(ClientError::Server(e)),
-                Some(Body::Result(result)) => {
-                    incoming
-                        .push(IncomingItem::ViewResult {
-                            request_id: rid,
-                            result,
-                        })
-                        .await;
-                    Ok(())
+            let item = match r.body {
+                Some(Body::Error(e)) => {
+                    let _ = tx.send(Err(ClientError::Server(e)));
+                    return true;
                 }
-                Some(Body::Subscribed(subscribed)) => {
-                    incoming
-                        .push(IncomingItem::Subscribed {
-                            request_id: rid,
-                            subscribed,
-                        })
-                        .await;
-                    Ok(())
+                Some(Body::Result(result)) => IncomingItem::ViewResult {
+                    request_id: rid,
+                    result,
+                },
+                Some(Body::Subscribed(subscribed)) => IncomingItem::Subscribed {
+                    request_id: rid,
+                    subscribed,
+                },
+                _ => {
+                    let _ = tx.send(Err(ClientError::UnexpectedResponse));
+                    return true;
                 }
-                _ => Err(ClientError::UnexpectedResponse),
             };
-            let _ = tx.send(outcome);
+            let alive = incoming.push(item, wire_len).await;
+            let _ = tx.send(if alive {
+                Ok(())
+            } else {
+                Err(ClientError::Closed)
+            });
+            alive
         }
         Pending::Ack(tx) => {
             let _ = tx.send(match r.body {
                 Some(Body::Error(e)) => Err(ClientError::Server(e)),
                 _ => Ok(()),
             });
+            true
         }
     }
 }
@@ -664,6 +687,76 @@ async fn dispatch_response(inner: &Inner, incoming: &IncomingTx, r: pb::Response
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn incoming(limit: u32) -> (IncomingTx, Incoming) {
+        let space = Arc::new(Semaphore::new(limit as usize));
+        let (tx, rx) = mpsc::unbounded_channel();
+        (
+            IncomingTx {
+                tx,
+                space: Arc::clone(&space),
+                limit,
+            },
+            Incoming { rx, space },
+        )
+    }
+
+    fn ack() -> IncomingItem {
+        IncomingItem::Subscribed {
+            request_id: 1,
+            subscribed: pb::Subscribed::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_payload_items_still_take_quota() {
+        // 默认 Subscribed 的载荷是 0 字节，但它的线上帧不是：配额满了就得等。
+        let (tx, mut rx) = incoming(10);
+        for _ in 0..10 {
+            assert!(tx.push(ack(), 1).await);
+        }
+        let blocked =
+            tokio::time::timeout(std::time::Duration::from_millis(50), tx.push(ack(), 1)).await;
+        assert!(blocked.is_err(), "配额用完后不能再入队");
+        rx.next().await.unwrap();
+        assert!(tx.push(ack(), 1).await, "消费一项后释放配额");
+    }
+
+    #[test]
+    fn charge_is_full_wire_length_at_least_one_capped_at_limit() {
+        assert_eq!(incoming_charge(0, 100), 1);
+        assert_eq!(incoming_charge(37, 100), 37);
+        assert_eq!(incoming_charge(500, 100), 100);
+    }
+
+    #[tokio::test]
+    async fn oversize_item_waits_for_empty_incoming_then_takes_whole_quota() {
+        let (tx, mut rx) = incoming(100);
+        assert!(tx.push(ack(), 10).await);
+        // 超过上限的单项：要等 Incoming 清空。
+        let big =
+            tokio::time::timeout(std::time::Duration::from_millis(50), tx.push(ack(), 500)).await;
+        assert!(big.is_err(), "Incoming 不空时超大单项不能放行");
+        rx.next().await.unwrap();
+        assert!(tx.push(ack(), 500).await, "清空后放行");
+        let more =
+            tokio::time::timeout(std::time::Duration::from_millis(50), tx.push(ack(), 1)).await;
+        assert!(more.is_err(), "超大单项独占全部配额");
+    }
+
+    #[tokio::test]
+    async fn dropping_incoming_releases_a_waiting_producer() {
+        let (tx, rx) = incoming(1);
+        assert!(tx.push(ack(), 1).await);
+        let waiting = tokio::spawn(async move { tx.push(ack(), 1).await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        drop(rx);
+        let pushed = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("Incoming 丢弃后等配额的生产者应立刻醒来")
+            .unwrap();
+        assert!(!pushed, "消费端不在了，push 报告失败");
+    }
 
     #[test]
     fn backoff_doubles_from_200ms_and_caps_at_5s() {
