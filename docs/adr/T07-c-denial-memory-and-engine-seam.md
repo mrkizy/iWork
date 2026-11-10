@@ -12,7 +12,7 @@ AC05 的拒绝记忆与等待上限中断后的一次性放行都是「某些动
 1. 两者都在引擎内存里，键是对话，与待审批、审查任务同在一把决策锁下。锁是 core 自写的无运行时异步互斥（`engine::lock::AsyncLock`，无 `unsafe`），锁内可以 `await` 一次提交，保证「判定 → 计算转换计划 → 提交事件 → 更新状态 → 答复」对同一对话串行。
 2. 拒绝记忆记被拒调用的**全部**子动作指纹；`Approval.call` 持久化恢复所需的最小调用记录（Q8）。一次性放行绑定回合与这份记录（两个摘要都要相等），七步跑完只豁免询问，命中即消费。AI 审查通过、切档放行、一次性放行答复前都用当前状态重判资格（`still_eligible`）；AI 审查结果先在克隆上判 Stale、再复查、只施加一次。
 3. 两者是审批流与对话流事件的确定性函数：`DenialMemory::apply` 在线与重放共用；`ApprovalEngine::recover` 启动时按事件重建待审批（全部 detached）、拒绝记忆与活规则，进行中的审查按失去执行者放弃（Q9），放弃计划也在恢复事务确认后才应用。恢复查询 `keys_for(conversation_id, turn_id)` 按原回合定位助手、私聊项目和快照，不能只按对话取一个键。亲手执行卡片独立保存助手归属并重放全部卡片状态事件，恢复后的回答通道为 detached。
-4. **与回合编排的接缝**（supervisor 2026-11-10 确认，偏离方案 2.4 / 6.1 / 6.2 / 6.7 的写法，判定逻辑不变）：
+4. **与回合编排的接缝**（**已被 ADR-T07-e 取代**，2026-11-10 引擎重做；下面保留原文作为历史。「记全部指纹」「放行前用当前状态重判资格」「只 `apply` 一次」见第 2 条，仍有效）（supervisor 2026-11-10 确认，偏离方案 2.4 / 6.1 / 6.2 / 6.7 的写法，判定逻辑不变）：
    - 引擎为每条会话给出 `decider_for(keys) -> SessionDecider`，实现 T05 的 `turn::PermissionDecider`，交给 `SessionLine::new`；方案里的 `handler_for` 都读作 `decider_for`。
    - 回合状态（`PermissionAsked` / `PermissionDecided`）只由编排写；引擎只提交审批流与审计流事件。
    - 回合级作废（取消、放弃、回合失败）走 `void_pending`，返回的 `ApprovalVoided` / 卡片作废事件由编排与回合状态同一次提交；对话、助手删除走 `ApprovalEngine::void_for_event`，事件由 T10 提交。

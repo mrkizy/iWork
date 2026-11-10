@@ -2838,6 +2838,7 @@ dependencies = [
 name = "iwork-bench"
 version = "0.1.0"
 dependencies = [
+ "iwork-app",
  "iwork-core",
  "iwork-domain",
  "iwork-host",
@@ -2845,6 +2846,7 @@ dependencies = [
  "iwork-ports",
  "iwork-proto",
  "iwork-shell",
+ "iwork-store",
  "serde_json",
  "tokio",
  "tokio-util",

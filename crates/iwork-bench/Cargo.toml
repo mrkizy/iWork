@@ -10,6 +10,8 @@ publish.workspace = true
 
 [dev-dependencies]
 iwork-core.workspace = true
+iwork-store.workspace = true
+iwork-app.workspace = true
 iwork-domain.workspace = true
 iwork-ports.workspace = true
 iwork-host.workspace = true
@@ -27,6 +29,11 @@ harness = false
 # T07：审批求值热路径（方案第 10 节）
 [[bench]]
 name = "approval"
+harness = false
+
+# T07 方案 6.10.12：审批引擎（追平、启动折叠、并发放行），真实 SqliteStore
+[[bench]]
+name = "approval_engine"
 harness = false
 
 # T03 方案第 6 节：ipc 热路径的绝对值（新建热路径，没有「前」可比）。T11 收编进 CI。
