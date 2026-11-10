@@ -38,6 +38,10 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Diagnostics_ToolHelp"] }
 base64 = "0.22"
 tauri-build = "2.7"
+rusqlite = { version = "0.41", features = ["bundled"] }
+sha2 = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 iwork-proto = { path = "crates/iwork-proto" }
 iwork-domain = { path = "crates/iwork-domain" }
