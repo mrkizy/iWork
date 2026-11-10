@@ -406,7 +406,8 @@ pub struct ApprovalCallRecord {
     pub shape: CallShapeKind,
     pub placement: SandboxPlacement,
     pub bypass_sandbox_requested: bool,
-    /// 全部子动作，保持顺序；代表动作是 `actions[representative]`
+    /// 全部子动作，保持顺序；代表动作是 `actions[representative]`。子动作的 `raw_summary` 为空，
+    /// 命令原文只在 `Approval.action` 上存一份（T07 7/F-2）
     pub actions: Vec<Action>,
     pub representative: u32,
     /// sha256(工具名 ‖ 规范化 JSON)：防文字层面的改写

@@ -661,7 +661,7 @@ where
         let elapsed = self.ports.clock.monotonic().0.saturating_sub(t0.0);
         let audit: DomainEvent = ApprovalEvaluated {
             turn_id: turn,
-            action: call.actions[eval.representative].clone(),
+            action: call.representative_action(eval.representative),
             matched_rule_ids: eval.evaluation.matched.clone(),
             ruleset_version: eval.evaluation.ruleset_version.clone(),
             verdict: eval.evaluation.verdict.clone(),
@@ -740,7 +740,7 @@ where
                     } else {
                         ApprovalKind::Ask
                     },
-                    action: call.actions[eval.representative].clone(),
+                    action: call.representative_action(eval.representative),
                     call: Some(Box::new(call.record(eval.representative))),
                     matched_rules: eval.evaluation.matched.clone(),
                     ruleset_version: eval.evaluation.ruleset_version.clone(),

@@ -356,7 +356,8 @@ message ApprovalEvaluated {
   uint64 snapshot_lists_seq = 8;
   // 活规则缓存最后应用的 rule 流游标（T07 Q10）。
   uint64 live_rules_seq = 9;
-  // 全部子动作；action 是其中的代表动作（T07 Q10）。
+  // 全部子动作；action 是其中的代表动作（T07 Q10）。命令原文只在 action.raw_summary 存一份，
+  // 子动作的 raw_summary 为空（T07 7/F-2：否则动作数 × 原文长度是平方级）。
   repeated ActionSummary sub_actions = 10;
   CallShape call_shape = 11;
   // 会话快照里规则路径的解析结果，只含解析后与原位置不同的项，按 path 排序；重放据此重算别名，不读磁盘（T07 方案 4.3、6.8）。

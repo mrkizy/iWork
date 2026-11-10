@@ -28,5 +28,6 @@
 
 ## 影响
 
+- 命令原文在一次调用里只存一份（`NormalizedCall.raw_summary`）：子动作的 `raw_summary` 为空，只有代表动作（审批的 `action`、审计的 `action`）填原文；审计的 `sub_actions` 与 `Approval.call.actions` 因此随动作数线性，不再是「动作数 × 原文长度」（7/F-2）。计数分配器回归测试 `alloc_bounds` 守住。
 - 传递依赖多约 77 个 crate（`brush-parser` 把 `insta` 等写成了普通依赖），许可都在白名单内、闭包里没有禁用 crate（`cargo deny`、`scripts/check-deps.sh` 通过）。换解析器只改 `iwork-shell`。
 - 已知限制：自动档下带 `$VAR`、通配、组合短选项（`tar -xzf`、`make -j8`，`git` 除外）的日常命令会多问；带上面这些包装词的日常命令（`timeout 60 cargo test`）三档都问、记不住；其余见方案第 13 节收口行的 (c)–(j)。

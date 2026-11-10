@@ -215,6 +215,14 @@ pub struct NormalizedCall {
 }
 
 impl NormalizedCall {
+    /// 代表动作：唯一带命令原文的那一个（审批卡片的 `action`、审计的 `action`）。子动作的 `raw_summary`
+    /// 都是空的，原文只在调用上存一份（7/F-2）。
+    pub fn representative_action(&self, index: usize) -> Action {
+        let mut action = self.actions[index].clone();
+        action.raw_summary.clone_from(&self.raw_summary);
+        action
+    }
+
     /// 全部子动作指纹，去重（方案 3.9）。
     pub fn fingerprints(&self) -> BTreeSet<ActionFingerprint> {
         self.actions.iter().map(Action::fingerprint).collect()
@@ -650,7 +658,9 @@ fn finish_action(
         kind,
         target,
         tool: a.tool.clone(),
-        raw_summary: a.raw_summary.clone(),
+        // 命令原文在一次调用里只存一份（NormalizedCall.raw_summary）：子动作不各复制一份，否则动作数 ×
+        // 原文长度在内存、审计事件与落盘里都是平方级（7/F-2）。代表动作由 `representative_action` 填上
+        raw_summary: String::new(),
         flags: ActionFlags {
             out_of_bounds,
             bypass_sandbox_requested: a.bypass_sandbox_requested,
