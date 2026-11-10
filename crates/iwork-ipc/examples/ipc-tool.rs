@@ -135,7 +135,7 @@ fn print_item(item: IncomingItem) {
         IncomingItem::Event(e) => Frame::Event(e),
         IncomingItem::ViewResult { request_id, result } => Frame::Response(pb::Response {
             request_id,
-            body: Some(pb::response::Body::Result(result)),
+            body: Some(pb::response::Body::Result(*result)),
         }),
         IncomingItem::Subscribed {
             request_id,

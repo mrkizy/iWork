@@ -195,7 +195,8 @@ pub enum IncomingItem {
     Event(Box<pb::Event>),
     ViewResult {
         request_id: u64,
-        result: pb::QueryResult,
+        // 装箱：查询结果比其他项大得多（对话页带工具调用、审批等），不让每一项都按它占位。
+        result: Box<pb::QueryResult>,
     },
     Subscribed {
         request_id: u64,
@@ -682,7 +683,7 @@ async fn dispatch_response(
                 }
                 Some(Body::Result(result)) => IncomingItem::ViewResult {
                     request_id: rid,
-                    result,
+                    result: Box::new(result),
                 },
                 Some(Body::Subscribed(subscribed)) => IncomingItem::Subscribed {
                     request_id: rid,
