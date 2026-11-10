@@ -2,13 +2,13 @@
 use super::*;
 use iwork_domain::id::MessageId;
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct ReviewContext {
     pub task_goal: String,
     pub recent_context: String,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct ReviewMessages {
     pub contexts: BTreeMap<Option<ProjectId>, ReviewContext>,
     assistant_messages: BTreeMap<MessageId, Option<ProjectId>>,

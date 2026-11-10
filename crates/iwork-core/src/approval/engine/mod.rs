@@ -10,6 +10,7 @@
 
 mod changes;
 mod context;
+pub mod fold;
 pub mod lock;
 mod recovery;
 pub mod review;
