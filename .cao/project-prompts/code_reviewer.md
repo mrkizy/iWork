@@ -1,4 +1,12 @@
-# iWork：code_reviewer 项目提示
+# 代码审查员：项目补充要求
+
+> 只写本项目特有的约定、背景、边界和验收规则。通用职责由 CAO profile 提供。
+
+## 项目背景
+
+iWork：本机运行的 ADE（Agent Development Environment），Rust daemon + Tauri/SolidJS 客户端，当前阶段 M1。依据文档、技术栈、命令、架构约定与安全不变量见根目录 `AGENTS.md`；M1 进度与未落文档的决定见 `docs/tasks/M1/STATUS.md`。
+
+## 必须遵守
 
 除通用审查标准外，本项目额外按以下规则定级：
 

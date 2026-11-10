@@ -1,4 +1,12 @@
-# iWork：developer 项目提示
+# 开发者：项目补充要求
+
+> 只写本项目特有的约定、背景、边界和验收规则。通用职责由 CAO profile 提供。
+
+## 项目背景
+
+iWork：本机运行的 ADE（Agent Development Environment），Rust daemon + Tauri/SolidJS 客户端，当前阶段 M1。依据文档、技术栈、命令、架构约定与安全不变量见根目录 `AGENTS.md`；M1 进度与未落文档的决定见 `docs/tasks/M1/STATUS.md`。
+
+## 必须遵守
 
 - 开工前读任务卡、`AGENTS.md`、卡片列出的文档章节；有方案的按方案实施。
 - 交付必须带测试：卡片“验收标准”的每一条都要有对应的自动化测试或可复现的检查命令，并在实现报告里逐条给出命令与结果。
