@@ -16,6 +16,11 @@
    - `git` 的未登记短选项粘值不让整条解析不了，改为按兜底候选抽读 + 写：方案 11.3 验收 4b 要求 `git clean -fd` 是必问而不是解析不了，与 3.4「没登记的粘值整条 Unparsable」冲突；`git` 的种类由子命令决定，候选里任何一个解析到受保护路径仍是底线拒绝。其他程序仍按方案。
    - `git -C` / `--git-dir` / `--work-tree` / `--namespace`（改变仓库位置）与子命令前未登记的全局选项整条解析不了，否则 `git --namespace x push` 能把推送藏成普通执行。
 
+5. **参数路径标记 `ActionFlag::ArgumentPath`**（supervisor 2026-11-10 定 (a)）：表外程序的位置参数既记读又记写，原意只为过底线与越界；但手动档下工作区内的写也按 `default.write.manual` 询问，于是 `npm test foo` 一条调用有两个要问的动作，按 6.4 只能「允许一次」，与 FR11「执行命令按程序名加子命令记住」冲突。做法：
+   - 这类路径动作带 `argument_path` 标记（domain `ActionFlags` 与 proto `ActionSummary` 各加一个字段、`ActionFlag` 加一个值，只加不改）；默认层在 `default.write.oob` 之后、`default.write.manual` 之前加 `default.write.argument`：`All([Write, Flag(ArgumentPath)])` → 放行，三档。越界、底线、拒绝记忆、拒绝规则、必问都排在它前面，不受影响；执行动作本身仍按档位询问；沙箱的写白名单仍挡命令的实际越界写。
+   - 标记只打在**归类成功**的表外程序（执行 / 发布）的位置参数、`--opt=值` 与 `name=值` 抽出的路径上。白名单程序按 `ArgSpec` 的精确角色走、不打；解析不了的兜底候选不打（它们三档都问，不能借这条放行）；重定向目标不打；第 4 条里 `git` 组合短选项的兜底候选、`find` 的单横线谓词也不打。
+   - 测试：`evaluate_stack::argument_path_does_not_add_a_second_ask`、属性测试 `approval_props::argument_path_only_on_external_program_arguments`，`never_wider_than_any_layer` 照样成立。
+
 ## 备选及放弃原因
 
 `tree-sitter-bash`（容错解析与需求相反，带 C 构建进三平台 CI）；`yash-syntax`（GPL-3，不在许可白名单）；`conch-parser`（2019 年起无人维护）；自写（bash 引号、here-doc、展开的边角正是攻击面）；完整语义建模（漏一处即放行有副作用的命令）。

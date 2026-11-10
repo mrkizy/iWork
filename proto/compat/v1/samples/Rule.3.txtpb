@@ -1,0 +1,25 @@
+id: "01JC0R0000000000000000RXE1"
+layer: RULE_LAYER_DEFAULT
+matcher {
+  all {
+    matchers: [{
+      action_kind_is: ACTION_KIND_WRITE
+    }, {
+      flag: ACTION_FLAG_ARGUMENT_PATH
+    }]
+  }
+}
+effect: RULE_EFFECT_ALLOW
+source {
+  builtin {
+    ruleset_version: "m1-1"
+  }
+}
+scope {
+  global {}
+}
+created_at {
+  seconds: 1762001300
+  nanos: 123000000
+}
+label: "default.write.argument"

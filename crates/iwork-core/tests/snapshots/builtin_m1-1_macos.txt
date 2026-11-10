@@ -58,6 +58,7 @@ default.read.oob.full 2J7V6YWS87J6CR0T2BEJ3VXYH3 Default Allow {FullAccess} All(
 default.read 7SSQAVN5JA645D8YTRTTKQQMG9 Default Allow {} ActionKindIs(Read)
 default.write.oob 1208GRTBAFJ0AEDB9YNNWA3TRQ Default Ask {Manual, Auto} All([ActionKindIs(Write), Flag(OutOfBounds)])
 default.write.oob.full 7KR0XQM8Z2WJSZ963MB9ZVWFGP Default Allow {FullAccess} All([ActionKindIs(Write), Flag(OutOfBounds)])
+default.write.argument 2Y78P4E4ER87W0WMQERG2W7BRG Default Allow {} All([ActionKindIs(Write), Flag(ArgumentPath)])
 default.write.manual 3QQA1721GWCY0THFTSRNE1ZH25 Default Ask {Manual} ActionKindIs(Write)
 default.write.auto-full 5EKKKQ526PQ84QMCMVJPB1XJM5 Default Allow {Auto, FullAccess} ActionKindIs(Write)
 default.execute.manual 0WCAWNR5GHN89JKQ4DYCPWFV23 Default Ask {Manual} ActionKindIs(Execute)

@@ -530,6 +530,13 @@ pub fn builtin_rules(env: &EnvPaths) -> Vec<RuleEntry> {
             E::Allow,
             FULL,
         ),
+        // 角色未知的参数路径在边界内不单独再问：执行动作本身仍按档位问（supervisor 2026-11-10 定 (a)）
+        (
+            "default.write.argument",
+            all([kind(ActionKind::Write), M::Flag(ActionFlag::ArgumentPath)]),
+            E::Allow,
+            ALL,
+        ),
         (
             "default.write.manual",
             kind(ActionKind::Write),

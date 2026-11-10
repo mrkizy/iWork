@@ -207,6 +207,8 @@ message ActionSummary {
   bool bypass_sandbox_requested = 6;
   // 「执行脚本」类：命令带起的脚本内容不可见。
   bool opaque_script = 7;
+  // 角色未知的参数路径（表外程序的位置参数、--opt=值 / name=值 的值）：只为过底线与越界（T07）。
+  bool argument_path = 8;
 }
 
 enum ActionKind {
@@ -463,6 +465,7 @@ enum ActionFlag {
   ACTION_FLAG_OUT_OF_BOUNDS = 1;
   ACTION_FLAG_BYPASS_SANDBOX_REQUESTED = 2;
   ACTION_FLAG_OPAQUE_SCRIPT = 3;
+  ACTION_FLAG_ARGUMENT_PATH = 4;
 }
 
 message ProgramSubcommand {

@@ -72,7 +72,7 @@ sample_types! {
     Approval => [b::approval_full, b::approval_with_call],
     Turn => [b::turn_full],
     UserActionCard => [b::user_action_card_full],
-    Rule => [b::rule_full, b::rule_composite],
+    Rule => [b::rule_full, b::rule_composite, b::rule_argument_path],
     RuntimeStatus => [b::runtime_status_full],
     Error => [b::error],
     SessionConstraints => [b::session_constraints],
@@ -142,6 +142,7 @@ sample_types! {
         b::ev_approval_voided_turn_failed,
         b::ev_approval_evaluated_with_call,
         b::ev_approval_review_abandoned_executor_lost,
+        b::ev_approval_evaluated_argument_path,
     ],
 }
 

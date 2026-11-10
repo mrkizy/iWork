@@ -166,9 +166,9 @@ fn action() -> impl Strategy<Value = Action> + Clone {
         action_target(),
         text(),
         text(),
-        any::<(bool, bool, bool)>(),
+        any::<(bool, bool, bool, bool)>(),
     )
-        .prop_map(|(kind, target, tool, raw_summary, (a, b, c))| Action {
+        .prop_map(|(kind, target, tool, raw_summary, (a, b, c, d))| Action {
             kind,
             target,
             tool: ToolRef(tool),
@@ -177,6 +177,7 @@ fn action() -> impl Strategy<Value = Action> + Clone {
                 out_of_bounds: a,
                 bypass_sandbox_requested: b,
                 opaque_script: c,
+                argument_path: d,
             },
         })
 }
@@ -622,7 +623,8 @@ fn rule() -> impl Strategy<Value = RuleEntry> + Clone {
         pick(vec![
             ActionFlag::OutOfBounds,
             ActionFlag::BypassSandboxRequested,
-            ActionFlag::OpaqueScript
+            ActionFlag::OpaqueScript,
+            ActionFlag::ArgumentPath
         ])
         .prop_map(RuleMatcher::Flag),
     ];

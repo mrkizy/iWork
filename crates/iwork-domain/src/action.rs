@@ -57,6 +57,9 @@ pub struct ActionFlags {
     pub bypass_sandbox_requested: bool,
     /// 「执行脚本」类：看不出脚本会做什么
     pub opaque_script: bool,
+    /// 角色未知的参数路径：归类成功的表外程序的位置参数、`--opt=值` / `name=值` 的值。
+    /// 既记读又记写只为过底线与越界；工作区内不单独再问（T07 方案 3.4 补充，supervisor 2026-11-10 定）
+    pub argument_path: bool,
 }
 
 /// 规则按标记匹配时用的标记名（[`crate::rule::RuleMatcher::Flag`]），与 [`ActionFlags`] 的字段一一对应。
@@ -65,6 +68,7 @@ pub enum ActionFlag {
     OutOfBounds,
     BypassSandboxRequested,
     OpaqueScript,
+    ArgumentPath,
 }
 
 impl ActionFlags {
@@ -74,6 +78,7 @@ impl ActionFlags {
             ActionFlag::OutOfBounds => self.out_of_bounds,
             ActionFlag::BypassSandboxRequested => self.bypass_sandbox_requested,
             ActionFlag::OpaqueScript => self.opaque_script,
+            ActionFlag::ArgumentPath => self.argument_path,
         }
     }
 }

@@ -396,9 +396,11 @@ pub fn normalize(
             (CallShape::Unparsable { why }, actions)
         }
     };
+    // 参数标记只给归类成功的调用：解析不了的兜底候选三档都问，不能借默认层的参数放行条目放行
+    let structured_ok = !matches!(shape, CallShape::Unparsable { .. });
     let mut actions: Vec<Action> = resolved
         .into_iter()
-        .map(|(p, target)| finish_action(a, ctx, fs, p, target))
+        .map(|(p, target)| finish_action(a, ctx, fs, p, target, structured_ok))
         .collect();
     if actions.is_empty() {
         // 非 Bash 工具解析不了且没有兜底（联网、MCP 不会走到这里）
@@ -408,6 +410,7 @@ pub fn normalize(
             fs,
             &single(ActionKind::Unclassified, PendingTarget::None),
             ActionTarget::None,
+            false,
         ));
     }
     NormalizedCall {
@@ -451,6 +454,7 @@ fn finish_action(
     fs: &impl PathResolver,
     p: &PendingAction,
     target: ActionTarget,
+    tag_arguments: bool,
 ) -> Action {
     let mut kind = p.kind;
     let path = match &target {
@@ -493,6 +497,7 @@ fn finish_action(
             out_of_bounds,
             bypass_sandbox_requested: a.bypass_sandbox_requested,
             opaque_script: p.opaque,
+            argument_path: tag_arguments && p.argument,
         },
     }
 }

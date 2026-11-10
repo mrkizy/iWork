@@ -76,6 +76,13 @@ fn push_argument(out: &mut Vec<PendingAction>, word: &str) {
     }
 }
 
+/// 读 + 写、但不打参数标记：兜底一类的候选（组合短选项的切分、单横线谓词），工作区内照常按写求值。
+fn push_untagged(out: &mut Vec<PendingAction>, word: &str) {
+    if is_path_word(word) {
+        out.extend([path(ActionKind::Read, word), path(ActionKind::Write, word)]);
+    }
+}
+
 fn redirect_actions(c: &SimpleCommand, out: &mut Vec<PendingAction>) {
     for r in &c.redirects {
         push_redirect(out, r.kind, &r.target.literal);
@@ -242,14 +249,14 @@ fn extract_external(
                     i += 1;
                 }
             } else if single_dash_long {
-                push_argument(out, w);
+                push_untagged(out, w);
             } else if letters.chars().count() >= 2 {
                 if !GLUED_AS_CANDIDATES.contains(&program) {
                     return Err(format!("{program} 的选项 {w} 粘着值（未登记的短选项）"));
                 }
                 // 组合短选项或粘值分不清：每个切分位置之后的剩余部分都按角色未知的路径抽（与兜底同一规则）
                 for cand in fallback_candidates(w) {
-                    push_argument(out, &cand);
+                    push_untagged(out, &cand);
                 }
             }
         }

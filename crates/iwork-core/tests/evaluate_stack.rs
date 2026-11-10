@@ -354,3 +354,108 @@ fn offered_remember_scopes() {
             .contains(&RememberScope::Project)
     );
 }
+
+/// ArgumentPath（supervisor 2026-11-10 定 (a)）：角色未知的参数路径在工作区内不单独再问；
+/// 越界、底线、解析不了、重定向都不受影响。
+#[test]
+fn argument_path_does_not_add_a_second_ask() {
+    use iwork_core::approval::evaluate::remember::remember_rule;
+    use iwork_domain::approval::{Approval, ApprovalKind, ApprovalState, ReviewState};
+    use iwork_domain::common::{Actor, Timestamp};
+    use iwork_domain::id::{ApprovalId, RawUlid, RuleId, TurnId};
+    let h = Harness::default();
+    // 手动档 npm test foo：只有执行动作要问，可按「npm test」记住
+    let (call, e) = h.eval(&bash_req("npm test foo"), Manual);
+    let asked: Vec<_> = e
+        .per_action
+        .iter()
+        .filter(|x| x.verdict != Verdict::Allow)
+        .collect();
+    assert_eq!(asked.len(), 1, "{:?}", briefs(&call));
+    assert!(
+        call.actions
+            .iter()
+            .any(|a| a.kind == ActionKind::Write && a.flags.argument_path)
+    );
+    let (scopes, label) = offered_remember(&call, &e, &scope());
+    assert!(scopes.contains(&RememberScope::Project), "{scopes:?}");
+    assert!(label.contains("npm test"), "{label}");
+    // 记住到本项目
+    let approval = Approval {
+        id: ApprovalId::from_raw(RawUlid::from_u128(1)),
+        turn_id: TurnId::from_raw(RawUlid::from_u128(2)),
+        conversation_id: conversation(),
+        kind: ApprovalKind::Ask,
+        action: call.actions[e.representative].clone(),
+        call: Some(Box::new(call.record(e.representative))),
+        matched_rules: vec![],
+        ruleset_version: e.evaluation.ruleset_version.clone(),
+        state: ApprovalState::Pending,
+        review: ReviewState::NotReviewed,
+        offered_remember: scopes,
+        remember_label: label,
+        requested_at: Timestamp(0),
+    };
+    let rule = remember_rule(
+        &approval,
+        RememberScope::Project,
+        &scope(),
+        Actor("u".into()),
+        Timestamp(1),
+        RuleId::from_raw(RawUlid::from_u128(3)),
+    )
+    .unwrap();
+    let mut h = Harness::default();
+    h.live.push(rule);
+    assert_eq!(h.verdict(&bash_req("npm test foo"), Manual), Verdict::Allow);
+    assert_eq!(
+        h.verdict(&bash_req("npm test bar --watch"), Manual),
+        Verdict::Allow,
+        "带任何参数都算"
+    );
+    // 记住后越界的参数路径仍询问
+    assert_eq!(
+        h.verdict(&bash_req("npm test ../outside"), Manual),
+        Verdict::Ask(AskReason::OutOfBounds)
+    );
+    // 底线照旧
+    for m in MODES {
+        assert!(
+            matches!(
+                h.verdict(&bash_req("npm test .git/x"), m),
+                Verdict::Deny(DenyReason::Baseline(_)) | Verdict::UserAction(_)
+            ),
+            "{m:?}"
+        );
+    }
+    // 解析不了的调用里同样的路径：仍是解析不了的询问（兜底候选不打标记）
+    let (call, e) = h.eval(&bash_req("npm test foo $X"), Manual);
+    assert!(call.actions.iter().all(|a| !a.flags.argument_path));
+    assert_eq!(
+        e.evaluation.verdict,
+        Verdict::Ask(AskReason::UnparsableCommand)
+    );
+    // 重定向目标不打标记：手动档仍按写询问
+    let h = Harness::default();
+    let (call, e) = h.eval(&bash_req("npm test > out.log"), Manual);
+    let w = call
+        .actions
+        .iter()
+        .position(|a| a.kind == ActionKind::Write && !a.flags.argument_path)
+        .unwrap();
+    assert_eq!(e.per_action[w].verdict, Verdict::Ask(AskReason::Default));
+    // 白名单的精确角色不打：cp 的目的地手动档照常询问
+    let (call, _) = h.eval(&bash_req("cp src/a.rs dst.rs"), Manual);
+    assert!(call.actions.iter().all(|a| !a.flags.argument_path));
+    assert_eq!(
+        v(&h.verdict(&bash_req("cp src/a.rs dst.rs"), Manual)),
+        "Ask"
+    );
+    // git 组合短选项的兜底候选不打
+    let (call, _) = h.eval(&bash_req("git clean -fd"), Manual);
+    assert!(
+        call.actions.iter().all(|a| !a.flags.argument_path),
+        "{:?}",
+        briefs(&call)
+    );
+}

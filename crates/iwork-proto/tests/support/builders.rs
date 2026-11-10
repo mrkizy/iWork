@@ -214,6 +214,7 @@ fn action_command() -> ActionSummary {
         out_of_bounds: true,
         bypass_sandbox_requested: true,
         opaque_script: true,
+        argument_path: false,
     }
 }
 
@@ -230,6 +231,73 @@ fn action_paths() -> ActionSummary {
         out_of_bounds: false,
         bypass_sandbox_requested: false,
         opaque_script: false,
+        argument_path: false,
+    }
+}
+
+/// T07：表外程序位置参数抽出的路径带 argument_path。
+fn action_argument_path() -> ActionSummary {
+    ActionSummary {
+        kind: ActionKind::Write.into(),
+        target: Some(ActionTarget {
+            kind: Some(action_target::Kind::Path(s("/Users/me/proj/foo"))),
+        }),
+        tool_name: s("Bash"),
+        raw_summary: s("npm test foo"),
+        out_of_bounds: false,
+        bypass_sandbox_requested: false,
+        opaque_script: false,
+        argument_path: true,
+    }
+}
+
+/// T07：参数路径的审计与按标记匹配的默认条目。
+pub fn ev_approval_evaluated_argument_path() -> DomainEvent {
+    ev(E::ApprovalEvaluated(ApprovalEvaluated {
+        turn_id: s(TURN),
+        action: Some(action_argument_path()),
+        matched_rule_ids: vec![s(RULE)],
+        ruleset_version: s("m1-1"),
+        verdict: Some(Verdict {
+            kind: Some(verdict::Kind::Allow(VerdictAllow {})),
+        }),
+        layer_hit: RuleLayer::Default.into(),
+        duration_ms: 1,
+        snapshot_lists_seq: 3,
+        live_rules_seq: 4,
+        sub_actions: vec![action_argument_path()],
+        call_shape: CallShape::SingleSimpleCommand.into(),
+    }))
+}
+
+pub fn rule_argument_path() -> Rule {
+    Rule {
+        id: s(RULE),
+        layer: RuleLayer::Default.into(),
+        matcher: Some(RuleMatcher {
+            kind: Some(rule_matcher::Kind::All(AllMatcher {
+                matchers: vec![
+                    RuleMatcher {
+                        kind: Some(rule_matcher::Kind::ActionKindIs(ActionKind::Write.into())),
+                    },
+                    RuleMatcher {
+                        kind: Some(rule_matcher::Kind::Flag(ActionFlag::ArgumentPath.into())),
+                    },
+                ],
+            })),
+        }),
+        effect: RuleEffect::Allow.into(),
+        source: Some(RuleSource {
+            kind: Some(rule_source::Kind::Builtin(BuiltinRuleSource {
+                ruleset_version: s("m1-1"),
+            })),
+        }),
+        scope: Some(Scope {
+            kind: Some(scope::Kind::Global(GlobalScope {})),
+        }),
+        created_at: ts(1_762_001_300),
+        label: s("default.write.argument"),
+        applies_in: vec![],
     }
 }
 

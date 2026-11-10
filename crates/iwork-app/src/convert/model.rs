@@ -147,6 +147,7 @@ enum_pair!(action_flag_to_proto, action_flag_from_proto, ActionFlag, pb::ActionF
     ActionFlag::OutOfBounds => pb::ActionFlag::OutOfBounds,
     ActionFlag::BypassSandboxRequested => pb::ActionFlag::BypassSandboxRequested,
     ActionFlag::OpaqueScript => pb::ActionFlag::OpaqueScript,
+    ActionFlag::ArgumentPath => pb::ActionFlag::ArgumentPath,
 });
 enum_pair!(call_shape_to_proto, call_shape_from_proto, CallShapeKind, pb::CallShape, {
     CallShapeKind::Tool => pb::CallShape::Tool,
@@ -924,6 +925,7 @@ pub fn action_to_proto(a: &Action) -> R<pb::ActionSummary> {
         out_of_bounds: a.flags.out_of_bounds,
         bypass_sandbox_requested: a.flags.bypass_sandbox_requested,
         opaque_script: a.flags.opaque_script,
+        argument_path: a.flags.argument_path,
     })
 }
 
@@ -939,6 +941,7 @@ pub fn action_from_proto(kind: &'static str, a: Option<&pb::ActionSummary>) -> R
             out_of_bounds: a.out_of_bounds,
             bypass_sandbox_requested: a.bypass_sandbox_requested,
             opaque_script: a.opaque_script,
+            argument_path: a.argument_path,
         },
     })
 }

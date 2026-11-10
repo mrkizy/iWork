@@ -220,6 +220,23 @@ proptest! {
         }
     }
 
+    /// 参数标记只出现在归类成功的调用里、执行 / 发布的参数路径上（读、写，路径目标）；解析不了的调用里一个都没有。
+    #[test]
+    fn argument_path_only_on_external_program_arguments(req in arb_req()) {
+        let c = norm(&req);
+        let tagged: Vec<_> = c.actions.iter().filter(|a| a.flags.argument_path).collect();
+        if c.shape.kind() == CallShapeKind::Unparsable || req.tool.0 != "Bash" {
+            prop_assert!(tagged.is_empty(), "{:?}", c.actions);
+        }
+        for a in &tagged {
+            prop_assert!(matches!(a.kind, ActionKind::Read | ActionKind::Write | ActionKind::WriteAutorunConfig), "{a:?}");
+            prop_assert!(matches!(a.target, iwork_domain::action::ActionTarget::Path(_)));
+        }
+        if !tagged.is_empty() {
+            prop_assert!(c.actions.iter().any(|a| matches!(a.kind, ActionKind::Execute | ActionKind::OutsideSandbox | ActionKind::Publish | ActionKind::Push | ActionKind::Delete)));
+        }
+    }
+
     /// 推送三档都不放行（除非被拒绝层接走）；解析不了三档都不放行，与放行规则无关。
     #[test]
     fn push_and_unparsable_never_allow(live in arb_live(), mode in arb_mode(), extra in prop::sample::select(vec!["", " && ls", " && echo $X"])) {
@@ -360,7 +377,7 @@ fn default_layer_total() {
     ];
     let mut checked = 0;
     for kind in kinds {
-        for bits in 0..8u8 {
+        for bits in 0..16u8 {
             for mode in MODES {
                 let a = Action {
                     kind,
@@ -371,6 +388,7 @@ fn default_layer_total() {
                         out_of_bounds: bits & 1 != 0,
                         bypass_sandbox_requested: bits & 2 != 0,
                         opaque_script: bits & 4 != 0,
+                        argument_path: bits & 8 != 0,
                     },
                 };
                 let hit = rules
@@ -382,7 +400,7 @@ fn default_layer_total() {
             }
         }
     }
-    assert_eq!(checked, 11 * 8 * 3);
+    assert_eq!(checked, 11 * 16 * 3);
     // default.push 不可达：必问层先接走
     for m in MODES {
         assert_eq!(
