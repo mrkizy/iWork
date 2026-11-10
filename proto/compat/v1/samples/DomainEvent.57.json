@@ -1,0 +1,72 @@
+{
+  "approvalEvaluated": {
+    "turnId": "01JC0T0000000000000000TRN1",
+    "action": {
+      "kind": "ACTION_KIND_EXECUTE",
+      "target": {
+        "command": {
+          "program": "find",
+          "argv": [
+            "-H",
+            "gate/root",
+            "-delete"
+          ]
+        }
+      },
+      "toolName": "Bash",
+      "rawSummary": "chmod u+x gate; find -H gate/root -delete",
+      "resourceLimitHit": true,
+      "unlexable": true,
+      "pathUnresolved": true
+    },
+    "matchedRuleIds": [
+      "01JC0R0000000000000000RXE1"
+    ],
+    "rulesetVersion": "m1-2",
+    "verdict": {
+      "deny": {
+        "denialMemory": {
+          "kind": "ACTION_KIND_DELETE",
+          "target": {
+            "path": "/Users/me/code/iwork/build"
+          }
+        }
+      }
+    },
+    "layerHit": "RULE_LAYER_USER_DENY",
+    "durationMs": 1,
+    "snapshotListsSeq": "5",
+    "liveRulesSeq": "6",
+    "subActions": [
+      {
+        "kind": "ACTION_KIND_EXECUTE",
+        "target": {
+          "command": {
+            "program": "find",
+            "argv": [
+              "-H",
+              "gate/root",
+              "-delete"
+            ]
+          }
+        },
+        "toolName": "Bash",
+        "rawSummary": "chmod u+x gate; find -H gate/root -delete",
+        "resourceLimitHit": true,
+        "unlexable": true,
+        "pathUnresolved": true
+      }
+    ],
+    "callShape": "CALL_SHAPE_COMPOUND",
+    "snapshotRulePaths": [
+      {
+        "path": "/Users/me/.npmrc",
+        "resolved": "/Users/me/dotfiles/npmrc"
+      },
+      {
+        "path": "/etc",
+        "resolved": "/private/etc"
+      }
+    ]
+  }
+}

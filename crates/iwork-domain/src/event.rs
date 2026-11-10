@@ -358,6 +358,16 @@ pub struct ApprovalEvaluated {
     pub sub_actions: Vec<Action>,
     /// T07 之前的审计事件没有，为 `None`
     pub call_shape: Option<CallShapeKind>,
+    /// 会话快照里规则路径的解析结果（只含解析后位置与原位置不同的项，按原路径排序）：
+    /// 重放用它重算别名条目，不读磁盘（T07 方案 4.3、6.8）
+    pub snapshot_rule_paths: Vec<RulePathResolution>,
+}
+
+/// 一条规则路径解析到的真实位置（T07 方案 4.3）。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RulePathResolution {
+    pub path: std::path::PathBuf,
+    pub resolved: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

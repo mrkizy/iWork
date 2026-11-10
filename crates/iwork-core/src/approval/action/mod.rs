@@ -339,7 +339,9 @@ pub fn gather_path_facts(a: &Analysis, cwd: &CanonicalPath, fs: &impl PathResolv
     let mut facts = PathFacts::default();
     let resolve = |facts: &mut PathFacts, w: &str| {
         if !facts.resolved.contains_key(w) {
-            facts.resolved.insert(w.to_owned(), fs.resolve(cwd, w));
+            facts
+                .resolved
+                .insert(w.to_owned(), fs.resolve(cwd, w).map(|r| r.target));
         }
     };
     let need_fallback = match &a.structured {
@@ -498,6 +500,7 @@ fn finish_action(
             bypass_sandbox_requested: a.bypass_sandbox_requested,
             opaque_script: p.opaque,
             argument_path: tag_arguments && p.argument,
+            ..ActionFlags::default()
         },
     }
 }

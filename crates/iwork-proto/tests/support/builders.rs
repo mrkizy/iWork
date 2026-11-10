@@ -215,6 +215,9 @@ fn action_command() -> ActionSummary {
         bypass_sandbox_requested: true,
         opaque_script: true,
         argument_path: false,
+        resource_limit_hit: false,
+        unlexable: false,
+        path_unresolved: false,
     }
 }
 
@@ -232,6 +235,9 @@ fn action_paths() -> ActionSummary {
         bypass_sandbox_requested: false,
         opaque_script: false,
         argument_path: false,
+        resource_limit_hit: false,
+        unlexable: false,
+        path_unresolved: false,
     }
 }
 
@@ -248,6 +254,9 @@ fn action_argument_path() -> ActionSummary {
         bypass_sandbox_requested: false,
         opaque_script: false,
         argument_path: true,
+        resource_limit_hit: false,
+        unlexable: false,
+        path_unresolved: false,
     }
 }
 
@@ -267,6 +276,7 @@ pub fn ev_approval_evaluated_argument_path() -> DomainEvent {
         live_rules_seq: 4,
         sub_actions: vec![action_argument_path()],
         call_shape: CallShape::SingleSimpleCommand.into(),
+        snapshot_rule_paths: vec![],
     }))
 }
 
@@ -1174,6 +1184,7 @@ pub fn ev_approval_evaluated() -> DomainEvent {
         live_rules_seq: 0,
         sub_actions: vec![],
         call_shape: 0,
+        snapshot_rule_paths: vec![],
     }))
 }
 
@@ -1191,6 +1202,7 @@ pub fn ev_approval_evaluated_with_call() -> DomainEvent {
         live_rules_seq: 57,
         sub_actions: vec![action_command(), action_paths()],
         call_shape: CallShape::Compound.into(),
+        snapshot_rule_paths: vec![],
     }))
 }
 
@@ -1332,4 +1344,66 @@ pub fn ev_recovery_completed() -> DomainEvent {
     ev(E::RecoveryCompleted(RecoveryCompleted {
         interrupted_turn_ids: vec![s(TURN)],
     }))
+}
+
+/// T07 收口：命中「路径查不清」内置拒绝条目的子动作，审计带规则路径的解析结果。
+fn action_path_unresolved() -> ActionSummary {
+    ActionSummary {
+        kind: ActionKind::Execute.into(),
+        target: Some(ActionTarget {
+            kind: Some(action_target::Kind::Command(CommandTarget {
+                program: s("find"),
+                subcommand: None,
+                argv: vec![s("-H"), s("gate/root"), s("-delete")],
+            })),
+        }),
+        tool_name: s("Bash"),
+        raw_summary: s("chmod u+x gate; find -H gate/root -delete"),
+        out_of_bounds: false,
+        bypass_sandbox_requested: false,
+        opaque_script: false,
+        argument_path: false,
+        resource_limit_hit: true,
+        unlexable: true,
+        path_unresolved: true,
+    }
+}
+
+pub fn ev_approval_evaluated_rule_paths() -> DomainEvent {
+    ev(E::ApprovalEvaluated(ApprovalEvaluated {
+        turn_id: s(TURN),
+        action: Some(action_path_unresolved()),
+        matched_rule_ids: vec![s(RULE)],
+        ruleset_version: s("m1-2"),
+        verdict: Some(verdict_deny()),
+        layer_hit: RuleLayer::UserDeny.into(),
+        duration_ms: 1,
+        snapshot_lists_seq: 5,
+        live_rules_seq: 6,
+        sub_actions: vec![action_path_unresolved()],
+        call_shape: CallShape::Compound.into(),
+        snapshot_rule_paths: vec![
+            RulePathResolution {
+                path: s("/Users/me/.npmrc"),
+                resolved: s("/Users/me/dotfiles/npmrc"),
+            },
+            RulePathResolution {
+                path: s("/etc"),
+                resolved: s("/private/etc"),
+            },
+        ],
+    }))
+}
+
+/// T07 收口：UserDeny 层的内置拒绝条目按新标记匹配。
+pub fn rule_flag_deny() -> Rule {
+    Rule {
+        matcher: Some(RuleMatcher {
+            kind: Some(rule_matcher::Kind::Flag(ActionFlag::PathUnresolved.into())),
+        }),
+        layer: RuleLayer::UserDeny.into(),
+        effect: RuleEffect::Deny.into(),
+        label: s("deny.path-unresolved"),
+        ..rule_argument_path()
+    }
 }

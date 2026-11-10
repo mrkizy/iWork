@@ -632,6 +632,7 @@ where
             live_rules_seq: live_seq,
             sub_actions: call.actions.clone(),
             call_shape: Some(call.shape.kind()),
+            snapshot_rule_paths: Vec::new(),
         }
         .into();
         let actor = format!("agent:{}", keys.assistant);

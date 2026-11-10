@@ -60,6 +60,12 @@ pub struct ActionFlags {
     /// 角色未知的参数路径：归类成功的表外程序的位置参数、`--opt=值` / `name=值` 的值。
     /// 既记读又记写只为过底线与越界；工作区内不单独再问（T07 方案 3.4 补充，supervisor 2026-11-10 定）
     pub argument_path: bool,
+    /// 命令文字超过解析资源上限（256 KiB），事实没收全：内置条目三档拒绝（T07 方案 3.3、4.2）
+    pub resource_limit_hit: bool,
+    /// 整条命令原文词法都切不出来，没有事实可抽：内置条目三档拒绝（T07 方案 3.3、4.2）
+    pub unlexable: bool,
+    /// 调用里有路径查不清（权限错误、链接成环等）：内置条目三档拒绝（T07 方案 3.5、4.2）
+    pub path_unresolved: bool,
 }
 
 /// 规则按标记匹配时用的标记名（[`crate::rule::RuleMatcher::Flag`]），与 [`ActionFlags`] 的字段一一对应。
@@ -69,6 +75,9 @@ pub enum ActionFlag {
     BypassSandboxRequested,
     OpaqueScript,
     ArgumentPath,
+    ResourceLimitHit,
+    Unlexable,
+    PathUnresolved,
 }
 
 impl ActionFlags {
@@ -79,6 +88,9 @@ impl ActionFlags {
             ActionFlag::BypassSandboxRequested => self.bypass_sandbox_requested,
             ActionFlag::OpaqueScript => self.opaque_script,
             ActionFlag::ArgumentPath => self.argument_path,
+            ActionFlag::ResourceLimitHit => self.resource_limit_hit,
+            ActionFlag::Unlexable => self.unlexable,
+            ActionFlag::PathUnresolved => self.path_unresolved,
         }
     }
 }

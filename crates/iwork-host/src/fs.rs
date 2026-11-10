@@ -10,7 +10,9 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use iwork_domain::action::CanonicalPath;
-use iwork_ports::fs::{MAX_SYMLINK_HOPS, PathResolveError, PathResolver};
+use iwork_ports::fs::{
+    MAX_SYMLINK_HOPS, PathResolveError, PathResolver, ResolvedPath, split_last_component,
+};
 
 /// 真实文件系统上的路径解析。
 #[derive(Debug, Clone)]
@@ -154,13 +156,25 @@ fn strip_verbatim(p: PathBuf) -> PathBuf {
     p
 }
 
-impl PathResolver for OsPathResolver {
-    fn resolve(&self, cwd: &CanonicalPath, raw: &str) -> Result<CanonicalPath, PathResolveError> {
-        let err_raw = || raw.to_owned();
-        let io_err = |e: io::Error| PathResolveError::Io {
+/// 文件系统错误 → 解析错误。上级分量是普通文件单独一类（走不通），其余 I/O 错误（含权限）是查不清。
+fn io_error(raw: &str, e: &io::Error) -> PathResolveError {
+    if e.kind() == io::ErrorKind::NotADirectory {
+        PathResolveError::NotADirectory {
+            raw: raw.to_owned(),
+        }
+    } else {
+        PathResolveError::Io {
             raw: raw.to_owned(),
             message: e.to_string(),
-        };
+        }
+    }
+}
+
+impl OsPathResolver {
+    /// 末级跟随的完全解析（`ResolvedPath::target`）。
+    fn resolve_target(&self, cwd: &CanonicalPath, raw: &str) -> Result<PathBuf, PathResolveError> {
+        let err_raw = || raw.to_owned();
+        let io_err = |e: io::Error| io_error(raw, &e);
         if raw.is_empty() {
             return Err(PathResolveError::Empty);
         }
@@ -178,7 +192,7 @@ impl PathResolver for OsPathResolver {
         if let Ok(real) = joined.canonicalize() {
             let real = strip_verbatim(real);
             return if real.to_str().is_some() {
-                Ok(CanonicalPath(real))
+                Ok(real)
             } else {
                 Err(PathResolveError::NotUtf8 { raw: err_raw() })
             };
@@ -186,7 +200,7 @@ impl PathResolver for OsPathResolver {
         // 第二条快路径：目标还不存在（将要写的文件）。尾段没有 `..` 时，找最深的已存在上级一次解析，
         // 再确认紧接着的分量确实不存在（悬空的符号链接也算存在，交给逐分量的慢路径）
         if let Some(found) = existing_ancestor(&joined, |n| self.missing_name(n)) {
-            return found.map(CanonicalPath);
+            return found;
         }
         let mut queue: VecDeque<Part> = parts(Path::new(rest)).into();
         let mut missing = false;
@@ -233,7 +247,52 @@ impl PathResolver for OsPathResolver {
         if current.to_str().is_none() {
             return Err(PathResolveError::NotUtf8 { raw: err_raw() });
         }
-        Ok(CanonicalPath(current))
+        Ok(current)
+    }
+
+    /// 末级不跟随的视图：末级是符号链接时是「父路径的完全解析 / 链接名」，否则等于 `target`。
+    fn resolve_entry(
+        &self,
+        cwd: &CanonicalPath,
+        raw: &str,
+        target: &Path,
+    ) -> Result<PathBuf, PathResolveError> {
+        let Some((parent_raw, name)) = split_last_component(raw) else {
+            return Ok(target.to_path_buf());
+        };
+        let parent = self.resolve_target(cwd, parent_raw)?;
+        let at = parent.join(name);
+        match std::fs::symlink_metadata(&at) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                Ok(parent.join(self.actual_name(&parent, name)))
+            }
+            _ => Ok(target.to_path_buf()),
+        }
+    }
+
+    /// 已存在的目录项在磁盘上的写法：大小写不敏感时从目录里找，指纹与规则比较都用同一种写法。
+    fn actual_name(&self, dir: &Path, name: &str) -> OsString {
+        if self.case_insensitive
+            && let Ok(entries) = std::fs::read_dir(dir)
+        {
+            for e in entries.flatten() {
+                if self.eq_name(&e.file_name(), std::ffi::OsStr::new(name)) {
+                    return e.file_name();
+                }
+            }
+        }
+        OsString::from(name)
+    }
+}
+
+impl PathResolver for OsPathResolver {
+    fn resolve(&self, cwd: &CanonicalPath, raw: &str) -> Result<ResolvedPath, PathResolveError> {
+        let target = self.resolve_target(cwd, raw)?;
+        let entry = self.resolve_entry(cwd, raw, &target)?;
+        Ok(ResolvedPath {
+            entry: CanonicalPath(entry),
+            target: CanonicalPath(target),
+        })
     }
 
     fn same_path<A: AsRef<Path> + ?Sized, B: AsRef<Path> + ?Sized>(&self, a: &A, b: &B) -> bool {

@@ -148,6 +148,9 @@ enum_pair!(action_flag_to_proto, action_flag_from_proto, ActionFlag, pb::ActionF
     ActionFlag::BypassSandboxRequested => pb::ActionFlag::BypassSandboxRequested,
     ActionFlag::OpaqueScript => pb::ActionFlag::OpaqueScript,
     ActionFlag::ArgumentPath => pb::ActionFlag::ArgumentPath,
+    ActionFlag::ResourceLimitHit => pb::ActionFlag::ResourceLimitHit,
+    ActionFlag::Unlexable => pb::ActionFlag::Unlexable,
+    ActionFlag::PathUnresolved => pb::ActionFlag::PathUnresolved,
 });
 enum_pair!(call_shape_to_proto, call_shape_from_proto, CallShapeKind, pb::CallShape, {
     CallShapeKind::Tool => pb::CallShape::Tool,
@@ -931,6 +934,9 @@ pub fn action_to_proto(a: &Action) -> R<pb::ActionSummary> {
         bypass_sandbox_requested: a.flags.bypass_sandbox_requested,
         opaque_script: a.flags.opaque_script,
         argument_path: a.flags.argument_path,
+        resource_limit_hit: a.flags.resource_limit_hit,
+        unlexable: a.flags.unlexable,
+        path_unresolved: a.flags.path_unresolved,
     })
 }
 
@@ -947,6 +953,9 @@ pub fn action_from_proto(kind: &'static str, a: Option<&pb::ActionSummary>) -> R
             bypass_sandbox_requested: a.bypass_sandbox_requested,
             opaque_script: a.opaque_script,
             argument_path: a.argument_path,
+            resource_limit_hit: a.resource_limit_hit,
+            unlexable: a.unlexable,
+            path_unresolved: a.path_unresolved,
         },
     })
 }

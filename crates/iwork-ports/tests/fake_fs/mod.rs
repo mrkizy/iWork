@@ -6,27 +6,37 @@
 
 #![allow(dead_code, reason = "各测试各用一部分")]
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
 use iwork_domain::action::CanonicalPath;
-use iwork_ports::fs::{MAX_SYMLINK_HOPS, PathResolveError, PathResolver};
+use iwork_ports::fs::{
+    MAX_SYMLINK_HOPS, PathResolveError, PathResolver, ResolvedPath, split_last_component,
+};
 
-/// 内存文件系统：一组已存在的路径（父目录自动存在）与一组符号链接。
+/// 节点种类。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FakeNode {
+    File,
+    Dir,
+    Symlink(PathBuf),
+    /// 没有执行（搜索）权限的目录：它自己能 lstat，要穿过它查里面的东西时报权限错误
+    Denied,
+}
+
+/// 内存文件系统：路径 → 节点。`add` 的上级目录自动存在。
 #[derive(Debug, Clone)]
 pub struct FakeFs {
     pub home: PathBuf,
     pub case_insensitive: bool,
-    existing: BTreeSet<PathBuf>,
-    /// 链接所在位置 → 链接内容（可以是相对路径）
-    symlinks: BTreeMap<PathBuf, PathBuf>,
+    nodes: BTreeMap<PathBuf, FakeNode>,
 }
 
 enum Entry {
     Missing,
     Link(PathBuf),
-    Exists(PathBuf),
+    Exists(PathBuf, FakeNode),
 }
 
 impl FakeFs {
@@ -35,31 +45,59 @@ impl FakeFs {
         let mut fs = Self {
             home: home.clone(),
             case_insensitive,
-            existing: BTreeSet::new(),
-            symlinks: BTreeMap::new(),
+            nodes: BTreeMap::new(),
         };
         fs.add(&home);
         fs
     }
 
-    /// 加一个已存在的路径（文件或目录），连同全部上级目录。
+    /// 加一个已存在的目录，连同全部上级目录。
     pub fn add(&mut self, path: impl AsRef<Path>) -> &mut Self {
-        let mut p = PathBuf::new();
-        for c in path.as_ref().components() {
-            p.push(c);
-            self.existing.insert(p.clone());
-        }
+        self.ancestors(path.as_ref());
+        self.nodes
+            .entry(path.as_ref().to_path_buf())
+            .or_insert(FakeNode::Dir);
         self
     }
 
-    /// 在 `at` 放一个指向 `target` 的符号链接（`at` 的上级目录自动存在）。
+    /// 加一个普通文件（上级目录自动存在）：前缀分量是它时解析报 `NotADirectory`。
+    pub fn file(&mut self, path: impl AsRef<Path>) -> &mut Self {
+        self.ancestors(path.as_ref());
+        self.nodes
+            .insert(path.as_ref().to_path_buf(), FakeNode::File);
+        self
+    }
+
+    /// 把一个目录标成没有搜索权限。
+    pub fn deny(&mut self, path: impl AsRef<Path>) -> &mut Self {
+        self.ancestors(path.as_ref());
+        self.nodes
+            .insert(path.as_ref().to_path_buf(), FakeNode::Denied);
+        self
+    }
+
+    /// 在 `at` 放一个指向 `target` 的符号链接（`at` 的上级目录自动存在；已有的节点被替换）。
     pub fn link(&mut self, at: impl AsRef<Path>, target: impl Into<PathBuf>) -> &mut Self {
         let at = at.as_ref();
-        if let Some(parent) = at.parent() {
-            self.add(parent);
-        }
-        self.symlinks.insert(at.to_path_buf(), target.into());
+        self.ancestors(at);
+        self.nodes
+            .insert(at.to_path_buf(), FakeNode::Symlink(target.into()));
         self
+    }
+
+    /// 删掉一个节点（换链接、改回普通文件的测试用）。
+    pub fn remove(&mut self, path: impl AsRef<Path>) -> &mut Self {
+        self.nodes.remove(path.as_ref());
+        self
+    }
+
+    fn ancestors(&mut self, path: &Path) {
+        let mut p = PathBuf::new();
+        let comps: Vec<_> = path.components().collect();
+        for c in comps.iter().take(comps.len().saturating_sub(1)) {
+            p.push(c);
+            self.nodes.entry(p.clone()).or_insert(FakeNode::Dir);
+        }
     }
 
     fn eq_name(&self, a: &Path, b: &Path) -> bool {
@@ -80,11 +118,14 @@ impl FakeFs {
     }
 
     fn lstat(&self, p: &Path) -> Entry {
-        if let Some((_, target)) = self.symlinks.iter().find(|(k, _)| self.eq_name(k, p)) {
-            return Entry::Link(target.clone());
-        }
-        match self.existing.iter().find(|k| self.eq_name(k, p)) {
-            Some(actual) => Entry::Exists(actual.clone()),
+        let found = if self.case_insensitive {
+            self.nodes.iter().find(|(k, _)| self.eq_name(k, p))
+        } else {
+            self.nodes.get_key_value(p)
+        };
+        match found {
+            Some((_, FakeNode::Symlink(target))) => Entry::Link(target.clone()),
+            Some((actual, node)) => Entry::Exists(actual.clone(), node.clone()),
             None => Entry::Missing,
         }
     }
@@ -96,35 +137,8 @@ impl FakeFs {
                 .zip(&b)
                 .all(|(x, y)| self.eq_name(x.as_ref(), y.as_ref()))
     }
-}
 
-/// 路径的一个分量（自有数据，可以放进队列）。
-enum Part {
-    /// 根（含 Windows 的盘符前缀）
-    Root(PathBuf),
-    Parent,
-    Name(OsString),
-}
-
-fn parts(p: &Path) -> Vec<Part> {
-    let mut root = PathBuf::new();
-    let mut out = Vec::new();
-    for c in p.components() {
-        match c {
-            Component::Prefix(_) | Component::RootDir => root.push(c.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => out.push(Part::Parent),
-            Component::Normal(n) => out.push(Part::Name(n.to_owned())),
-        }
-    }
-    if !root.as_os_str().is_empty() {
-        out.insert(0, Part::Root(root));
-    }
-    out
-}
-
-impl PathResolver for FakeFs {
-    fn resolve(&self, cwd: &CanonicalPath, raw: &str) -> Result<CanonicalPath, PathResolveError> {
+    fn resolve_target(&self, cwd: &CanonicalPath, raw: &str) -> Result<PathBuf, PathResolveError> {
         let err_raw = || raw.to_owned();
         if raw.is_empty() {
             return Err(PathResolveError::Empty);
@@ -156,12 +170,25 @@ impl PathResolver for FakeFs {
                         current = current.join(self.missing_name(&name));
                         continue;
                     }
+                    // 查 current 里的东西：current 自己必须是能进去的目录
+                    match self.lstat(&current) {
+                        Entry::Exists(_, FakeNode::File) => {
+                            return Err(PathResolveError::NotADirectory { raw: err_raw() });
+                        }
+                        Entry::Exists(_, FakeNode::Denied) => {
+                            return Err(PathResolveError::Io {
+                                raw: err_raw(),
+                                message: "Permission denied (os error 13)".into(),
+                            });
+                        }
+                        _ => {}
+                    }
                     match self.lstat(&candidate) {
                         Entry::Missing => {
                             missing = true;
                             current = current.join(self.missing_name(&name));
                         }
-                        Entry::Exists(actual) => current = actual,
+                        Entry::Exists(actual, _) => current = actual,
                         Entry::Link(target) => {
                             hops += 1;
                             if hops > MAX_SYMLINK_HOPS {
@@ -176,7 +203,60 @@ impl PathResolver for FakeFs {
                 }
             }
         }
-        Ok(CanonicalPath(current))
+        Ok(current)
+    }
+}
+
+/// 路径的一个分量（自有数据，可以放进队列）。
+enum Part {
+    /// 根（含 Windows 的盘符前缀）
+    Root(PathBuf),
+    Parent,
+    Name(OsString),
+}
+
+fn parts(p: &Path) -> Vec<Part> {
+    let mut root = PathBuf::new();
+    let mut out = Vec::new();
+    for c in p.components() {
+        match c {
+            Component::Prefix(_) | Component::RootDir => root.push(c.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => out.push(Part::Parent),
+            Component::Normal(n) => out.push(Part::Name(n.to_owned())),
+        }
+    }
+    if !root.as_os_str().is_empty() {
+        out.insert(0, Part::Root(root));
+    }
+    out
+}
+
+impl PathResolver for FakeFs {
+    fn resolve(&self, cwd: &CanonicalPath, raw: &str) -> Result<ResolvedPath, PathResolveError> {
+        let target = self.resolve_target(cwd, raw)?;
+        let entry = match split_last_component(raw) {
+            None => target.clone(),
+            Some((parent_raw, name)) => {
+                let parent = self.resolve_target(cwd, parent_raw)?;
+                match self.lstat(&parent.join(name)) {
+                    Entry::Link(_) => {
+                        let actual = self
+                            .nodes
+                            .keys()
+                            .find(|k| self.eq_name(k, &parent.join(name)))
+                            .and_then(|k| k.file_name().map(OsString::from))
+                            .unwrap_or_else(|| OsString::from(name));
+                        parent.join(actual)
+                    }
+                    _ => target.clone(),
+                }
+            }
+        };
+        Ok(ResolvedPath {
+            entry: CanonicalPath(entry),
+            target: CanonicalPath(target),
+        })
     }
 
     fn same_path<A: AsRef<Path> + ?Sized, B: AsRef<Path> + ?Sized>(&self, a: &A, b: &B) -> bool {

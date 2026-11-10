@@ -202,6 +202,16 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
             live_rules_seq: e.live_rules_seq.0,
             sub_actions: actions_to_proto(&e.sub_actions)?,
             call_shape: e.call_shape.map_or(0, call_shape_to_proto),
+            snapshot_rule_paths: e
+                .snapshot_rule_paths
+                .iter()
+                .map(|r| {
+                    Ok(pb::RulePathResolution {
+                        path: path_to_proto("RulePathResolution", "path", &r.path)?,
+                        resolved: path_to_proto("RulePathResolution", "resolved", &r.resolved)?,
+                    })
+                })
+                .collect::<R<_>>()?,
         }),
         DomainEvent::RuleRemembered(e) => P::RuleRemembered(pb::RuleRemembered {
             rule: Some(rule_to_proto(&e.rule)?),
@@ -731,6 +741,14 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
                     0 => None,
                     v => Some(call_shape_from_proto(K, "call_shape", v)?),
                 },
+                snapshot_rule_paths: e
+                    .snapshot_rule_paths
+                    .iter()
+                    .map(|r| ev::RulePathResolution {
+                        path: path_from_proto(&r.path),
+                        resolved: path_from_proto(&r.resolved),
+                    })
+                    .collect(),
             }
             .into()
         }

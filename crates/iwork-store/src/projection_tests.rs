@@ -332,6 +332,7 @@ fn approval_terminal_states_online_and_rebuilt() {
         let mut a = approval(n, 20, 10);
         a.review = ReviewState::Passed {
             review_id: ReviewId(tid(99)),
+            reason: String::new(),
         };
         feed.ok(vec![
             ApprovalRequested {

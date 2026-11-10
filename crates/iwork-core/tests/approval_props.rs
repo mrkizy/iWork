@@ -377,7 +377,7 @@ fn default_layer_total() {
     ];
     let mut checked = 0;
     for kind in kinds {
-        for bits in 0..16u8 {
+        for bits in 0..128u8 {
             for mode in MODES {
                 let a = Action {
                     kind,
@@ -389,6 +389,9 @@ fn default_layer_total() {
                         bypass_sandbox_requested: bits & 2 != 0,
                         opaque_script: bits & 4 != 0,
                         argument_path: bits & 8 != 0,
+                        resource_limit_hit: bits & 16 != 0,
+                        unlexable: bits & 32 != 0,
+                        path_unresolved: bits & 64 != 0,
                     },
                 };
                 let hit = rules
@@ -400,7 +403,7 @@ fn default_layer_total() {
             }
         }
     }
-    assert_eq!(checked, 11 * 16 * 3);
+    assert_eq!(checked, 11 * 128 * 3);
     // default.push 不可达：必问层先接走
     for m in MODES {
         assert_eq!(

@@ -167,19 +167,25 @@ fn action() -> impl Strategy<Value = Action> + Clone {
         text(),
         text(),
         any::<(bool, bool, bool, bool)>(),
+        any::<(bool, bool, bool)>(),
     )
-        .prop_map(|(kind, target, tool, raw_summary, (a, b, c, d))| Action {
-            kind,
-            target,
-            tool: ToolRef(tool),
-            raw_summary,
-            flags: ActionFlags {
-                out_of_bounds: a,
-                bypass_sandbox_requested: b,
-                opaque_script: c,
-                argument_path: d,
+        .prop_map(
+            |(kind, target, tool, raw_summary, (a, b, c, d), (e, f, g))| Action {
+                kind,
+                target,
+                tool: ToolRef(tool),
+                raw_summary,
+                flags: ActionFlags {
+                    out_of_bounds: a,
+                    bypass_sandbox_requested: b,
+                    opaque_script: c,
+                    argument_path: d,
+                    resource_limit_hit: e,
+                    unlexable: f,
+                    path_unresolved: g,
+                },
             },
-        })
+        )
 }
 
 fn project_settings() -> impl Strategy<Value = ProjectSettings> + Clone {
@@ -627,7 +633,10 @@ fn rule() -> impl Strategy<Value = RuleEntry> + Clone {
             ActionFlag::OutOfBounds,
             ActionFlag::BypassSandboxRequested,
             ActionFlag::OpaqueScript,
-            ActionFlag::ArgumentPath
+            ActionFlag::ArgumentPath,
+            ActionFlag::ResourceLimitHit,
+            ActionFlag::Unlexable,
+            ActionFlag::PathUnresolved
         ])
         .prop_map(RuleMatcher::Flag),
     ];
@@ -1226,6 +1235,13 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                         any::<u64>(),
                         prop::collection::vec(action(), 0..3),
                         proptest::option::of(call_shape()),
+                        prop::collection::vec(
+                            (text(), text()).prop_map(|(a, b)| RulePathResolution {
+                                path: a.into(),
+                                resolved: b.into(),
+                            }),
+                            0..3,
+                        ),
                     ),
                 )
                     .prop_map(
@@ -1237,7 +1253,13 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                             verdict,
                             layer_hit,
                             duration_ms,
-                            (snapshot_lists_seq, live_rules_seq, sub_actions, call_shape),
+                            (
+                                snapshot_lists_seq,
+                                live_rules_seq,
+                                sub_actions,
+                                call_shape,
+                                snapshot_rule_paths,
+                            ),
                         )| ApprovalEvaluated {
                             turn_id,
                             action,
@@ -1250,6 +1272,7 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                             live_rules_seq: Seq(live_rules_seq),
                             sub_actions,
                             call_shape,
+                            snapshot_rule_paths,
                         },
                     ),
             ),

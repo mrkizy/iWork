@@ -70,7 +70,7 @@ pub fn snapshot_for(
 fn real_location_alias(rule: &RuleEntry, fs: &impl PathResolver) -> Option<RuleEntry> {
     let path = path_of(&rule.matcher)?;
     let root = CanonicalPath(path.ancestors().last()?.to_path_buf());
-    let real = fs.resolve(&root, path.to_str()?).ok()?;
+    let real = fs.resolve(&root, path.to_str()?).ok()?.target;
     if fs.same_path(&real, path) {
         return None;
     }

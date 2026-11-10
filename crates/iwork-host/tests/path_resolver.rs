@@ -21,6 +21,20 @@ struct Layout {
     fake: FakeFs,
 }
 
+impl Drop for Layout {
+    /// 恢复权限，临时目录才删得掉。
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                self.root.join("ws/gate"),
+                std::fs::Permissions::from_mode(0o755),
+            );
+        }
+    }
+}
+
 impl Layout {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -34,7 +48,7 @@ impl Layout {
         };
         let touch = |fake: &mut FakeFs, rel: &str| {
             std::fs::write(root.join(rel), b"x").unwrap();
-            fake.add(root.join(rel));
+            fake.file(root.join(rel));
         };
         mkdir(&mut fake, "home/.ssh");
         touch(&mut fake, "home/.ssh/id_rsa");
@@ -53,10 +67,22 @@ impl Layout {
             ("alias", PathBuf::from("real")),
             ("ws/loop1", PathBuf::from("loop2")),
             ("ws/loop2", PathBuf::from("loop1")),
+            // 末级是链接：指向 .git/config 的文件链接、指向 .git 的目录链接
+            ("ws/c", PathBuf::from(".git/config")),
+            ("ws/g", PathBuf::from(".git")),
         ];
         for (at, target) in links {
             symlink(target, &root.join(at));
             fake.link(root.join(at), target.clone());
+        }
+        // 没有搜索权限的目录（查不清）：真实文件系统上 chmod 000，假的标 Denied
+        mkdir(&mut fake, "ws/gate/root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.join("ws/gate"), std::fs::Permissions::from_mode(0o000))
+                .unwrap();
+            fake.deny(root.join("ws/gate"));
         }
         let os = OsPathResolver::new(home.canonicalize().unwrap(), ci);
         Self {
@@ -92,24 +118,25 @@ fn dotdot_escapes_workspace() {
     let l = Layout::new();
     let r =
         l.os.resolve(&l.ws(), "src/../../outside/secret.txt")
-            .unwrap();
+            .unwrap()
+            .target;
     assert_eq!(r, l.p("outside/secret.txt"));
     assert!(!l.os.is_under(&r, &l.ws()));
     // 对照：留在工作区内的 ..
-    let r = l.os.resolve(&l.ws(), "src/../src/a.rs").unwrap();
+    let r = l.os.resolve(&l.ws(), "src/../src/a.rs").unwrap().target;
     assert!(l.os.is_under(&r, &l.ws()));
 }
 
 #[test]
 fn symlink_out_of_workspace() {
     let l = Layout::new();
-    let r = l.os.resolve(&l.ws(), "out/secret.txt").unwrap();
+    let r = l.os.resolve(&l.ws(), "out/secret.txt").unwrap().target;
     assert_eq!(r, l.p("outside/secret.txt"));
     assert!(!l.os.is_under(&r, &l.ws()));
-    let r = l.os.resolve(&l.ws(), "keys/id_rsa").unwrap();
+    let r = l.os.resolve(&l.ws(), "keys/id_rsa").unwrap().target;
     assert!(l.os.is_under(&r, &l.p("home/.ssh")));
     // 还不存在的文件：真实前缀之后原样接上
-    let r = l.os.resolve(&l.ws(), "keys/new_key").unwrap();
+    let r = l.os.resolve(&l.ws(), "keys/new_key").unwrap().target;
     assert_eq!(r, l.p("home/.ssh/new_key"));
 }
 
@@ -117,7 +144,7 @@ fn symlink_out_of_workspace() {
 #[test]
 fn dotdot_after_symlink_uses_real_parent() {
     let l = Layout::new();
-    let r = l.os.resolve(&l.ws(), "objs/../config").unwrap();
+    let r = l.os.resolve(&l.ws(), "objs/../config").unwrap().target;
     assert_eq!(r, l.p("ws/.git/config"));
     assert!(l.os.is_under(&r, &l.p("ws/.git")));
 }
@@ -125,7 +152,7 @@ fn dotdot_after_symlink_uses_real_parent() {
 #[test]
 fn case_variant() {
     let l = Layout::new();
-    let r = l.os.resolve(&l.ws(), ".GIT/CONFIG").unwrap();
+    let r = l.os.resolve(&l.ws(), ".GIT/CONFIG").unwrap().target;
     if OsPathResolver::detect_case_insensitive(&l.root).unwrap() {
         // 已存在的分量取磁盘上的大小写
         assert_eq!(r, l.p("ws/.git/config"));
@@ -140,12 +167,12 @@ fn case_variant() {
 #[test]
 fn alias_directory() {
     let l = Layout::new();
-    let r = l.os.resolve(&l.ws(), "../alias/x").unwrap();
+    let r = l.os.resolve(&l.ws(), "../alias/x").unwrap().target;
     assert_eq!(r, l.p("real/x"));
     // macOS 的 /tmp 是 /private/tmp 的链接
     #[cfg(target_os = "macos")]
     {
-        let r = l.os.resolve(&l.ws(), "/tmp/iwork-x").unwrap();
+        let r = l.os.resolve(&l.ws(), "/tmp/iwork-x").unwrap().target;
         assert_eq!(r.0, PathBuf::from("/private/tmp/iwork-x"));
     }
 }
@@ -154,10 +181,10 @@ fn alias_directory() {
 fn home_and_errors() {
     let l = Layout::new();
     assert_eq!(
-        l.os.resolve(&l.ws(), "~/.ssh/id_rsa").unwrap(),
+        l.os.resolve(&l.ws(), "~/.ssh/id_rsa").unwrap().target,
         l.p("home/.ssh/id_rsa")
     );
-    assert_eq!(l.os.resolve(&l.ws(), "~").unwrap(), l.p("home"));
+    assert_eq!(l.os.resolve(&l.ws(), "~").unwrap().target, l.p("home"));
     assert!(matches!(
         l.os.resolve(&l.ws(), "~root/x"),
         Err(PathResolveError::OtherUserHome { .. })
@@ -194,15 +221,27 @@ fn fake_fs_agrees_with_os() {
         "~",
         "~root",
         "missing/../x",
+        "c",
+        "g",
+        "g/",
+        "g/.",
+        "g/config",
+        "out",
+        "../ws/c",
         "loop1",
         "",
         "/",
     ];
+    let mut raws = raws.to_vec();
+    // Windows 上普通文件后再接分量报「找不到」而不是「不是目录」，权限也没有 chmod 000：只在 unix 对拍
+    #[cfg(unix)]
+    raws.extend(["src/a.rs/x", "gate/root", "gate"]);
     for raw in raws {
         let os = l.os.resolve(&l.ws(), raw);
         let fake = l.fake.resolve(&l.ws(), raw);
         match (&os, &fake) {
             (Ok(a), Ok(b)) => assert_eq!(a, b, "{raw:?}"),
+            // 权限错误的文字随平台不同，只比种类
             (Err(a), Err(b)) => assert_eq!(
                 std::mem::discriminant(a),
                 std::mem::discriminant(b),
@@ -211,4 +250,55 @@ fn fake_fs_agrees_with_os() {
             _ => panic!("{raw:?}：真实 {os:?}，假的 {fake:?}"),
         }
     }
+}
+
+/// 末级是链接时两种视图不同（方案 2.3）：`entry` 是链接所在位置，`target` 是链接指向。
+#[test]
+fn last_component_link_has_two_views() {
+    let l = Layout::new();
+    let r = l.os.resolve(&l.ws(), "c").unwrap();
+    assert_eq!(r.entry, l.p("ws/c"));
+    assert_eq!(r.target, l.p("ws/.git/config"));
+    // 中间分量的链接照常跟随，末级不是链接时两种视图相同
+    let r = l.os.resolve(&l.ws(), "g/config").unwrap();
+    assert_eq!(r.entry, l.p("ws/.git/config"));
+    assert_eq!(r.target, l.p("ws/.git/config"));
+    // 对照：普通文件
+    let r = l.os.resolve(&l.ws(), "src/a.rs").unwrap();
+    assert_eq!(r.entry, r.target);
+}
+
+/// 带尾斜杠、末级是 `.` 时内核先跟随末级：两种视图都是链接指向（9/F-1）。
+#[test]
+fn trailing_slash_follows_last_link() {
+    let l = Layout::new();
+    for raw in ["g/", "g/."] {
+        let r = l.os.resolve(&l.ws(), raw).unwrap();
+        assert_eq!(r.entry, l.p("ws/.git"), "{raw}");
+        assert_eq!(r.target, l.p("ws/.git"), "{raw}");
+    }
+    // 对照：不带尾斜杠时 entry 是链接本身
+    assert_eq!(l.os.resolve(&l.ws(), "g").unwrap().entry, l.p("ws/g"));
+}
+
+/// 前缀分量是普通文件：走不通（`NotADirectory`）；没有搜索权限的目录：查不清（Io）。
+#[test]
+fn not_a_directory_and_permission_are_classified() {
+    use iwork_ports::fs::ResolveCertainty;
+    let l = Layout::new();
+    #[cfg(unix)]
+    {
+        let e = l.os.resolve(&l.ws(), "src/a.rs/x").unwrap_err();
+        assert!(matches!(e, PathResolveError::NotADirectory { .. }), "{e:?}");
+        assert_eq!(e.certainty(), ResolveCertainty::Disproved);
+        let e = l.os.resolve(&l.ws(), "gate/root").unwrap_err();
+        assert!(matches!(e, PathResolveError::Io { .. }), "{e:?}");
+        assert_eq!(e.certainty(), ResolveCertainty::Unknown);
+        // 目录自己做末级时照常
+        assert!(l.os.resolve(&l.ws(), "gate").is_ok());
+    }
+    let e = l.os.resolve(&l.ws(), "nope/../x").unwrap_err();
+    assert_eq!(e.certainty(), ResolveCertainty::Disproved);
+    let e = l.os.resolve(&l.ws(), "loop1/x").unwrap_err();
+    assert_eq!(e.certainty(), ResolveCertainty::Unknown);
 }

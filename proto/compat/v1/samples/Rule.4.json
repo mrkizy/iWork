@@ -1,0 +1,18 @@
+{
+  "id": "01JC0R0000000000000000RXE1",
+  "layer": "RULE_LAYER_USER_DENY",
+  "matcher": {
+    "flag": "ACTION_FLAG_PATH_UNRESOLVED"
+  },
+  "effect": "RULE_EFFECT_DENY",
+  "source": {
+    "builtin": {
+      "rulesetVersion": "m1-1"
+    }
+  },
+  "scope": {
+    "global": {}
+  },
+  "createdAt": "2025-11-01T12:48:20.123Z",
+  "label": "deny.path-unresolved"
+}

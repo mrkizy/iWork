@@ -209,6 +209,12 @@ message ActionSummary {
   bool opaque_script = 7;
   // 角色未知的参数路径（表外程序的位置参数、--opt=值 / name=值 的值）：只为过底线与越界（T07）。
   bool argument_path = 8;
+  // 命令文字超过解析资源上限（T07 方案 3.3）。
+  bool resource_limit_hit = 9;
+  // 整条命令词法都切不出来（T07 方案 3.3）。
+  bool unlexable = 10;
+  // 调用里有路径查不清（T07 方案 3.5）。
+  bool path_unresolved = 11;
 }
 
 enum ActionKind {
@@ -459,13 +465,16 @@ message AllMatcher {
   repeated RuleMatcher matchers = 1;
 }
 
-// 规则按标记匹配时用的标记名，与 ActionSummary 的三个布尔字段一一对应。
+// 规则按标记匹配时用的标记名，与 ActionSummary 的标记布尔字段一一对应。
 enum ActionFlag {
   ACTION_FLAG_UNSPECIFIED = 0;
   ACTION_FLAG_OUT_OF_BOUNDS = 1;
   ACTION_FLAG_BYPASS_SANDBOX_REQUESTED = 2;
   ACTION_FLAG_OPAQUE_SCRIPT = 3;
   ACTION_FLAG_ARGUMENT_PATH = 4;
+  ACTION_FLAG_RESOURCE_LIMIT_HIT = 5;
+  ACTION_FLAG_UNLEXABLE = 6;
+  ACTION_FLAG_PATH_UNRESOLVED = 7;
 }
 
 message ProgramSubcommand {
