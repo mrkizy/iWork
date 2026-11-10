@@ -32,10 +32,10 @@
 | 卡 | 产物 | worker（终端） | 审查任务 ID / 轮次 | 还开着的问题 | 下一步 |
 | --- | --- | --- | --- | --- | --- |
 | T01 | 已合入 main `bb6d69a` | — | `2026-11-09-m1-t01` 已关 | 验收 5 空窗口截图未补（屏幕锁定） | 有空时补截图 |
-| T02 | 分支 `cao/fecce968` @ `24adbca`（合并 main `e5877a2` + 返工） | developer `fecce968`；reviewer A `3036f50a`、B `6723c1bb` | `2026-11-10-m1-t02` 第 2 轮复审中 | 1/F-1～F-7 待复核 | 等 A/B 第 2 轮结论 |
-| T03 | 实施分支 `cao/2e7bcbe5` @ `5b0ddae`（17 提交，+13438） | developer `2e7bcbe5`；reviewer A `b520b815`（对端校验、传输）、B `9c2a6c04`（帧、连接、事件流、客户端） | 实施任务 `2026-11-10-m1-t03` 第 1 轮审查中 | — | 等审查；**待产品负责人定**：fork+exec 冒充绕过对端校验（t0-findings 6.5，supervisor 建议登记已知限制）；Windows 映像绑定未实测、M1 暂不支持（建议加 Windows CI 跑 N2 脚本） |
+| T02 | 分支 `cao/fecce968` @ `24adbca` | developer `fecce968`；reviewer A `3036f50a`、B `6723c1bb` | `2026-11-10-m1-t02` 第 2 轮：第 1 轮 7 条全关 | 2/F-1（返工缺热路径前后基准） | developer 补基准 → A 块核 → 合入 main（统一 ADR 编号） |
+| T03 | 实施分支 `cao/2e7bcbe5` @ `c3e8cda` | developer `2e7bcbe5`；reviewer A `b520b815`、B `9c2a6c04` | `2026-11-10-m1-t03` 第 1 轮不通过（10 条：6 blocking、4 important） | 1/F-1～F-10 | developer 返工中；**待产品负责人定**：fork+exec 冒充（建议已知限制）、Windows CI job（等 gh 登录与推送同意） |
 | T05 | 已合入 main `a6987d4` | —（worker 已删，retrospector 已复盘） | `2026-11-09-m1-t05` 已关 | — | — |
-| T07 | 方案 `docs/plans/T07.md` 定稿 `a597d87`；实施 developer `009e8660`（worktree） | architect `62a1aeb0`、方案 reviewer `bd0c2ab0` | 方案已关（七轮）；实施任务 `2026-11-10-m1-t07` | — | 实施中，第 0–3 步已提交；引擎接缝按 T05 的 PermissionDecider（`54ee753`）；加 ArgumentPath 默认放行条目解决手动档执行命令记不住（`2d92a17`） |
+| T07 | 实施分支 `cao/009e8660` @ `dea62cd`（9 提交，+14255） | developer `009e8660`；reviewer A `2eb2187c`（解析、归一、规则、求值）、B `c2ab0fc2`（引擎、类型、审计、恢复） | `2026-11-10-m1-t07` 第 1 轮审查中 | — | 等审查结论 |
 | T08 | 分支 `cao/49facf33` @ `bbefd46`（本地，远端还在 `52f35cc`） | developer `49facf33`；reviewer `8c64ada5` | `2026-11-09-m1-t08` 第 5 轮通过，全部 finding 已关 | — | 只差 CI：run 42660636464（52f35cc）三平台 test 失败，supervisor 在临时副本里用无 git 身份的干净环境复现；合入前需三平台全绿 |
 | T04、T06、T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
 
