@@ -12,8 +12,11 @@
 
 mod convert;
 mod facts;
+mod reparse;
+mod strings;
 mod word;
 
+pub use facts::{TEXT_LIMIT, literal_facts};
 pub use word::literal_value;
 
 /// 一段 Bash 脚本：若干列表项，按出现顺序。
@@ -101,13 +104,19 @@ impl RedirectKind {
     }
 }
 
-/// 放弃转换之前已经可靠识别出来的字面事实（方案 3.3）。只收字面值，含展开的词不收。
+/// 第一遍收到的字面事实（方案 3.3，[`literal_facts`]）。只收字面值，含展开的词不收。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartialFacts {
-    /// 任何节点（含复合命令、函数体）上的字面重定向目标（字面值）
+    /// 任何节点（含复合命令、函数体）上的字面重定向目标（字面值），原文与队列里的文字都算
     pub literal_redirects: Vec<(RedirectKind, String)>,
-    /// 全部命令里的字面词（含前置赋值词、for 的值列表）
+    /// 原文里全部命令的字面词（含前置赋值词、for 的值列表），按出现顺序
     pub literal_words: Vec<String>,
+    /// 工作队列里别的文字（替换体、shell 程序的参数）里的字面词：没有命令结构，只能用保守规则
+    pub queued_words: Vec<String>,
+    /// 处理的 shell 文字总量超过 [`TEXT_LIMIT`]，事实没收全
+    pub resource_limit: bool,
+    /// 整条命令原文连词法都切不出来，没有事实可抽
+    pub lex_failed: bool,
 }
 
 /// 解析不了：原因给审计与卡片看，事实给归一抽路径动作。
@@ -117,33 +126,27 @@ pub struct Unparsable {
     pub facts: PartialFacts,
 }
 
-/// 解析命令文字。纯函数：不读环境、不展开、不缓存。
+/// 解析命令文字。纯函数：不读环境、不展开、不缓存整段解析。
 ///
-/// 分两遍：第一遍在第三方解析器的完整 AST 上收集字面事实；第二遍转成小 AST，遇到表达不了的
-/// 形态返回 `Unparsable{why, facts: 第一遍的结果}`。第三方解析器本身失败时，事实取自词法分析的词。
+/// 转成小 AST，遇到表达不了的形态返回 `Unparsable{why, facts}`，`facts` 是第一遍 [`literal_facts`]
+/// 的结果（归类阶段放弃时调用方直接调 `literal_facts`，两种 `Unparsable` 读同一份事实）。
 pub fn parse(text: &str) -> Result<ShellScript, Unparsable> {
-    // 第三方解析器在异常输入上 panic 不能拖垮后台服务：按「解析不了」处理，结果仍是询问（失败即关闭）
-    let parsed = std::panic::catch_unwind(|| parse_program(text));
-    let program = match parsed {
-        Ok(Ok(program)) => program,
-        Ok(Err(why)) => {
-            return Err(Unparsable {
-                why,
-                facts: facts::from_tokens(text),
-            });
-        }
-        Err(_) => {
-            return Err(Unparsable {
-                why: "解析器内部错误".into(),
-                facts: PartialFacts::default(),
-            });
-        }
+    let fail = |why: String| Unparsable {
+        why,
+        facts: literal_facts(text),
     };
-    let facts = facts::collect(&program);
-    convert::program(&program).map_err(|why| Unparsable { why, facts })
+    if text.len() > TEXT_LIMIT {
+        return Err(fail(format!("命令文字超过 {} KiB", TEXT_LIMIT / 1024)));
+    }
+    // 第三方解析器在异常输入上 panic 不能拖垮后台服务：按「解析不了」处理
+    match std::panic::catch_unwind(|| parse_program(text)) {
+        Ok(Ok(program)) => convert::program(&program).map_err(fail),
+        Ok(Err(why)) => Err(fail(why)),
+        Err(_) => Err(fail("解析器内部错误".into())),
+    }
 }
 
-fn parse_program(text: &str) -> Result<brush_parser::ast::Program, String> {
+pub(crate) fn parse_program(text: &str) -> Result<brush_parser::ast::Program, String> {
     let options = brush_parser::ParserOptions::default();
     // Parser::new 走不带缓存的词法分析（cached 版本有全局状态，方案 3.3）
     let mut parser = brush_parser::Parser::new(text.as_bytes(), &options);

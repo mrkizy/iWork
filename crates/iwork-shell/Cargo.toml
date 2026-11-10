@@ -7,7 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-brush-parser.workspace = true
+# serde 特性：第一遍的通用遍历要走到 AST 与词片段的每个字符串叶子（方案 3.3）
+brush-parser = { workspace = true, features = ["serde"] }
+serde.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

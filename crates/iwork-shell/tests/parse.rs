@@ -189,7 +189,7 @@ fn partial_facts_survive_unparsable() {
         (
             "LC_ALL=C ssh -v -E.git/config host",
             &[],
-            &["ssh", "LC_ALL=C", "-v", "-E.git/config", "host"],
+            &["LC_ALL=C", "ssh", "-v", "-E.git/config", "host"],
         ),
         (
             r#"ssh -v -E.git/config host; echo "$UNUSED""#,
@@ -199,7 +199,7 @@ fn partial_facts_survive_unparsable() {
         (
             r#"LC_ALL=C ssh -E".git/config" host"#,
             &[],
-            &["ssh", "LC_ALL=C", "-E.git/config", "host"],
+            &["LC_ALL=C", "ssh", "-E.git/config", "host"],
         ),
         (
             "case x in a) cat ~/.ssh/id_rsa >> out;; esac",
@@ -214,16 +214,16 @@ fn partial_facts_survive_unparsable() {
         (
             "LC_ALL=C printf x > -out",
             &[(RedirectKind::Write, "-out")],
-            &["printf", "LC_ALL=C", "x"],
+            &["LC_ALL=C", "printf", "x"],
         ),
     ];
     for (text, redirects, words) in cases {
         let u = err(text);
-        let expected = PartialFacts {
-            literal_redirects: redirects.iter().map(|(k, t)| (*k, t.to_string())).collect(),
-            literal_words: words.iter().map(|w| w.to_string()).collect(),
-        };
-        assert_eq!(u.facts, expected, "{text:?}");
+        let redirects: Vec<(RedirectKind, String)> =
+            redirects.iter().map(|(k, t)| (*k, t.to_string())).collect();
+        let words: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+        assert_eq!(u.facts.literal_redirects, redirects, "{text:?}");
+        assert_eq!(u.facts.literal_words, words, "{text:?}");
     }
     // 语法错误：第三方解析器整体失败，词法分析切出的字面词仍在
     let u = err("cat ~/.ssh/id_rsa && && ls");
@@ -236,7 +236,158 @@ fn partial_facts_survive_unparsable() {
     assert_eq!(u.facts.literal_words, vec!["cat".to_string()]);
 }
 
+fn facts(text: &str) -> PartialFacts {
+    iwork_shell::literal_facts(text)
+}
+
+fn has_redirect(f: &PartialFacts, kind: RedirectKind, target: &str) -> bool {
+    f.literal_redirects
+        .iter()
+        .any(|(k, t)| *k == kind && t == target)
+}
+
+/// 9/F-7：替换体在任何词里都收——参数展开的操作数、算术展开、here-string、可展开 here-doc、
+/// 整体语法错时词法切出的词。对照：没有替换体的写法收不到。
+#[test]
+fn substitution_found_in_any_word() {
+    for text in [
+        "echo $(printf x > .git/config)",
+        "echo `printf x > .git/config`",
+        "echo ${x:-$(printf x > .git/config)}",
+        "echo $(( $(printf x > .git/config; echo 1) + 1 ))",
+        "cat <<< \"$(printf x > .git/config)\"",
+        "cat <<EOF\n$(printf x > .git/config)\nEOF\n",
+        "echo \"a $(printf x > .git/config) b\"",
+        "printf x > .git/config\nif\n",
+        "<(printf x > .git/config) cat",
+    ] {
+        let f = facts(text);
+        assert!(
+            has_redirect(&f, RedirectKind::Write, ".git/config")
+                || f.literal_words.iter().any(|w| w == ".git/config"),
+            "{text:?}：{f:?}"
+        );
+    }
+    // 对照
+    let f = facts("echo ${x:-y} $((1 + 2))");
+    assert!(f.literal_redirects.is_empty(), "{f:?}");
+}
+
+/// 8/F-1：没有深度上限，10 层嵌套照样收到。
+#[test]
+fn deep_nesting_has_no_depth_limit() {
+    let mut text = "printf x > .git/config".to_string();
+    for _ in 0..10 {
+        text = format!("echo $({text})");
+    }
+    let f = facts(&text);
+    assert!(
+        has_redirect(&f, RedirectKind::Write, ".git/config"),
+        "{f:?}"
+    );
+    assert!(!f.resource_limit);
+}
+
+/// 资源上限：总文字超过 256 KiB 置 resource_limit；以下不置。
+#[test]
+fn resource_limit_flags_oversized_text() {
+    let big = format!("echo {}", "a".repeat(iwork_shell::TEXT_LIMIT));
+    assert!(facts(&big).resource_limit);
+    assert!(parse(&big).unwrap_err().facts.resource_limit);
+    let small = format!("echo {}", "a".repeat(1000));
+    assert!(!facts(&small).resource_limit);
+    // 入队文字也算：原文不大，嵌套展开出来的总量超了
+    let chunk = "b".repeat(60 * 1024);
+    let nested = format!("eval '{chunk}' '{chunk}' '{chunk}'");
+    assert!(facts(&nested).resource_limit);
+}
+
+/// 登记表里的 shell 程序：后面每个字面参数再解析，包装词后面的也认；eval 另加连起来的一段。
+#[test]
+fn nested_command_text_keeps_facts() {
+    for text in [
+        "eval \"printf x > .git/config\"",
+        "bash -c 'printf x > .git/config'",
+        "env X=1 bash -lc 'printf x > .git/config'",
+        "sudo sh -ec 'printf x > .git/config'",
+        "timeout 5 bash -o pipefail -c 'printf x > .git/config'",
+        "bash -c -e 'printf x > .git/config'",
+        "bash -c -- 'printf x > .git/config'",
+        "bash -c -o pipefail 'printf x > .git/config'",
+        "su -c 'printf x > .git/config' root",
+        "su root --command='printf x > .git/config'",
+        "eval printf x '>' .git/config",
+        "eval \"eval \\\"eval 'printf x > .git/config'\\\"\"",
+        "LC_ALL=C bash -c 'printf x > .git/config'; echo $V",
+    ] {
+        let f = facts(text);
+        assert!(
+            has_redirect(&f, RedirectKind::Write, ".git/config"),
+            "{text:?}：{f:?}"
+        );
+    }
+    // eval 的引号跨参数：连起来才看得到重定向目标
+    let f = facts(r#"eval 'printf changed > "/tmp/probe/repo' 'space/.git/config"'"#);
+    assert!(
+        has_redirect(&f, RedirectKind::Write, "/tmp/probe/repo space/.git/config"),
+        "{f:?}"
+    );
+    // 嵌套文字词法失败：粗切，仍收到 .git/config
+    let f = facts("eval \"printf x > .git/config\necho 'abc\"");
+    assert!(f.queued_words.iter().any(|w| w == ".git/config"), "{f:?}");
+    assert!(!f.lex_failed);
+    // 队列里收来的词进 queued_words，原文的词进 literal_words
+    let f = facts("bash -c 'find . -delete'");
+    assert!(f.queued_words.iter().any(|w| w == "-delete"), "{f:?}");
+    assert!(!f.literal_words.iter().any(|w| w == "-delete"), "{f:?}");
+}
+
+/// closeout 1/F-2：不在登记表程序后面的字符串参数不再解析。
+#[test]
+fn plain_string_args_are_not_reparsed() {
+    for text in [
+        "env LC_ALL=C git commit -m 'Document .git/config format'",
+        "env LC_ALL=C printf '%s\\n' 'Document .git/config format'",
+        "env LC_ALL=C grep 'cat ~/.ssh/id_rsa' notes.md",
+        "sudo echo 'rm -rf ~/.ssh'",
+    ] {
+        let f = facts(text);
+        assert!(f.queued_words.is_empty(), "{text:?}：{f:?}");
+        assert!(f.literal_redirects.is_empty(), "{text:?}：{f:?}");
+    }
+}
+
+/// 收口补定：整条命令原文词法都切不出时置 lex_failed，不抽事实。
+#[test]
+fn unlexable_original_text() {
+    for text in ["printf x > .git/config\nls\necho 'abc", "echo \"abc"] {
+        let u = parse(text).unwrap_err();
+        assert!(u.facts.lex_failed, "{text:?}：{u:?}");
+    }
+    // 对照：语法错但词法切得出
+    let u = parse("printf x > .git/config\nif\n").unwrap_err();
+    assert!(!u.facts.lex_failed);
+}
+
 proptest! {
+    /// 把替换体塞进随机脚本里会展开的位置，第一遍都收得到（方案 11.2 substitution_found_in_any_word 的 shell 层部分）。
+    #[test]
+    fn substitution_in_random_script(
+        parts in prop::collection::vec(fragment(), 1..4),
+        wrap in prop::sample::select(vec![
+            "$(S)", "`S`", "${x:-$(S)}", "$(( $(S; echo 1) + 1 ))", "\"a $(S) b\"", "$(echo $(S))",
+        ]),
+        at in 0usize..4,
+    ) {
+        let inner = wrap.replace('S', "printf x > .git/config");
+        let mut words: Vec<String> = parts.into_iter().map(|(p, _)| p).collect();
+        let at = at.min(words.len());
+        words.insert(at, format!("echo {inner}"));
+        let text = words.join("; ");
+        let f = facts(&text);
+        prop_assert!(has_redirect(&f, RedirectKind::Write, ".git/config"), "{text:?}：{f:?}");
+    }
+
     /// 任意字符串都不 panic：要么小 AST，要么 Unparsable。
     #[test]
     fn shell_parse_never_panics(text in ".{0,200}") {

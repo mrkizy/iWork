@@ -40,8 +40,9 @@ deny_transitive = "normal_build_dev"
 
 [crates.iwork-shell]
 # Bash 语法解析，把 brush-parser 隔离在这一个 crate 里（T07 方案 3.3、ADR-T07-a）
+# serde：只用来写一个收字符串的 Serializer，走完整 AST 找命令替换（方案 3.3），纯计算
 internal = []
-direct = ["brush-parser"]
+direct = ["brush-parser", "serde"]
 direct_dev = ["proptest"]
 deny_transitive = "normal_build_dev"
 

@@ -288,6 +288,7 @@ dependencies = [
  "indenter",
  "insta",
  "peg",
+ "serde",
  "thiserror 2.0.21",
  "tracing",
  "utf8-chars",
@@ -2970,6 +2971,7 @@ version = "0.1.0"
 dependencies = [
  "brush-parser",
  "proptest",
+ "serde",
 ]
 
 [[package]]
