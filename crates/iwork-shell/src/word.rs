@@ -96,22 +96,24 @@ fn tilde_names_user(chars: &[char], i: usize) -> bool {
 
 /// 词里任何一处不加引号的 `{…}`（含嵌套、含前面已有字面 `{}` 的情形）出现 `,` 或 `..` 就按花括号展开
 /// 处理，拿不准就不算字面；`{}`（`find -exec … {} \;`）与 `@{u}` 这类不是展开。
+///
+/// 判定等价于「存在 `{` 在前、`,` 或 `..` 在中间、`}` 在后」，单遍扫描，时间与词长成正比（2/F-8）：
+/// 见过 `{` 之后再见到分隔符就记下，之后任何一个 `}` 都让它成立。
 fn looks_like_brace_expansion(unquoted: &str) -> bool {
-    let chars: Vec<char> = unquoted.chars().collect();
-    chars
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| **c == '{')
-        .any(|(open, _)| {
-            chars[open + 1..]
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| **c == '}')
-                .any(|(k, _)| {
-                    let inner: String = chars[open + 1..open + 1 + k].iter().collect();
-                    inner.contains(',') || inner.contains("..")
-                })
-        })
+    let mut seen_open = false;
+    let mut separator_after_open = false;
+    let mut prev = '\0';
+    for c in unquoted.chars() {
+        match c {
+            '{' => seen_open = true,
+            ',' if seen_open => separator_after_open = true,
+            '.' if seen_open && prev == '.' => separator_after_open = true,
+            '}' if separator_after_open => return true,
+            _ => {}
+        }
+        prev = c;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -140,6 +142,19 @@ mod tests {
         assert_eq!(lit("\\~/x").as_deref(), Some("./~/x"));
         assert_eq!(lit("~/x").as_deref(), Some("~/x"));
         assert_eq!(lit("{}{x}").as_deref(), Some("{}{x}"));
+        assert_eq!(lit("a,b}").as_deref(), Some("a,b}"));
+        assert_eq!(lit("{a}.").as_deref(), Some("{a}."));
+    }
+
+    /// 2/F-8：大量字面 `{}` 时成本线性。64 KiB 的 `{}` 重复在调试构建下也应远小于一秒
+    /// （旧实现三次复杂度，6400 字节就要十几秒）。
+    #[test]
+    fn brace_check_is_linear() {
+        let word = "{}".repeat(32 * 1024);
+        let t = std::time::Instant::now();
+        assert_eq!(lit(&word).as_deref(), Some(word.as_str()));
+        let spent = t.elapsed();
+        assert!(spent < std::time::Duration::from_secs(1), "耗时 {spent:?}");
     }
 
     #[test]
