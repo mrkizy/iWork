@@ -160,20 +160,26 @@ fn classify_simple(c: &SimpleCommand, out: &mut Vec<PendingAction>) -> Result<()
     if UNPARSABLE_PROGRAMS.contains(&program) {
         return Err(format!("{program} 改变执行方式或工作目录"));
     }
-    if SHELLS.contains(&program)
-        && args.iter().any(|a| {
-            *a == "--command" || (a.starts_with('-') && !a.starts_with("--") && a.contains('c'))
-        })
-    {
-        return Err(format!("{program} -c：程序文本来自参数"));
-    }
-    if let Some((_, opts)) = INLINE_CODE_OPTIONS.iter().find(|(p, _)| *p == program)
-        && args.iter().any(|a| {
-            opts.iter()
-                .any(|o| a == o || (o.len() == 2 && a.starts_with(o)))
-        })
-    {
-        return Err(format!("{program}：程序文本来自参数"));
+    // 程序文本来自参数：shell 与解释器出现在任何位置都算（包装词后面的、`-c` 前后夹着别的选项的），
+    // 不看它是第几个词（方案 3.3「精确与保守的分界」）
+    for (i, w) in words.iter().enumerate() {
+        let name = commands::program_id(w);
+        let rest = &words[i + 1..];
+        if SHELLS.contains(&name)
+            && rest.iter().any(|a| {
+                *a == "--command" || (a.starts_with('-') && !a.starts_with("--") && a.contains('c'))
+            })
+        {
+            return Err(format!("{name} -c：程序文本来自参数"));
+        }
+        if let Some((_, opts)) = INLINE_CODE_OPTIONS.iter().find(|(p, _)| *p == name)
+            && rest.iter().any(|a| {
+                opts.iter()
+                    .any(|o| a == o || (o.len() == 2 && a.starts_with(o)))
+            })
+        {
+            return Err(format!("{name}：程序文本来自参数"));
+        }
     }
 
     // ② git
@@ -700,12 +706,29 @@ fn dd_form(args: &[&str]) -> Result<Vec<PendingAction>, NotSafe> {
 /// 解析不了的调用的动作（方案 3.6）。路径来源只有第一遍的扁平事实：字面重定向按真实目标与读写角色，
 /// 再连同全部字面词（原文与队列里的）按 [`fallback_candidates`] 抽读 + 写；`find … -delete` 的删除约束
 /// 不随解析不了丢掉：parse 成功时用精确切法的结果（`precise_find`），否则对原文的字面词用保守规则；
-/// 队列里的词恒用保守规则。另加一个承载整条命令文字的执行动作。全部是候选：走不通的只丢它自己。
+/// 队列里的词恒用保守规则。另有一个承载整条命令文字的执行动作。路径全是候选：走不通的只丢它自己。
 pub fn fallback_actions(
     facts: &PartialFacts,
     precise_find: Option<&[String]>,
 ) -> Vec<PendingAction> {
-    let mut out = Vec::new();
+    // 承载命令文字的执行动作排第一：同样是询问时代表动作取靠前的，原因显示为「解析不了」
+    let mut out = vec![PendingAction {
+        kind: ActionKind::Execute,
+        target: PendingTarget::Command {
+            // 程序名取第一个不是 name=value 的词（前置赋值在命令名前面）
+            program: facts
+                .literal_words
+                .iter()
+                .find(|w| split_assignment(w).is_none())
+                .or(facts.literal_words.first())
+                .map_or("?", String::as_str)
+                .to_owned(),
+            subcommand: None,
+            argv: Vec::new(),
+        },
+        opaque: false,
+        argument: false,
+    }];
     for (kind, target) in &facts.literal_redirects {
         if kind.reads() {
             out.push(path_with(
@@ -742,22 +765,5 @@ pub fn fallback_actions(
     {
         out.push(path_with(ActionKind::Delete, d, PathOrigin::Hypothetical));
     }
-    out.push(PendingAction {
-        kind: ActionKind::Execute,
-        target: PendingTarget::Command {
-            // 程序名取第一个不是 name=value 的词（前置赋值在命令名前面）
-            program: facts
-                .literal_words
-                .iter()
-                .find(|w| split_assignment(w).is_none())
-                .or(facts.literal_words.first())
-                .map_or("?", String::as_str)
-                .to_owned(),
-            subcommand: None,
-            argv: Vec::new(),
-        },
-        opaque: false,
-        argument: false,
-    });
     out
 }

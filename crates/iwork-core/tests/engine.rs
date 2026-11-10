@@ -79,6 +79,10 @@ fn keys() -> SessionKeys {
 
 impl Bench {
     async fn new(mode: Option<ApprovalMode>) -> Self {
+        Self::with_fs(mode, fs()).await
+    }
+
+    async fn with_fs(mode: Option<ApprovalMode>, fs: FakeFs) -> Self {
         let store = MemStore::default();
         let reviewer = FakeReviewer::default();
         let timer = FakeTimer::default();
@@ -89,7 +93,7 @@ impl Bench {
                 store: store.clone(),
                 reviewer: reviewer.clone(),
                 timer: timer.clone(),
-                fs: fs(),
+                fs,
             },
             Default::default(),
         ));
@@ -1078,6 +1082,166 @@ async fn audit_snapshot_reconstructible() {
         checked += 1;
     }
     assert_eq!(checked, 3, "三次求值各一条审计");
+}
+
+/// 收口第 2 轮 closeout 1/F-4：规则路径的解析结果随审计落盘，重放只用事件里的映射、不读磁盘。
+/// 会话启动时 `~/.npmrc` 链到 A，求值命中别名被拒；之后链接改到 B、再改回普通文件，丢掉引擎内存，
+/// 换一个一调 `resolve` 就 panic 的解析器重放，重建出的别名仍指向 A、ID 与审计里记的相同、结果相同。
+#[tokio::test]
+async fn audit_replay_uses_recorded_rule_paths() {
+    use iwork_core::approval::denial::DenialMemory;
+    use iwork_core::approval::evaluate::strictness::strictness;
+    use iwork_core::approval::evaluate::{EvalContext, evaluate};
+    use iwork_core::approval::rules::build_ruleset;
+    use iwork_core::approval::session::{rule_paths_for, snapshot_for};
+    use iwork_domain::action::CanonicalPath;
+    use iwork_ports::fs::{PathResolveError, PathResolver, ResolvedPath};
+
+    /// 比较照常、一调解析就 panic：证明重放不读磁盘。
+    struct NoResolve(FakeFs);
+    impl PathResolver for NoResolve {
+        fn resolve(&self, _: &CanonicalPath, raw: &str) -> Result<ResolvedPath, PathResolveError> {
+            panic!("重放调用了 resolve：{raw}")
+        }
+        fn same_path<A: AsRef<std::path::Path> + ?Sized, B: AsRef<std::path::Path> + ?Sized>(
+            &self,
+            a: &A,
+            b: &B,
+        ) -> bool {
+            self.0.same_path(a, b)
+        }
+        fn is_under<A: AsRef<std::path::Path> + ?Sized, B: AsRef<std::path::Path> + ?Sized>(
+            &self,
+            child: &A,
+            dir: &B,
+        ) -> bool {
+            self.0.is_under(child, dir)
+        }
+    }
+
+    let layout = |target: Option<&str>| {
+        let mut f = fs();
+        f.file("/home/u/dotfiles/a");
+        f.file("/home/u/dotfiles/b");
+        match target {
+            Some(t) => {
+                f.link("/home/u/.npmrc", t);
+            }
+            None => {
+                f.file("/home/u/.npmrc");
+            }
+        }
+        f
+    };
+    let fs_a = layout(Some("dotfiles/a"));
+    let b = Bench::with_fs(None, fs_a.clone()).await;
+    let mut k = keys();
+    k.snapshot = Arc::new(snapshot_on(Manual, &[], &env(), Seq(7), &fs_a));
+    let d = Arc::new(b.engine.decider_for(k.clone()));
+    assert!(matches!(
+        // Read 工具命中底线不出卡片，直接拒（单条 Bash 命令会出卡片、等用户）
+        b.call(&d, turn(1), read_req("~/dotfiles/a")).await,
+        PermissionDecision::Deny { .. }
+    ));
+    let audit = b
+        .store
+        .all()
+        .into_iter()
+        .find_map(|e| match e {
+            DomainEvent::ApprovalEvaluated(a) => Some(a),
+            _ => None,
+        })
+        .unwrap();
+    let expected = vec![iwork_domain::event::RulePathResolution {
+        path: "/home/u/.npmrc".into(),
+        resolved: "/home/u/dotfiles/a".into(),
+    }];
+    assert_eq!(audit.snapshot_rule_paths, expected);
+
+    for later in [layout(Some("dotfiles/b")), layout(None)] {
+        // 对照：现在的磁盘给出的事实已经不同
+        assert_ne!(rule_paths_for(&[], &scope(), &env(), &later), expected);
+        let replayed = snapshot_for(
+            Manual,
+            &[],
+            &scope(),
+            &env(),
+            audit.snapshot_lists_seq,
+            &audit.snapshot_rule_paths,
+        );
+        assert_eq!(replayed.rules, k.snapshot.rules, "重建出的快照与当时相同");
+        let alias_ids: Vec<_> = replayed
+            .rules
+            .iter()
+            .filter(|r| r.label.contains("dotfiles/a"))
+            .map(|r| r.id)
+            .collect();
+        assert!(!alias_ids.is_empty());
+        assert!(
+            audit
+                .matched_rule_ids
+                .iter()
+                .any(|id| alias_ids.contains(id))
+        );
+        let rules = build_ruleset(&replayed.rules, &[], &k.scope()).unwrap();
+        let denial = DenialMemory::default();
+        let ctx = EvalContext {
+            mode: Manual,
+            turn_kind: TurnKind::Assistant,
+            tool_set: &k.tool_set,
+            disabled_groups: &k.disabled_groups,
+            denial: &denial,
+        };
+        let shape = iwork_core::approval::action::CallShape::Tool;
+        let no_resolve = NoResolve(later);
+        let worst = audit
+            .sub_actions
+            .iter()
+            .map(|x| evaluate(x, &shape, &rules, &ctx, &no_resolve).0.verdict)
+            .max_by_key(strictness)
+            .unwrap();
+        assert_eq!(strictness(&worst), strictness(&audit.verdict));
+    }
+}
+
+/// 三条内置拒绝条目回给运行时的话（方案 4.2、9/F-6）。
+#[tokio::test]
+async fn builtin_deny_messages() {
+    let b = Bench::new(None).await;
+    let d = b.decider();
+    let big = format!("echo {}", "a".repeat(iwork_shell::TEXT_LIMIT));
+    for (cmd, want) in [
+        (
+            big.as_str(),
+            "被规则拒绝：命令文字超过 256 KiB，无法完整检查",
+        ),
+        (
+            "echo \"abc",
+            "被规则拒绝：命令有语法错误，无法检查，请修正后重发",
+        ),
+    ] {
+        match b.call(&d, turn(1), bash_req(cmd)).await {
+            PermissionDecision::Deny { message } => assert_eq!(message, want),
+            other => panic!("{other:?}"),
+        }
+    }
+    let mut f = fs();
+    f.add(format!("{WS}/gate/root"));
+    f.deny(format!("{WS}/gate"));
+    let b = Bench::with_fs(None, f).await;
+    let d = b.decider();
+    match b.call(&d, turn(2), bash_req("rm -rf gate/root")).await {
+        PermissionDecision::Deny { message } => assert_eq!(
+            message,
+            "被规则拒绝：路径查不清（权限不足等），无法检查；请先解决再重发"
+        ),
+        other => panic!("{other:?}"),
+    }
+    // 不出卡片、不出审批
+    assert!(!b.store.all().iter().any(|e| matches!(
+        e,
+        DomainEvent::ApprovalRequested(_) | DomainEvent::UserActionProposed(_)
+    )));
 }
 
 #[path = "engine/review_round1_b.rs"]

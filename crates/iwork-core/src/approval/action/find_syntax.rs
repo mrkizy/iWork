@@ -106,6 +106,14 @@ pub fn split<'a>(args: &[&'a str]) -> FindCall<'a> {
         if w == "-delete" {
             call.delete = true;
             i += 1;
+        } else if w == "-f" {
+            // 前置选项阶段被没登记的词提前结束时，后面的 `-f <路径>` 仍可能是起点（BSD 下以 `-` 开头的起点
+            // 只能这样给）：只往严里算，记进拿不准的起点
+            call.unregistered = true;
+            if let Some(&v) = args.get(i + 1) {
+                call.maybe_roots.push(v);
+            }
+            i += 2;
         } else if FIND_FLAG_PREDICATES.contains(&w) {
             i += 1;
         } else if FIND_VALUE_PREDICATES.contains(&w) {
@@ -195,6 +203,9 @@ mod tests {
         assert!(c.delete && c.unregistered);
         assert_eq!(s("-HL -O3 -D tree . -print").roots, vec!["."]);
         assert_eq!(s("-newer ref").read_targets(), vec![".", "ref"]);
+        // 没登记的前置选项之后的 -f：值仍算可能的起点（以 - 开头也算）
+        let c = s("-Z -f -dir/../.. -- -delete");
+        assert!(c.maybe_roots.contains(&"-dir/../..") && c.delete);
     }
 
     #[test]

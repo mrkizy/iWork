@@ -10,11 +10,12 @@
 ## 决定
 
 1. 用 `brush-parser` 0.4（MIT、活跃、纯 Rust、完整 bash 语法、词保持未展开的原文），只在新 crate `iwork-shell` 里出现；对外是我们自己的小 AST，**小 AST 里只有字面词**（引号、转义去掉后的值）。表达不了的形态（`for` / `case` / 函数 / 复合命令上的重定向 / 任何展开、通配、`~user` / 前置赋值 / 未加引号的 here-doc / here-string / 进程替换 / `time` / `[[ ]]`）整条返回 `Unparsable` → 三档询问、不记住、不审查。
-2. `parse` 两遍：先在完整 AST 上收集字面重定向与字面词（`PartialFacts`），再转换；放弃时事实随 `Unparsable` 返回，归一照常抽成路径动作过底线。第三方解析器整体失败（语法错误）时，事实取自词法分析的词；第三方解析器 panic 也按解析不了处理（失败即关闭）。
-3. 子命令只在「白名单程序 + 选项全部登记（`ArgSpec`）+ 位置参数角色对得上」时归为读 / 写 / 删除，其余归执行；表外程序的位置参数、`name=value` 的值、`--opt=值` 记读 + 写；登记过的路径选项（`PathOptions`）按角色；没登记的短选项粘值整条解析不了。解析不了的调用用通用兜底规则 `fallback_candidates` 宁可多抽；`eval "…"` / `bash -c '…'` 的参数再解析一层抽事实。
+2. 第一遍事实只有一个入口 `iwork_shell::literal_facts`（`parse` 放弃与归类放弃两种 `Unparsable` 读同一份）：在完整 AST 上收集字面重定向与字面词（`PartialFacts`），用显式工作队列收命令替换体——AST 的每个字符串叶子经 `serde` 通用遍历走到，用解析器的词语法（词与 here-doc 两种读法取并集）找替换体，不列入口；没有深度上限，唯一上限是处理过的文字总量 256 KiB（命中置 `resource_limit` → 内置条目 `deny.resource-limit` 三档拒）。第三方解析器整体失败（语法错误）时，事实取自词法分析的词；原文词法也失败时置 `lex_failed` → `deny.unlexable` 三档拒；队列里的文字词法失败时按空白与元字符粗切。第三方解析器 panic 也按失败处理（失败即关闭）。
+3. 子命令只在「白名单程序 + 选项全部登记（`ArgSpec`）+ 位置参数角色对得上」时归为读 / 写 / 删除，其余归执行；表外程序的位置参数、`name=value` 的值、`--opt=值` 记读 + 写；登记过的路径选项（`PathOptions`）按角色；没登记的短选项粘值整条解析不了。解析不了的调用用通用兜底规则 `fallback_candidates` 宁可多抽。字符串参数里的命令只按一张固定登记表再解析（`iwork-shell::reparse`）：`sh` / `bash` / `zsh` / `dash` / `ksh` 后每个字面参数、`eval` 连起来的一段加逐参数、带 `-c` / `--command` 的 `su` 后每个字面参数，进同一个工作队列；队列里收来的词（`queued_words`）没有命令结构，`find` 的删除只用保守规则 `flat_delete`。白名单程序带未登记选项时降成执行，同时保留保底角色（`ArgSpec.floor`）；`find` 不登记保底，带没登记的词整条解析不了。
 4. 实施中补的两处（报告「偏离方案处」列出）：
    - `git` 的未登记短选项粘值不让整条解析不了，改为按兜底候选抽读 + 写：方案 11.3 验收 4b 要求 `git clean -fd` 是必问而不是解析不了，与 3.4「没登记的粘值整条 Unparsable」冲突；`git` 的种类由子命令决定，候选里任何一个解析到受保护路径仍是底线拒绝。其他程序仍按方案。
    - `git -C` / `--git-dir` / `--work-tree` / `--namespace`（改变仓库位置）与子命令前未登记的全局选项整条解析不了，否则 `git --namespace x push` 能把推送藏成普通执行。
+   - 收口实施时补：包装词表加 `timeout`、`gtimeout`、`stdbuf`、`ionice`、`setsid`、`caffeinate`、`flock`、`chrt`、`taskset`、`unbuffer`、`watch`、`chroot`、`nsenter`、`arch`（方案 3.4 清单漏了：`timeout 5 rm -rf src` 的删除被藏在参数里，自动档会放行）；shell 与解释器的 `-c` / `-e` 判定不看程序在第几个词（`timeout 5 bash -o pipefail -c '…'`）。`find` 表达式位置的 `-f <路径>` 也记进可能的起点（`find -Z -f -dir/../.. -- -delete` 的根原来只产出删 cwd）。
 
 5. **参数路径标记 `ActionFlag::ArgumentPath`**（supervisor 2026-11-10 定 (a)）：表外程序的位置参数既记读又记写，原意只为过底线与越界；但手动档下工作区内的写也按 `default.write.manual` 询问，于是 `npm test foo` 一条调用有两个要问的动作，按 6.4 只能「允许一次」，与 FR11「执行命令按程序名加子命令记住」冲突。做法：
    - 这类路径动作带 `argument_path` 标记（domain `ActionFlags` 与 proto `ActionSummary` 各加一个字段、`ActionFlag` 加一个值，只加不改）；默认层在 `default.write.oob` 之后、`default.write.manual` 之前加 `default.write.argument`：`All([Write, Flag(ArgumentPath)])` → 放行，三档。越界、底线、拒绝记忆、拒绝规则、必问都排在它前面，不受影响；执行动作本身仍按档位询问；沙箱的写白名单仍挡命令的实际越界写。
@@ -28,4 +29,4 @@
 ## 影响
 
 - 传递依赖多约 77 个 crate（`brush-parser` 把 `insta` 等写成了普通依赖），许可都在白名单内、闭包里没有禁用 crate（`cargo deny`、`scripts/check-deps.sh` 通过）。换解析器只改 `iwork-shell`。
-- 已知限制：自动档下带 `$VAR`、通配、组合短选项（`tar -xzf`、`make -j8`，`git` 除外）的日常命令会多问。
+- 已知限制：自动档下带 `$VAR`、通配、组合短选项（`tar -xzf`、`make -j8`，`git` 除外）的日常命令会多问；带上面这些包装词的日常命令（`timeout 60 cargo test`）三档都问、记不住；其余见方案第 13 节收口行的 (c)–(j)。

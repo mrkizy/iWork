@@ -152,14 +152,23 @@ pub fn norm_with(
     snap: &SessionSnapshot,
     fs: &fake_fs::FakeFs,
 ) -> NormalizedCall {
-    let e = env();
+    norm_at(req, snap, fs, &cp(WS), &env())
+}
+
+/// 在给定 cwd 下归一一次调用。
+pub fn norm_at(
+    req: &PermissionRequest,
+    snap: &SessionSnapshot,
+    fs: &fake_fs::FakeFs,
+    cwd: &CanonicalPath,
+    e: &EnvPaths,
+) -> NormalizedCall {
     let none = BTreeSet::new();
-    let cwd = cp(WS);
     let ctx = NormalizeContext {
-        paths: &e,
+        paths: e,
         boundaries: &snap.boundaries,
         mcp_read_only: &none,
-        cwd: &cwd,
+        cwd,
     };
     normalize_request(req, &ctx, fs)
 }
@@ -210,6 +219,10 @@ pub struct Harness {
     pub turn: TurnKind,
     pub disabled: ToolGroups,
     pub fs: fake_fs::FakeFs,
+    /// hook 输入里的 cwd，默认工作区根
+    pub cwd: CanonicalPath,
+    /// 环境路径，默认 `env()`；换了它要用同一个环境重算 `snap`
+    pub env: EnvPaths,
 }
 
 impl Default for Harness {
@@ -221,6 +234,8 @@ impl Default for Harness {
             turn: TurnKind::Assistant,
             disabled: ToolGroups::new(),
             fs: fs(),
+            cwd: cp(WS),
+            env: env(),
         }
     }
 }
@@ -231,7 +246,7 @@ impl Harness {
         req: &PermissionRequest,
         mode: ApprovalMode,
     ) -> (NormalizedCall, CallEvaluation) {
-        let call = norm_with(req, &self.snap, &self.fs);
+        let call = norm_at(req, &self.snap, &self.fs, &self.cwd, &self.env);
         let rules = build_ruleset(&self.snap.rules, &self.live, &scope()).unwrap();
         let tool_set = tool_set_for(self.turn, &self.disabled);
         let ctx = EvalContext {
