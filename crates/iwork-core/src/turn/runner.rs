@@ -435,7 +435,12 @@ where
             events: events.clone(),
             outbox: Vec::new(),
         };
-        self.ports.store.commit(request).await?;
+        if let Err(error) = self.ports.store.commit(request).await {
+            // 提交明确失败：作废计划没落盘，判定方撤销它的预留（等回执时被取消则不调，事件多半已落盘，
+            // 由订阅重投补上）
+            self.decider.aborted(&events).await;
+            return Err(error);
+        }
         self.decider.committed(&events).await;
         Ok(())
     }

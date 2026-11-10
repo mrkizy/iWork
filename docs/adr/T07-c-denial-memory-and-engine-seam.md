@@ -16,7 +16,11 @@ AC05 的拒绝记忆与等待上限中断后的一次性放行都是「某些动
    - 引擎为每条会话给出 `decider_for(keys) -> SessionDecider`，实现 T05 的 `turn::PermissionDecider`，交给 `SessionLine::new`；方案里的 `handler_for` 都读作 `decider_for`。
    - 回合状态（`PermissionAsked` / `PermissionDecided`）只由编排写；引擎只提交审批流与审计流事件。
    - 回合级作废（取消、放弃、回合失败）走 `void_pending`，返回的 `ApprovalVoided` / 卡片作废事件由编排与回合状态同一次提交；对话、助手删除走 `ApprovalEngine::void_for_event`，事件由 T10 提交。
-   - 第 1 轮返工给 T05 `PermissionDecider` 加默认空实现的 `committed(events)` 回调：`void_pending` / `void_for_event` 只返回计划，不提前更新等待表；runner 的提交接缝只在存储确认成功后调用回调。T10 提交删除事务后同样调用 `ApprovalEngine::committed`。提交失败或等待回执时取消，审批内存保持原样，计划可以重试。回合状态仍只由编排写。
+   - 第 1 轮返工给 T05 `PermissionDecider` 加默认空实现的 `committed(events)` 回调：`void_pending` / `void_for_event` 只返回计划，不提前改等待表；runner 的提交接缝只在存储确认成功后调用回调。T10 提交删除事务后同样调用 `ApprovalEngine::committed`。回合状态仍只由编排写。
+   - 第 2 轮返工（2/F-1）：交出作废计划时在决策锁下**预留**挑中的审批、卡片与回合：确认前 `decide`、切档放行、审查生效都跳过它们，这些回合也不再登记新的等待项。确认（`committed` 或订阅重投 `ApprovalVoided`）时清掉预留；外部事务明确失败时调 `void_aborted`（T05 接缝加默认空实现的 `aborted(events)`，runner 提交失败时调用）撤销预留，计划可以重算重试。
+   - 已提交事件只有一个应用入口 `apply_committed`，幂等（2/F-2）：发起方拿到回执后调它，订阅把同一批事件投给 `on_event` 时也调它（审批决定、审查更新、作废、档位变化、卡片状态、回合结束）。**等回执时请求被取消不等于回滚**：事件多半已落盘，本地没来得及应用的由订阅重投补上，拒绝记忆、放行、档位都不会丢。所以 daemon 必须把每条已提交事件（含引擎自己提交的）按序投给 `on_event`。提交明确失败（`Err`）时内存保持原样。`on_permission` 先登记等待项与卡片再提交，提交明确失败才撤回；等回执时取消，登记留着，回答通道成 detached（等同等待上限中断）。
+   - 活规则缓存与审计的 `live_rules_seq` 描述同一段完整有序前缀（2/F-3）：订阅按序投递，序号不比缓存新的跳过；本地提交了记住规则时先从日志读 `(缓存游标, 回执序号]` 的全部事件补齐再推进，不会越过还没消费的撤销。读日志失败就不推进，等订阅。
+   - 一次性放行命中只是计划消费，审计提交成功后才移除（2/F-4）；资格已不成立的当场作废。
    - 等待上限中断：编排丢掉等审批的请求（回答通道接收端随之丢弃），审批保持 `Pending`；用户允许时 `decide` 返回 `resume_turn`，续接后重新 `decide` 时由一次性放行命中。
    - AI 审查在等用户答复的同一个 future 里与答复并行跑；用户先决定、作废或切档放行时审查作废。`SessionKeys` 由调用方给出审查端口的 `runtime_id` 与 `assistant_version`，引擎用真实 `Turn{SystemAiReview}` 记录排队、状态、用量、额度、实际模型及收尾；这些系统回合仍由引擎这一个写者拥有。
    - 同一个截止时间覆盖建连、prompt、更新流与关闭；到期先写超时、转问用户，取消与关闭最多再等三秒。离开自动档时，切档命令与私聊项目切换共用放弃计划，未被自动放行的审查统一放弃；领域触发与原因改名 `ModeChangedFromAuto`，旧事件的无理由 Abandoned 仍能读取。事件消费 `on_event` 与恢复 `recover` 返回 Result；项目切换引起的放弃提交失败时保留旧内存并把错误交回调用方重试。

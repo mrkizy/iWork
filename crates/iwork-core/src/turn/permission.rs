@@ -41,6 +41,11 @@ pub trait PermissionDecider: Send + Sync + 'static {
     fn committed(&self, _events: &[DomainEvent]) -> impl Future<Output = ()> + Send {
         async {}
     }
+
+    /// 编排提交这些事件明确失败（作废计划没落盘）；判定方撤销为它们做的预留。等回执时被取消不调用。
+    fn aborted(&self, _events: &[DomainEvent]) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 }
 
 /// 审批桩：全部放行或全部拒绝，运行中可切换。T07 完成后由审批引擎替换。

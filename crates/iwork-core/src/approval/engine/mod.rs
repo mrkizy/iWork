@@ -66,7 +66,9 @@ use crate::approval::evaluate::{CallEvaluation, EvalContext, evaluate_call};
 use crate::approval::rules::{RuleSetError, build_ruleset};
 use crate::approval::session::SessionSnapshot;
 use crate::turn::PermissionDecider;
-use changes::{apply_approval_changes, plan_approval, plan_reviews_leaving_auto};
+use changes::{
+    apply_committed, is_rule_event, modes_after, plan_approval, plan_reviews_leaving_auto,
+};
 use lock::AsyncLock;
 use review::{ReviewInput, ReviewOutcome, parse_review_output, review_prompt};
 
@@ -224,13 +226,20 @@ struct ConversationState {
     cards: BTreeMap<UserActionId, PendingCard>,
     review_messages: context::ReviewMessages,
     rebuild_session_needed: bool,
+    /// 作废计划已交给外部事务、提交确认还没回来的审批、卡片与回合（2/F-1）：这期间不能批准它们、
+    /// 也不能为这些回合新登记等待项。确认（`committed` 或订阅重投）时清掉；外部事务失败时由
+    /// [`ApprovalEngine::void_aborted`] 清掉。
+    voiding: BTreeSet<ApprovalId>,
+    voiding_cards: BTreeSet<UserActionId>,
+    voiding_turns: BTreeSet<TurnId>,
 }
 
+/// 活规则缓存：`entries` 是规则流里序号不超过 `seq` 的全部事件应用后的结果（完整有序前缀，2/F-3），
+/// 审计的 `live_rules_seq` 就是 `seq`，按日志重放到它能得到同一份规则。
 #[derive(Debug, Default, Clone)]
 struct LiveRules {
     entries: Vec<RuleEntry>,
     seq: Seq,
-    versions: BTreeMap<RuleId, Seq>,
 }
 
 /// 用户的决定。
@@ -547,6 +556,28 @@ where
             .map(|r| Some(r.last_seq))
     }
 
+    /// 本地提交了规则事件、回执序号是 `to`：先从日志补齐 `(live.seq, to]` 的全部事件再推进游标，
+    /// 缓存不会越过还没消费的撤销（2/F-3）。读日志失败就不推进，等订阅按序投递。
+    async fn catch_up_rules(&self, to: Seq) {
+        let from = lock_std(&self.live).seq;
+        if to <= from {
+            return;
+        }
+        let limit = usize::try_from(to.0 - from.0).unwrap_or(usize::MAX);
+        let Ok(events) = self
+            .ports
+            .store
+            .read_events(iwork_ports::store::EventFilter::All, from, limit)
+            .await
+        else {
+            return;
+        };
+        let mut live = lock_std(&self.live);
+        for e in events.iter().filter(|e| e.seq <= to) {
+            live.apply(e.seq, &e.event);
+        }
+    }
+
     fn evaluate_now(
         &self,
         keys: &SessionKeys,
@@ -591,13 +622,19 @@ where
 
         let conv = self.conversation(keys.conversation);
         let mut state = conv.lock().await;
+        // 回合已在作废（计划已交出）：不再为它登记新的等待项（2/F-1）
+        if state.voiding_turns.contains(&turn) {
+            return deny(MSG_TURN_CANCELLED);
+        }
         let mode = state.modes.effective(keys.assistant);
         let (mut eval, rules, live_seq) = match self.evaluate_now(keys, &call, &state, mode) {
             Ok(evaluated) => evaluated,
             Err(error) => return deny(format!("iWork 审批规则无效：{error}")),
         };
 
-        // 一次性放行：只有「这次本来要问」才查，命中即消费，仍过资格复查
+        // 一次性放行：只有「这次本来要问」才查。命中只是计划消费：资格不再成立的当场作废；
+        // 放行的要等审计提交成功才移除（2/F-4），提交失败或取消时授权还在，重试照样命中
+        let mut grant_used = None;
         if matches!(
             eval.evaluation.verdict,
             Verdict::Ask(_) | Verdict::OutsideSandbox(_)
@@ -609,12 +646,14 @@ where
                 .find(|(_, g)| g.matches(turn, &record))
                 .map(|(id, _)| *id);
             if let Some(id) = hit {
-                state.grants.remove(&id);
                 // 绑定的是同一次调用，必问 / 解析不了不算「新出现」；只看拒绝与强制询问
                 if still_eligible(&eval, Some(&eval), Waiver::GrantOnce).is_ok() {
                     eval.evaluation.verdict = Verdict::Allow;
                     eval.evaluation.layer_hit = RuleLayer::Remembered;
                     eval.evaluation.matched = Vec::new();
+                    grant_used = Some(id);
+                } else {
+                    state.grants.remove(&id);
                 }
             }
         }
@@ -639,7 +678,12 @@ where
 
         match eval.evaluation.verdict.clone() {
             Verdict::Allow => match self.commit(&actor, vec![audit]).await {
-                Ok(()) => PermissionDecision::Allow,
+                Ok(()) => {
+                    if let Some(id) = grant_used {
+                        state.grants.remove(&id);
+                    }
+                    PermissionDecision::Allow
+                }
                 Err(_) => deny(MSG_STORAGE_FAILED),
             },
             Verdict::Deny(reason) => {
@@ -661,25 +705,27 @@ where
                     output_artifact: None,
                 };
                 let (tx, rx) = oneshot::channel();
-                if self
-                    .commit(
-                        &actor,
-                        vec![audit, UserActionProposed { card: card.clone() }.into()],
-                    )
-                    .await
-                    .is_err()
-                {
-                    return deny(MSG_STORAGE_FAILED);
-                }
-                lock_std(&self.cards).insert(card.id, keys.conversation);
+                // 先登记再提交：等回执时被取消（事件多半已落盘）卡片仍在等待表里，回答通道成 detached；
+                // 提交明确失败才撤回登记
+                let card_id = card.id;
+                lock_std(&self.cards).insert(card_id, keys.conversation);
                 state.cards.insert(
-                    card.id,
+                    card_id,
                     PendingCard {
                         assistant: keys.assistant,
-                        card,
+                        card: card.clone(),
                         reply: Some(tx),
                     },
                 );
+                if self
+                    .commit(&actor, vec![audit, UserActionProposed { card }.into()])
+                    .await
+                    .is_err()
+                {
+                    state.cards.remove(&card_id);
+                    lock_std(&self.cards).remove(&card_id);
+                    return deny(MSG_STORAGE_FAILED);
+                }
                 drop(state);
                 rx.await.map_or_else(|_| deny(MSG_TURN_CANCELLED), deny)
             }
@@ -710,6 +756,26 @@ where
                     && keys.turn_kind == TurnKind::Assistant;
                 let (tx, rx) = oneshot::channel();
                 let id = approval.id;
+                let context = state
+                    .review_messages
+                    .contexts
+                    .get(&keys.project)
+                    .cloned()
+                    .unwrap_or_default();
+                let (stop_review, stopped) = oneshot::channel();
+                // 先登记再提交（同卡片）：等回执时被取消，等待项仍在，回答通道成 detached（等同等待上限中断）
+                lock_std(&self.approvals).insert(id, keys.conversation);
+                state.pending.insert(
+                    id,
+                    PendingAsk {
+                        approval: approval.clone(),
+                        call: Some(call.clone()),
+                        eval_at_request: Some(eval),
+                        keys: keys.clone(),
+                        reply: Some(tx),
+                        stop_review: Some(stop_review),
+                    },
+                );
                 if self
                     .commit(
                         &actor,
@@ -724,27 +790,10 @@ where
                     .await
                     .is_err()
                 {
+                    state.pending.remove(&id);
+                    lock_std(&self.approvals).remove(&id);
                     return deny(MSG_STORAGE_FAILED);
                 }
-                lock_std(&self.approvals).insert(id, keys.conversation);
-                let context = state
-                    .review_messages
-                    .contexts
-                    .get(&keys.project)
-                    .cloned()
-                    .unwrap_or_default();
-                let (stop_review, stopped) = oneshot::channel();
-                state.pending.insert(
-                    id,
-                    PendingAsk {
-                        approval,
-                        call: Some(call.clone()),
-                        eval_at_request: Some(eval),
-                        keys: keys.clone(),
-                        reply: Some(tx),
-                        stop_review: Some(stop_review),
-                    },
-                );
                 if review {
                     let review_id = ReviewId(TurnId::from_raw(self.new_id()));
                     let started = self.plan_change(
@@ -761,7 +810,7 @@ where
                     if self.commit(ENGINE_ACTOR, started.clone()).await.is_err() {
                         return deny(MSG_STORAGE_FAILED);
                     }
-                    apply_approval_changes(&mut state, &started);
+                    apply_committed(&mut state, &started);
                     drop(state);
                     let input = ReviewInput {
                         actions: call
@@ -820,28 +869,6 @@ where
         Ok(plan_approval(&p.approval, trigger, mode_now)?)
     }
 
-    /// 放行一条待审批：回答通道还在就答复，否则（detached）记一次性放行，返回要续接的回合。
-    fn release(state: &mut ConversationState, id: ApprovalId) -> Option<TurnId> {
-        let mut p = state.pending.remove(&id)?;
-        let reply = p.reply.take();
-        match reply.map(|tx| tx.send(PermissionDecision::Allow)) {
-            Some(Ok(())) => None,
-            _ => {
-                if let Some(record) = p.approval.call.as_deref().cloned() {
-                    state.grants.insert(
-                        id,
-                        GrantOnce {
-                            approval_id: id,
-                            turn: p.approval.turn_id,
-                            record,
-                        },
-                    );
-                }
-                Some(p.approval.turn_id)
-            }
-        }
-    }
-
     /// 审查结果回来：锁下先在克隆上判 Stale → 通过时复查资格 → 只施加一次（方案 6.6 ⑤）。
     async fn settle_review(
         &self,
@@ -856,6 +883,9 @@ where
         let Some(p) = state.pending.get(&id) else {
             return Ok(());
         };
+        if state.voiding.contains(&id) {
+            return Ok(());
+        }
         let raw_trigger = match &result {
             ReviewResult::Passed(reason) => ApprovalTrigger::AiReviewPassed {
                 review_id,
@@ -895,13 +925,9 @@ where
         } else {
             raw_trigger
         };
-        let passed = matches!(trigger, ApprovalTrigger::AiReviewPassed { .. });
         let events = self.plan_change(&state, id, trigger, mode)?;
         self.commit(ENGINE_ACTOR, events.clone()).await?;
-        apply_approval_changes(&mut state, &events);
-        if passed {
-            Self::release(&mut state, id);
-        }
+        apply_committed(&mut state, &events);
         Ok(())
     }
 
@@ -919,9 +945,12 @@ where
         let conv = self.conversation(conv_id);
         let mut state = conv.lock().await;
         let p = state.pending.get(&id).ok_or(DecideError::NotPending(id))?;
+        // 作废计划已交出（2/F-1）：等它的确认，不能再批准
+        if state.voiding.contains(&id) {
+            return Err(DecideError::NotPending(id));
+        }
         let keys = p.keys.clone();
         let mode = state.modes.effective(keys.assistant);
-        let fingerprints = p.approval.fingerprints();
         let mut events = Vec::new();
         match decision {
             UserDecision::Allow { remember } => {
@@ -953,17 +982,12 @@ where
                     events.push(RuleRemembered { rule: rule.clone() }.into());
                 }
                 let seq = self.commit_seq(&by.0, events.clone()).await?;
-                apply_approval_changes(&mut state, &events);
+                let resume_turn = apply_committed(&mut state, &events).into_iter().next();
                 if rule.is_some()
                     && let Some(seq) = seq
                 {
-                    let mut live = lock_std(&self.live);
-                    for event in &events {
-                        live.apply(seq, event);
-                    }
+                    self.catch_up_rules(seq).await;
                 }
-                state.denial.apply(&DenialEvent::UserAllowed(fingerprints));
-                let resume_turn = Self::release(&mut state, id);
                 Ok(DecideOutcome {
                     events,
                     resume_turn,
@@ -972,13 +996,7 @@ where
             UserDecision::Deny => {
                 events.extend(self.plan_change(&state, id, ApprovalTrigger::UserDeny, mode)?);
                 self.commit(&by.0, events.clone()).await?;
-                apply_approval_changes(&mut state, &events);
-                state.denial.apply(&DenialEvent::UserDenied(fingerprints));
-                if let Some(mut p) = state.pending.remove(&id)
-                    && let Some(tx) = p.reply.take()
-                {
-                    let _ = tx.send(deny(MSG_USER_DENIED));
-                }
+                apply_committed(&mut state, &events);
                 Ok(DecideOutcome {
                     events,
                     resume_turn: None,
@@ -1030,31 +1048,7 @@ where
         };
         let conv = self.conversation(conv_id);
         let mut state = conv.lock().await;
-        let mut modes = state.modes.clone();
-        match (&mut modes, target) {
-            (
-                ConversationModes::Project {
-                    conversation_setting,
-                    ..
-                },
-                ApprovalModeTarget::Conversation(_),
-            ) => {
-                *conversation_setting = mode;
-            }
-            (
-                ConversationModes::Project {
-                    member_overrides, ..
-                },
-                ApprovalModeTarget::Member { assistant_id, .. },
-            ) => {
-                match mode {
-                    Some(m) => member_overrides.insert(assistant_id, m),
-                    None => member_overrides.remove(&assistant_id),
-                };
-            }
-            (ConversationModes::Dm { own_setting, .. }, _) => *own_setting = mode,
-            (_, ApprovalModeTarget::Project(_)) => unreachable!("上面已返回"),
-        }
+        let modes = modes_after(&state.modes, target, mode).expect("项目默认已在上面返回");
         let mut events: Vec<DomainEvent> = vec![
             ApprovalModeChanged {
                 target,
@@ -1074,6 +1068,9 @@ where
             if let ApprovalModeTarget::Member { assistant_id, .. } = target
                 && keys.assistant != assistant_id
             {
+                continue;
+            }
+            if state.voiding.contains(&id) {
                 continue;
             }
             if let Some(call) = &call {
@@ -1096,12 +1093,8 @@ where
             plan_reviews_leaving_auto(&state, &modes, &released).map_err(DecideError::from)?,
         );
         self.commit(&by.0, events.clone()).await?;
-        state.modes = modes;
-        apply_approval_changes(&mut state, &events);
-        let resumes = released
-            .into_iter()
-            .filter_map(|id| Self::release(&mut state, id))
-            .collect();
+        let resumes = apply_committed(&mut state, &events);
+        debug_assert_eq!(state.modes, modes, "档位变化事件已应用");
         Ok((events, resumes))
     }
 
@@ -1113,16 +1106,32 @@ where
         reason: VoidReason,
     ) -> Vec<DomainEvent> {
         let conv = self.conversation(conversation);
-        let state = conv.lock().await;
-        self.void_where(&state, reason, |t| t == turn)
+        let mut state = conv.lock().await;
+        state.voiding_turns.insert(turn);
+        self.void_where(&mut state, reason, |t| t == turn)
     }
 
+    /// 作废计划：挑中的待审批与 Pending 卡片在锁下预留（2/F-1），确认前不能再批准、不能开始新的放行。
     fn void_where(
         &self,
-        state: &ConversationState,
+        state: &mut ConversationState,
         reason: VoidReason,
         pick: impl Fn(TurnId) -> bool,
     ) -> Vec<DomainEvent> {
+        let ids: Vec<ApprovalId> = state
+            .pending
+            .values()
+            .filter(|p| pick(p.approval.turn_id))
+            .map(|p| p.approval.id)
+            .collect();
+        state.voiding.extend(ids);
+        let cards: Vec<UserActionId> = state
+            .cards
+            .values()
+            .filter(|c| pick(c.card.turn_id) && c.card.state == UserActionState::Pending)
+            .map(|c| c.card.id)
+            .collect();
+        state.voiding_cards.extend(cards);
         let mut events = Vec::new();
         for p in state.pending.values().filter(|p| pick(p.approval.turn_id)) {
             events.extend(
@@ -1154,11 +1163,39 @@ where
         events
     }
 
-    /// 外部事务提交成功后应用审批计划。提交失败时不调用，等待表保持原样。
+    /// 外部事务提交成功后应用审批计划（与订阅重投走同一个幂等入口）。
     pub async fn committed(&self, events: &[DomainEvent]) {
         let convs: Vec<_> = lock_std(&self.conversations).values().cloned().collect();
         for conv in convs {
-            apply_approval_changes(&mut *conv.lock().await, events);
+            apply_committed(&mut *conv.lock().await, events);
+        }
+    }
+
+    /// 外部事务没有提交作废计划（失败、放弃）：撤销预留，等待项照常可以处理，计划可以重算重试。
+    pub async fn void_aborted(&self, events: &[DomainEvent]) {
+        let convs: Vec<_> = lock_std(&self.conversations).values().cloned().collect();
+        for conv in convs {
+            let mut state = conv.lock().await;
+            for e in events {
+                let turn = match e {
+                    DomainEvent::ApprovalVoided(v) => {
+                        state.voiding.remove(&v.approval_id);
+                        state
+                            .pending
+                            .get(&v.approval_id)
+                            .map(|p| p.approval.turn_id)
+                    }
+                    DomainEvent::UserActionStateChanged(c) => {
+                        state.voiding_cards.remove(&c.card_id);
+                        state.cards.get(&c.card_id).map(|c| c.card.turn_id)
+                    }
+                    DomainEvent::TurnStateChanged(t) => Some(t.turn_id),
+                    _ => None,
+                };
+                if let Some(turn) = turn {
+                    state.voiding_turns.remove(&turn);
+                }
+            }
         }
     }
 
@@ -1167,14 +1204,14 @@ where
         match event {
             DomainEvent::ConversationDeleting(e) => {
                 let conv = self.conversation(e.conversation_id);
-                let state = conv.lock().await;
-                self.void_where(&state, VoidReason::ConversationDeleted, |_| true)
+                let mut state = conv.lock().await;
+                self.void_where(&mut state, VoidReason::ConversationDeleted, |_| true)
             }
             DomainEvent::AssistantDeleted(e) => {
                 let convs: Vec<_> = lock_std(&self.conversations).values().cloned().collect();
                 let mut events = Vec::new();
                 for conv in convs {
-                    let state = conv.lock().await;
+                    let mut state = conv.lock().await;
                     let turns: BTreeSet<TurnId> = state
                         .pending
                         .values()
@@ -1189,7 +1226,7 @@ where
                         )
                         .collect();
                     events.extend(
-                        self.void_where(&state, VoidReason::AssistantDeleted, |t| {
+                        self.void_where(&mut state, VoidReason::AssistantDeleted, |t| {
                             turns.contains(&t)
                         }),
                     );
@@ -1207,7 +1244,7 @@ where
         };
         let conv = self.conversation(conv_id);
         let mut state = conv.lock().await;
-        apply_approval_changes(
+        apply_committed(
             &mut state,
             &[UserActionStateChanged {
                 card_id: card,
@@ -1224,9 +1261,38 @@ where
             DomainEvent::UserActionStateChanged(e) => {
                 self.on_user_action_settled(e.card_id, &e.state).await;
             }
-            DomainEvent::ApprovalVoided(_) => {
+            // 审批流事件：订阅重投与本地回执走同一个幂等入口（2/F-2）。等回执时请求被取消，这里补上
+            DomainEvent::ApprovalVoided(_) | DomainEvent::UserActionProposed(_) => {
                 self.committed(std::slice::from_ref(event)).await;
             }
+            DomainEvent::ApprovalDecided(ApprovalDecided {
+                approval_id: id, ..
+            })
+            | DomainEvent::ApprovalReviewUpdated(ApprovalReviewUpdated {
+                approval_id: id, ..
+            }) => {
+                let conv_id = lock_std(&self.approvals).get(id).copied();
+                if let Some(conv_id) = conv_id {
+                    let conv = self.conversation(conv_id);
+                    apply_committed(&mut *conv.lock().await, std::slice::from_ref(event));
+                }
+            }
+            DomainEvent::ApprovalModeChanged(e) => match e.target {
+                ApprovalModeTarget::Project(p) => {
+                    let m = match e.mode {
+                        Some(ApprovalMode::Auto) => ProjectDefaultMode::Auto,
+                        _ => ProjectDefaultMode::Manual,
+                    };
+                    lock_std(&self.project_defaults).insert(p, m);
+                }
+                ApprovalModeTarget::Conversation(c)
+                | ApprovalModeTarget::Member {
+                    conversation_id: c, ..
+                } => {
+                    let conv = self.conversation(c);
+                    apply_committed(&mut *conv.lock().await, std::slice::from_ref(event));
+                }
+            },
             DomainEvent::MessageAppended(e) => {
                 let conv = self.conversation(e.message.conversation_id);
                 let mut state = conv.lock().await;
@@ -1239,9 +1305,7 @@ where
                 let conv = self.conversation(e.conversation_id);
                 conv.lock().await.review_messages.observe(event);
             }
-            DomainEvent::RuleRemembered(_)
-            | DomainEvent::RuleRevoked(_)
-            | DomainEvent::RulesDeleted(_) => {
+            e if is_rule_event(e) => {
                 lock_std(&self.live).apply(seq, event);
             }
             DomainEvent::SecurityListEntryAdded(_)
@@ -1272,12 +1336,12 @@ where
                 let abandoned = plan_reviews_leaving_auto(&state, &modes, &[])?;
                 self.commit(ENGINE_ACTOR, abandoned.clone()).await?;
                 state.modes = modes;
-                apply_approval_changes(&mut state, &abandoned);
+                apply_committed(&mut state, &abandoned);
             }
-            DomainEvent::TurnFinished(e) => {
+            DomainEvent::TurnFinished(_) => {
                 let convs: Vec<_> = lock_std(&self.conversations).values().cloned().collect();
                 for conv in convs {
-                    conv.lock().await.grants.retain(|_, g| g.turn != e.turn_id);
+                    apply_committed(&mut *conv.lock().await, std::slice::from_ref(event));
                 }
             }
             _ => {}
@@ -1368,6 +1432,10 @@ where
 
     async fn committed(&self, events: &[DomainEvent]) {
         self.engine.committed(events).await;
+    }
+
+    async fn aborted(&self, events: &[DomainEvent]) {
+        self.engine.void_aborted(events).await;
     }
 
     async fn void_pending(&self, turn_id: TurnId, reason: VoidReason) -> Vec<DomainEvent> {

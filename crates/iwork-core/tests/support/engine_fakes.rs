@@ -81,10 +81,15 @@ impl StoragePort for MemStore {
     async fn read_events(
         &self,
         _f: EventFilter,
-        _from: Seq,
-        _limit: usize,
+        from: Seq,
+        limit: usize,
     ) -> Result<Vec<StoredEvent>, StorageError> {
-        Ok(self.stored())
+        Ok(self
+            .stored()
+            .into_iter()
+            .filter(|e| e.seq > from)
+            .take(limit)
+            .collect())
     }
     async fn checkpoint_message(
         &self,
