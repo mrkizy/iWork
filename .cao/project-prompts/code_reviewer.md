@@ -11,5 +11,5 @@ iWork：本机运行的 ADE（Agent Development Environment），Rust daemon + T
 除通用审查标准外，本项目额外按以下规则定级：
 
 - **blocking**：违反 `AGENTS.md` “安全不变量”任意一条；审批可被绕过的任何路径（含超时、异常、进程崩溃时的默认放行）；凭据或个人信息落盘、进日志；事件被修改或丢失；命令重放不幂等。
-- **important**：crate 依赖方向违规（`domain`/`ports` 引入 I/O 或框架，`core` 引用存储、git、ACP 实现）；核心中出现厂商或 git 特例；状态变化绕过事件直接改客户端状态；网页层做业务判断；热路径改动没有基准对比；厂商行为假设没有 `t0-findings.md` 依据。
+- **important**：crate 依赖方向违规（`domain`/`ports` 引入 I/O 或框架，`core` 引用存储、git、ACP 实现）；核心中出现厂商或 git 特例（审批规则登记表里按命令文字识别 git 等程序子命令不算，见 `AGENTS.md` 架构约定）；状态变化绕过事件直接改客户端状态；网页层做业务判断；热路径改动没有基准对比；厂商行为假设没有 `t0-findings.md` 依据。
 - 审查时对照任务卡“验收标准”逐条核对证据；缺证据的条目按 important 报。

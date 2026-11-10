@@ -24,7 +24,7 @@
 - T07 `cp -r` 递归复制只检查两层：接受为已知限制。
 - 以上 T07 的三条已知限制（cp -r 两层、替换受保护链接被拒、find -exec 每次问）在方案收口通过后一起写进需求第 9 章。
 
-**仍待定**：T07 1/F-12——审批按命令文字识别 git 子命令（如 git push 必问）能不能放在 core。supervisor 建议在 AGENTS.md 架构约定加澄清：「审批按命令文字识别 git 等程序的子命令属于审批规则，可以出现在 core 的规则登记表里；版本控制操作的差异仍收在 VcsProvider，核心不写 git 特例」，同步 `.cao/project-prompts/code_reviewer.md` 里「核心中出现 git 特例」那条，F-12 记 `intentional`。
+- T07 1/F-12：按建议，AGENTS.md 架构约定已加澄清、code_reviewer 项目提示同步，F-12 记 intentional。
 
 ## 3 各卡状态
 
