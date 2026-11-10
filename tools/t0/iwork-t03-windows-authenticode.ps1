@@ -125,7 +125,12 @@ try {
 
     "== ④ 叶证书 SHA-256（期望两行相同；Rust 侧算的是同一个值：叶证书 DER 的 SHA-256）"
     "证书本身：      $(Sha256Hex $cert.RawData)"
-    "从签名里取回：  $(Sha256Hex (Get-AuthenticodeSignature "$out\signed.exe").SignerCertificate.RawData)"
+    $sig = Get-AuthenticodeSignature "$out\signed.exe"
+    "从签名里取回：  $(Sha256Hex $sig.SignerCertificate.RawData)"
+    # 两行不同时看这里：SignatureType 为 Catalog 说明取到的是系统目录签名（拷来的 cmd.exe 的 Authenticode 哈希
+    # 不含签名区，仍能匹配系统目录），不是嵌入的自签名；Embedded 才是我们签的那一份。
+    "证书本身 Subject：$($cert.Subject)"
+    "签名里的 Subject：$($sig.SignerCertificate.Subject)  SignatureType：$($sig.SignatureType)"
 
     "== ⑤ 命名管道两端 pid"
     [N2]::PipePids()
