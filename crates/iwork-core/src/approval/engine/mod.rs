@@ -1262,7 +1262,7 @@ where
                 self.on_user_action_settled(e.card_id, &e.state).await;
             }
             // 审批流事件：订阅重投与本地回执走同一个幂等入口（2/F-2）。等回执时请求被取消，这里补上
-            DomainEvent::ApprovalVoided(_) | DomainEvent::UserActionProposed(_) => {
+            DomainEvent::ApprovalVoided(_) => {
                 self.committed(std::slice::from_ref(event)).await;
             }
             DomainEvent::ApprovalDecided(ApprovalDecided {
