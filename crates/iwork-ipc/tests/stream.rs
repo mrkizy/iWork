@@ -604,3 +604,37 @@ async fn ahead_from_seq_snapshot_then_live_events_arrive() {
         "快照之后的事件不能被超前游标吞掉"
     );
 }
+
+/// 订阅快照取数期间发布的事件已在快照里：客户端先收到快照，之后不会再收到 seq ≤ snapshot_seq 的事件
+/// （方案 2.8 第 6–8 步）。否则 from_seq = 0 重连时，客户端会先看到比自己游标还旧的事件。
+#[tokio::test]
+async fn snapshot_handover_skips_buffered_events_covered_by_snapshot() {
+    let h = start(server_cfg());
+    h.upsert("project:p1", 1);
+    *h.world.read_delay.lock().unwrap() = Duration::from_millis(50);
+    let (client, mut inc) = h.connect_ok().await;
+    let ack = client.subscribe_nowait(1, sidebar(), 0).unwrap();
+    // 快照还在取数（延迟 50ms）：这期间提交并发布的事件进了缓冲，快照读到的 head 包含它。
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let during = h.upsert("project:p1", 2);
+    ack.await.unwrap().unwrap();
+    let first = next_item(&mut inc).await;
+    let s = subscribed(&first).clone();
+    assert!(
+        s.snapshot_seq >= during,
+        "快照读到的 head 包含取数期间的提交"
+    );
+    let content = decode_view(&s.snapshot.unwrap().results[0]);
+    assert_eq!(
+        content.get("project:p1"),
+        Some(&2),
+        "快照里是取数期间提交后的值"
+    );
+    // 之后只会有更新的事件。
+    let after = h.upsert("project:p1", 3);
+    assert_eq!(
+        next_persisted(&mut inc).await,
+        after,
+        "≤ snapshot_seq 的缓冲事件不该再送"
+    );
+}

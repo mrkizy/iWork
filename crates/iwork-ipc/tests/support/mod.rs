@@ -104,15 +104,22 @@ impl Op {
     }
 }
 
-/// 实体名形如 `conversation:c1`、`project:p1`；路由键就是它。
-pub fn route_of(entity: &str) -> StreamKey {
+/// 实体的路由键。`conversation:c1`、`project:p1` 只有自己一个键；`turn:t1@c2` 模拟带会话 ID 的回合事件，
+/// 有两个键：`turn:t1` 与 `conversation:c2`（方案 2.8：回合、审批事件同时落在会话键上）。
+pub fn routes_of(entity: &str) -> Vec<StreamKey> {
     let (kind, id) = entity.split_once(':').expect("实体名形如 kind:id");
-    let kind: &'static str = match kind {
-        "conversation" => "conversation",
-        "project" => "project",
-        other => panic!("测试世界只有两类实体：{other}"),
-    };
-    StreamKey::one(kind, id)
+    match kind {
+        "conversation" => vec![StreamKey::one("conversation", id)],
+        "project" => vec![StreamKey::one("project", id)],
+        "turn" => {
+            let (turn, conv) = id.split_once('@').expect("回合实体形如 turn:t1@c2");
+            vec![
+                StreamKey::one("turn", turn),
+                StreamKey::one("conversation", conv),
+            ]
+        }
+        other => panic!("测试世界没有 {other} 这类实体"),
+    }
 }
 
 /// 测试里的范围 → 键：Sidebar 覆盖两类全部；Conversation{id} 覆盖那一个对话。
@@ -144,10 +151,69 @@ pub fn conversation(id: &str) -> pb::SubscriptionScope {
 }
 
 pub fn covers(scopes: &[pb::SubscriptionScope], entity: &str) -> bool {
-    let r = route_of(entity);
-    scopes
-        .iter()
-        .any(|s| scope_keys(s).iter().any(|k| k.covers(&r)))
+    let keys: Vec<StreamKey> = scopes.iter().flat_map(scope_keys).collect();
+    keys_cover(&keys, entity)
+}
+
+pub fn keys_cover(keys: &[StreamKey], entity: &str) -> bool {
+    let routes = routes_of(entity);
+    keys.iter().any(|k| routes.iter().any(|r| k.covers(r)))
+}
+
+// ---------------------------------------------------------------- 线上载荷
+//
+// 夹具把真实数据放进帧里，客户端模型只从收到的帧取数据（测试的独立期望来自世界日志，不喂给模型）：
+// - 持久事件：操作编码在 `PersistedEvent.actor` 里（`U|实体|值|填充`、`D|实体||填充`）；
+// - 快照与会写视图的查询结果：视图里的实体放在 `ListConversationsResult` 里（`id` = 实体，`last_read_seq` = 值）。
+
+pub fn encode_op(op: &Op, pad: usize) -> String {
+    let pad = "u".repeat(pad);
+    match op {
+        Op::Upsert { entity, value } => format!("U|{entity}|{value}|{pad}"),
+        Op::Delete { entity } => format!("D|{entity}||{pad}"),
+    }
+}
+
+pub fn decode_op(actor: &str) -> Op {
+    let mut parts = actor.splitn(4, '|');
+    let (tag, entity, value) = (parts.next(), parts.next(), parts.next());
+    match (tag, entity, value) {
+        (Some("U"), Some(e), Some(v)) => Op::Upsert {
+            entity: e.into(),
+            value: v.parse().expect("值是数字"),
+        },
+        (Some("D"), Some(e), _) => Op::Delete { entity: e.into() },
+        _ => panic!("事件载荷格式不对：{actor:?}"),
+    }
+}
+
+pub fn view_result(seq: u64, entities: &BTreeMap<String, u64>) -> pb::QueryResult {
+    pb::QueryResult {
+        seq,
+        kind: Some(pb::query_result::Kind::ListConversations(
+            pb::ListConversationsResult {
+                conversations: entities
+                    .iter()
+                    .map(|(e, v)| pb::Conversation {
+                        id: e.clone(),
+                        last_read_seq: *v,
+                        ..Default::default()
+                    })
+                    .collect(),
+            },
+        )),
+    }
+}
+
+pub fn decode_view(r: &pb::QueryResult) -> BTreeMap<String, u64> {
+    match &r.kind {
+        Some(pb::query_result::Kind::ListConversations(l)) => l
+            .conversations
+            .iter()
+            .map(|c| (c.id.clone(), c.last_read_seq))
+            .collect(),
+        _ => BTreeMap::new(),
+    }
 }
 
 #[derive(Default)]
@@ -185,10 +251,10 @@ impl World {
             pb::PersistedEvent {
                 seq,
                 at: None,
-                actor: "u".repeat(1 + pad),
+                actor: encode_op(&op, pad),
                 event: None,
             },
-            vec![route_of(op.entity())],
+            routes_of(op.entity()),
         ));
         st.events.push((Arc::clone(&e), op));
         e
@@ -206,6 +272,14 @@ impl World {
         self.state.lock().unwrap().events[seq as usize - 1]
             .1
             .clone()
+    }
+
+    /// `keys` 覆盖的实体在 seq 时刻的投影。
+    pub fn view_at(&self, seq: u64, keys: &[StreamKey]) -> BTreeMap<String, u64> {
+        self.projection_at(seq)
+            .into_iter()
+            .filter(|(e, _)| keys_cover(keys, e))
+            .collect()
     }
 
     /// seq 时刻的投影：实体 → 值。
@@ -303,9 +377,10 @@ impl EventSource for WorldSource {
         self.world.delay().await;
         let s = self.world.head();
         let tear = std::mem::take(&mut *self.world.snapshot_tear_once.lock().unwrap());
+        // 每个范围一部分，内容是这个范围的视图在 s 时刻的实体（一个读事务：都按同一个 s 取）。
         let mut results: Vec<pb::QueryResult> = scopes
             .iter()
-            .map(|_| pb::QueryResult { seq: s, kind: None })
+            .map(|scope| view_result(s, &self.world.view_at(s, &scope_keys(scope))))
             .collect();
         if tear {
             // 两部分之间夹着一次提交：后一部分看到更新的 seq。
@@ -396,7 +471,16 @@ impl RequestHandler for TestHandler {
                     if !d.is_zero() {
                         tokio::time::sleep(d).await;
                     }
-                    pb::response::Body::Result(pb::QueryResult { seq: s, kind: None })
+                    // GetConversation 的结果是这个对话视图在 S 时刻的实体（含带这个会话键的回合实体）；
+                    // 其余列表查询这个世界里没有内容。
+                    let view = match &kind {
+                        pb::query::Kind::GetConversation(g) => self.world.view_at(
+                            s,
+                            &[StreamKey::one("conversation", g.conversation_id.clone())],
+                        ),
+                        _ => BTreeMap::new(),
+                    };
+                    pb::response::Body::Result(view_result(s, &view))
                 }
             }
             _ => unreachable!("订阅不会到 handler"),
