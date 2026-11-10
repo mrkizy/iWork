@@ -45,7 +45,8 @@
 | T08 | **已合入 main `c1aaf6b`**（ADR 0010） | developer `4960bf0d` 可删；旧 worktree `.cao/worktrees/49facf33` 分支已合入 | `2026-11-09-m1-t08` 已关（七轮） | — | 补任务卡完成记录 |
 | T04 | 方案 docs/plans/T04.md（未提交） | architect `3b7032e0`；方案 reviewer `e4187f1a` | 方案 `2026-11-10-m1-t04-plan` 第 1 轮不通过（12 条：10 本次引入、2 条 T05 旧缺口 F-11 / F-12） | 10 条 architect 在改；**F-11、F-12 归属待产品负责人定** | 改完原 reviewer 第 2 轮；Q1～Q3 等产品负责人，Q4 等补选项 |
 | T06 | 方案 docs/plans/T06.md + tools/t0/iwork-t0g.py（未提交） | architect `4f7c1e8b`；方案 reviewer `4674b8d1` | 方案 `2026-11-10-m1-t06-plan` 第 1 轮不通过（10 条：6 blocking） | 10 条 architect 在改 | 改完原 reviewer 第 2 轮；P2 风险说明改写后要再跟产品负责人确认一次；P5 补「失败即关闭不成立就阻断」选项 |
-| T09、T10、T11 | 未开工 | — | — | — | 依赖前面的卡 |
+| T09 | 方案编写中（依赖 T03 已合入；T04 未合入前界面先接假数据） | architect `62db2f05` | 方案 `2026-11-10-m1-t09-plan` | — | 方案回报后开 reviewer 审；实施后派 ui_design_reviewer 对照画布 |
+| T10、T11 | 未开工 | — | — | — | T10 依赖 T06、T07、T08、T09；T11 依赖 T10 |
 
 查开着的问题：`agent-scaffold findings list --task <任务 ID> --open`。
 
