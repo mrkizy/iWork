@@ -9,3 +9,12 @@ publish.workspace = true
 [dependencies]
 iwork-domain.workspace = true
 iwork-ports.workspace = true
+gix.workspace = true
+iwork-rootfs.workspace = true
+tokio = { workspace = true, features = ["rt", "process", "io-util"] }
+dunce.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+tempfile.workspace = true
+proptest.workspace = true

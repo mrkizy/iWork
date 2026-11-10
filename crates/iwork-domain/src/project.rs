@@ -1,5 +1,6 @@
 //! 项目（技术设计 8.2、9.3、9.6）。
 
+use std::cmp::{Ordering, Reverse};
 use std::path::PathBuf;
 
 use crate::approval_mode::ProjectDefaultMode;
@@ -114,4 +115,31 @@ impl Project {
         self.root_path = new_path;
         Ok(())
     }
+
+    /// 记一次活跃（在项目里发消息、开对话等）。最近活跃时间只往前走：乱序到达的旧时间不回拨它。
+    /// 返回是否有变化，没变化就不必发 `ProjectUpdated`。
+    pub fn touch(&mut self, at: Timestamp) -> bool {
+        if self.last_active_at.is_some_and(|last| last >= at) {
+            return false;
+        }
+        self.last_active_at = Some(at);
+        true
+    }
+
+    /// 置顶或取消置顶。返回是否有变化。
+    pub fn set_pinned(&mut self, pinned: bool) -> bool {
+        let changed = self.pinned != pinned;
+        self.pinned = pinned;
+        changed
+    }
+}
+
+/// 侧栏的项目顺序（需求 FR19）：置顶的在前；同组内最近活跃的在前，从没活跃过的排最后；
+/// 再按名字、ID 排，保证顺序完全确定（同一组项目每次排出来都一样）。
+pub fn sidebar_order(a: &Project, b: &Project) -> Ordering {
+    let key = |p: &Project| (Reverse(p.pinned), Reverse(p.last_active_at));
+    key(a)
+        .cmp(&key(b))
+        .then_with(|| a.name.cmp(&b.name))
+        .then_with(|| a.id.cmp(&b.id))
 }

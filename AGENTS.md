@@ -10,7 +10,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 
 ## 依据文档（先读，按优先级）
 
-1. `docs/requirements/iwork-requirements.md`：需求与架构基线（v1.72）。**已确认**的需求不得自行改动。
+1. `docs/requirements/iwork-requirements.md`：需求与架构基线（v1.74）。**已确认**的需求不得自行改动。
 2. `docs/design/m1-tech-design.md`：M1 技术设计，写“怎么做”。与需求冲突时以需求为准。
 3. `docs/design/t0-findings.md`：三家厂商 CLI 的实测事实。适配器实现以它为准，不要凭记忆或网上资料假设厂商行为。
 4. `docs/tasks/M1/`：M1 任务卡（T01–T11）与未决事项清单（`README.md`），每张卡写明目标、范围、交付物、验收标准、依赖。
@@ -55,7 +55,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 
 - 进程：客户端（Tauri）、后台服务（daemon，常驻单实例）、每个运行中成员一个适配器进程，下面是厂商 CLI。编排核心是 daemon 里的一层，不是进程。
 - crate 与依赖方向见 `docs/design/m1-tech-design.md` 第 2 节。**依赖只向下**：`iwork-domain`、`iwork-ports` 不依赖任何框架与 I/O；`iwork-core` 不知道 SQLite、git、ACP 的存在；只有 `iwork-daemon` 同时知道所有实现。违反即 `important`。
-- 后台服务只通过 AgentPort 说 ACP。各厂商差异全部收在适配器里，核心不写厂商特例。版本控制差异收在 VcsProvider 里，核心不写 git 特例。
+- 后台服务只通过 AgentPort 说 ACP。各厂商差异全部收在适配器里，核心不写厂商特例。版本控制差异收在 VcsProvider 里，核心不写 git 特例。审批按命令文字识别 git 等程序的子命令（如 git push 必问、git clean 算删除）属于审批规则，可以出现在 core 的规则登记表里；版本控制操作本身的差异仍收在 VcsProvider（产品负责人 2026-11-10 确认）。
 - 状态变化一律经事件：命令只返回受理结果与事件 `seq`；客户端只有一条更新路径（订阅事件）。
 - 事件只追加不修改；一次命令 = 追加事件 + 更新投影 + 写 outbox + 记录 `command_id`，同一事务；单写者线程，组提交。
 - 网页层只渲染：不解析协议全集、不做业务判断；Rust 侧每 16ms 合并一次 `ViewPatch` 推给网页。

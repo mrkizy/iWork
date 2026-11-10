@@ -2,5 +2,8 @@
 //!
 //! 只依赖 `iwork-domain` 与 `iwork-ports`，不知道 SQLite、git、ACP 的存在，也不绑定异步运行时
 //! （只用无运行时的 `futures-channel` 做内部信箱）。
+//!
+//! - [`project_identity`]：项目身份规则（去重、重新定位、路径检查），T08。
 
+pub mod project_identity;
 pub mod turn;

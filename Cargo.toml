@@ -41,6 +41,12 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 base64 = "0.22"
 tauri-build = "2.7"
 tokio-util = { version = "0.7", features = ["codec"] }
+# 读 git 仓库（gitoxide）。只开 status（含 dirwalk、index、blob-diff），不要默认的网络与 CLI 便利功能
+gix = { version = "0.90", default-features = false, features = ["status", "sha1"] }
+# Windows 上 canonicalize 去掉 `\\?\` 前缀；其他平台等同 std::fs::canonicalize
+dunce = "1"
+# 读 `.iwork/project.toml`；只要解析，不要写出与 serde 派生
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 tracing = "0.1"
 sha2 = "0.10"
 hex = "0.4"
@@ -56,6 +62,7 @@ iwork-app = { path = "crates/iwork-app" }
 iwork-store = { path = "crates/iwork-store" }
 iwork-agent-acp = { path = "crates/iwork-agent-acp" }
 iwork-vcs-git = { path = "crates/iwork-vcs-git" }
+iwork-rootfs = { path = "crates/iwork-rootfs" }
 iwork-host = { path = "crates/iwork-host" }
 iwork-ipc = { path = "crates/iwork-ipc" }
 iwork-claude-hook = { path = "crates/iwork-claude-hook" }
