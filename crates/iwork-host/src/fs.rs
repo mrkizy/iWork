@@ -260,6 +260,14 @@ impl OsPathResolver {
         let Some((parent_raw, name)) = split_last_component(raw) else {
             return Ok(target.to_path_buf());
         };
+        // 先一次 lstat（内核按同样的顺序解析中间分量）：末级不是链接时就等于 target，常见情况不再解析父路径
+        let written = match raw.strip_prefix("~/") {
+            Some(rest) => self.home.join(rest),
+            None => cwd.0.join(raw),
+        };
+        if !std::fs::symlink_metadata(&written).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Ok(target.to_path_buf());
+        }
         let parent = self.resolve_target(cwd, parent_raw)?;
         let at = parent.join(name);
         match std::fs::symlink_metadata(&at) {
