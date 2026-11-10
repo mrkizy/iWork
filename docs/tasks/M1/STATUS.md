@@ -41,7 +41,7 @@
 | T03 | **已合入 main**（ADR 0011、0012） | developer `b271f92f` 可删；旧 worktree `.cao/worktrees/2e7bcbe5` 分支已合入 | `2026-11-10-m1-t03` 已关 | — | — |
 | T05 | 已合入 main `a6987d4`；Windows 偶发测试修复已合入 `a6a5007` | — | 已关；`2026-11-10-m1-t05-flake` 1 轮通过 | — | — |
 | （方案复盘） | T03、T07 方案 | retrospector `f77efc99` 已复盘（给 architect 存 3 条 lesson），终端可删 | — | — | — |
-| T07 | 方案定稿 `4e27665`（+57b5c4d）；实施分支 `cao/009e8660` @ `747db6b` | developer `f8877913`；reviewer A `4f01bbc2`、B `edeff392` | 实施 `2026-11-10-m1-t07` 第 3 轮不通过（已满三轮） | A：1/F-7、2/F-5、3/F-1（cp 粘值目录目标）、3/F-2（flat_floor 平方级展开）；B：1/F-13、2/F-1、2/F-2、3/F-3～F-8（引擎提交 / 预留 / 本地与订阅两路输入的并发问题） | **待产品负责人定 B 侧根因改法**（supervisor 建议：引擎内存只由有序已提交事件推进、去掉预留集合，状态前提由单写者原子校验） |
+| T07 | 方案定稿 `4e27665`（+57b5c4d）；实施分支 `cao/009e8660` @ `747db6b` | developer `f8877913`；reviewer A `4f01bbc2`、B `edeff392` | 实施 `2026-11-10-m1-t07` 第 3 轮不通过（已满三轮） | A：1/F-7、2/F-5、3/F-1（cp 粘值目录目标）、3/F-2（flat_floor 平方级展开）；B：1/F-13、2/F-1、2/F-2、3/F-3～F-8（引擎提交 / 预留 / 本地与订阅两路输入的并发问题） | B 侧按根因改结构（产品负责人 2026-11-10 批准）：architect `890c712d` 写方案补充（任务 2026-11-10-m1-t07-engine-plan），审过再实施；A 侧 3/F-1、3/F-2 developer 先修 |
 | T08 | **已合入 main `c1aaf6b`**（ADR 0010） | developer `4960bf0d` 可删；旧 worktree `.cao/worktrees/49facf33` 分支已合入 | `2026-11-09-m1-t08` 已关（七轮） | — | 补任务卡完成记录 |
 | T04 | 方案 docs/plans/T04.md（未提交） | architect `3b7032e0`；方案 reviewer `e4187f1a` | 方案 `2026-11-10-m1-t04-plan` 第 1 轮不通过（12 条：10 本次引入、2 条 T05 旧缺口 F-11 / F-12） | 10 条 architect 在改；**F-11、F-12 归属待产品负责人定** | 改完原 reviewer 第 2 轮；Q1～Q3 等产品负责人，Q4 等补选项 |
 | T06 | 方案 docs/plans/T06.md + tools/t0/iwork-t0g.py（未提交） | architect `4f7c1e8b`；方案 reviewer `4674b8d1` | 方案 `2026-11-10-m1-t06-plan` 第 1 轮不通过（10 条：6 blocking） | 10 条 architect 在改 | 改完原 reviewer 第 2 轮；P2 风险说明改写后要再跟产品负责人确认一次；P5 补「失败即关闭不成立就阻断」选项 |
