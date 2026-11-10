@@ -465,6 +465,20 @@ impl Client {
         self.ordered(pb::request::Body::Query(query)).await
     }
 
+    /// 立即写出一个会写视图的查询，返回它的 `request_id`（结果在 `Incoming` 里以同一个 id 出现）与等成败的接收端。
+    /// 与 `subscribe_nowait` / `unsubscribe_nowait` 一起用时，帧按调用顺序发出。
+    pub fn view_query_nowait(
+        &self,
+        query: pb::Query,
+    ) -> Result<(u64, oneshot::Receiver<Result<(), ClientError>>), ClientError> {
+        if query.kind.as_ref().map(query_lane) != Some(QueryLane::ViewQuery) {
+            return Err(ClientError::WrongLane);
+        }
+        let (tx, rx) = oneshot::channel();
+        let id = self.send_request(Pending::Ordered(tx), pb::request::Body::Query(query))?;
+        Ok((id, rx))
+    }
+
     /// 订阅：`Subscribed`（可能带快照）以 [`IncomingItem::Subscribed`] 从 `Incoming` 出来，future 只说完成 / 失败。
     pub async fn subscribe(
         &self,
