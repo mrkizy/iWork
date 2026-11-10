@@ -138,6 +138,7 @@ fn out_of_bounds_reads() {
         &scope(),
         &e2,
         iwork_domain::id::Seq(0),
+        &h.fs,
     );
     let call = {
         let none = std::collections::BTreeSet::new();

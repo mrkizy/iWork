@@ -53,7 +53,7 @@ fn keys_with(lists: &[RuleEntry], assistant: AssistantId) -> SessionKeys {
         assistant,
         project: Some(project()),
         turn_kind: TurnKind::Assistant,
-        snapshot: Arc::new(snapshot_for(Manual, lists, &scope(), &env(), Seq(7))),
+        snapshot: Arc::new(snapshot_for(Manual, lists, &scope(), &env(), Seq(7), &fs())),
         tool_set: tool_set_for(TurnKind::Assistant, &ToolGroups::new()),
         disabled_groups: ToolGroups::new(),
         cwd: cp(WS),

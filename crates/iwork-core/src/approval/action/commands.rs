@@ -3,6 +3,12 @@
 //! 白名单是**允许清单**：只有登记过的选项才算安全形态，出现任何未登记的选项、位置参数个数或角色
 //! 对不上，就不是安全形态（归执行）。宁可多归执行，也不把有副作用的命令当读放行。
 
+/// 归类用的程序标识：去掉路径前缀（`/usr/bin/git` → `git`）。凭据匹配与动作分类都用它，两边对程序名的
+/// 理解一致（审查 1/F-8）；命令目标里保留原文，指纹与记住规则仍区分带不带前缀。
+pub fn program_id(literal: &str) -> &str {
+    literal.rsplit('/').next().unwrap_or(literal)
+}
+
 /// 路径参数的角色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {

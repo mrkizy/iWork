@@ -13,7 +13,10 @@ use iwork_domain::turn::TurnKind;
 
 use crate::approval::env::{EnvPaths, ScopeKeys};
 use crate::approval::registry::{self, ToolClass};
+use crate::approval::rules::matcher::path_of;
 use crate::approval::rules::{Boundaries, applies_to, builtin};
+use iwork_domain::action::CanonicalPath;
+use iwork_ports::fs::PathResolver;
 
 /// 会话绑定的规则部分：内置规则集 + 三张清单（范围过滤后）+ 临时敏感条目，以及由它们算出的约束与边界。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,12 +30,17 @@ pub struct SessionSnapshot {
 }
 
 /// 会话启动时算快照。`user_lists` 是三张清单里的用户条目（内置条目由规则集给出）；按 `scope` 过滤。
+///
+/// 规则里的路径与动作路径要比较的是同一种东西：动作目标经 `PathResolver` 解析成真实位置，所以规则路径
+/// 也要解析。受保护路径本身是符号链接（`~/.ssh` 链到别处）、或系统别名（macOS `/etc` → `/private/etc`）时，
+/// 原条目保留（守住入口本身，如删除链接），另加一条指向真实位置的别名条目（审查 1/F-3）。
 pub fn snapshot_for(
     mode: ApprovalMode,
     user_lists: &[RuleEntry],
     scope: &ScopeKeys,
     env: &EnvPaths,
     lists_seq: Seq,
+    fs: &impl PathResolver,
 ) -> SessionSnapshot {
     let mut rules = builtin::builtin_rules(env);
     rules.extend(builtin::transient_sensitive_rules(env));
@@ -42,6 +50,8 @@ pub fn snapshot_for(
             .filter(|e| e.security_list().is_some() && !e.is_builtin() && applies_to(e, scope))
             .cloned(),
     );
+    let aliases: Vec<RuleEntry> = rules.iter().filter_map(|r| real_location_alias(r, fs)).collect();
+    rules.extend(aliases);
     let boundaries = Boundaries::from_rules(&rules);
     let constraints = constraints_for(mode, &rules, env);
     SessionSnapshot {
@@ -50,6 +60,30 @@ pub fn snapshot_for(
         boundaries,
         ruleset_version: builtin::version(),
         lists_seq,
+    }
+}
+
+/// 规则路径的真实位置与写法不同时，返回指向真实位置的别名条目；ID 由原条目 ID 与真实路径派生。
+fn real_location_alias(rule: &RuleEntry, fs: &impl PathResolver) -> Option<RuleEntry> {
+    let path = path_of(&rule.matcher)?;
+    let root = CanonicalPath(path.ancestors().last()?.to_path_buf());
+    let real = fs.resolve(&root, path.to_str()?).ok()?;
+    if fs.same_path(&real, path) {
+        return None;
+    }
+    let mut alias = rule.clone();
+    alias.matcher = replace_path(&rule.matcher, &real.0);
+    alias.id = builtin::builtin_rule_id(&format!("alias:{}:{}", rule.id, real.0.display()));
+    alias.label = format!("{}（真实位置 {}）", rule.label, real.0.display());
+    Some(alias)
+}
+
+fn replace_path(m: &RuleMatcher, real: &std::path::Path) -> RuleMatcher {
+    match m {
+        RuleMatcher::PathUnder(_) => RuleMatcher::PathUnder(real.to_path_buf()),
+        RuleMatcher::PathIs(_) => RuleMatcher::PathIs(real.to_path_buf()),
+        RuleMatcher::All(ms) => RuleMatcher::All(ms.iter().map(|x| replace_path(x, real)).collect()),
+        other => other.clone(),
     }
 }
 

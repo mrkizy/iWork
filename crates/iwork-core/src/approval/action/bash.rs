@@ -14,7 +14,7 @@ use super::commands::{
     OPAQUE_SUBCOMMANDS, Operands, PUBLISH_COMMANDS, Role, SHELLS, UNPARSABLE_PROGRAMS, Value,
 };
 use super::credential::simple_commands;
-use super::paths::{fallback_candidates, is_path_word, split_assignment};
+use super::paths::{fallback_candidates, is_path_word, split_assignment, value_variants};
 use super::{PendingAction, PendingTarget};
 
 /// 这些程序的未登记短选项粘值不让整条解析不了，改为按兜底候选抽读 + 写：`git` 的种类由子命令决定
@@ -101,9 +101,11 @@ fn push_redirect(out: &mut Vec<PendingAction>, kind: RedirectKind, target: &str)
 fn classify_simple(c: &SimpleCommand, out: &mut Vec<PendingAction>) -> Result<(), Why> {
     redirect_actions(c, out);
     let words: Vec<&str> = c.words.iter().map(|w| w.literal.as_str()).collect();
-    let Some(&program) = words.first() else {
+    let Some(&literal_program) = words.first() else {
         return Ok(());
     };
+    // 登记表一律按程序标识查：带路径前缀的 git、sudo、npm 与不带前缀的同样归类
+    let program = commands::program_id(literal_program);
     let args = &words[1..];
 
     // ① 整条解析不了
@@ -168,7 +170,7 @@ fn classify_simple(c: &SimpleCommand, out: &mut Vec<PendingAction>) -> Result<()
                 ActionKind::Execute,
                 &words,
                 sub,
-                is_opaque(program, sub),
+                is_opaque(literal_program, sub),
             ));
             // find 的谓词是单横线长词（-delete、-exec），不是短选项粘值
             extract_external(program, args, out, program == "find")
@@ -227,7 +229,9 @@ fn extract_external(
         if after_dashdash || !w.starts_with('-') || w == "-" {
             push_argument(out, w);
             if !after_dashdash && let Some(v) = split_assignment(w) {
-                push_argument(out, v);
+                for v in value_variants(v) {
+                    push_argument(out, &v);
+                }
             }
         } else if w == "--" {
             after_dashdash = true;
@@ -235,7 +239,9 @@ fn extract_external(
             if let Some((_, v)) = long.split_once('=')
                 && !v.is_empty()
             {
-                push_argument(out, v);
+                for v in value_variants(v) {
+                    push_argument(out, &v);
+                }
             }
         } else {
             let letters = &w[1..];

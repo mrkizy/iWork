@@ -68,6 +68,10 @@ fn credential_rejects_interpreters_and_transfer_tools() {
     ] {
         rejected(SecurityList::CredentialCommands, p, "解释器");
     }
+    // 审查 1/F-9：解释器 / 启动器加第二个词（脚本）同样拒收
+    for p in ["python script.py", "bash script.sh", "node script.js", "env python", "make deploy", "sudo git"] {
+        rejected(SecurityList::CredentialCommands, p, "解释器");
+    }
     for p in ["rsync", "scp", "sftp", "rsync -a"] {
         rejected(SecurityList::CredentialCommands, p, "");
     }

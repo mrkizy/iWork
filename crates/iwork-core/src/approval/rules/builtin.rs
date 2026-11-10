@@ -254,6 +254,10 @@ pub const REJECTED_PROGRAMS: &[&str] = &[
     "sftp",
 ];
 
+/// 拒收名单里只拒「整程序」、允许写到子命令一级的程序（`docker login` 可以加，`docker` 不行）。
+/// 其余拒收程序带不带第二个词都拒：`python script.py` 的第二个词是脚本，不是子命令（审查 1/F-9）。
+pub const REJECT_ALLOWS_SUBCOMMAND: &[&str] = &["docker"];
+
 /// 传输工具：拒收理由与解释器不同（方案 4.4）。
 pub const TRANSFER_PROGRAMS: &[&str] = &["rsync", "scp", "sftp"];
 

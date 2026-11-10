@@ -12,7 +12,7 @@ use iwork_domain::session::CommandPattern;
 use support::*;
 
 fn builtin_patterns() -> Vec<CommandPattern> {
-    snapshot_for(ApprovalMode::Manual, &[], &scope(), &env(), Seq(0))
+    snapshot_for(ApprovalMode::Manual, &[], &scope(), &env(), Seq(0), &fs())
         .constraints
         .excluded_commands
 }
@@ -62,7 +62,7 @@ fn credential_corpus_matches_ours_and_is_conservative() {
 /// hook 侧求值用的清单与写进 excludedCommands 的清单出自同一份快照数据。
 #[test]
 fn excluded_commands_equal_classifier_patterns() {
-    let s = snapshot_for(ApprovalMode::Auto, &[], &scope(), &env(), Seq(0));
+    let s = snapshot_for(ApprovalMode::Auto, &[], &scope(), &env(), Seq(0), &fs());
     assert_eq!(
         s.constraints.excluded_commands,
         s.boundaries.credential_commands

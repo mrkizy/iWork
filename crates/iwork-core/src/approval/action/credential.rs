@@ -53,7 +53,7 @@ fn match_command(c: &SimpleCommand, patterns: &[CommandPattern]) -> Match {
         return Match::No;
     };
     let program = first.literal.as_str();
-    let basename = program.rsplit('/').next().unwrap_or(program);
+    let basename = super::commands::program_id(program);
     if basename != program {
         return if patterns.iter().any(|p| p.program == basename) {
             Match::Unsure

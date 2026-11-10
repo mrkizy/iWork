@@ -43,6 +43,16 @@ impl OsPathResolver {
         }
     }
 
+    /// 还不存在的分量：大小写不敏感时统一成小写。磁盘上没有它的「实际大小写」，同一个将创建的文件
+    /// 换大小写写也必须得到同一条规范路径，动作指纹才相等（审查 1/F-10）。
+    fn missing_name(&self, name: &std::ffi::OsStr) -> OsString {
+        if self.case_insensitive {
+            OsString::from(name.to_string_lossy().to_lowercase())
+        } else {
+            name.to_owned()
+        }
+    }
+
     fn eq_name(&self, a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
         if a == b {
             return true;
@@ -95,7 +105,10 @@ fn parts(p: &Path) -> Vec<Part> {
 }
 
 /// 尾段没有 `..` 时：最深的已存在上级（解析后）接上不存在的尾段。走不了快路径返回 `None`。
-fn existing_ancestor(joined: &Path) -> Option<Result<PathBuf, PathResolveError>> {
+fn existing_ancestor(
+    joined: &Path,
+    missing_name: impl Fn(&std::ffi::OsStr) -> OsString,
+) -> Option<Result<PathBuf, PathResolveError>> {
     if joined.components().any(|c| c == Component::ParentDir) {
         return None;
     }
@@ -112,7 +125,7 @@ fn existing_ancestor(joined: &Path) -> Option<Result<PathBuf, PathResolveError>>
             }
             let mut out = strip_verbatim(real);
             for name in tail.iter().rev() {
-                out.push(name);
+                out.push(missing_name(name));
             }
             return Some(if out.to_str().is_some() {
                 Ok(out)
@@ -172,7 +185,7 @@ impl PathResolver for OsPathResolver {
         }
         // 第二条快路径：目标还不存在（将要写的文件）。尾段没有 `..` 时，找最深的已存在上级一次解析，
         // 再确认紧接着的分量确实不存在（悬空的符号链接也算存在，交给逐分量的慢路径）
-        if let Some(found) = existing_ancestor(&joined) {
+        if let Some(found) = existing_ancestor(&joined, |n| self.missing_name(n)) {
             return found.map(CanonicalPath);
         }
         let mut queue: VecDeque<Part> = parts(Path::new(rest)).into();
@@ -188,15 +201,15 @@ impl PathResolver for OsPathResolver {
                     current.pop();
                 }
                 Part::Name(name) => {
-                    let candidate = current.join(name);
+                    let candidate = current.join(&name);
                     if missing {
-                        current = candidate;
+                        current = current.join(self.missing_name(&name));
                         continue;
                     }
                     match std::fs::symlink_metadata(&candidate) {
                         Err(e) if e.kind() == io::ErrorKind::NotFound => {
                             missing = true;
-                            current = candidate;
+                            current = current.join(self.missing_name(&name));
                         }
                         Err(e) => return Err(io_err(e)),
                         Ok(meta) if meta.file_type().is_symlink() => {

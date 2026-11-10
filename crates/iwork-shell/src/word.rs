@@ -73,6 +73,10 @@ pub fn literal_value(raw: &str) -> Option<String> {
     if looks_like_brace_expansion(&unquoted) {
         return None;
     }
+    // 引号或转义里的 `~` 不展开（Bash 只展开词首未引用的 `~`）：写成 `./~…`，路径解析就不会把它当主目录
+    if out.starts_with('~') && !raw.starts_with('~') {
+        out.insert_str(0, "./");
+    }
     Some(out)
 }
 
@@ -90,17 +94,20 @@ fn tilde_names_user(chars: &[char], i: usize) -> bool {
     !matches!(chars.get(i + 1), None | Some('/') | Some(':'))
 }
 
-/// 不加引号的 `{…}` 里出现 `,` 或 `..` 就按花括号展开处理；`{}`（`find -exec … {} \;`）与
-/// `@{u}` 这类不是展开。
+/// 词里任何一处不加引号的 `{…}`（含嵌套、含前面已有字面 `{}` 的情形）出现 `,` 或 `..` 就按花括号展开
+/// 处理，拿不准就不算字面；`{}`（`find -exec … {} \;`）与 `@{u}` 这类不是展开。
 fn looks_like_brace_expansion(unquoted: &str) -> bool {
-    let Some(open) = unquoted.find('{') else {
-        return false;
-    };
-    let Some(close) = unquoted[open..].find('}') else {
-        return false;
-    };
-    let inner = &unquoted[open + 1..open + close];
-    inner.contains(',') || inner.contains("..")
+    let chars: Vec<char> = unquoted.chars().collect();
+    chars.iter().enumerate().filter(|(_, c)| **c == '{').any(|(open, _)| {
+        chars[open + 1..]
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| **c == '}')
+            .any(|(k, _)| {
+                let inner: String = chars[open + 1..open + 1 + k].iter().collect();
+                inner.contains(',') || inner.contains("..")
+            })
+    })
 }
 
 #[cfg(test)]
@@ -123,6 +130,12 @@ mod tests {
         assert_eq!(lit("@{u}").as_deref(), Some("@{u}"));
         assert_eq!(lit("\"a\\nb\"").as_deref(), Some("a\\nb"));
         assert_eq!(lit("'*'").as_deref(), Some("*"));
+        // 引号 / 转义里的 ~ 是字面，不是主目录（审查 1/F-5）
+        assert_eq!(lit("'~/config'").as_deref(), Some("./~/config"));
+        assert_eq!(lit("\"~\"/x").as_deref(), Some("./~/x"));
+        assert_eq!(lit("\\~/x").as_deref(), Some("./~/x"));
+        assert_eq!(lit("~/x").as_deref(), Some("~/x"));
+        assert_eq!(lit("{}{x}").as_deref(), Some("{}{x}"));
     }
 
     #[test]
@@ -143,6 +156,11 @@ mod tests {
             "X=~root",
             "{a,b}",
             "{1..3}",
+            // 审查 1/F-11：前面有字面 {} 或 {x}，后面才是展开
+            "{}{a,b}",
+            "{x}{1..3}",
+            "a{b}c{d,e}",
+            "{{a,b}}",
             "@(a|b)",
             "'unterminated",
             "\"unterminated",

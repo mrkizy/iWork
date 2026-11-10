@@ -70,6 +70,15 @@ impl FakeFs {
         }
     }
 
+    /// 还不存在的分量：大小写不敏感时统一成小写，同一个将创建的文件只有一种写法（审查 1/F-10）。
+    fn missing_name(&self, name: &std::ffi::OsStr) -> OsString {
+        if self.case_insensitive {
+            OsString::from(name.to_string_lossy().to_lowercase())
+        } else {
+            name.to_owned()
+        }
+    }
+
     fn lstat(&self, p: &Path) -> Entry {
         if let Some((_, target)) = self.symlinks.iter().find(|(k, _)| self.eq_name(k, p)) {
             return Entry::Link(target.clone());
@@ -142,15 +151,15 @@ impl PathResolver for FakeFs {
                     current.pop();
                 }
                 Part::Name(name) => {
-                    let candidate = current.join(name);
+                    let candidate = current.join(&name);
                     if missing {
-                        current = candidate;
+                        current = current.join(self.missing_name(&name));
                         continue;
                     }
                     match self.lstat(&candidate) {
                         Entry::Missing => {
                             missing = true;
-                            current = candidate;
+                            current = current.join(self.missing_name(&name));
                         }
                         Entry::Exists(actual) => current = actual,
                         Entry::Link(target) => {

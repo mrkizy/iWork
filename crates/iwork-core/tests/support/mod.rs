@@ -109,7 +109,7 @@ use iwork_domain::id::Seq;
 use iwork_ports::agent::{PermissionRequest, RawToolInput};
 
 pub fn snapshot() -> SessionSnapshot {
-    snapshot_for(ApprovalMode::Manual, &[], &scope(), &env(), Seq(0))
+    snapshot_for(ApprovalMode::Manual, &[], &scope(), &env(), Seq(0), &fs())
 }
 
 pub fn bash_req(command: &str) -> PermissionRequest {

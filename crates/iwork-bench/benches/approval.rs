@@ -49,7 +49,7 @@ fn main() {
         home.0.clone(),
         OsPathResolver::detect_case_insensitive(&root).unwrap(),
     );
-    let snap = snapshot_for(ApprovalMode::Auto, &[], &scope, &env, Seq(0));
+    let snap = snapshot_for(ApprovalMode::Auto, &[], &scope, &env, Seq(0), &fs);
     let remembered: Vec<RuleEntry> = (0..500u128)
         .map(|i| RuleEntry {
             id: RuleId::from_raw(RawUlid::from_u128(0x10_000 + i)),

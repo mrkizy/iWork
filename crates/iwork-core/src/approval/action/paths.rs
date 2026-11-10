@@ -40,12 +40,30 @@ pub fn fallback_candidates(literal: &str) -> BTreeSet<String> {
     } else if let Some(value) = split_assignment(literal) {
         out.insert(value.to_owned());
     }
+    // 词中间切出来的候选以 ~ 开头时，Bash 是否展开取决于上下文（`name=~/x` 展开、`--o=~/x` 不展开），
+    // 两种都记（审查 1/F-5）；完整字面值的 ~ 资格已由 iwork-shell 定好
+    let derived: Vec<String> = out
+        .iter()
+        .filter(|c| c.as_str() != literal && c.starts_with('~'))
+        .map(|c| format!("./{c}"))
+        .collect();
+    out.extend(derived);
     out
 }
 
-/// 不是路径的字面词：空、`-`（标准输入）。
+/// 从词中间切出来的值（`name=值`、`--opt=值`）的全部解读：以 ~ 开头时主目录与字面 ~ 两种都要过检查。
+pub fn value_variants(value: &str) -> Vec<String> {
+    if value.starts_with('~') {
+        vec![value.to_owned(), format!("./{value}")]
+    } else {
+        vec![value.to_owned()]
+    }
+}
+
+/// 不是路径的字面词只有空串。`-` 是真实文件名（重定向 `> -`、兜底候选都要解析它）；
+/// 只有明确把 `-` 当标准流的位置（白名单程序的操作数）由调用方排除（审查 1/F-4）。
 pub fn is_path_word(literal: &str) -> bool {
-    !literal.is_empty() && literal != "-"
+    !literal.is_empty()
 }
 
 #[cfg(test)]
@@ -67,6 +85,8 @@ mod tests {
         assert!(e.contains(&".git/config".to_string()) && e.contains(&"E.git/config".to_string()));
         assert_eq!(c("-p2222"), vec!["-p2222", "2", "22", "222", "2222"]);
         assert_eq!(c("-v"), vec!["-v"]);
+        assert_eq!(c("X=~/a"), vec!["./~/a", "X=~/a", "~/a"]);
+        assert_eq!(c("-"), vec!["-"]);
         assert!(c("").is_empty());
     }
 

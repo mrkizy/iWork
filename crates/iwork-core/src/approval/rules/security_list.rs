@@ -12,7 +12,7 @@ use iwork_domain::rule::{
 use iwork_domain::security_list::{ListEntryRejection, SecurityList};
 use iwork_ports::fs::PathResolver;
 
-use super::builtin::TRANSFER_PROGRAMS;
+use super::builtin::{REJECT_ALLOWS_SUBCOMMAND, TRANSFER_PROGRAMS};
 use super::matcher::path_of;
 use crate::approval::env::EnvPaths;
 
@@ -111,12 +111,15 @@ fn credential_command(
         e.layer == RuleLayer::RejectList
             && matches!(&e.matcher, RuleMatcher::ProgramSubcommand { program: p, subcommand: None } if p == program)
     });
-    // 拒收名单拒的是「整程序」：docker 拒收，docker login 不拒（方案 4.2 拒收名单说明）
-    if rejected && (subcommand.is_none() || TRANSFER_PROGRAMS.contains(&program)) {
+    // 拒收程序带不带子命令都拒；只有登记为「允许子命令」的（docker）才放过带子命令的写法
+    let subcommand_allowed = subcommand.is_some() && REJECT_ALLOWS_SUBCOMMAND.contains(&program);
+    if rejected && !subcommand_allowed {
         return Err(reject(if TRANSFER_PROGRAMS.contains(&program) {
             format!("「{program}」会把任意文件传出去，不能整程序加入；请改用 git，或由你亲手执行")
         } else {
-            format!("「{program}」是解释器 / 启动器，清单内的命令会在沙箱外运行，等于放开整个沙箱")
+            format!(
+                "「{program}」是解释器 / 启动器，清单内的命令会在沙箱外运行，等于放开整个沙箱"
+            )
         }));
     }
     Ok(RuleMatcher::ProgramSubcommand {
