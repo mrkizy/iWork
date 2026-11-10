@@ -118,7 +118,9 @@ async fn other_user_is_rejected_both_directions() {
             .any(|e| e.get("role").map(String::as_str) == Some("server")
                 && e.get("reason")
                     .is_some_and(|r| r.starts_with("DifferentUser"))),
-        "后台审计里应有 DifferentUser：{rejected:?}"
+        "后台审计里应有 DifferentUser：{rejected:?}；另一用户的 ipc-tool 退出 {}，stdout：{stdout}；stderr：{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
     );
     // 对照：同用户照常连上，后台没被拖垮。
     let (client, _inc) = Client::connect(
