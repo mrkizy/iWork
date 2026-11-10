@@ -173,6 +173,13 @@ impl Bench {
         .unwrap()
     }
 
+    /// 先提交后发布，与 daemon 的写线程一样。只提交不发布不行：`serve` 启动时读 head 作发布水位基线，
+    /// 它若先于这些提交读到 0，快照交接会一直等一个不会发布的 seq，10 秒后按 PublishStalled 关连接。
+    fn commit_published(&self, size: usize) {
+        let e = self.commit(size);
+        self.publisher.publish(Published::Persisted(e));
+    }
+
     /// 提交一条约 `size` 字节的事件（不发布）。
     fn commit(&self, size: usize) -> Arc<RoutedEvent> {
         let mut log = self.log.lock().unwrap();
@@ -297,7 +304,7 @@ async fn ipc_publish_fanout(conns: usize, secs: u64) {
 async fn ipc_replay_10k() {
     let b = Bench::start();
     for _ in 0..10_000 {
-        b.commit(200);
+        b.commit_published(200);
     }
     let mut v = Vec::new();
     for _ in 0..20 {
@@ -318,7 +325,7 @@ async fn ipc_replay_10k() {
 async fn ipc_scope_change_snapshot() {
     let b = Bench::start();
     for _ in 0..1000 {
-        b.commit(200);
+        b.commit_published(200);
     }
     let (c, mut inc) = b.connect().await;
     let mut v = Vec::new();
