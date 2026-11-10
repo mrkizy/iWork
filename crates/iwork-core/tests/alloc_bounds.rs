@@ -10,11 +10,11 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use iwork_core::approval::engine::{ApprovalEngine, ConversationModes, EnginePorts, SessionKeys};
+use iwork_core::approval::engine::{ApprovalEngine, EnginePorts, SessionKeys};
 use iwork_core::approval::rules::builtin::builtin_rule_id;
 use iwork_core::approval::session::tool_set_for;
 use iwork_core::turn::PermissionDecider;
-use iwork_domain::approval_mode::{ApprovalMode, ProjectDefaultMode};
+use iwork_domain::approval_mode::ApprovalMode;
 use iwork_domain::common::{ModelId, ModelSelection, ToolGroups};
 use iwork_domain::event::DomainEvent;
 use iwork_domain::id::{RawUlid, TurnId};
@@ -23,6 +23,7 @@ use iwork_domain::rule::{DenyReason, Verdict};
 use iwork_domain::turn::TurnKind;
 use iwork_ports::agent::PermissionDecision;
 use support::engine_fakes::*;
+use support::fold_fx;
 use support::*;
 
 struct Counting;
@@ -117,28 +118,30 @@ fn allocation_is_linear_and_bounded() {
     let mut engine_peaks = Vec::new();
     for n in [1000usize, 4000] {
         let store = MemStore::default();
-        let engine = Arc::new(ApprovalEngine::new(
-            EnginePorts {
-                clock: TickClock::default(),
-                ids: Ids::default(),
-                store: store.clone(),
-                reviewer: FakeReviewer::default(),
-                timer: FakeTimer::default(),
-                fs: fs(),
-            },
-            Default::default(),
-        ));
-        rt.block_on(engine.set_modes(
+        let turn = TurnId::from_raw(RawUlid::from_u128(0x700 + n as u128));
+        store.seed(fold_fx::world_with(
+            project(),
             conversation(),
-            ConversationModes::Project {
-                project_default: ProjectDefaultMode::Manual,
-                conversation_setting: None,
-                member_overrides: Default::default(),
-            },
+            &[assistant()],
+            None,
         ));
+        store.seed(fold_fx::waiting_turn(turn, conversation(), assistant()));
+        let (engine, _) = rt
+            .block_on(ApprovalEngine::start(
+                EnginePorts {
+                    clock: TickClock::default(),
+                    ids: Ids::default(),
+                    store: store.clone(),
+                    reviewer: FakeReviewer::default(),
+                    timer: FakeTimer::default(),
+                    fs: fs(),
+                },
+                Default::default(),
+                |_, _| None,
+            ))
+            .unwrap();
         let d = engine.decider_for(keys());
         let req = bash_req(&rm_command(n, " ~/.ssh/id_rsa"));
-        let turn = TurnId::from_raw(RawUlid::from_u128(0x700 + n as u128));
         let (decision, peak) = peak_during(|| rt.block_on(d.decide(turn, &req)));
         assert!(matches!(decision, PermissionDecision::Deny { .. }));
         let audit = store

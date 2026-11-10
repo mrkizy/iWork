@@ -14,10 +14,7 @@ async fn failed_mode_commit_keeps_previous_mode() {
             .await
             .is_err()
     );
-    assert_eq!(
-        b.engine.effective_mode(conversation(), assistant()).await,
-        Manual
-    );
+    assert_eq!(b.mode(conversation(), assistant()).await, Manual);
 }
 
 #[tokio::test]
@@ -32,10 +29,7 @@ async fn failed_denial_can_be_retried_and_is_recorded() {
             .await
             .is_err()
     );
-    assert_eq!(
-        b.engine.pending_approval(id).await.unwrap().state,
-        ApprovalState::Pending
-    );
+    assert_eq!(b.pending(id).await.unwrap().state, ApprovalState::Pending);
     assert!(!h.is_finished());
     b.engine
         .decide(id, UserDecision::Deny, user())
@@ -56,18 +50,17 @@ async fn legacy_approval_resumes_without_grant_once() {
     let h = b.ask(&b.decider(), turn(101), write_req("src/a.rs"));
     let id = b.approval(0).await;
     h.abort();
-    let mut events = b.store.stored();
+    // 把日志里的审批改成 T07 之前的样子（没有调用记录），在这份日志上重启
+    let legacy = Bench::new(Some(Manual)).await;
+    let mut events = b.store.all();
     for e in &mut events {
-        if let DomainEvent::ApprovalRequested(e) = &mut e.event {
-            e.approval.call = None;
+        if let DomainEvent::ApprovalRequested(r) = e {
+            r.approval.call = None;
         }
     }
-    let recovered = Bench::new(Some(Manual)).await;
-    recovered
-        .engine
-        .recover(&events, |_, _| Some(keys()))
-        .await
-        .unwrap();
+    legacy.store.seed(events[4..].to_vec());
+    let (recovered, _) = legacy.restart(|_, _| Some(keys())).await;
+    recovered.interrupt(turn(101)).await;
     let result = recovered
         .engine
         .decide(
@@ -79,8 +72,10 @@ async fn legacy_approval_resumes_without_grant_once() {
         )
         .await
         .unwrap();
-    assert_eq!(result.resume_turn, Some(turn(101)));
-    assert!(recovered.engine.grant(conversation(), id).await.is_none());
+    // 没有调用记录就发不出一次性放行；续接以「有放行可用」为准（方案 6.10.6 第 2 条），所以也不续接
+    assert_eq!(result.resume_turn, None);
+    assert!(recovered.grant(id).await.is_none());
+    assert!(recovered.engine.turns_to_resume().is_empty());
 }
 
 #[tokio::test]
@@ -98,10 +93,7 @@ async fn remembered_rule_receipt_race_keeps_deny_rules() {
         ),
         RuleScope::Global,
     );
-    b.engine
-        .on_event(Seq(1), &RuleRemembered { rule }.into())
-        .await
-        .unwrap();
+    b.external(vec![RuleRemembered { rule }.into()]).await;
     let h = b.ask(&b.decider(), turn(102), bash_req("npm test"));
     let id = b.approval(0).await;
     let gate = Arc::new(tokio::sync::Notify::new());
@@ -123,7 +115,9 @@ async fn remembered_rule_receipt_race_keeps_deny_rules() {
         }
         tokio::task::yield_now().await;
     };
-    b.engine.on_event(stored.seq, &stored.event).await.unwrap();
+    assert!(matches!(stored.event, DomainEvent::RuleRemembered(_)));
+    // 别的任务在回执到达之前追平：规则只按日志顺序应用一次
+    b.engine.catch_up().await.unwrap();
     gate.notify_one();
     decision.await.unwrap().unwrap();
     assert_eq!(h.await.unwrap(), PermissionDecision::Allow);
@@ -165,10 +159,7 @@ async fn void_plan_does_not_change_waiting_state_before_commit() {
             .await
             .is_err()
     );
-    assert_eq!(
-        b.engine.pending_approval(id).await.unwrap().state,
-        ApprovalState::Pending
-    );
+    assert_eq!(b.pending(id).await.unwrap().state, ApprovalState::Pending);
     assert!(!h.is_finished());
     let retry = d.void_pending(turn(104), VoidReason::TurnCancelled).await;
     assert_eq!(retry, plan);
@@ -182,7 +173,7 @@ async fn void_plan_does_not_change_waiting_state_before_commit() {
         .await
         .unwrap();
     d.committed(&retry).await;
-    assert!(b.engine.pending_approval(id).await.is_none());
+    assert!(b.pending(id).await.is_none());
     assert!(is_deny(&h.await.unwrap(), MSG_TURN_CANCELLED));
 }
 
@@ -213,27 +204,31 @@ async fn assistant_deletion_voids_card_without_ordinary_approval() {
     let card = first_card(&b).await;
     let plan = b
         .engine
-        .void_for_event(
-            &AssistantDeleted {
-                assistant_id: assistant(),
-                name_snapshot: "a".into(),
-            }
-            .into(),
+        .commit_with(
+            Scope::AssistantDeleted(assistant()),
+            command(vec![
+                AssistantDeleted {
+                    assistant_id: assistant(),
+                    name_snapshot: "a".into(),
+                }
+                .into(),
+            ]),
         )
-        .await;
+        .await
+        .unwrap()
+        .attached;
     assert!(plan.iter().any(|e| matches!(e, DomainEvent::UserActionStateChanged(e) if e.card_id == card.id && matches!(e.state, UserActionState::Voided { reason: VoidReason::AssistantDeleted }))));
-    b.engine.committed(&plan).await;
     assert!(is_deny(&settle(h).await, MSG_TURN_CANCELLED));
 }
 
 #[tokio::test]
 async fn active_and_unknown_cards_are_not_voided() {
-    use iwork_domain::event::UserActionStateChanged;
-    for card_state in [
-        UserActionState::Starting,
-        UserActionState::Executing,
-        UserActionState::Stopping,
-    ] {
+    for reached in 1..=3 {
+        let path = [
+            UserActionState::Starting,
+            UserActionState::Executing,
+            UserActionState::Stopping,
+        ];
         let b = Bench::new(Some(Manual)).await;
         let h = b.ask(
             &b.decider(),
@@ -241,22 +236,19 @@ async fn active_and_unknown_cards_are_not_voided() {
             bash_req(&format!("cat '{DATA}/internal'")),
         );
         let card = first_card(&b).await;
-        b.engine
-            .on_event(
-                Seq(100),
-                &UserActionStateChanged {
-                    card_id: card.id,
-                    state: card_state,
-                    output_artifact: None,
-                }
-                .into(),
-            )
-            .await
-            .unwrap();
+        b.external(
+            path[..reached]
+                .iter()
+                .map(|s| card_state(card.id, s.clone()))
+                .collect(),
+        )
+        .await;
         assert!(
             b.engine
-                .void_turn(conversation(), turn(106), VoidReason::TurnCancelled)
+                .void_plan(conversation(), turn(106), VoidReason::TurnCancelled)
                 .await
+                .unwrap()
+                .0
                 .is_empty()
         );
         assert!(!h.is_finished());
@@ -274,39 +266,26 @@ async fn recovered_cards_keep_owner_and_latest_state() {
     );
     let card = first_card(&b).await;
     h.abort();
-    let fresh = Bench::new(Some(Manual)).await;
-    fresh
-        .engine
-        .recover(&b.store.stored(), |_, _| Some(keys()))
-        .await
-        .unwrap();
+    let (fresh, _) = b.restart(|_, _| Some(keys())).await;
     let plan = fresh
         .engine
-        .void_turn(conversation(), turn(107), VoidReason::TurnCancelled)
-        .await;
-    assert!(plan.iter().any(|e| matches!(e, DomainEvent::UserActionStateChanged(e) if e.card_id == card.id && matches!(e.state, UserActionState::Voided { .. }))));
-    use iwork_domain::event::UserActionStateChanged;
-    let mut events = b.store.stored();
-    let mut state_event = events.last().unwrap().clone();
-    state_event.seq = Seq(state_event.seq.0 + 1);
-    state_event.event = UserActionStateChanged {
-        card_id: card.id,
-        state: UserActionState::Executing,
-        output_artifact: None,
-    }
-    .into();
-    events.push(state_event);
-    let active = Bench::new(Some(Manual)).await;
-    active
-        .engine
-        .recover(&events, |_, _| Some(keys()))
+        .void_plan(conversation(), turn(107), VoidReason::TurnCancelled)
         .await
-        .unwrap();
+        .unwrap()
+        .0;
+    assert!(plan.iter().any(|e| matches!(e, DomainEvent::UserActionStateChanged(e) if e.card_id == card.id && matches!(e.state, UserActionState::Voided { .. }))));
+    b.store.seed(vec![
+        card_state(card.id, UserActionState::Starting),
+        card_state(card.id, UserActionState::Executing),
+    ]);
+    let (active, _) = b.restart(|_, _| Some(keys())).await;
     assert!(
         active
             .engine
-            .void_turn(conversation(), turn(107), VoidReason::TurnCancelled)
+            .void_plan(conversation(), turn(107), VoidReason::TurnCancelled)
             .await
+            .unwrap()
+            .0
             .is_empty()
     );
 }
@@ -316,7 +295,7 @@ async fn recovery_resolves_each_original_turn_line() {
     use iwork_domain::rule::RuleScope;
     let b = Bench::new(Some(Manual)).await;
     let first = keys();
-    let second_assistant = AssistantId::from_raw(RawUlid::from_u128(0x456));
+    let second_assistant = other_assistant();
     let mut second = keys_with(&[], second_assistant);
     second.project = Some(other_project());
     let d1 = Arc::new(b.engine.decider_for(first.clone()));
@@ -327,11 +306,9 @@ async fn recovery_resolves_each_original_turn_line() {
     let c = b.approval(1).await;
     h1.abort();
     h2.abort();
-    let fresh = Bench::new(Some(Manual)).await;
     let lookups = std::sync::Mutex::new(Vec::new());
-    fresh
-        .engine
-        .recover(&b.store.stored(), |conversation_id, original_turn| {
+    let (fresh, _) = b
+        .restart(|conversation_id, original_turn| {
             assert_eq!(conversation_id, conversation());
             lookups.lock().unwrap().push(original_turn);
             Some(if original_turn == turn(108) {
@@ -340,8 +317,7 @@ async fn recovery_resolves_each_original_turn_line() {
                 second.clone()
             })
         })
-        .await
-        .unwrap();
+        .await;
     for id in [a, c] {
         fresh
             .engine
@@ -401,7 +377,7 @@ async fn review_deadline_covers_open_cancel_and_close() {
         b.timer.expire();
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                if let Some(a) = b.engine.pending_approval(id).await
+                if let Some(a) = b.pending(id).await
                     && matches!(a.review, ReviewState::TimedOut { .. })
                 {
                     assert!(a.awaits_user());
@@ -450,7 +426,7 @@ async fn leaving_auto_abandons_review_blocked_by_denial_memory() {
         )
         .await
         .unwrap();
-    let pending = b.engine.pending_approval(c).await.unwrap();
+    let pending = b.pending(c).await.unwrap();
     assert!(pending.awaits_user(), "{pending:?}");
     assert!(matches!(pending.review, ReviewState::Abandoned { .. }));
     b.engine
@@ -538,15 +514,8 @@ async fn review_context_is_bounded_isolated_and_replayed() {
         })
         .await
         .unwrap();
-    for e in b.store.stored() {
-        b.engine.on_event(e.seq, &e.event).await.unwrap();
-    }
-    let fresh = Bench::new(Some(Auto)).await;
-    fresh
-        .engine
-        .recover(&b.store.stored(), |_, _| Some(keys()))
-        .await
-        .unwrap();
+    b.engine.sync().await.unwrap();
+    let (fresh, _) = b.restart(|_, _| Some(keys())).await;
     for bench in [&b, &fresh] {
         bench.reviewer.push(ReviewScript::Says(
             "{\"pass\":false,\"reason\":\"需用户确认\"}".into(),
@@ -656,10 +625,7 @@ async fn invalid_ruleset_fails_closed_with_rule_id() {
         RuleScope::Global,
     );
     let rule_id = bad.id.to_string();
-    b.engine
-        .on_event(Seq(100), &RuleRemembered { rule: bad }.into())
-        .await
-        .unwrap();
+    b.external(vec![RuleRemembered { rule: bad }.into()]).await;
     let result = b.call(&b.decider(), turn(115), write_req("src/a.rs")).await;
     assert!(matches!(result, PermissionDecision::Deny { message } if message.contains(&rule_id)));
 }
@@ -675,27 +641,22 @@ async fn failed_project_default_commit_keeps_old_default() {
             .await
             .is_err()
     );
-    b.engine
-        .on_event(
-            Seq(1),
-            &DmProjectSwitched {
-                conversation_id: conversation(),
-                project_id: Some(project()),
-            }
-            .into(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        b.engine.effective_mode(conversation(), assistant()).await,
-        Manual
-    );
+    b.external(vec![
+        DmProjectSwitched {
+            conversation_id: conversation(),
+            project_id: Some(project()),
+        }
+        .into(),
+    ])
+    .await;
+    assert_eq!(b.mode(conversation(), assistant()).await, Manual);
 }
 
 #[tokio::test]
 async fn cancelled_mode_commit_does_not_publish_uncommitted_mode() {
     let b = Bench::new(Some(Manual)).await;
-    *b.store.before_commit.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *b.store.before_commit.lock().unwrap() = Some(gate.clone());
     let engine = b.engine.clone();
     let switch = tokio::spawn(async move {
         engine
@@ -715,26 +676,26 @@ async fn cancelled_mode_commit_does_not_publish_uncommitted_mode() {
     .unwrap();
     switch.abort();
     let _ = switch.await;
-    assert_eq!(
-        b.engine.effective_mode(conversation(), assistant()).await,
-        Manual
-    );
+    // 已入队、还没处理：档位不变，日志里也没有
+    assert_eq!(b.mode(conversation(), assistant()).await, Manual);
     assert_eq!(
         b.count(|e| matches!(e, DomainEvent::ApprovalModeChanged(_))),
         0
     );
-    b.engine
-        .switch_mode(
-            ApprovalModeTarget::Conversation(conversation()),
-            Some(FullAccess),
-            user(),
-        )
-        .await
-        .unwrap();
+    // 调用方没了，已入队的那笔照样处理；档位只随日志变
+    gate.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while b.store.queued() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(
-        b.engine.effective_mode(conversation(), assistant()).await,
-        FullAccess
+        b.count(|e| matches!(e, DomainEvent::ApprovalModeChanged(_))),
+        1
     );
+    assert_eq!(b.mode(conversation(), assistant()).await, FullAccess);
 }
 
 #[tokio::test]
@@ -818,15 +779,8 @@ async fn artifact_messages_are_skipped_without_polluting_review_context() {
         })
         .await
         .unwrap();
-    for stored in b.store.stored() {
-        b.engine.on_event(stored.seq, &stored.event).await.unwrap();
-    }
-    let fresh = Bench::new(Some(Auto)).await;
-    fresh
-        .engine
-        .recover(&b.store.stored(), |_, _| Some(keys()))
-        .await
-        .unwrap();
+    b.engine.sync().await.unwrap();
+    let (fresh, _) = b.restart(|_, _| Some(keys())).await;
     for bench in [&b, &fresh] {
         bench.reviewer.push(ReviewScript::Says(
             "{\"pass\":false,\"reason\":\"需确认\"}".into(),
@@ -873,32 +827,27 @@ async fn dm_project_switch_out_of_auto_abandons_review_immediately() {
     );
     let id = b.approval(0).await;
     b.store.fail_next.store(true, Ordering::SeqCst);
-    let event = DmProjectSwitched {
-        conversation_id: conversation(),
-        project_id: None,
-    }
-    .into();
-    assert!(b.engine.on_event(Seq(100), &event).await.is_err());
-    assert_eq!(
-        b.engine.effective_mode(conversation(), assistant()).await,
-        Auto
-    );
-    assert!(matches!(
-        b.engine.pending_approval(id).await.unwrap().review,
-        ReviewState::InProgress { .. }
-    ));
-    b.engine
-        .on_event(
-            Seq(100),
-            &DmProjectSwitched {
+    let switched = || {
+        command(vec![
+            DmProjectSwitched {
                 conversation_id: conversation(),
                 project_id: None,
             }
             .into(),
-        )
-        .await
-        .unwrap();
-    let pending = b.engine.pending_approval(id).await.unwrap();
+        ])
+    };
+    let scope = Scope::DmProjectSwitched {
+        conversation: conversation(),
+        project: None,
+    };
+    assert!(b.engine.commit_with(scope, switched()).await.is_err());
+    assert_eq!(b.mode(conversation(), assistant()).await, Auto);
+    assert!(matches!(
+        b.pending(id).await.unwrap().review,
+        ReviewState::InProgress { .. }
+    ));
+    b.engine.commit_with(scope, switched()).await.unwrap();
+    let pending = b.pending(id).await.unwrap();
     assert!(
         pending.awaits_user(),
         "切回纯私聊已离开 Auto，不能留下 InProgress"

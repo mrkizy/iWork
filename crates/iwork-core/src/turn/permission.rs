@@ -23,10 +23,6 @@ use iwork_ports::agent::{PermissionDecision, PermissionHandler, PermissionReques
 /// 一次判定的结论和它对应的审批（T06 方案 2.6 第 3 条）。`approval`：规则直接放行或拒绝、没有审批实体时
 /// 为 `None`；经审批得到的答复、一次性授权命中时为 `Some`（T07 方案 6.10.6 第 8 步）。编排采纳结论时
 /// 凭它提交 `ApprovalDelivered`。
-#[expect(
-    dead_code,
-    reason = "T07 E2 先定义；E5 把 decide 的返回类型换成它，届时去掉"
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decided {
     pub decision: PermissionDecision,

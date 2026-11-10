@@ -5,7 +5,11 @@
 #[path = "../../../iwork-ports/tests/fake_fs/mod.rs"]
 pub mod fake_fs;
 
+#[path = "../../../iwork-ports/tests/reference_projection/mod.rs"]
+pub mod reference_projection;
+
 pub mod engine_fakes;
+pub mod fold_fx;
 
 use std::path::PathBuf;
 

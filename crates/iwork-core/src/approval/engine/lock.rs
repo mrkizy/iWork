@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use futures_channel::oneshot;
 
@@ -33,15 +33,13 @@ impl<T> AsyncLock<T> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    pub async fn lock(&self) -> AsyncGuard<'_, T> {
+    /// 排队直到拿到值。拿值与返回之间没有 `await`，future 在任何一点被丢弃都不会把值带走。
+    async fn take(&self) -> T {
         loop {
             let wait = {
                 let mut inner = self.std_lock();
                 if let Some(value) = inner.value.take() {
-                    return AsyncGuard {
-                        lock: self,
-                        value: Some(value),
-                    };
+                    return value;
                 }
                 let (tx, rx) = oneshot::channel();
                 inner.waiters.push_back(tx);
@@ -53,6 +51,28 @@ impl<T> AsyncLock<T> {
             // 发送方被丢弃（不会发生：持有者释放时只会 send）也当作被叫醒，重试即可
             let mut wait = wait;
             let _ = (&mut wait.receiver).await;
+        }
+    }
+
+    fn put_back(&self, value: T) {
+        let mut inner = self.std_lock();
+        inner.value = Some(value);
+        wake_next(&mut inner);
+    }
+
+    pub async fn lock(&self) -> AsyncGuard<'_, T> {
+        AsyncGuard {
+            lock: self,
+            value: Some(self.take().await),
+        }
+    }
+
+    /// 守卫带着 `Arc`，可以离开拿锁的函数（审批引擎交给编排的作废句柄用）。
+    pub async fn lock_owned(self: Arc<Self>) -> OwnedAsyncGuard<T> {
+        let value = self.take().await;
+        OwnedAsyncGuard {
+            lock: self,
+            value: Some(value),
         }
     }
 }
@@ -99,8 +119,34 @@ impl<T> DerefMut for AsyncGuard<'_, T> {
 
 impl<T> Drop for AsyncGuard<'_, T> {
     fn drop(&mut self) {
-        let mut inner = self.lock.std_lock();
-        inner.value = self.value.take();
-        wake_next(&mut inner);
+        if let Some(value) = self.value.take() {
+            self.lock.put_back(value);
+        }
+    }
+}
+
+pub struct OwnedAsyncGuard<T> {
+    lock: Arc<AsyncLock<T>>,
+    value: Option<T>,
+}
+
+impl<T> Deref for OwnedAsyncGuard<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.value.as_ref().expect("持有期间值一直在")
+    }
+}
+
+impl<T> DerefMut for OwnedAsyncGuard<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.value.as_mut().expect("持有期间值一直在")
+    }
+}
+
+impl<T> Drop for OwnedAsyncGuard<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.value.take() {
+            self.lock.put_back(value);
+        }
     }
 }

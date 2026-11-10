@@ -22,8 +22,9 @@ fn count(b: &Bench, f: impl Fn(&DomainEvent) -> bool) -> usize {
     b.store.all().iter().filter(|e| f(e)).count()
 }
 
-/// 2/F-1：作废计划已交出、外部事务已写入 ApprovalVoided、committed 回调还没来：此时 decide(Allow, Project)
-/// 不能批准、不能生成记住规则；同一回合也不能新登记等待项。确认后等待项移除；外部提交失败时撤销预留。
+/// 2/F-1：作废计划已交出、编排已写入回合状态与 ApprovalVoided、committed 回调还没来：此时 decide(Allow, Project)
+/// 先追平，读到作废，不能批准、不能生成记住规则；同一回合也不能新登记等待项。
+/// 对照：计划交出了但没落盘，下一个决定先过屏障（一笔空提交）再读，审批照常可以批准。
 #[tokio::test]
 async fn round2_void_committed_before_callback_cannot_be_approved() {
     let b = Bench::new(Some(Manual)).await;
@@ -32,7 +33,13 @@ async fn round2_void_committed_before_callback_cannot_be_approved() {
     let id = b.approval(0).await;
     let plan = d.void_pending(turn(200), VoidReason::TurnCancelled).await;
     assert!(!plan.is_empty());
-    commit_raw(&b, 1, plan.clone()).await;
+    let mut with_turn = vec![state_changed(
+        turn(200),
+        TurnState::WaitingApproval,
+        TurnState::Cancelling,
+    )];
+    with_turn.extend(plan.iter().cloned());
+    commit_raw(&b, 1, with_turn).await;
     assert_eq!(
         b.engine
             .decide(id, allow(RememberScope::Project), user())
@@ -49,28 +56,33 @@ async fn round2_void_committed_before_callback_cannot_be_approved() {
     );
     // 同一回合在作废中：新请求直接按取消拒绝，不登记等待项
     assert!(is_deny(
-        &b.call(&d, turn(200), write_req("src/b.rs")).await,
+        &d.decide(turn(200), &write_req("src/b.rs")).await,
         MSG_TURN_CANCELLED
     ));
+    assert_eq!(
+        count(&b, |e| matches!(e, DomainEvent::ApprovalRequested(_))),
+        1,
+        "回合不在等审批：不建审批"
+    );
     d.committed(&plan).await;
-    assert!(b.engine.pending_approval(id).await.is_none());
+    assert!(b.pending(id).await.is_none());
     assert!(is_deny(&settle(h).await, MSG_TURN_CANCELLED));
 
     // 对照：外部提交失败 → 撤销预留，等待项照常可以批准
     let h = b.ask(&d, turn(201), write_req("src/c.rs"));
     let id = b.approval(1).await;
     let plan = d.void_pending(turn(201), VoidReason::TurnCancelled).await;
-    assert_eq!(
-        b.engine
-            .decide(id, allow(RememberScope::Once), user())
-            .await,
-        Err(DecideError::NotPending(id))
-    );
-    d.aborted(&plan).await;
+    assert!(!plan.is_empty());
+    let commits = b.store.commits.load(Ordering::SeqCst);
     b.engine
         .decide(id, allow(RememberScope::Once), user())
         .await
         .unwrap();
+    assert_eq!(
+        b.store.commits.load(Ordering::SeqCst),
+        commits + 2,
+        "屏障的空提交 + 决定那一笔"
+    );
     assert_eq!(settle(h).await, PermissionDecision::Allow);
 }
 
@@ -84,15 +96,22 @@ async fn round2_void_for_event_blocks_decide_until_confirmed() {
         conversation_id: conversation(),
     }
     .into();
-    let plan = b.engine.void_for_event(&deleting).await;
-    commit_raw(&b, 2, plan.clone()).await;
+    let plan = b
+        .engine
+        .commit_with(
+            Scope::ConversationDeleting(conversation()),
+            command(vec![deleting]),
+        )
+        .await
+        .unwrap()
+        .attached;
+    assert!(!plan.is_empty());
     assert_eq!(
         b.engine
             .decide(id, allow(RememberScope::Project), user())
             .await,
         Err(DecideError::NotPending(id))
     );
-    b.engine.committed(&plan).await;
     assert!(is_deny(&settle(h).await, MSG_TURN_CANCELLED));
     assert_eq!(
         count(&b, |e| matches!(e, DomainEvent::RuleRemembered(_))),
@@ -125,10 +144,11 @@ async fn round2_committed_denial_survives_cancelled_receipt() {
     };
     decision.abort();
     let _ = decision.await;
-    // 订阅把已落盘的事件投过来
-    b.engine.on_event(stored.seq, &stored.event).await.unwrap();
+    // 下一次追平折到已落盘的拒绝
+    assert!(matches!(stored.event, DomainEvent::ApprovalDecided(_)));
+    b.engine.sync().await.unwrap();
     assert!(is_deny(&settle(h).await, MSG_USER_DENIED));
-    assert!(b.engine.pending_approval(id).await.is_none());
+    assert!(b.pending(id).await.is_none());
     b.engine
         .switch_mode(
             ApprovalModeTarget::Conversation(conversation()),
@@ -139,8 +159,8 @@ async fn round2_committed_denial_survives_cancelled_receipt() {
         .unwrap();
     let again = b.call(&d, turn(204), write_req("src/a.rs")).await;
     assert!(is_deny(&again, MSG_USER_DENIED), "{again:?}");
-    // 重投两次也一样（幂等）
-    b.engine.on_event(stored.seq, &stored.event).await.unwrap();
+    // 再追平一次也一样（每条事件只应用一次）
+    b.engine.sync().await.unwrap();
     assert!(is_deny(
         &b.call(&d, turn(205), write_req("src/a.rs")).await,
         MSG_USER_DENIED
@@ -177,18 +197,13 @@ async fn round2_committed_mode_switch_survives_cancelled_receipt() {
     };
     switching.abort();
     let _ = switching.await;
-    for e in stored.iter().filter(|e| {
-        matches!(
-            e.event,
-            DomainEvent::ApprovalModeChanged(_) | DomainEvent::ApprovalDecided(_)
-        )
-    }) {
-        b.engine.on_event(e.seq, &e.event).await.unwrap();
-    }
-    assert_eq!(
-        b.engine.effective_mode(conversation(), assistant()).await,
-        Auto
+    assert!(
+        stored
+            .iter()
+            .any(|e| matches!(e.event, DomainEvent::ApprovalModeChanged(_)))
     );
+    b.engine.sync().await.unwrap();
+    assert_eq!(b.mode(conversation(), assistant()).await, Auto);
     assert_eq!(settle(h).await, PermissionDecision::Allow);
 }
 
@@ -209,9 +224,7 @@ async fn round2_live_cursor_must_describe_contiguous_rule_history() {
         .await
         .unwrap();
     settle(h).await;
-    for e in b.store.stored() {
-        b.engine.on_event(e.seq, &e.event).await.unwrap();
-    }
+    b.engine.sync().await.unwrap();
     assert_eq!(
         b.call(&d, turn(211), write_req("src/a.rs")).await,
         PermissionDecision::Allow
@@ -315,24 +328,24 @@ async fn round2_failed_audit_must_not_consume_grant_once() {
     let id = b.approval(0).await;
     h.abort();
     let _ = h.await;
+    b.interrupt(turn(220)).await;
     b.engine
         .decide(id, allow(RememberScope::Once), user())
         .await
         .unwrap();
-    assert!(b.engine.grant(conversation(), id).await.is_some());
+    assert!(b.grant(id).await.is_some());
+    // 续接（编排提交回到等审批），然后让审计那一笔失败
+    b.waiting(turn(220), assistant());
     b.store.fail_next.store(true, Ordering::SeqCst);
-    let first = b
-        .call(&d, turn(220), bash_req("rm a.txt && touch a.txt"))
+    let first = d
+        .decide(turn(220), &bash_req("rm a.txt && touch a.txt"))
         .await;
     assert!(matches!(first, PermissionDecision::Deny { .. }));
-    assert!(
-        b.engine.grant(conversation(), id).await.is_some(),
-        "审计失败不消费"
-    );
+    assert!(b.grant(id).await.is_some(), "审计失败不消费");
     assert_eq!(
         b.call(&d, turn(220), bash_req("rm a.txt && touch a.txt"))
             .await,
         PermissionDecision::Allow
     );
-    assert!(b.engine.grant(conversation(), id).await.is_none());
+    assert!(b.grant(id).await.is_none());
 }

@@ -9,28 +9,30 @@ use std::time::Duration;
 
 use ApprovalMode::{Auto, FullAccess, Manual};
 use iwork_core::approval::engine::{
-    ApprovalEngine, ConversationModes, DecideError, EnginePorts, MSG_TURN_CANCELLED,
-    MSG_USER_DENIED, MSG_USER_NOT_EXECUTED, ModeError, SessionDecider, SessionKeys, UserDecision,
+    ApprovalEngine, DecideError, EnginePorts, GrantOnce, MSG_TURN_CANCELLED, MSG_USER_DENIED,
+    MSG_USER_NOT_EXECUTED, ModeError, Scope, SessionDecider, SessionKeys, UserDecision,
 };
 use iwork_core::approval::session::tool_set_for;
 use iwork_core::turn::PermissionDecider;
 use iwork_domain::approval::{
-    AbandonReason, ApprovalKind, ApprovalState, Decider, ReviewState, VoidReason,
+    AbandonReason, Approval, ApprovalKind, ApprovalState, Decider, ReviewState, VoidReason,
 };
 use iwork_domain::approval_mode::{ApprovalMode, ProjectDefaultMode, RememberScope};
 use iwork_domain::common::{Actor, ModelId, ModelSelection, Timestamp, ToolGroups};
 use iwork_domain::event::{
-    ApprovalModeTarget, AssistantDeleted, ConversationDeleting, DomainEvent, MessageAppended,
+    ApprovalModeTarget, AssistantCreated, AssistantDeleted, ConversationCreated,
+    ConversationDeleting, DomainEvent, MessageAppended, ProjectAdded, TurnQueued, TurnStateChanged,
 };
-use iwork_domain::id::{ApprovalId, AssistantId, MessageId, RawUlid, Seq, TurnId};
+use iwork_domain::id::{ApprovalId, AssistantId, ConversationId, MessageId, RawUlid, Seq, TurnId};
 use iwork_domain::message::{Author, Message, MessageBody, MessageStatus};
 use iwork_domain::project::AiReviewSettings;
 use iwork_domain::rule::{RuleEntry, Verdict};
-use iwork_domain::turn::TurnKind;
+use iwork_domain::turn::{InterruptReason, TurnKind, TurnState};
 use iwork_domain::user_action::{ExitStatus, UserActionState};
 use iwork_ports::agent::{PermissionDecision, PermissionRequest};
 use support::engine_fakes::*;
 use support::fake_fs::FakeFs;
+use support::fold_fx;
 use support::*;
 
 type Engine = ApprovalEngine<TickClock, Ids, MemStore, FakeReviewer, FakeTimer, FakeFs>;
@@ -41,10 +43,16 @@ struct Bench {
     store: MemStore,
     reviewer: FakeReviewer,
     timer: FakeTimer,
+    fs: FakeFs,
 }
 
 fn turn(n: u128) -> TurnId {
     TurnId::from_raw(RawUlid::from_u128(0x500 + n))
+}
+
+/// 测试里用到的另一个助手。
+fn other_assistant() -> AssistantId {
+    AssistantId::from_raw(RawUlid::from_u128(0x22))
 }
 
 fn keys_with(lists: &[RuleEntry], assistant: AssistantId) -> SessionKeys {
@@ -77,6 +85,44 @@ fn keys() -> SessionKeys {
     keys_with(&[], assistant())
 }
 
+/// 布景：项目（手动默认）、两个助手、项目对话（对话级档位 `mode`）。
+fn world(mode: Option<ApprovalMode>) -> Vec<DomainEvent> {
+    let mut p = fold_fx::project(1, ProjectDefaultMode::Manual);
+    p.id = project();
+    let mut a = fold_fx::assistant(1);
+    a.id = assistant();
+    let mut o = fold_fx::assistant(2);
+    o.id = other_assistant();
+    let mut c = fold_fx::project_conversation(1, 1);
+    c.id = conversation();
+    c.kind = iwork_domain::conversation::ConversationKind::Project {
+        project_id: project(),
+    };
+    c.approval_mode = mode;
+    vec![
+        ProjectAdded { project: p }.into(),
+        AssistantCreated { assistant: a }.into(),
+        AssistantCreated { assistant: o }.into(),
+        ConversationCreated { conversation: c }.into(),
+    ]
+}
+
+fn ports(
+    store: &MemStore,
+    reviewer: &FakeReviewer,
+    timer: &FakeTimer,
+    fs: FakeFs,
+) -> EnginePorts<TickClock, Ids, MemStore, FakeReviewer, FakeTimer, FakeFs> {
+    EnginePorts {
+        clock: TickClock::default(),
+        ids: Ids::default(),
+        store: store.clone(),
+        reviewer: reviewer.clone(),
+        timer: timer.clone(),
+        fs,
+    }
+}
+
 impl Bench {
     async fn new(mode: Option<ApprovalMode>) -> Self {
         Self::with_fs(mode, fs()).await
@@ -84,39 +130,129 @@ impl Bench {
 
     async fn with_fs(mode: Option<ApprovalMode>, fs: FakeFs) -> Self {
         let store = MemStore::default();
+        store.seed(world(mode));
         let reviewer = FakeReviewer::default();
         let timer = FakeTimer::default();
-        let engine = Arc::new(ApprovalEngine::new(
-            EnginePorts {
-                clock: TickClock::default(),
-                ids: Ids::default(),
-                store: store.clone(),
-                reviewer: reviewer.clone(),
-                timer: timer.clone(),
-                fs,
-            },
+        let (engine, plan) = Engine::start(
+            ports(&store, &reviewer, &timer, fs.clone()),
             Default::default(),
-        ));
-        engine
-            .set_modes(
-                conversation(),
-                ConversationModes::Project {
-                    project_default: ProjectDefaultMode::Manual,
-                    conversation_setting: mode,
-                    member_overrides: Default::default(),
-                },
-            )
-            .await;
+            |_, _| None,
+        )
+        .await
+        .unwrap();
+        assert!(plan.is_empty());
         Self {
             engine,
             store,
             reviewer,
             timer,
+            fs,
         }
+    }
+
+    /// 后台重启：用同一份日志（拷进一个新存储）`start` 一个新引擎，提交它的恢复计划。
+    /// 新引擎有自己的审查运行时与定时器；旧引擎留在旧存储上，互不影响。返回恢复计划。
+    async fn restart(
+        &self,
+        keys_for: impl Fn(ConversationId, TurnId) -> Option<SessionKeys>,
+    ) -> (Self, Vec<DomainEvent>) {
+        let store = MemStore::default();
+        store.seed(self.store.all());
+        let reviewer = FakeReviewer::default();
+        let timer = FakeTimer::default();
+        let p = ports(&store, &reviewer, &timer, self.fs.clone());
+        // 新引擎的 id 不能和旧日志里的撞：先推进计数器
+        for _ in 0..10_000 {
+            iwork_ports::clock::IdGenerator::next(&p.ids);
+        }
+        let (engine, plan) = Engine::start(p, Default::default(), keys_for)
+            .await
+            .unwrap();
+        if !plan.is_empty() {
+            store.seed(plan.clone());
+            engine.sync().await.unwrap();
+        }
+        (
+            Self {
+                engine,
+                store,
+                reviewer,
+                timer,
+                fs: self.fs.clone(),
+            },
+            plan,
+        )
     }
 
     fn decider(&self) -> Arc<Decider_> {
         Arc::new(self.engine.decider_for(keys()))
+    }
+
+    /// 回合最近一次落盘的状态（没有状态变化记录时是 `Queued`）；没登记过返回 `None`。
+    fn turn_state(&self, t: TurnId) -> Option<TurnState> {
+        let events = self.store.all();
+        let queued = events
+            .iter()
+            .any(|e| matches!(e, DomainEvent::TurnQueued(q) if q.turn.id == t));
+        if !queued {
+            return None;
+        }
+        Some(
+            events
+                .iter()
+                .rev()
+                .find_map(|e| match e {
+                    DomainEvent::TurnStateChanged(c) if c.turn_id == t => Some(c.to),
+                    _ => None,
+                })
+                .unwrap_or(TurnState::Queued),
+        )
+    }
+
+    /// 扮演编排：回合 `t`（属于 `assistant`）登记过并处于等审批（`PermissionAsked` 已落盘）。
+    fn waiting(&self, t: TurnId, assistant: AssistantId) {
+        let mut events = Vec::new();
+        let from = match self.turn_state(t) {
+            Some(state) => state,
+            None => {
+                let mut turn = fold_fx::turn(1, 1, 1);
+                turn.id = t;
+                turn.conversation_id = conversation();
+                turn.assistant_id = assistant;
+                events.push(TurnQueued { turn }.into());
+                TurnState::Queued
+            }
+        };
+        if from != TurnState::WaitingApproval {
+            events.push(state_changed(t, from, TurnState::WaitingApproval));
+        }
+        if !events.is_empty() {
+            self.store.seed(events);
+        }
+    }
+
+    /// 扮演编排：等待上限到时，回合中断（不作废审批）。
+    async fn interrupt(&self, t: TurnId) {
+        let from = self.turn_state(t).expect("回合已登记");
+        self.store.seed(vec![state_changed(
+            t,
+            from,
+            TurnState::Interrupted {
+                reason: InterruptReason::ApprovalWaitLimit,
+            },
+        )]);
+        self.engine.sync().await.unwrap();
+    }
+
+    /// 扮演编排：回合以 `reason` 结束等待，作废计划与回合状态同一笔提交。返回作废事件。
+    async fn void_turn(&self, d: &Decider_, t: TurnId, reason: VoidReason) -> Vec<DomainEvent> {
+        let events = d.void_pending(t, reason).await;
+        let from = self.turn_state(t).expect("回合已登记");
+        let mut all = vec![state_changed(t, from, TurnState::Cancelling)];
+        all.extend(events.iter().cloned());
+        self.store.seed(all);
+        d.committed(&events).await;
+        events
     }
 
     /// 在后台发起一次请求，返回答复句柄。
@@ -126,6 +262,7 @@ impl Bench {
         t: TurnId,
         req: PermissionRequest,
     ) -> tokio::task::JoinHandle<PermissionDecision> {
+        self.waiting(t, d.keys().assistant);
         let d = d.clone();
         tokio::spawn(async move { d.decide(t, &req).await })
     }
@@ -136,6 +273,7 @@ impl Bench {
         t: TurnId,
         req: PermissionRequest,
     ) -> PermissionDecision {
+        self.waiting(t, d.keys().assistant);
         d.decide(t, &req).await
     }
 
@@ -159,6 +297,28 @@ impl Bench {
         panic!("第 {n} 个审批没有出现：{:#?}", self.store.all());
     }
 
+    /// 追平后的待审批。
+    async fn pending(&self, id: ApprovalId) -> Option<Approval> {
+        self.engine.catch_up().await.unwrap();
+        self.engine.pending_approval(id)
+    }
+
+    async fn grant(&self, id: ApprovalId) -> Option<GrantOnce> {
+        self.engine.catch_up().await.unwrap();
+        self.engine.grant(id)
+    }
+
+    async fn mode(&self, c: ConversationId, a: AssistantId) -> ApprovalMode {
+        self.engine.catch_up().await.unwrap();
+        self.engine.effective_mode(c, a)
+    }
+
+    /// 别的写者提交（扮演 T10 等），然后提醒引擎。
+    async fn external(&self, events: Vec<DomainEvent>) {
+        self.store.seed(events);
+        self.engine.sync().await.unwrap();
+    }
+
     async fn user_message(&self) {
         let m = Message {
             id: MessageId::from_raw(RawUlid::from_u128(0x77)),
@@ -171,15 +331,42 @@ impl Bench {
             created_at: Timestamp(1),
             turn_id: None,
         };
-        self.engine
-            .on_event(Seq(100), &MessageAppended { message: m }.into())
-            .await
-            .unwrap();
+        self.external(vec![MessageAppended { message: m }.into()])
+            .await;
     }
 
     fn count(&self, pred: impl Fn(&DomainEvent) -> bool) -> usize {
         self.store.all().iter().filter(|e| pred(e)).count()
     }
+}
+
+fn card_state(card: iwork_domain::id::UserActionId, state: UserActionState) -> DomainEvent {
+    iwork_domain::event::UserActionStateChanged {
+        card_id: card,
+        state,
+        output_artifact: None,
+    }
+    .into()
+}
+
+/// T10 交给 `commit_with` 的一笔命令。
+fn command(events: Vec<DomainEvent>) -> iwork_ports::store::CommitRequest {
+    iwork_ports::store::CommitRequest {
+        command_id: iwork_domain::id::CommandId::from_raw(RawUlid::from_u128(0x7777)),
+        actor: user(),
+        events,
+        outbox: Vec::new(),
+    }
+}
+
+fn state_changed(t: TurnId, from: TurnState, to: TurnState) -> DomainEvent {
+    TurnStateChanged {
+        turn_id: t,
+        from,
+        to,
+        reason: None,
+    }
+    .into()
 }
 
 fn user() -> Actor {
@@ -211,7 +398,7 @@ async fn ask_then_user_allow_and_audit_every_call() {
     );
     let h = b.ask(&d, turn(1), bash_req("npm test"));
     let id = b.approval(0).await;
-    let a = b.engine.pending_approval(id).await.unwrap();
+    let a = b.pending(id).await.unwrap();
     assert_eq!(a.kind, ApprovalKind::Ask);
     assert!(a.call.is_some());
     let out = b
@@ -270,7 +457,7 @@ async fn denial_memory_cross_turn_and_tool() {
     b.user_message().await;
     let h = b.ask(&d, turn(5), write_req("a.txt"));
     let id2 = b.approval(1).await;
-    let a = b.engine.pending_approval(id2).await.unwrap();
+    let a = b.pending(id2).await.unwrap();
     assert_eq!(
         a.offered_remember,
         vec![RememberScope::Once],
@@ -354,16 +541,12 @@ async fn ai_review_four_outcomes() {
         let id = b.approval(0).await;
         // 等审查结论落下
         for _ in 0..200 {
-            if b.engine
-                .pending_approval(id)
-                .await
-                .is_some_and(|a| a.awaits_user())
-            {
+            if b.pending(id).await.is_some_and(|a| a.awaits_user()) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let a = b.engine.pending_approval(id).await.unwrap();
+        let a = b.pending(id).await.unwrap();
         assert!(a.awaits_user(), "{want}");
         let phase = format!("{:?}", a.review.phase());
         assert_eq!(phase, want);
@@ -403,16 +586,12 @@ async fn review_recheck_fail_keeps_pending() {
     assert!(is_deny(&settle(ha).await, MSG_USER_DENIED));
     gate.notify_one();
     for _ in 0..200 {
-        if b.engine
-            .pending_approval(bid)
-            .await
-            .is_some_and(|x| x.awaits_user())
-        {
+        if b.pending(bid).await.is_some_and(|x| x.awaits_user()) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    let pb = b.engine.pending_approval(bid).await.unwrap();
+    let pb = b.pending(bid).await.unwrap();
     assert_eq!(pb.state, ApprovalState::Pending);
     assert!(pb.awaits_user());
     assert!(
@@ -455,16 +634,12 @@ async fn late_review_pass_after_user_message_asks_user() {
     b.user_message().await;
     gate.notify_one();
     for _ in 0..200 {
-        if b.engine
-            .pending_approval(bid)
-            .await
-            .is_some_and(|x| x.awaits_user())
-        {
+        if b.pending(bid).await.is_some_and(|x| x.awaits_user()) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    let pb = b.engine.pending_approval(bid).await.unwrap();
+    let pb = b.pending(bid).await.unwrap();
     assert!(
         matches!(&pb.review, ReviewState::Failed { reason, .. } if reason.contains("重新确认")),
         "{:?}",
@@ -502,7 +677,7 @@ async fn mode_switch_release_cases() {
         .await
         .unwrap();
     assert_eq!(settle(in_bounds).await, PermissionDecision::Allow);
-    assert!(b.engine.pending_approval(oob_id).await.is_some());
+    assert!(b.pending(oob_id).await.is_some());
     // 自动 → 全开：越界放行，push 与带 push 的组合保留
     b.engine
         .switch_mode(
@@ -513,8 +688,8 @@ async fn mode_switch_release_cases() {
         .await
         .unwrap();
     assert_eq!(settle(oob).await, PermissionDecision::Allow);
-    assert!(b.engine.pending_approval(push_id).await.is_some());
-    assert!(b.engine.pending_approval(combo_id).await.is_some());
+    assert!(b.pending(push_id).await.is_some());
+    assert!(b.pending(combo_id).await.is_some());
     assert_eq!(b.count(|e| matches!(e, DomainEvent::ApprovalDecided(x) if x.state == ApprovalState::Approved { decider: Decider::ModeSwitch })), 2);
     assert!(!card.is_finished(), "卡片不随切档自动执行");
     // 项目默认不能全开
@@ -564,15 +739,9 @@ async fn member_override_unaffected_by_supervisor_switch() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        b.engine.effective_mode(conversation(), assistant()).await,
-        Manual
-    );
+    assert_eq!(b.mode(conversation(), assistant()).await, Manual);
     let other = AssistantId::from_raw(RawUlid::from_u128(0x22));
-    assert_eq!(
-        b.engine.effective_mode(conversation(), other).await,
-        FullAccess
-    );
+    assert_eq!(b.mode(conversation(), other).await, FullAccess);
     // 恢复跟随
     b.engine
         .switch_mode(
@@ -585,10 +754,7 @@ async fn member_override_unaffected_by_supervisor_switch() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        b.engine.effective_mode(conversation(), assistant()).await,
-        FullAccess
-    );
+    assert_eq!(b.mode(conversation(), assistant()).await, FullAccess);
 }
 
 #[tokio::test]
@@ -600,7 +766,7 @@ async fn to_manual_abandons_review() {
     let id = b.approval(0).await;
     for _ in 0..100 {
         if matches!(
-            b.engine.pending_approval(id).await.unwrap().review,
+            b.pending(id).await.unwrap().review,
             ReviewState::InProgress { .. }
         ) {
             break;
@@ -615,7 +781,7 @@ async fn to_manual_abandons_review() {
         )
         .await
         .unwrap();
-    let a = b.engine.pending_approval(id).await.unwrap();
+    let a = b.pending(id).await.unwrap();
     assert!(matches!(
         a.review,
         ReviewState::Abandoned {
@@ -644,8 +810,7 @@ async fn void_and_wait_limit() {
         let d = b.decider();
         let h = b.ask(&d, turn(1), bash_req("npm test"));
         let id = b.approval(0).await;
-        let events = d.void_pending(turn(1), reason).await;
-        d.committed(&events).await;
+        let events = b.void_turn(&d, turn(1), reason).await;
         assert!(
             events
                 .iter()
@@ -659,22 +824,32 @@ async fn void_and_wait_limit() {
             Err(DecideError::NotPending(id))
         );
     }
-    for event in [
-        DomainEvent::from(ConversationDeleting {
-            conversation_id: conversation(),
-        }),
-        AssistantDeleted {
-            assistant_id: assistant(),
-            name_snapshot: "a".into(),
-        }
-        .into(),
+    for (scope, event) in [
+        (
+            Scope::ConversationDeleting(conversation()),
+            DomainEvent::from(ConversationDeleting {
+                conversation_id: conversation(),
+            }),
+        ),
+        (
+            Scope::AssistantDeleted(assistant()),
+            AssistantDeleted {
+                assistant_id: assistant(),
+                name_snapshot: "a".into(),
+            }
+            .into(),
+        ),
     ] {
         let b = Bench::new(None).await;
         let d = b.decider();
         let h = b.ask(&d, turn(1), bash_req("npm test"));
         let id = b.approval(0).await;
-        let events = b.engine.void_for_event(&event).await;
-        b.engine.committed(&events).await;
+        let events = b
+            .engine
+            .commit_with(scope, command(vec![event]))
+            .await
+            .unwrap()
+            .attached;
         assert_eq!(events.len(), 1, "{events:?}");
         settle(h).await;
         assert!(
@@ -691,17 +866,15 @@ async fn void_and_wait_limit() {
     let id = b.approval(0).await;
     h.abort();
     let _ = h.await;
-    assert_eq!(
-        b.engine.pending_approval(id).await.unwrap().state,
-        ApprovalState::Pending
-    );
+    b.interrupt(turn(1)).await;
+    assert_eq!(b.pending(id).await.unwrap().state, ApprovalState::Pending);
     let out = b
         .engine
         .decide(id, allow(RememberScope::Once), user())
         .await
         .unwrap();
     assert_eq!(out.resume_turn, Some(turn(1)));
-    assert!(b.engine.grant(conversation(), id).await.is_some());
+    assert!(b.grant(id).await.is_some());
     // 续接后：改写过的调用不命中（照常询问）；原样重发命中、只放一次
     for changed in [
         "touch a.txt && rm a.txt",
@@ -719,10 +892,7 @@ async fn void_and_wait_limit() {
             .unwrap();
         assert_eq!(settle(h2).await, PermissionDecision::Allow);
     }
-    assert!(
-        b.engine.grant(conversation(), id).await.is_some(),
-        "改写过的调用不消费一次性放行"
-    );
+    assert!(b.grant(id).await.is_some(), "改写过的调用不消费一次性放行");
     // 续接前用户拒绝过同一动作并发了新消息：一次性放行被强制询问挡住（grant_once_voided_by_force_ask）
     let n = b.count(|e| matches!(e, DomainEvent::ApprovalRequested(_)));
     let hx = b.ask(&d, turn(1), bash_req("rm a.txt"));
@@ -753,6 +923,7 @@ async fn grant_once_exact_call_only() {
     let id = b.approval(0).await;
     h.abort();
     let _ = h.await;
+    b.interrupt(turn(1)).await;
     b.engine
         .decide(id, allow(RememberScope::Once), user())
         .await
@@ -771,10 +942,7 @@ async fn grant_once_exact_call_only() {
             .await,
         PermissionDecision::Allow
     );
-    assert!(
-        b.engine.grant(conversation(), id).await.is_none(),
-        "命中即消费"
-    );
+    assert!(b.grant(id).await.is_none(), "命中即消费");
     // 再发一次：照常询问
     let h = b.ask(&d, turn(1), bash_req("rm a.txt && touch a.txt"));
     let again = b.approval(2).await;
@@ -800,14 +968,18 @@ async fn user_action_card_round_trip() {
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     };
-    b.engine
-        .on_user_action_settled(
+    // T10 的执行器写状态（Pending → Starting → Executing → Done）
+    b.external(vec![
+        card_state(card.id, UserActionState::Starting),
+        card_state(card.id, UserActionState::Executing),
+        card_state(
             card.id,
-            &UserActionState::Done {
+            UserActionState::Done {
                 exit: ExitStatus::Code(3),
             },
-        )
-        .await;
+        ),
+    ])
+    .await;
     assert_eq!(
         settle(h).await,
         PermissionDecision::Deny {
@@ -830,8 +1002,7 @@ async fn user_action_card_round_trip() {
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     };
-    b.engine
-        .on_user_action_settled(card.id, &UserActionState::Dismissed)
+    b.external(vec![card_state(card.id, UserActionState::Dismissed)])
         .await;
     assert!(is_deny(&settle(h).await, MSG_USER_NOT_EXECUTED));
 }
@@ -882,26 +1053,29 @@ async fn engine_recovers_pending_from_events() {
     let reviewing = b.approval(1).await;
     for _ in 0..100 {
         if matches!(
-            b.engine.pending_approval(reviewing).await.unwrap().review,
+            b.pending(reviewing).await.unwrap().review,
             ReviewState::InProgress { .. }
         ) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    let original = b.engine.pending_approval(plain).await.unwrap();
+    let original = b.pending(plain).await.unwrap();
     h1.abort();
     h2.abort();
-    // 丢掉全部内存状态，只凭事件重建
-    let fresh = Bench::new(Some(Auto)).await;
-    let abandoned = fresh
-        .engine
-        .recover(&b.store.stored(), |_, _| Some(keys()))
-        .await
-        .unwrap();
+    // 丢掉全部内存状态，只凭事件重建；T04 把回合标成 Interrupted{Crash}
+    let (fresh, abandoned) = b.restart(|_, _| Some(keys())).await;
     assert_eq!(abandoned.len(), 1);
-    fresh.engine.committed(&abandoned).await;
-    let recovered = fresh.engine.pending_approval(reviewing).await.unwrap();
+    fresh
+        .external(vec![state_changed(
+            turn(1),
+            TurnState::WaitingApproval,
+            TurnState::Interrupted {
+                reason: InterruptReason::Crash,
+            },
+        )])
+        .await;
+    let recovered = fresh.pending(reviewing).await.unwrap();
     assert!(matches!(
         recovered.review,
         ReviewState::Abandoned {
@@ -910,7 +1084,7 @@ async fn engine_recovers_pending_from_events() {
         }
     ));
     assert!(recovered.awaits_user());
-    let p = fresh.engine.pending_approval(plain).await.unwrap();
+    let p = fresh.pending(plain).await.unwrap();
     assert_eq!(p.call, original.call, "调用记录无损");
     let out = fresh
         .engine
@@ -919,17 +1093,13 @@ async fn engine_recovers_pending_from_events() {
         .unwrap();
     assert_eq!(out.resume_turn, Some(turn(1)));
     assert_eq!(
-        fresh
-            .engine
-            .grant(conversation(), plain)
-            .await
-            .unwrap()
-            .record,
+        fresh.grant(plain).await.unwrap().record,
         *original.call.unwrap()
     );
     let fd = Arc::new(fresh.engine.decider_for(keys()));
     assert_eq!(
-        fd.decide(turn(1), &bash_req("rm a.txt && touch a.txt"))
+        fresh
+            .call(&fd, turn(1), bash_req("rm a.txt && touch a.txt"))
             .await,
         PermissionDecision::Allow
     );
@@ -957,18 +1127,19 @@ async fn snapshot_pins_excluded_commands() {
         b.engine
             .decider_for(keys_with(std::slice::from_ref(&tf), assistant())),
     );
-    b.engine
-        .on_event(
-            Seq(50),
-            &iwork_domain::event::SecurityListEntryRemoved { entry_id: tf.id }.into(),
-        )
-        .await
-        .unwrap();
-    assert!(b.engine.rebuild_session_needed(conversation()).await);
+    let before = b.engine.snapshot_inputs_seq();
+    b.external(vec![
+        iwork_domain::event::SecurityListEntryRemoved { entry_id: tf.id }.into(),
+    ])
+    .await;
+    assert!(
+        b.engine.snapshot_inputs_seq() > before,
+        "清单变了：生成于这之前的会话快照已过期"
+    );
     let h = b.ask(&old, turn(1), bash_req("terraform apply"));
     let id = b.approval(0).await;
     assert_eq!(
-        b.engine.pending_approval(id).await.unwrap().kind,
+        b.pending(id).await.unwrap().kind,
         ApprovalKind::OutsideSandbox
     );
     b.engine
@@ -980,10 +1151,7 @@ async fn snapshot_pins_excluded_commands() {
     b.user_message().await;
     let h = b.ask(&new, turn(2), bash_req("terraform apply -x"));
     let id = b.approval(1).await;
-    assert_eq!(
-        b.engine.pending_approval(id).await.unwrap().kind,
-        ApprovalKind::Ask
-    );
+    assert_eq!(b.pending(id).await.unwrap().kind, ApprovalKind::Ask);
     b.engine
         .decide(id, UserDecision::Deny, user())
         .await
@@ -1035,8 +1203,7 @@ async fn audit_snapshot_reconstructible() {
             .await
             .unwrap();
     }
-    let seq = Seq(b.store.stored().len() as u64);
-    b.engine.on_event(seq, &revoke).await.unwrap();
+    b.engine.sync().await.unwrap();
     let h = b.ask(&d, turn(3), write_req("src/c.rs"));
     let id = b.approval(1).await;
     b.engine
@@ -1247,5 +1414,7 @@ async fn builtin_deny_messages() {
 #[path = "engine/review_round1_b.rs"]
 mod review_round1_b;
 
+#[path = "engine/concurrency.rs"]
+mod concurrency;
 #[path = "engine/review_round2.rs"]
 mod review_round2;

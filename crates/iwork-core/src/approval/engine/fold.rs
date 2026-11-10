@@ -535,7 +535,8 @@ impl Folded {
         Ok(effects)
     }
 
-    fn project_default(&self, project: ProjectId) -> ProjectDefaultMode {
+    /// 项目这一刻的默认档位；没登记过的项目按手动。
+    pub fn project_default(&self, project: ProjectId) -> ProjectDefaultMode {
         self.project_defaults
             .get(&project)
             .copied()

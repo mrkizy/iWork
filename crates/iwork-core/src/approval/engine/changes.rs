@@ -1,8 +1,6 @@
-//! 状态转换先在副本上计算；只有已提交的事件能更新内存。
-//!
-//! 已提交事件的应用只有一个入口 [`apply_committed`]（2/F-1、2/F-2）：发起方拿到提交回执后调它，订阅把
-//! 同一批事件再投给 `on_event` 时也调它。它是幂等的——等待项还在才动，动完就移除——所以等回执时请求被
-//! 取消（事件已落盘、本地没来得及应用）也不会丢：订阅重投时补上。取消等待回执不等于回滚。
+//! 计划都是纯函数：在折叠的只读视图上算出要提交的事件，不改任何内存（T07 方案 6.10.2）。
+//! 内存只由追平时折叠应用已提交的事件推进（[`super::fold::Folded::apply`]）。
+use super::fold::{ConversationFold, Folded, VoidTarget};
 use super::*;
 
 pub(super) fn plan_approval(
@@ -73,114 +71,6 @@ pub(super) fn plan_approval(
     }
 }
 
-/// 放行一条待审批：回答通道还在就答复，否则（detached）记一次性放行，返回要续接的回合。
-pub(super) fn release(state: &mut ConversationState, id: ApprovalId) -> Option<TurnId> {
-    let mut p = state.pending.remove(&id)?;
-    let reply = p.reply.take();
-    match reply.map(|tx| tx.send(PermissionDecision::Allow)) {
-        Some(Ok(())) => None,
-        _ => {
-            if let Some(record) = p.approval.call.as_deref().cloned() {
-                state.grants.insert(
-                    id,
-                    GrantOnce {
-                        approval_id: id,
-                        turn: p.approval.turn_id,
-                        record,
-                    },
-                );
-            }
-            Some(p.approval.turn_id)
-        }
-    }
-}
-
-/// 应用已提交的事件（幂等）。返回因放行而要续接的回合（等待上限中断过的审批）。
-pub(super) fn apply_committed(
-    state: &mut ConversationState,
-    events: &[DomainEvent],
-) -> Vec<TurnId> {
-    let mut resumes = Vec::new();
-    for event in events {
-        match event {
-            DomainEvent::ApprovalReviewUpdated(e) => {
-                if let Some(p) = state.pending.get_mut(&e.approval_id) {
-                    p.approval.review = e.review.clone();
-                    if !matches!(e.review, ReviewState::InProgress { .. })
-                        && let Some(stop) = p.stop_review.take()
-                    {
-                        let _ = stop.send(());
-                    }
-                }
-            }
-            DomainEvent::ApprovalDecided(e) => {
-                state.voiding.remove(&e.approval_id);
-                let Some(p) = state.pending.get_mut(&e.approval_id) else {
-                    continue;
-                };
-                p.approval.state = e.state;
-                let fingerprints = p.approval.fingerprints();
-                match e.state {
-                    ApprovalState::Denied => {
-                        state.denial.apply(&DenialEvent::UserDenied(fingerprints));
-                        if let Some(mut p) = state.pending.remove(&e.approval_id)
-                            && let Some(tx) = p.reply.take()
-                        {
-                            let _ = tx.send(deny(MSG_USER_DENIED));
-                        }
-                    }
-                    ApprovalState::Approved { decider } => {
-                        if decider == Decider::User {
-                            state.denial.apply(&DenialEvent::UserAllowed(fingerprints));
-                        }
-                        resumes.extend(release(state, e.approval_id));
-                    }
-                    ApprovalState::Pending | ApprovalState::Voided { .. } => {}
-                }
-            }
-            DomainEvent::ApprovalVoided(e) => {
-                state.voiding.remove(&e.approval_id);
-                if let Some(mut p) = state.pending.remove(&e.approval_id) {
-                    state.grants.remove(&e.approval_id);
-                    if let Some(tx) = p.reply.take() {
-                        let _ = tx.send(deny(MSG_TURN_CANCELLED));
-                    }
-                }
-            }
-            DomainEvent::ApprovalModeChanged(e) => {
-                if let Some(modes) = modes_after(&state.modes, e.target, e.mode) {
-                    state.modes = modes;
-                }
-            }
-            DomainEvent::TurnFinished(e) => {
-                state.grants.retain(|_, grant| grant.turn != e.turn_id);
-                state.voiding_turns.remove(&e.turn_id);
-            }
-            DomainEvent::UserActionStateChanged(e) => {
-                let voided = matches!(e.state, UserActionState::Voided { .. });
-                if voided {
-                    state.voiding_cards.remove(&e.card_id);
-                }
-                if let Some(c) = state.cards.get_mut(&e.card_id) {
-                    // 作废计划交出后卡片若已开始执行，迟到的作废不覆盖它（2/F-1）
-                    if voided && c.card.state != UserActionState::Pending {
-                        continue;
-                    }
-                    c.card.state = e.state.clone();
-                }
-                if let Some(message) = card_settled_message(&e.state)
-                    && let Some(mut c) = state.cards.remove(&e.card_id)
-                    && let Some(tx) = c.reply.take()
-                {
-                    let _ = tx.send(message);
-                }
-            }
-            _ => {}
-        }
-    }
-    resumes
-}
-
 /// 对话级档位变化后的档位输入（纯函数）；项目默认不在对话里，返回 `None`。
 pub(super) fn modes_after(
     current: &ConversationModes,
@@ -213,55 +103,93 @@ pub(super) fn modes_after(
     Some(modes)
 }
 
-/// 活规则流里的事件。
-pub(super) fn is_rule_event(event: &DomainEvent) -> bool {
-    matches!(
-        event,
-        DomainEvent::RuleRemembered(_) | DomainEvent::RuleRevoked(_) | DomainEvent::RulesDeleted(_)
-    )
-}
-
-impl LiveRules {
-    /// 应用规则流里序号为 `seq` 的事件（2/F-3）。缓存与 `seq` 描述同一段完整有序前缀：只接受比 `seq` 新的事件，
-    /// 调用方保证按序号递增、不跳过任何规则事件（订阅按序投递；本地回执先经 [`ApprovalEngine::catch_up_rules`]
-    /// 从日志补齐）。重投、迟到的旧事件按序号跳过，所以幂等。
-    pub(super) fn apply(&mut self, seq: Seq, event: &DomainEvent) {
-        if seq <= self.seq {
-            return;
-        }
-        match event {
-            DomainEvent::RuleRemembered(e) => {
-                self.entries.retain(|r| r.id != e.rule.id);
-                self.entries.push(e.rule.clone());
-            }
-            DomainEvent::RuleRevoked(e) => self.entries.retain(|r| r.id != e.rule_id),
-            DomainEvent::RulesDeleted(e) => self.entries.retain(|r| !e.rule_ids.contains(&r.id)),
-            _ => {}
-        }
-        self.seq = seq;
-    }
-}
-
-/// 所有档位来源共用：离开 Auto 后，只有本次已经放行的审批可以跳过放弃。
+/// 所有档位来源共用：离开 Auto 后，只有本次已经放行的审批可以跳过放弃。审批属于哪个助手从折叠的回合归属查。
 pub(super) fn plan_reviews_leaving_auto(
-    state: &ConversationState,
+    folded: &Folded,
+    conv: &ConversationFold,
     modes: &ConversationModes,
     released: &[ApprovalId],
 ) -> Result<Vec<DomainEvent>, ApprovalApplyError> {
     let mut events = Vec::new();
-    for (id, pending) in &state.pending {
-        let assistant = pending.keys.assistant;
-        if state.modes.effective(assistant) == ApprovalMode::Auto
-            && modes.effective(assistant) != ApprovalMode::Auto
+    for (id, pending) in &conv.pending {
+        let Some(owner) = folded.turn_owner(pending.approval.turn_id) else {
+            continue;
+        };
+        if conv.modes.effective(owner.assistant) == ApprovalMode::Auto
+            && modes.effective(owner.assistant) != ApprovalMode::Auto
             && matches!(pending.approval.review, ReviewState::InProgress { .. })
             && !released.contains(id)
         {
             events.extend(plan_approval(
                 &pending.approval,
                 ApprovalTrigger::ModeChangedFromAuto,
-                modes.effective(assistant),
+                modes.effective(owner.assistant),
             )?);
         }
     }
     Ok(events)
+}
+
+/// 这个对话里满足 `pick(回合)` 的待审批与 Pending 卡片，作废原因 `reason`。
+pub(super) fn targets_where(
+    conv: &ConversationFold,
+    reason: VoidReason,
+    pick: impl Fn(TurnId) -> bool,
+) -> Vec<VoidTarget> {
+    let approvals = conv
+        .pending
+        .values()
+        .filter(|p| pick(p.approval.turn_id))
+        .map(|p| VoidTarget::Approval {
+            id: p.approval.id,
+            reason,
+        });
+    let cards = conv
+        .cards
+        .values()
+        .filter(|c| pick(c.turn_id) && c.state == UserActionState::Pending)
+        .map(|c| VoidTarget::Card { id: c.id, reason });
+    approvals.chain(cards).collect()
+}
+
+/// 作废事件。目标都取自同一份视图（待审批、Pending 卡片），所以转换一定合法。
+pub(super) fn plan_voids(
+    folded: &Folded,
+    conv: &ConversationFold,
+    targets: &[VoidTarget],
+) -> Vec<DomainEvent> {
+    let mut events = Vec::new();
+    for target in targets {
+        match *target {
+            VoidTarget::Approval { id, reason } => {
+                let Some(p) = conv.pending.get(&id) else {
+                    continue;
+                };
+                let mode = folded
+                    .turn_owner(p.approval.turn_id)
+                    .map_or(ApprovalMode::Manual, |o| conv.modes.effective(o.assistant));
+                events.extend(
+                    plan_approval(&p.approval, ApprovalTrigger::Void { reason }, mode)
+                        .expect("待审批可以作废"),
+                );
+            }
+            VoidTarget::Card { id, reason } => {
+                let Some(card) = conv.cards.get(&id) else {
+                    continue;
+                };
+                let mut card = card.clone();
+                card.apply(UserActionTrigger::Void { reason })
+                    .expect("Pending 卡片可以作废");
+                events.push(
+                    UserActionStateChanged {
+                        card_id: card.id,
+                        state: card.state,
+                        output_artifact: None,
+                    }
+                    .into(),
+                );
+            }
+        }
+    }
+    events
 }

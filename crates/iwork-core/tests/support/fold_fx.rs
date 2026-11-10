@@ -423,3 +423,48 @@ pub fn e_mode(target: ApprovalModeTarget, mode: Option<ApprovalMode>) -> DomainE
     }
     .into()
 }
+
+/// 引擎测试的布景：一个项目（手动默认）、这些助手、一个项目对话（对话级档位 `mode`）。id 由调用方给。
+pub fn world_with(
+    project_id: ProjectId,
+    conversation_id: ConversationId,
+    assistants: &[AssistantId],
+    mode: Option<ApprovalMode>,
+) -> Vec<DomainEvent> {
+    let mut p = project(1, ProjectDefaultMode::Manual);
+    p.id = project_id;
+    let mut c = project_conversation(1, 1);
+    c.id = conversation_id;
+    c.kind = ConversationKind::Project { project_id };
+    c.approval_mode = mode;
+    let mut events: Vec<DomainEvent> = vec![ProjectAdded { project: p }.into()];
+    for a in assistants {
+        let mut x = assistant(1);
+        x.id = *a;
+        events.push(AssistantCreated { assistant: x }.into());
+    }
+    events.push(ConversationCreated { conversation: c }.into());
+    events
+}
+
+/// 扮演编排：回合登记并进入等审批。
+pub fn waiting_turn(
+    t: TurnId,
+    conversation_id: ConversationId,
+    a: AssistantId,
+) -> Vec<DomainEvent> {
+    let mut x = turn(1, 1, 1);
+    x.id = t;
+    x.conversation_id = conversation_id;
+    x.assistant_id = a;
+    vec![
+        TurnQueued { turn: x }.into(),
+        TurnStateChanged {
+            turn_id: t,
+            from: TurnState::Queued,
+            to: TurnState::WaitingApproval,
+            reason: None,
+        }
+        .into(),
+    ]
+}

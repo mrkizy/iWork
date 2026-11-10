@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::reference_projection::{ReferenceProjection, apply_all};
 use iwork_domain::common::Timestamp;
 use iwork_domain::event::DomainEvent;
 use iwork_domain::id::{MessageId, RawUlid, Seq};
@@ -18,16 +19,108 @@ use iwork_ports::store::{
     StorageError, StoragePort, StoredEvent,
 };
 
+/// 内存存储，照生产写线程的纪律：入队（同步、不可取消）→ 按入队顺序处理 → 回执。处理在独立任务里跑，
+/// 调用方的 future 被丢弃，已入队的那笔照样落盘。提交时用参照投影做同一组状态前提与归属校验
+/// （T02 方案 2.6），不通过整笔回滚、报 `Projection`；读事件按流过滤。
+///
+/// 三个门：`enqueue_gate` 让下一个 commit 停在入队门口（还没入队）；`before_commit` 让它入队后停在处理之前
+/// （排在它后面的都得等）；`receipt_gate` 让它处理完、回执还没送到。
 #[derive(Default, Clone)]
 pub struct MemStore {
+    pub enqueue_gate: Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>,
+    /// 有一个 commit 停在入队门口
+    pub at_enqueue_gate: Arc<AtomicBool>,
+    /// 到过入队门口的次数
+    pub gate_arrivals: Arc<AtomicU64>,
+    queue: Arc<Mutex<Queue>>,
+    queue_moved: Arc<tokio::sync::Notify>,
     pub events: Arc<Mutex<Vec<StoredEvent>>>,
+    pub projection: Arc<Mutex<ReferenceProjection>>,
     pub fail_next: Arc<AtomicBool>,
+    /// 下一次读事件报 `Io`
+    pub fail_read: Arc<AtomicBool>,
+    /// 处理过的提交笔数（含空提交、含被拒的）
+    pub commits: Arc<AtomicU64>,
+    /// 处理过的空提交（屏障）笔数
+    pub empty_commits: Arc<AtomicU64>,
     pub commit_entered: Arc<AtomicBool>,
     pub before_commit: Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>,
     pub receipt_gate: Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>,
 }
 
+/// 票号：入队时领一张，处理按票号顺序。
+#[derive(Default)]
+struct Queue {
+    next: u64,
+    serving: u64,
+}
+
 impl MemStore {
+    /// 已入队、还没处理完的笔数。
+    pub fn queued(&self) -> u64 {
+        let q = self.queue.lock().unwrap();
+        q.next - q.serving
+    }
+
+    /// 处理一笔（不看门）：提交时校验、追加日志、回执。
+    fn process(&self, req: CommitRequest) -> Result<CommitReceipt, StorageError> {
+        let mut events = self.events.lock().unwrap();
+        self.commits.fetch_add(1, Ordering::SeqCst);
+        if req.events.is_empty() {
+            self.empty_commits.fetch_add(1, Ordering::SeqCst);
+        }
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(StorageError::Busy);
+        }
+        let first = Seq(events.len() as u64 + 1);
+        apply_all(&mut self.projection.lock().unwrap(), &req.events).map_err(|message| {
+            StorageError::Projection {
+                seq: first,
+                message,
+            }
+        })?;
+        for e in req.events {
+            let seq = Seq(events.len() as u64 + 1);
+            events.push(StoredEvent {
+                seq,
+                at: Timestamp(0),
+                actor: req.actor.clone(),
+                event: e,
+            });
+        }
+        Ok(CommitReceipt {
+            first_seq: first,
+            last_seq: Seq(events.len() as u64),
+            replayed: false,
+        })
+    }
+
+    async fn process_in_turn(
+        &self,
+        ticket: u64,
+        req: CommitRequest,
+    ) -> Result<CommitReceipt, StorageError> {
+        loop {
+            // 先登记再检查，检查和等待之间的叫醒不会丢
+            let moved = self.queue_moved.notified();
+            tokio::pin!(moved);
+            moved.as_mut().enable();
+            if self.queue.lock().unwrap().serving == ticket {
+                break;
+            }
+            moved.await;
+        }
+        let before = self.before_commit.lock().unwrap().take();
+        if let Some(before) = before {
+            self.commit_entered.store(true, Ordering::SeqCst);
+            before.notified().await;
+        }
+        let result = self.process(req);
+        self.queue.lock().unwrap().serving += 1;
+        self.queue_moved.notify_waiters();
+        result
+    }
+
     pub fn all(&self) -> Vec<DomainEvent> {
         self.events
             .lock()
@@ -39,36 +132,52 @@ impl MemStore {
     pub fn stored(&self) -> Vec<StoredEvent> {
         self.events.lock().unwrap().clone()
     }
+    /// 不经引擎直接写一笔（扮演编排、T10 或测试布景），同步处理；队列里还有没处理的提交、或被拒时 panic。
+    pub fn seed(&self, events: Vec<DomainEvent>) {
+        assert_eq!(self.queued(), 0, "布景时队列里还有没处理的提交");
+        let mut q = self.queue.lock().unwrap();
+        self.process(CommitRequest {
+            command_id: iwork_domain::id::CommandId::from_raw(RawUlid::from_u128(0)),
+            actor: iwork_domain::common::Actor("test".into()),
+            events,
+            outbox: Vec::new(),
+        })
+        .expect("布景事件应当被接受");
+        q.next += 1;
+        q.serving += 1;
+    }
+}
+
+fn selected(filter: &EventFilter, event: &DomainEvent) -> bool {
+    match filter {
+        EventFilter::All => true,
+        EventFilter::Streams(selectors) => {
+            let (kind, id) = event.stream();
+            selectors
+                .iter()
+                .any(|s| s.kind == kind && (s.id.is_none() || s.id == id))
+        }
+    }
 }
 
 impl StoragePort for MemStore {
     async fn commit(&self, req: CommitRequest) -> Result<CommitReceipt, StorageError> {
-        if self.fail_next.swap(false, Ordering::SeqCst) {
-            return Err(StorageError::Busy);
+        let gate = self.enqueue_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            self.at_enqueue_gate.store(true, Ordering::SeqCst);
+            self.gate_arrivals.fetch_add(1, Ordering::SeqCst);
+            gate.notified().await;
+            self.at_enqueue_gate.store(false, Ordering::SeqCst);
         }
-        let before = self.before_commit.lock().unwrap().take();
-        if let Some(before) = before {
-            self.commit_entered.store(true, Ordering::SeqCst);
-            before.notified().await;
-        }
-        let receipt = {
-            let mut events = self.events.lock().unwrap();
-            let first = Seq(events.len() as u64 + 1);
-            for e in req.events {
-                let seq = Seq(events.len() as u64 + 1);
-                events.push(StoredEvent {
-                    seq,
-                    at: Timestamp(0),
-                    actor: req.actor.clone(),
-                    event: e,
-                });
-            }
-            CommitReceipt {
-                first_seq: first,
-                last_seq: Seq(events.len() as u64),
-                replayed: false,
-            }
+        // 入队：同步领票，之后调用方被丢弃也不影响这笔被处理
+        let ticket = {
+            let mut q = self.queue.lock().unwrap();
+            q.next += 1;
+            q.next - 1
         };
+        let this = self.clone();
+        let processed = tokio::spawn(async move { this.process_in_turn(ticket, req).await });
+        let receipt = processed.await.expect("处理任务不 panic")?;
         let gate = self.receipt_gate.lock().unwrap().take();
         if let Some(gate) = gate {
             gate.notified().await;
@@ -80,14 +189,19 @@ impl StoragePort for MemStore {
     }
     async fn read_events(
         &self,
-        _f: EventFilter,
+        filter: EventFilter,
         from: Seq,
         limit: usize,
     ) -> Result<Vec<StoredEvent>, StorageError> {
+        if self.fail_read.swap(false, Ordering::SeqCst) {
+            return Err(StorageError::Io {
+                message: "测试注入的读失败".into(),
+            });
+        }
         Ok(self
             .stored()
             .into_iter()
-            .filter(|e| e.seq > from)
+            .filter(|e| e.seq > from && selected(&filter, &e.event))
             .take(limit)
             .collect())
     }
