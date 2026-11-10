@@ -43,9 +43,9 @@
 | （方案复盘） | T03、T07 方案 | retrospector `f77efc99` 已复盘（给 architect 存 3 条 lesson），终端可删 | — | — | — |
 | T07 | 方案定稿 `4e27665`（+57b5c4d）；实施分支 `cao/009e8660` @ `747db6b` | developer `f8877913`；reviewer A `4f01bbc2`、B `edeff392` | 实施 `2026-11-10-m1-t07` 第 3 轮不通过（已满三轮） | A：1/F-7、2/F-5、3/F-1（cp 粘值目录目标）、3/F-2（flat_floor 平方级展开）；B：1/F-13、2/F-1、2/F-2、3/F-3～F-8（引擎提交 / 预留 / 本地与订阅两路输入的并发问题） | B 侧按根因改结构（产品负责人 2026-11-10 批准）：architect `890c712d` 写方案补充（任务 2026-11-10-m1-t07-engine-plan），审过再实施；A 侧 3/F-1、3/F-2 developer 先修 |
 | T08 | **已合入 main `c1aaf6b`**（ADR 0010） | developer `4960bf0d` 可删；旧 worktree `.cao/worktrees/49facf33` 分支已合入 | `2026-11-09-m1-t08` 已关（七轮） | — | 补任务卡完成记录 |
-| T04 | 方案 docs/plans/T04.md（未提交） | architect `3b7032e0`；方案 reviewer `e4187f1a` | 方案 `2026-11-10-m1-t04-plan` 第 1 轮不通过（12 条：10 本次引入、2 条 T05 旧缺口 F-11 / F-12） | 10 条 architect 在改；**F-11、F-12 归属待产品负责人定** | 改完原 reviewer 第 2 轮；Q1～Q3 等产品负责人，Q4 等补选项 |
-| T06 | 方案 docs/plans/T06.md + tools/t0/iwork-t0g.py（未提交） | architect `4f7c1e8b`；方案 reviewer `4674b8d1` | 方案 `2026-11-10-m1-t06-plan` 第 1 轮不通过（10 条：6 blocking） | 10 条 architect 在改 | 改完原 reviewer 第 2 轮；P2 风险说明改写后要再跟产品负责人确认一次；P5 补「失败即关闭不成立就阻断」选项 |
-| T09 | 方案编写中（依赖 T03 已合入；T04 未合入前界面先接假数据） | architect `62db2f05` | 方案 `2026-11-10-m1-t09-plan` | — | 方案回报后开 reviewer 审；实施后派 ui_design_reviewer 对照画布 |
+| T04 | 方案 docs/plans/T04.md（未提交） | architect `3b7032e0`；方案 reviewer `e4187f1a` | 方案 `2026-11-10-m1-t04-plan` 第 2 轮不通过（新 2/F-1～F-4 + 1/F-4、F-6、F-8 残留）；第 3 轮修改中 | 见账本 | Q1～Q5 已定；1/F-11、1/F-12 由 T05 补丁（任务 2026-11-10-m1-t05-dispatch，developer `e6df3dbe`）先修 |
+| T06 | 方案 docs/plans/T06.md + tools/t0/iwork-t0g.py（未提交） | architect `4f7c1e8b`；方案 reviewer `4674b8d1` | 方案 `2026-11-10-m1-t06-plan` 第 2 轮不通过（6 条：3 blocking）；第 3 轮修改中 | 1/F-3、F-6、F-8、F-10 未收完；2/F-1～F-6 | P1 b、P2 c、P6 a、P8 a 已定；P3/P4/P5/P7 等实测；ApprovalDelivered / Decided 由 T07 先定义 |
+| T09 | 方案 docs/plans/T09.md（未提交） | architect `62db2f05`；方案 reviewer `9cbb7f89` | 方案 `2026-11-10-m1-t09-plan` 第 1 轮不通过（7 条，4 blocking） | architect 在改 | D1 画布已由设计窗口统一（ui-m1.md 第 2 节第 3 条）、D2 需求 v1.75 对话标题、D3 空态、D4/D5/D7/D8 按推荐、D6 关窗通知进 M1（归 T10）；G1～G4 第 1 步只加 proto 字段、填值归 T10 |
 | T10、T11 | 未开工 | — | — | — | T10 依赖 T06、T07、T08、T09；T11 依赖 T10 |
 
 查开着的问题：`agent-scaffold findings list --task <任务 ID> --open`。
