@@ -2,7 +2,7 @@
 
 任务：`2026-11-10-m1-t07`；分支：`cao/009e8660`；接手提交：`95f5ac6`。
 
-状态：B 块代码与定向验收已整理，按 supervisor 要求先停在此处。全量检查与基准仍排队，本草稿不宣称最终通过。
+状态：B 块代码与定向验收已整理，按 supervisor 要求先停在此处。全量 clippy 已通过；全量测试尚未结束，基准仍排队，本草稿不宣称最终验收通过。
 
 本轮只修 `2026-11-10-m1-t07/1/F-13` 至 `F-25`。A 块保持交接结果；F-1、F-2、F-6、F-7 等方案复核，F-12 等产品负责人，不在本轮修改。
 
@@ -39,13 +39,13 @@
 | `scripts/check-deps.sh`（PATH 优先 rustup） | 通过。 |
 | `scripts/check-domain-terms.sh` | 通过。 |
 | `cargo fmt --all --check`、`git diff --check` | 通过。 |
-| `lockf /tmp/iwork-heavy-test.lock cargo clippy --workspace --all-targets -- -D warnings` | 首次执行发现 8 处条件合并、多余 clone 与可变引用提示，已修正；第二次排队，尚无最终结果。 |
-| `lockf /tmp/iwork-heavy-test.lock cargo test --workspace` | 排队，尚无结果。 |
+| `lockf /tmp/iwork-heavy-test.lock cargo clippy --workspace --all-targets -- -D warnings` | 首次执行发现 8 处条件合并、多余 clone 与可变引用提示，已修正；第二次执行通过，退出码 0。 |
+| `lockf /tmp/iwork-heavy-test.lock cargo test --workspace` | 已开始运行，目前通过的测试组均为绿色，尚未收到最终退出码。 |
 | `lockf /tmp/iwork-heavy-test.lock <基准前后验证脚本>` | 排队，尚无结果。脚本用 git archive 导出 95f5ac6 到系统临时目录，以 env -i 与临时 HOME 构建；先跑 `cargo bench --locked -p iwork-bench --bench approval`，叠加本轮补丁后再跑一次，并核对原工作区状态不变。 |
 
 重测试未绕锁。supervisor 确认 T03 的 mutations.sh 长时间持锁、机器负载很高，本轮继续排队。基准只覆盖现有的取事实、归一、求值与规则拼装，不覆盖存储延迟或审查运行时耗时；数字出来后再评价性能，不能先写成无回归。
 
-定向测试在指定 worktree 内运行，开工 `git status --short` 为空；运行期间没有混入别人的改动。最终提交后再记一次状态。
+定向测试在指定 worktree 内运行，开工 `git status --short` 为空；运行期间没有混入别人的改动。B 块代码提交 `4efc5cf` 后，`git status --short` 为空。
 
 ## 偏离与风险
 
