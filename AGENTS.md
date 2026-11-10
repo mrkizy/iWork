@@ -40,6 +40,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 - 前端：`pnpm -C client install --frozen-lockfile`、`pnpm -C client gen`（从 `proto/` 生成 TS 到 `client/src/gen/`，不入库）、`pnpm -C client typecheck`、`pnpm -C client test`（含开发服务器只绑 127.0.0.1、发布配置不含开发入口两项检查）
 - 客户端：Tauri 配置分三层，层清单只写在 `client/scripts/tauri-layers.ts`，包装脚本与 CI 检查共用它。开发用 `pnpm -C client tauri dev`（叠加 `tauri.dev.conf.json`）；发布构建用 `pnpm -C client tauri build`（叠加 `tauri.build.conf.json`）。tauri CLI 只支持 dev 和 build 两个子命令，且只能经这两条包装命令调用：包装脚本拒绝其他子命令（bundle、android、ios 等）、调用方自带的 `-c/--config` 和环境变量 `TAURI_CONFIG`；裸跑 `tauri build`、`tauri bundle` 会被拒；`client/src-tauri/` 下多出层清单没登记的 Tauri 配置文件时 `pnpm -C client test` 失败。`cargo build`/`cargo run -p iwork-client` 不需要 `dist/`，但 `cargo run` 起来的窗口是空的（没有开发服务器也没有嵌入资源），看界面要用 `tauri dev`
 - 性能基准：`cargo bench -p iwork-bench`（T01 建空 crate，T11 填实现）
+- 重测试排队（产品负责人 2026-11-10 定：同一时间只跑一张卡的重测试）：`cargo test --workspace`、`cargo clippy --workspace`、崩溃注入、`PROPTEST_CASES` 调大的属性测试、fuzz、`cargo bench`、release 构建、docker 里的测试，一律套 `lockf /tmp/iwork-heavy-test.lock <命令>` 跑（macOS 自带 `lockf`，拿不到锁就排队等）；单个 crate 的少量定向测试不用套。临时验证副本里跑也一样套
 
 ## 架构约定
 
