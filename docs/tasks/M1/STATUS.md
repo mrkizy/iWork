@@ -1,11 +1,14 @@
 # M1 进度与决策（supervisor 交接记录）
 
-> 最后更新：2026-11-10 10:55。上下文压缩或换会话后，supervisor 先读这份文件再动手。
+> 最后更新：2026-11-10 11:15。上下文压缩或换会话后，supervisor 先读这份文件再动手。
 > 只记当前状态与还没写进其他文档的决定；已写进需求、技术设计、任务卡、方案的，以那些文档为准。
 
 ## 1 运行安排
 
-- **11:02 产品负责人说「继续」，已恢复派活**（10:53 曾要求关窗口前停下）。 已让在干活的 developer（T03 `2e7bcbe5`、T07 `009e8660`、T08 `49facf33`）立刻做 WIP 提交并停下；它们的进度以各自分支上的最新提交为准（见第 3 节）。
+- **11:15 产品负责人要重新配置角色、用 `--new-supervisor` 重开 supervisor 窗口，旧对话可能丢失。** 新 supervisor 接手时注意：
+  - **在飞 worker 的回报会发给旧 supervisor 终端 `1bb602b5`**，新 supervisor 收不到。接手后先 `agent-scaffold ps` 看每个 worker 状态，用 `cao agent result <id>` 或直接看它的 tmux 窗口拿最后回复，再看各分支最新提交；必要时给 worker 发一条消息说明「以后回报发给新 supervisor」（若 CAO 不允许跨 supervisor 发消息，就让它停下，重新 assign 新 worker 接手同一 worktree）。
+  - 在飞的 4 个：T03 developer `fe00e889`（codex，worktree `.cao/worktrees/2e7bcbe5`）、T07 developer `5638c08f`（codex，worktree `.cao/worktrees/009e8660`）、T07 方案复核 reviewer `ed326a3d`（任务 2026-11-09-m1-t07-plan 第 9 轮）、T08 复审 reviewer `e2991248`（任务 2026-11-09-m1-t08 第 6 轮）。复审结论以账本为准：`agent-scaffold findings list --task <任务 ID>`。
+  - 旧 developer 终端 `2e7bcbe5`、`009e8660`、`49facf33` 是 use_worktree 建的，**删终端会清掉 worktree**，分支合入前不要删。
 - 定时任务都只在旧会话里有效，重开后不存在；gh 已登录（账号 mrkizy），不用再提醒。
 - **推送**：main 推送已获同意；T05、T08 分支已获同意推送跑 CI。T03 分支推送跑 Windows CI **还没获同意**。
 - **重测试排队（产品负责人 2026-11-10 定）**：同一时间只跑一张卡的重测试，统一用 `lockf /tmp/iwork-heavy-test.lock <命令>`，规则写在 AGENTS.md 命令节。派活消息里要写明。
