@@ -33,7 +33,7 @@
 | T06 | 方案 + `tools/t0/iwork-t0g.py`（未提交） | architect `4f7c1e8b`；reviewer `4674b8d1` | `2026-11-10-m1-t06-plan` 第 3 轮不通过，产品负责人批准第 4 轮（3/F-1～F-4），architect 在改 | 2/F-1～F-6 + 1/F-3/F-6/F-8/F-10 残留 | 改完原 reviewer 第 3 轮；ApprovalDelivered / Decided 引用 T07 |
 | T07 实施 | 分支 `cao/009e8660` @ `f716b15`（worktree `.cao/worktrees/009e8660`） | developer `f8877913`；A 侧 reviewer `4f01bbc2`；B 侧 reviewer `edeff392`（空闲） | `2026-11-10-m1-t07` A 侧第 7 轮复审中（含三版全面回归对照） | A：3/F-2、5/F-1、6/F-1～F-4；B：1/F-13、2/F-1、2/F-2、3/F-3～F-8（等引擎重做） | 派 4f01bbc2 第 7 轮核 6/F-*，并跑一次全面回归对照；B 侧等引擎方案 |
 | T07 引擎方案 | `docs/plans/T07.md` 6.10 + `docs/plans/T02.md` 状态前提（未提交） | architect `890c712d`；reviewer `099b7f24` | `2026-11-10-m1-t07-engine-plan` 第 2 轮不通过（新 2/F-1～F-4，3 important 1 nit），architect 第 3 轮在改 | 1/F-1～F-5 | 改完原 reviewer 第 2 轮；PD6 问产品负责人 |
-| T09 | 方案 `docs/plans/T09.md`（未提交，429 行） | architect `62db2f05`；reviewer `9cbb7f89` | `2026-11-10-m1-t09-plan` 第 2 轮不通过：2/F-1（断线丢在飞的摘要重查）、2/F-2（reload 不释放 Tauri 旧帧暂存）、2/F-3（非时间线大 patch 超 1 MiB 永远发不出，blocking）；1/F-3～F-7 已解决可关，1/F-1、F-2 部分 | 见左 | 第 3 轮复审中（reviewer `9cbb7f89`）；设计窗口 Q9～Q12 待答 |
+| T09 | 方案 `docs/plans/T09.md`（未提交，429 行） | architect `62db2f05`；reviewer `9cbb7f89` | `2026-11-10-m1-t09-plan` 第 2 轮不通过：2/F-1（断线丢在飞的摘要重查）、2/F-2（reload 不释放 Tauri 旧帧暂存）、2/F-3（非时间线大 patch 超 1 MiB 永远发不出，blocking）；1/F-3～F-7 已解决可关，1/F-1、F-2 部分 | 见左 | 第 3 轮不通过（3/F-1 interceptor 守门无效、3/F-2 跨代旧响应覆盖），产品负责人批准第 4 轮，architect 在改；设计窗口 Q9～Q12 待答 |
 | T10、T11 | 未开工 | — | — | — | T10 依赖 T06、T07、T08、T09 |
 
 查开着的问题：`agent-scaffold findings list --task <任务 ID> --open`。记账工具轮次只能 1～9，超过换新任务 ID。
