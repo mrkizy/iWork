@@ -478,7 +478,8 @@ impl Cf {
     /// # Safety
     /// `ptr` 必须是空，或调用方拥有的一份 +1 引用（不能再由别人释放）。
     unsafe fn adopt(ptr: CFTypeRef) -> Option<Cf> {
-        (!ptr.is_null()).then_some(Cf(ptr))
+        // 必须惰性构造：`then_some(Cf(ptr))` 会先建出 Cf(NULL)，条件不成立时丢弃它，Drop 里 CFRelease(NULL) 直接崩溃。
+        (!ptr.is_null()).then(|| Cf(ptr))
     }
 }
 
@@ -507,6 +508,36 @@ impl AsCf for Borrowed {
 #[cfg(test)]
 mod tests {
     use std::os::fd::AsFd;
+
+    use core_foundation_sys::base::{CFGetRetainCount, CFRetain};
+    use core_foundation_sys::data::CFDataCreate;
+
+    #[test]
+    fn adopt_null_is_none_and_never_releases() {
+        // 空指针：返回 None；若内部先建 Cf(NULL) 再丢弃，这里会因 CFRelease(NULL) 崩溃。
+        // SAFETY: 空指针满足 adopt 的前置条件。
+        assert!(unsafe { Cf::adopt(std::ptr::null()) }.is_none());
+    }
+
+    #[test]
+    fn adopt_non_null_releases_exactly_once() {
+        let bytes = [1u8, 2, 3];
+        // SAFETY: CFDataCreate 复制 bytes，返回一份 +1 引用。
+        let data =
+            unsafe { CFDataCreate(kCFAllocatorDefault, bytes.as_ptr(), bytes.len() as CFIndex) };
+        assert!(!data.is_null());
+        // 再持一份引用作对照：Cf 释放一次后计数应回到 1。
+        // SAFETY: data 是有效的 CF 对象。
+        unsafe { CFRetain(data.cast()) };
+        // SAFETY: data 是有效的 CF 对象。
+        assert_eq!(unsafe { CFGetRetainCount(data.cast()) }, 2);
+        // SAFETY: 交出 CFDataCreate 给的那一份 +1 引用。
+        drop(unsafe { Cf::adopt(data.cast()) }.expect("非空"));
+        // SAFETY: 我们还持有 CFRetain 的那一份。
+        assert_eq!(unsafe { CFGetRetainCount(data.cast()) }, 1, "Cf 只释放一次");
+        // SAFETY: 释放测试自己持有的那一份。
+        unsafe { CFRelease(data.cast()) };
+    }
     use std::os::unix::net::UnixStream;
 
     use super::*;
