@@ -106,3 +106,9 @@ transitive_exempt = ["agent-client-protocol", "tokio"]
 # T03：ipc 热路径基准（推送扇出、补发、快照、握手）。T11 收编其余基准时再按需加。
 internal = ["iwork-ipc", "iwork-proto"]
 transitive_exempt = ["tokio"]
+
+[crates.iwork-fake-daemon]
+# T09 假后台（方案 2.6）：真 ipc 服务端 + 订阅范围表（iwork-app::subscription，一处真值）。只在开发与测试用，
+# 发布的 iwork-client 不依赖它（check-no-dev-trust.sh 查 feature 图）。
+internal = ["iwork-ipc", "iwork-proto", "iwork-app", "iwork-core", "iwork-ports", "iwork-domain"]
+transitive_exempt = ["tokio"]
