@@ -66,6 +66,25 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      # T03：iwork-ipc 里 cfg(windows) 的测试（命名管道 DACL、两端 pid、按句柄验映像）要在 Windows 上真跑到。
+      #   上面的 workspace 测试已经包含它们；这里按名字核对每一条都出现且通过，防止 cfg 写错后悄悄变成 0 条。
+      - name: iwork-ipc 的 Windows 专属测试真的跑了（Windows）
+        if: runner.os == 'Windows'
+        run: |
+          cargo test -p iwork-ipc --lib -- windows 2>&1 | tee ipc-windows-tests.log
+          for t in \
+            transport::windows::tests::pipe_dacl_only_current_user \
+            transport::windows::tests::second_listener_on_same_name_is_refused \
+            transport::windows::tests::both_ends_see_this_process_and_bytes_flow \
+            transport::windows::tests::non_pipe_endpoint_is_unsupported \
+            peer::windows::tests::current_user_is_a_user_sid \
+            peer::windows::tests::unsigned_own_image_is_hashed_through_the_bound_handle \
+            peer::windows::tests::own_process_is_current_user_and_signer_passes_the_gate \
+            peer::windows::tests::unopenable_pid_is_an_error_not_an_identity \
+            peer::windows_image::tests::trust_code_values_match_windows_sys; do
+            grep -q "^test $t \.\.\. ok" ipc-windows-tests.log || { echo "::error::没跑到或没通过：$t"; exit 1; }
+          done
+
       - name: 依赖方向检查
         run: scripts/check-deps.sh
       - name: 依赖方向检查自测（注入违规必须失败）
@@ -109,6 +128,33 @@ jobs:
       #   - 包装脚本只放行 dev/build、拒绝自带 -c/--config（tests/tauri-wrapper.test.ts）
       - name: 前端测试（金样本解码、开发服务器只绑回环、发布配置与包装脚本检查）
         run: pnpm -C client test
+
+  # T03 方案 8.2 N2：Windows 上自签 Authenticode、WinVerifyTrust 返回码、改名后的进程映像路径、管道两端 pid。
+  #   这是实测，不是检查：脚本只打印结论，不因结论失败；transcript 作为 artifact 留存，结论写进 t0-findings。
+  #   自签证书由脚本在 CurrentUser\My 里现建、结束时删除，不用任何仓库密钥。
+  windows-n2:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: N2 实测
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/t0/iwork-t03-windows-authenticode.ps1
+          $rc = $LASTEXITCODE
+          Get-Content tools/t0/out/t03-windows/transcript.txt
+          "## N2 实测（PowerShell 5.1）" >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          Get-Content tools/t0/out/t03-windows/transcript.txt >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          # 脚本本身出错（不是结论为「不成立」）才让这一步失败
+          exit $rc
+      - name: 上传 N2 记录
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: t03-windows-n2
+          path: tools/t0/out/t03-windows/transcript.txt
+          if-no-files-found: error
 
   # T03 验收 3：cargo-fuzz 三个目标各跑 60 秒（nightly，只在 Linux）
   fuzz:
