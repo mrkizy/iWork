@@ -15,12 +15,16 @@
 
 - **11:05 产品负责人更新了角色配置，要求换新窗口**：developer → codex `gpt-6.1-sol`（high）；code_reviewer → claude_code `claude-fable-5-2`（high）；architect → `claude-fable-5-2`（`.cao/agent-store/*.md`，产品负责人的改动，未提交，不要动）。旧配置的 reviewer、architect 终端已删。**旧 developer `2e7bcbe5`（T03）、`009e8660`（T07）、`49facf33`（T08）不要删**：它们是 use_worktree 建的，删终端会把对应 worktree 目录清掉；新 developer 直接在这些 worktree 里接着做，等分支合入后再删旧终端。新 developer 是 codex：发给它的消息会立刻插进它正在做的这一轮，只发要它马上照做的指令。
 
-## 2 等产品负责人定的事（重开后先问）
+## 2 产品负责人 2026-11-10 12:40 前后的决定（重开后无须再问）
 
-1. **T07 1/F-12：审批对 git 命令文字的分类能不能放在 core。** AGENTS.md「核心不写 git 特例」与 T07 方案 3.4（core 里 classify_git、git push 必问等）冲突。supervisor 建议在 AGENTS.md 架构约定加一句澄清：「审批按命令文字识别 git 等程序的子命令（如 git push 必问）属于审批规则，可以出现在 core 的规则登记表里；版本控制操作的差异仍收在 VcsProvider，核心不写 git 特例。」同意后改 AGENTS.md 与 `.cao/project-prompts/code_reviewer.md`，F-12 记 `intentional`。
-2. ~~T03 fork+exec 冒充~~：产品负责人 11:20 定「登记」，已写进需求 v1.73 第 9 章已知限制。T03 合入时 t0-findings 6.5「未修」措辞改成「已登记已知限制」。
-3. **T03 推送分支跑 Windows CI**：Windows 映像绑定没实测，代码统一返回 Unavailable，M1 在 Windows 上会拒绝启动。建议加 Windows job 跑 `tools/t0/iwork-t03-windows-authenticode.ps1` 和 Windows 测试，需同意推送 `cao/2e7bcbe5`。
-4. **T07 方案第 8 轮（实施审查补）不通过**，见第 3 节 T07 行；其中「`cp -r` 递归复制只检查目的目录与目的/源目录名两层」是要产品负责人接受的已知限制。
+- 项目提示：把原项目规则填回新模板（已做，`4f7db54`）。
+- fork+exec 冒充：登记已知限制（已写进需求 v1.73）。
+- T03 分支推送跑 Windows CI：同意（已让 T03 developer `b271f92f` 加 Windows 实测 job 并推送）。
+- T07 方案按 supervisor 建议收口（链接两种视图都过底线、find 未登记谓词整条 Unparsable 且 -delete 登记为删除、resource-limit 挪到 UserDeny 层、任何词里的命令替换都收；9/F-7 顺手修）；接受两条代价：替换指向受保护位置的链接会被拒（可走亲手执行）、`find … -exec …` 每次都问。已派 architect `e7a8c21c` 改方案。
+- T07 `cp -r` 递归复制只检查两层：接受为已知限制。
+- 以上 T07 的三条已知限制（cp -r 两层、替换受保护链接被拒、find -exec 每次问）在方案收口通过后一起写进需求第 9 章。
+
+**仍待定**：T07 1/F-12——审批按命令文字识别 git 子命令（如 git push 必问）能不能放在 core。supervisor 建议在 AGENTS.md 架构约定加澄清：「审批按命令文字识别 git 等程序的子命令属于审批规则，可以出现在 core 的规则登记表里；版本控制操作的差异仍收在 VcsProvider，核心不写 git 特例」，同步 `.cao/project-prompts/code_reviewer.md` 里「核心中出现 git 特例」那条，F-12 记 `intentional`。
 
 ## 3 各卡状态
 
