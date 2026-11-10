@@ -341,7 +341,7 @@ fn is_branch_delete(a: &str) -> bool {
 /// 白名单程序：全部选项登记过、位置参数个数与角色对得上，才是安全形态。
 fn safe_form(spec: &ArgSpec, args: &[&str]) -> Result<Vec<PendingAction>, NotSafe> {
     let mut out = Vec::new();
-    let mut operands: Vec<&str> = Vec::new();
+    let mut operands: Vec<Operand> = Vec::new();
     let mut target_dir = false;
     let mut pattern_given = false;
     let mut all_write = false;
@@ -364,11 +364,11 @@ fn safe_form(spec: &ArgSpec, args: &[&str]) -> Result<Vec<PendingAction>, NotSaf
     while i < args.len() {
         let w = args[i];
         if after_dashdash || !w.starts_with('-') || w == "-" {
-            if w == "-" && !after_dashdash {
-                // 标准输入：不是路径
-            } else {
-                operands.push(w);
-            }
+            // `--` 之前的 `-` 可能是标准流：只在只读角色的位置当标准输入（见 push_operand）
+            operands.push(Operand {
+                word: w,
+                maybe_stdin: w == "-" && !after_dashdash,
+            });
         } else if w == "--" {
             after_dashdash = true;
         } else if let Some(long) = w.strip_prefix("--") {
@@ -425,14 +425,14 @@ fn safe_form(spec: &ArgSpec, args: &[&str]) -> Result<Vec<PendingAction>, NotSaf
     }
     let primary = if all_write {
         for o in &operands {
-            push_roles(&mut out, &[Role::Write], o);
+            push_operand(&mut out, &[Role::Write], o);
         }
         Role::Write
     } else {
         match spec.operands {
             Operands::All(roles) => {
                 for o in &operands {
-                    push_roles(&mut out, roles, o);
+                    push_operand(&mut out, roles, o);
                 }
                 roles.first().copied().unwrap_or(Role::Read)
             }
@@ -442,7 +442,7 @@ fn safe_form(spec: &ArgSpec, args: &[&str]) -> Result<Vec<PendingAction>, NotSaf
                     return Err(NotSafe);
                 }
                 for o in &operands[skip..] {
-                    push_roles(&mut out, roles, o);
+                    push_operand(&mut out, roles, o);
                 }
                 roles[0]
             }
@@ -459,10 +459,10 @@ fn safe_form(spec: &ArgSpec, args: &[&str]) -> Result<Vec<PendingAction>, NotSaf
                     return Err(NotSafe);
                 }
                 for o in sources {
-                    push_roles(&mut out, source, o);
+                    push_operand(&mut out, source, o);
                 }
                 for o in dests {
-                    push_roles(&mut out, dest, o);
+                    push_operand(&mut out, dest, o);
                 }
                 dest[0]
             }
@@ -478,6 +478,22 @@ fn safe_form(spec: &ArgSpec, args: &[&str]) -> Result<Vec<PendingAction>, NotSaf
         });
     }
     Ok(out)
+}
+
+/// 白名单程序的一个位置参数。
+struct Operand<'a> {
+    word: &'a str,
+    /// 是 `--` 之前的 `-`：在只读位置是标准输入
+    maybe_stdin: bool,
+}
+
+/// 只读位置的 `-` 是标准输入，不是路径；写或删除位置的 `-` 是标准输出还是名为 `-` 的文件拿不准，
+/// 按文件保守处理（审查 1/F-4，`tee -a -`）。
+fn push_operand(out: &mut Vec<PendingAction>, roles: &[Role], o: &Operand) {
+    if o.maybe_stdin && roles.iter().all(|r| *r == Role::Read) {
+        return;
+    }
+    push_roles(out, roles, o.word);
 }
 
 /// `find`：起点目录记读；表达式词只认纯测试谓词，其余（`-delete`、`-exec`…）不是安全形态。

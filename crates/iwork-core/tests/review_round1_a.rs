@@ -7,33 +7,53 @@ use iwork_core::approval::session::snapshot_for;
 use iwork_domain::action::CallShapeKind;
 use iwork_domain::approval_mode::ApprovalMode;
 use iwork_domain::id::Seq;
-use iwork_domain::rule::{AskReason, DenyReason, RuleEffect, RuleEntry, RuleLayer, RuleMatcher, RuleScope, RuleSource, Verdict};
+use iwork_domain::rule::{
+    AskReason, DenyReason, RuleEffect, RuleEntry, RuleLayer, RuleMatcher, RuleScope, RuleSource,
+    Verdict,
+};
 use support::fake_fs::FakeFs;
 use support::*;
 
 use ApprovalMode::{Auto, FullAccess, Manual};
 
 fn denied(v: &Verdict) -> bool {
-    matches!(v, Verdict::Deny(DenyReason::Baseline(_)) | Verdict::UserAction(_))
+    matches!(
+        v,
+        Verdict::Deny(DenyReason::Baseline(_)) | Verdict::UserAction(_)
+    )
 }
 
 /// 用给定的文件系统重算会话快照（规则路径按它解析）。
 fn harness_on(fs: FakeFs, lists: &[RuleEntry]) -> Harness {
     let snap = snapshot_for(Manual, lists, &scope(), &env(), Seq(0), &fs);
-    Harness { snap, fs, ..Harness::default() }
+    Harness {
+        snap,
+        fs,
+        ..Harness::default()
+    }
 }
 
 /// F-3：受保护路径本身是链接时，经真实位置的访问同样命中底线。
 #[test]
 fn protected_rule_symlink() {
     let mut fs = FakeFs::new(HOME, false);
-    fs.add(format!("{WS}/src/a.rs")).add("/tmp/relocated/config");
+    fs.add(format!("{WS}/src/a.rs"))
+        .add("/tmp/relocated/config");
     fs.link("/home/u/.ssh", "/tmp/relocated");
     let h = harness_on(fs, &[]);
     for m in [Manual, Auto, FullAccess] {
-        assert!(denied(&h.verdict(&read_req("/home/u/.ssh/config"), m)), "{m:?}");
-        assert!(denied(&h.verdict(&read_req("/tmp/relocated/config"), m)), "{m:?}");
-        assert!(denied(&h.verdict(&bash_req("cat /tmp/relocated/config"), m)), "{m:?}");
+        assert!(
+            denied(&h.verdict(&read_req("/home/u/.ssh/config"), m)),
+            "{m:?}"
+        );
+        assert!(
+            denied(&h.verdict(&read_req("/tmp/relocated/config"), m)),
+            "{m:?}"
+        );
+        assert!(
+            denied(&h.verdict(&bash_req("cat /tmp/relocated/config"), m)),
+            "{m:?}"
+        );
     }
     // 对照：真实位置旁边的文件不受影响
     assert_eq!(h.verdict(&read_req("/tmp/other"), Manual), Verdict::Allow);
@@ -47,7 +67,10 @@ fn critical_alias() {
     fs.link("/etc", "/private/etc");
     let h = harness_on(fs, &[]);
     for m in [Manual, FullAccess] {
-        assert!(denied(&h.verdict(&bash_req("rm -r /private/etc"), m)), "{m:?}");
+        assert!(
+            denied(&h.verdict(&bash_req("rm -r /private/etc"), m)),
+            "{m:?}"
+        );
         assert!(denied(&h.verdict(&bash_req("rm -r /etc"), m)), "{m:?}");
     }
 }
@@ -70,7 +93,10 @@ fn user_list_symlink() {
         applies_in: Default::default(),
     };
     let h = harness_on(fs, &[entry]);
-    assert_eq!(h.verdict(&read_req("/srv/secret/x"), Manual), Verdict::Ask(AskReason::OutOfBounds));
+    assert_eq!(
+        h.verdict(&read_req("/srv/secret/x"), Manual),
+        Verdict::Ask(AskReason::OutOfBounds)
+    );
 }
 
 /// F-4：重定向与兜底里真实的 `-` 是文件名；白名单操作数位置的 `-` 才是标准输入。
@@ -78,7 +104,12 @@ fn user_list_symlink() {
 fn redirect_dash() {
     let mut h = Harness::default();
     h.fs.link(format!("{WS}/-"), ".git/config");
-    for cmd in ["printf x > -", "LC_ALL=C printf x > -", "tee -a - < src/a.rs", "cmd -"] {
+    for cmd in [
+        "printf x > -",
+        "LC_ALL=C printf x > -",
+        "tee -a - < src/a.rs",
+        "cmd -",
+    ] {
         for m in [Auto, FullAccess] {
             assert!(denied(&h.verdict(&bash_req(cmd), m)), "{cmd} {m:?}");
         }
@@ -92,14 +123,24 @@ fn redirect_dash() {
 fn quoted_tilde_is_relative() {
     let mut h = Harness::default();
     h.fs.link(format!("{WS}/~"), ".git");
-    for cmd in ["printf x > '~/config'", "printf x > \"~\"/config", "printf x > \\~/config", "cmd --out=~/config", "make OUT=~/config"] {
+    for cmd in [
+        "printf x > '~/config'",
+        "printf x > \"~\"/config",
+        "printf x > \\~/config",
+        "cmd --out=~/config",
+        "make OUT=~/config",
+    ] {
         for m in [Auto, FullAccess] {
             assert!(denied(&h.verdict(&bash_req(cmd), m)), "{cmd} {m:?}");
         }
     }
     // 对照：未引用的 ~ 是主目录（写主目录是越界，不是 .git）
     let c = norm_with(&bash_req("printf x > ~/config"), &h.snap, &h.fs);
-    assert!(has(&c, iwork_domain::action::ActionKind::Write, "/home/u/config"));
+    assert!(has(
+        &c,
+        iwork_domain::action::ActionKind::Write,
+        "/home/u/config"
+    ));
 }
 
 /// F-8：带路径前缀的 git / npm / sudo 与不带前缀的同样归类。
@@ -107,14 +148,29 @@ fn quoted_tilde_is_relative() {
 fn absolute_path_programs() {
     let h = Harness::default();
     for m in [Manual, Auto, FullAccess] {
-        assert_eq!(h.verdict(&bash_req("/usr/bin/git push origin main"), m), Verdict::Ask(AskReason::MustAsk), "{m:?}");
+        assert_eq!(
+            h.verdict(&bash_req("/usr/bin/git push origin main"), m),
+            Verdict::Ask(AskReason::MustAsk),
+            "{m:?}"
+        );
     }
     let (_, e) = h.eval(&bash_req("/usr/local/bin/npm publish"), Auto);
     assert_eq!(e.evaluation.verdict, Verdict::Ask(AskReason::MustAsk));
     assert!(!e.constraints.review_eligible());
-    assert_eq!(three(&bash_req("/usr/bin/git reset --hard")), ["Ask", "Ask", "Allow"]);
-    for cmd in ["/usr/bin/sudo rm -rf /", "/usr/bin/env git pull", "/bin/bash -c 'x'"] {
-        assert_eq!(norm(&bash_req(cmd)).shape.kind(), CallShapeKind::Unparsable, "{cmd}");
+    assert_eq!(
+        three(&bash_req("/usr/bin/git reset --hard")),
+        ["Ask", "Ask", "Allow"]
+    );
+    for cmd in [
+        "/usr/bin/sudo rm -rf /",
+        "/usr/bin/env git pull",
+        "/bin/bash -c 'x'",
+    ] {
+        assert_eq!(
+            norm(&bash_req(cmd)).shape.kind(),
+            CallShapeKind::Unparsable,
+            "{cmd}"
+        );
     }
     // 对照：命令目标保留原文（指纹区分带不带前缀）
     let a = norm(&bash_req("/usr/bin/git status"));
@@ -125,12 +181,23 @@ fn absolute_path_programs() {
 /// F-10：大小写不敏感的文件系统上，换大小写写同一个尚不存在的文件仍被拒绝记忆挡住（跨工具也一样）。
 #[test]
 fn case_insensitive_denial_on_missing_file() {
-    let mut h = Harness { fs: fs_ci(true), ..Harness::default() };
+    let mut h = Harness {
+        fs: fs_ci(true),
+        ..Harness::default()
+    };
     let (call, _) = h.eval(&write_req("new.txt"), Auto);
     h.denial = DenialMemory::replay(&[DenialEvent::UserDenied(call.fingerprints())]);
-    for req in [write_req("NEW.txt"), write_req(&format!("{WS}/New.TXT")), bash_req("printf x > NEW.TXT")] {
+    for req in [
+        write_req("NEW.txt"),
+        write_req(&format!("{WS}/New.TXT")),
+        bash_req("printf x > NEW.TXT"),
+    ] {
         let v = h.verdict(&req, Auto);
-        assert!(matches!(v, Verdict::Deny(DenyReason::DenialMemory(_))), "{}：{v:?}", req.raw_input.0);
+        assert!(
+            matches!(v, Verdict::Deny(DenyReason::DenialMemory(_))),
+            "{}：{v:?}",
+            req.raw_input.0
+        );
     }
     // 对照：大小写敏感时是两个文件
     let mut cs = Harness::default();
@@ -145,8 +212,15 @@ fn brace_after_literal_braces() {
     for cmd in ["touch {}{a,b}", "touch {x}{1..3}", "cat a{b}c{d,e}"] {
         let c = norm(&bash_req(cmd));
         assert_eq!(c.shape.kind(), CallShapeKind::Unparsable, "{cmd}");
-        assert_eq!(bash_verdict(cmd, FullAccess), Verdict::Ask(AskReason::UnparsableCommand), "{cmd}");
+        assert_eq!(
+            bash_verdict(cmd, FullAccess),
+            Verdict::Ask(AskReason::UnparsableCommand),
+            "{cmd}"
+        );
     }
     // 对照：find -exec 的 {} 仍是字面
-    assert_ne!(norm(&bash_req("find . -exec rm {} ;")).shape.kind(), CallShapeKind::Unparsable);
+    assert_ne!(
+        norm(&bash_req("find . -exec rm {} ;")).shape.kind(),
+        CallShapeKind::Unparsable
+    );
 }

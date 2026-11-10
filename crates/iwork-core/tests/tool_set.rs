@@ -152,7 +152,14 @@ fn snapshot_includes_scoped_user_lists_and_transient_sensitive() {
             RuleScope::Global,
         ),
     ];
-    let s = snapshot_for(ApprovalMode::Manual, &lists, &scope(), &env(), Seq(41), &fs());
+    let s = snapshot_for(
+        ApprovalMode::Manual,
+        &lists,
+        &scope(),
+        &env(),
+        Seq(41),
+        &fs(),
+    );
     assert_eq!(s.lists_seq, Seq(41));
     assert!(s.constraints.excluded_commands.contains(&CommandPattern {
         program: "terraform".into(),

@@ -50,7 +50,10 @@ pub fn snapshot_for(
             .filter(|e| e.security_list().is_some() && !e.is_builtin() && applies_to(e, scope))
             .cloned(),
     );
-    let aliases: Vec<RuleEntry> = rules.iter().filter_map(|r| real_location_alias(r, fs)).collect();
+    let aliases: Vec<RuleEntry> = rules
+        .iter()
+        .filter_map(|r| real_location_alias(r, fs))
+        .collect();
     rules.extend(aliases);
     let boundaries = Boundaries::from_rules(&rules);
     let constraints = constraints_for(mode, &rules, env);
@@ -82,7 +85,9 @@ fn replace_path(m: &RuleMatcher, real: &std::path::Path) -> RuleMatcher {
     match m {
         RuleMatcher::PathUnder(_) => RuleMatcher::PathUnder(real.to_path_buf()),
         RuleMatcher::PathIs(_) => RuleMatcher::PathIs(real.to_path_buf()),
-        RuleMatcher::All(ms) => RuleMatcher::All(ms.iter().map(|x| replace_path(x, real)).collect()),
+        RuleMatcher::All(ms) => {
+            RuleMatcher::All(ms.iter().map(|x| replace_path(x, real)).collect())
+        }
         other => other.clone(),
     }
 }

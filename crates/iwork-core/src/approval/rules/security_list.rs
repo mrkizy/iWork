@@ -117,9 +117,7 @@ fn credential_command(
         return Err(reject(if TRANSFER_PROGRAMS.contains(&program) {
             format!("「{program}」会把任意文件传出去，不能整程序加入；请改用 git，或由你亲手执行")
         } else {
-            format!(
-                "「{program}」是解释器 / 启动器，清单内的命令会在沙箱外运行，等于放开整个沙箱"
-            )
+            format!("「{program}」是解释器 / 启动器，清单内的命令会在沙箱外运行，等于放开整个沙箱")
         }));
     }
     Ok(RuleMatcher::ProgramSubcommand {

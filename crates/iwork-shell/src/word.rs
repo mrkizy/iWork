@@ -98,16 +98,20 @@ fn tilde_names_user(chars: &[char], i: usize) -> bool {
 /// 处理，拿不准就不算字面；`{}`（`find -exec … {} \;`）与 `@{u}` 这类不是展开。
 fn looks_like_brace_expansion(unquoted: &str) -> bool {
     let chars: Vec<char> = unquoted.chars().collect();
-    chars.iter().enumerate().filter(|(_, c)| **c == '{').any(|(open, _)| {
-        chars[open + 1..]
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| **c == '}')
-            .any(|(k, _)| {
-                let inner: String = chars[open + 1..open + 1 + k].iter().collect();
-                inner.contains(',') || inner.contains("..")
-            })
-    })
+    chars
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| **c == '{')
+        .any(|(open, _)| {
+            chars[open + 1..]
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| **c == '}')
+                .any(|(k, _)| {
+                    let inner: String = chars[open + 1..open + 1 + k].iter().collect();
+                    inner.contains(',') || inner.contains("..")
+                })
+        })
 }
 
 #[cfg(test)]
