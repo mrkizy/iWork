@@ -1097,11 +1097,11 @@ async fn externally_filtered_file_is_never_judged_unchanged_by_raw_bytes() {
     );
     write(&repo.join("x.r"), "hello\n");
     write(&repo.join("calm.r"), "quiet\n");
-    // 对照文件的 mtime 早于随后写出的索引：否则同一时间粒度内它是 racy 的，按规则本就该保守列出
-    set_mtime(
-        &repo.join("calm.r"),
-        std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
-    );
+    // 两个条目的 mtime 都早于索引，避免 racy 分支掩盖 stat 变化的判定；没改动的对照文件也不会被保守列出
+    let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for path in ["x.r", "calm.r"] {
+        set_mtime(&repo.join(path), earlier);
+    }
     f.commit_all(&repo, "rot13 stored"); // 存储内容是 "uryyb\n"
     assert_eq!(f.git(&repo, &["cat-file", "-p", "HEAD:x.r"]), "uryyb");
     let root = RepoRoot(repo.clone());
@@ -1110,12 +1110,7 @@ async fn externally_filtered_file_is_never_judged_unchanged_by_raw_bytes() {
     // 工作区改成与存储内容逐字节相同（git 过滤后是 "hello" → 不同 → M）
     write(&repo.join("x.r"), "uryyb\n");
     let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
-    std::fs::File::options()
-        .write(true)
-        .open(repo.join("x.r"))
-        .unwrap()
-        .set_modified(later)
-        .unwrap();
+    set_mtime(&repo.join("x.r"), later);
     assert!(
         f.git(&repo, &["status", "--porcelain"]).contains("M x.r"),
         "前提：git 报 M"

@@ -1,4 +1,4 @@
-//! `ProjectMarkerStore` 与 `ProjectDirectories` 的本机文件系统实现（技术设计 8.2、9.3；ADR-0006）。
+//! `ProjectMarkerStore` 与 `ProjectDirectories` 的本机文件系统实现（技术设计 8.2、9.3；ADR-0010）。
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};

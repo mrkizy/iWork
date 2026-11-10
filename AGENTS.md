@@ -10,7 +10,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 
 ## 依据文档（先读，按优先级）
 
-1. `docs/requirements/iwork-requirements.md`：需求与架构基线（v1.69）。**已确认**的需求不得自行改动。
+1. `docs/requirements/iwork-requirements.md`：需求与架构基线（v1.73）。**已确认**的需求不得自行改动。
 2. `docs/design/m1-tech-design.md`：M1 技术设计，写“怎么做”。与需求冲突时以需求为准。
 3. `docs/design/t0-findings.md`：三家厂商 CLI 的实测事实。适配器实现以它为准，不要凭记忆或网上资料假设厂商行为。
 4. `docs/tasks/M1/`：M1 任务卡（T01–T11）与未决事项清单（`README.md`），每张卡写明目标、范围、交付物、验收标准、依赖。
@@ -27,11 +27,11 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 - 协议：Protobuf，Rust 侧用 prost 生成，TypeScript 侧用 protobuf-es 生成；生成代码不手改、不入库（构建时生成）。
 - 存储：SQLite（rusqlite，WAL）。版本控制读操作用 gitoxide（`gix`），写操作调本机 `git`。
 
-工具链：Rust 版本由根目录 `rust-toolchain.toml` 固定（经 rustup 自动安装，不用系统自带或 Homebrew 的 rustc）；pnpm 版本由 `client/package.json` 的 `packageManager` 固定；脚本需要 bash 与 jq。CI 是 `.github/workflows/ci.yml`，三平台跑下面除基准外的全部检查。
+工具链：Rust 版本由根目录 `rust-toolchain.toml` 固定（经 rustup 自动安装，不用系统自带或 Homebrew 的 rustc）；pnpm 版本由 `client/package.json` 的 `packageManager` 固定；脚本需要 bash 与 jq。CI 是 `.github/workflows/ci.yml`，三平台跑下面除基准外的全部检查。CI 的运行状态不登录也能查（`curl https://api.github.com/repos/mrkizy/iWork/actions/runs?branch=<分支>`），失败日志要登录 GitHub 后用 `gh run view <run-id> --log-failed` 看；Windows 行为本机验证不了，以 CI 为准，拿不到日志时交 supervisor 请产品负责人登录 `gh`，不要只凭推断改。
 
 命令（T01 建立后以此为准；改动须同步本节）：
 
-- 全量测试：`cargo test --workspace`
+- 全量测试：`cargo test --workspace`（含存储的崩溃注入测试 `cargo test -p iwork-store --test crash_injection`，随机 kill -9 子进程 200 轮，约 1 分钟；库建在系统临时目录）
 - 静态检查：`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`
 - 许可与来源：`cargo deny check`（`deny.toml`）
 - 依赖方向：`scripts/check-deps.sh`，真值是 `scripts/deps-policy.toml`（加 crate、放开外部依赖都改这个文件）；`scripts/check-deps.sh --selftest` 证明检查会红
@@ -39,7 +39,8 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 - 协议兼容：新加或改了 `.proto` 字段后跑 `cargo run -p iwork-proto --example update-contract -- --additive` 把新字段登记进 `proto/compat/v1/contract.binpb`；它拒绝改号、改类型、删字段；加了样本构造函数后跑 `cargo run -p iwork-proto --example dump-compat -- proto/compat/v1/samples` 写出新的金样本（只增不改，已有样本内容不同会拒绝）。规则见 `proto/compat/README.md`
 - 前端：`pnpm -C client install --frozen-lockfile`、`pnpm -C client gen`（从 `proto/` 生成 TS 到 `client/src/gen/`，不入库）、`pnpm -C client typecheck`、`pnpm -C client test`（含开发服务器只绑 127.0.0.1、发布配置不含开发入口两项检查）
 - 客户端：Tauri 配置分三层，层清单只写在 `client/scripts/tauri-layers.ts`，包装脚本与 CI 检查共用它。开发用 `pnpm -C client tauri dev`（叠加 `tauri.dev.conf.json`）；发布构建用 `pnpm -C client tauri build`（叠加 `tauri.build.conf.json`）。tauri CLI 只支持 dev 和 build 两个子命令，且只能经这两条包装命令调用：包装脚本拒绝其他子命令（bundle、android、ios 等）、调用方自带的 `-c/--config` 和环境变量 `TAURI_CONFIG`；裸跑 `tauri build`、`tauri bundle` 会被拒；`client/src-tauri/` 下多出层清单没登记的 Tauri 配置文件时 `pnpm -C client test` 失败。`cargo build`/`cargo run -p iwork-client` 不需要 `dist/`，但 `cargo run` 起来的窗口是空的（没有开发服务器也没有嵌入资源），看界面要用 `tauri dev`
-- 性能基准：`cargo bench -p iwork-bench`（T01 建空 crate，T11 填实现）
+- 性能基准：`cargo bench -p iwork-bench`（T01 建空 crate，T11 填实现）；存储写入基准初版 `cargo bench -p iwork-store --bench write_commit`（每组一行 JSON 到 stdout，macOS 上 fullfsync 开、关各一组；T11 收编后改这一条）
+- 重测试排队（产品负责人 2026-11-10 定：同一时间只跑一张卡的重测试）：`cargo test --workspace`、`cargo clippy --workspace`、崩溃注入、`PROPTEST_CASES` 调大的属性测试、fuzz、`cargo bench`、release 构建、docker 里的测试，一律套 `lockf /tmp/iwork-heavy-test.lock <命令>` 跑（macOS 自带 `lockf`，拿不到锁就排队等）；单个 crate 的少量定向测试不用套。临时验证副本里跑也一样套
 
 ## 架构约定
 

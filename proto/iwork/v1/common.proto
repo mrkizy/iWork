@@ -196,6 +196,8 @@ enum VoidReason {
   VOID_REASON_CONVERSATION_DELETED = 2;
   VOID_REASON_TURN_ABANDONED_AFTER_INTERRUPT = 3;
   VOID_REASON_ASSISTANT_DELETED = 4;
+  // 所属回合失败（如等审批时运行时进程意外退出）。
+  VOID_REASON_TURN_FAILED = 5;
 }
 
 // 亲手执行卡片状态（T01 方案 4.3 卡片表）。

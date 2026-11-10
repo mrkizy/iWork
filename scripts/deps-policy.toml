@@ -40,13 +40,16 @@ deny_transitive = "normal_build_dev"
 
 [crates.iwork-core]
 internal = ["iwork-domain", "iwork-ports"]
-direct = ["thiserror"]
+# futures-channel / futures-core：无运行时的信箱与 Stream trait，回合编排同时等多路输入用（ADR-0006）
+direct = ["thiserror", "futures-channel", "futures-core"]
 
 [crates.iwork-app]
 internal = ["iwork-core", "iwork-ports", "iwork-proto", "iwork-domain"]
 
 [crates.iwork-store]
 internal = ["iwork-ports", "iwork-domain"]
+direct = ["rusqlite", "sha2", "thiserror", "tracing"]
+direct_dev = ["pollster", "proptest", "prost", "prost-reflect", "rusqlite", "tempfile", "tracing-subscriber"]
 transitive_exempt = ["rusqlite"]
 
 [crates.iwork-agent-acp]
@@ -54,7 +57,7 @@ internal = ["iwork-ports", "iwork-domain", "iwork-proto"]
 transitive_exempt = ["agent-client-protocol", "tokio"]
 
 [crates.iwork-rootfs]
-# 只用 std：在项目根内不跟随符号链接地读写文件（ADR-0006）
+# 只用 std：在项目根内不跟随符号链接地读写文件（ADR-0010）
 internal = []
 direct = []
 deny_transitive = "normal_build_dev"

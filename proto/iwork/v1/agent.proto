@@ -61,3 +61,12 @@ message SessionToolSet {
 message SessionModel {
   ModelSelection model = 1;
 }
+
+// 开会话时随 ACP `session/new`、`session/load` 的 `_meta` 下发给桥接的会话配置（设计 6.1、6.3）。
+// 系统提示走 ACP 标准字段 `systemPrompt`，不在这里。编码：本消息的 Protobuf 二进制再做标准 base64，
+// 放在 `_meta["iwork"]["sessionSetup"]`；桥接解不出来时必须拒绝开会话，不能退回 CLI 默认值。
+message SessionSetup {
+  ModelSelection model = 1;
+  SessionConstraints constraints = 2;
+  SessionToolSet tool_set = 3;
+}
