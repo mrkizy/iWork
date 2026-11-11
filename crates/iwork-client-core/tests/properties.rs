@@ -410,10 +410,11 @@ mod live {
     #[tokio::test(flavor = "multi_thread")]
     async fn reconnect_equals_fresh() {
         let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig {
-            cases: 12,
+            cases: 16,
             ..ProptestConfig::default()
         });
-        let strategy = proptest::collection::vec(0u8..7, 5..40);
+        // 7 号操作（实时改写时间线里的行）权重加倍：变异对照靠它发现「丢了一类变化事件」。
+        let strategy = proptest::collection::vec(0u8..10, 5..40);
         let rt = tokio::runtime::Handle::current();
         runner
             .run(&strategy, |ops| {
@@ -430,6 +431,17 @@ mod live {
                 conversation_id: "c-basic".into(),
                 first_ordinal: i64::MIN,
                 last_ordinal: i64::MIN + 1,
+            })),
+        })
+        .await;
+    }
+
+    async fn scroll_all(app: &App) {
+        app.intent(pb::UiIntent {
+            kind: Some(I::SetVisibleRows(pb::SetVisibleRows {
+                conversation_id: "c-basic".into(),
+                first_ordinal: i64::MIN,
+                last_ordinal: i64::MAX,
             })),
         })
         .await;
@@ -454,9 +466,10 @@ mod live {
             d.append(f::user_message(&format!("pad-{i}"), "c-basic", "填充"));
         }
         let (app, mut web) = connect(&d, Some("c-basic")).await;
+        // 先等对话订阅完成，之后的事件才是实时到达（否则全被折进快照，变化事件的路径测不到）。
+        // 「断在订阅途中」由下面开关对话的操作覆盖：重新打开后紧接着的操作就落在订阅途中。
+        settle(&app, &mut web).await;
         let mut open = true;
-        // 网页窗口是否顶在最上面（翻页）：那样它会一直往前翻到底，比较时新客户端也要同样翻到底。
-        let mut at_top = false;
         for (i, op) in ops.into_iter().enumerate() {
             match op {
                 0 => {
@@ -470,14 +483,23 @@ mod live {
                 }
                 3 => {
                     open = !open;
-                    // 换对话会清掉网页声明的窗口。
-                    at_top = false;
                     set_conv(&app, open.then_some("c-basic")).await;
                 }
                 5 => {
                     // 翻页：窗口顶到最上面，往前翻（审查 1/F-6）。
-                    at_top |= open;
                     scroll_top(&app).await;
+                }
+                7..=9 => {
+                    // 最新页里的一条助手消息实时流完：时间线里的行被变化事件改写。
+                    let id = format!("live-{i}");
+                    d.append(f::assistant_message(
+                        &id,
+                        "c-basic",
+                        "t-basic",
+                        f::IWORK,
+                        "iWork",
+                    ));
+                    d.append(f::message_completed("c-basic", &id, "实时完成"));
                 }
                 6 => {
                     // 断在重查途中：命中侧栏的事件让摘要失效、重查发出，紧接着断线（审查 1/F-6）。
@@ -495,16 +517,20 @@ mod live {
         if !open {
             set_conv(&app, Some("c-basic")).await;
         }
-        settle(&app, &mut web).await;
         let (fresh_app, mut fresh) = connect(&d, Some("c-basic")).await;
-        settle(&fresh_app, &mut fresh).await;
-        if at_top {
-            // 被比较的一方翻到了底：新客户端也把窗口顶到最上面，同样翻到底，再比全部行。
-            scroll_top(&fresh_app).await;
-            settle(&fresh_app, &mut fresh).await;
+        // 两边都把窗口声明成整条时间线：窗口顶到最旧会一直往前翻到底，两边都加载全部历史后整份比较。
+        // 只比各自的默认窗口会把「加载了多少历史」的差别误判成不一致（两边的窗口落在不同的行上）。
+        for a in [&app, &fresh_app] {
+            scroll_all(a).await;
         }
-        prop_assert_eq!(&web.state.rows, &fresh.state.rows);
+        settle(&app, &mut web).await;
+        settle(&fresh_app, &mut fresh).await;
         prop_assert_eq!(&web.state.sidebar, &fresh.state.sidebar);
+        prop_assert_eq!(&web.state.rows, &fresh.state.rows);
+        prop_assert!(
+            fresh.state.rows.contains_key("m-basic-u"),
+            "对照：确实翻到了最旧的一条"
+        );
         Ok(())
     }
 }
