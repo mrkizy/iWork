@@ -3,7 +3,8 @@
 //! 五组：① `on_permission_allow_e2e`：一条 `git status` 走完整条放行路径（追平 + 求值 + 审计提交）；
 //! ② `catch_up_idle`：没有新事件时一次追平；③ `catch_up_burst`：积了 200 条回合事件后的一次追平；
 //! ④ `engine_fold_startup`：1 万 / 10 万条混合事件从头折一遍（报回合表条数）；⑤ 16 个对话并发放行的吞吐。
-//! macOS 上 ①⑤ 各跑 `fullfsync` 开、关两组。前后对比由报告里的交替多轮给出（旧引擎的 API 不同，另有一份对照副本）。
+//! macOS 上 ①⑤ 各跑 `fullfsync` 开、关两组。前后对比用 `scripts/bench-approval-engine-ab.sh`：旧引擎接口不同，旧版的基准源在
+//! `crates/iwork-bench/ab/approval_engine_747db6b.rs`，脚本把它放进 747db6b 的临时工作树，和当前树同一时段交替跑。
 //!
 //! 环境变量：`IWORK_BENCH_ENGINE_N`（① 的次数，默认 2000）、`IWORK_BENCH_FOLD_MAX`（④ 的最大事件数，默认 100000）。
 
