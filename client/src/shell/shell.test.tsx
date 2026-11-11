@@ -1,6 +1,9 @@
 // 外壳、侧栏、首页与对话页对着录像渲染（方案第 7 节「组件测试」）：可见文字与按钮状态都来自 patch。
 import { fireEvent, screen, waitFor, within } from "@solidjs/testing-library";
 import { describe, expect, it } from "vitest";
+import { create } from "@bufbuild/protobuf";
+import { getDraft, HOME_DRAFT } from "../composer/drafts";
+import { ViewPatchSchema } from "../gen/iwork/v1/view_pb";
 import { noFixtures, renderScenario, userActs } from "../test-fixtures";
 
 /** 侧栏里的对话行（助手行的最近动态里也可能带着同一个标题）。 */
@@ -74,6 +77,29 @@ describe.skipIf(noFixtures)("侧栏", () => {
     fireEvent.input(input, { target: { value: " 新标题 " } });
     fireEvent.keyDown(input, { key: "Enter" });
     expect(userActs(acts)).toEqual([expect.objectContaining({ case: "renameConversation", value: expect.objectContaining({ title: "新标题" }) })]);
+  });
+});
+
+describe.skipIf(noFixtures)("首页草稿只在发出后清（审查 2a 2/F-7）", () => {
+  const navigate = (seq: bigint, startedProjectId?: string) =>
+    create(ViewPatchSchema, {
+      changes: [{ change: { case: "navigate", value: { seq, conversationId: "c-basic", rowKey: "", startedProjectId } } }],
+    });
+
+  it("别的跳转不清；带 startedProjectId 的跳转清那个项目的草稿", async () => {
+    const { store } = renderScenario("empty");
+    const key = HOME_DRAFT + "p-demo";
+    fireEvent.input(screen.getByRole("textbox", { name: "消息" }), { target: { value: "还没发出去" } });
+    expect(getDraft(key)).toBe("还没发出去");
+    store.applyPatch(navigate(1n));
+    await Promise.resolve();
+    expect(getDraft(key), "点了系统通知之类的跳转：草稿留着").toBe("还没发出去");
+    store.applyPatch(navigate(2n, "p-other"));
+    await Promise.resolve();
+    expect(getDraft(key), "别的项目的收尾：不动这个项目的草稿").toBe("还没发出去");
+    store.applyPatch(navigate(3n, "p-demo"));
+    await Promise.resolve();
+    expect(getDraft(key), "这个项目首条消息发出去了：清掉").toBe("");
   });
 });
 

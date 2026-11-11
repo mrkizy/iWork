@@ -396,3 +396,95 @@ async fn home_start_rejected_keeps_draft_and_reports() {
     // 一次只能有一个在发：失败之后可以再发
     assert_eq!(act(&app, start_intent("再试")).await.error, None);
 }
+
+async fn choose_home(app: &App, mode: pb::ApprovalMode) {
+    let ack = act(
+        app,
+        I::SetHomeModel(pb::HomeModelIntent {
+            model_id: "fake-small".into(),
+            effort: None,
+        }),
+    )
+    .await;
+    assert_eq!(ack.error, None);
+    let ack = act(
+        app,
+        I::SetHomeApprovalMode(pb::HomeApprovalModeIntent { mode: mode as i32 }),
+    )
+    .await;
+    assert_eq!(ack.error, None);
+}
+
+/// 审查 2a 2/F-7：设模型、设档位任一步被拒，就停下报原因，首条消息不发出。
+#[tokio::test(flavor = "multi_thread")]
+async fn home_start_stops_when_a_step_is_rejected() {
+    let (d, app, mut web, _dir) = start("empty").await;
+    home(&app, "").await;
+    live(&app, &mut web).await;
+    choose_home(&app, pb::ApprovalMode::Auto).await;
+    d.fail_commands(Some(Box::new(|c: &pb::Command| {
+        matches!(c.kind, Some(pb::command::Kind::SetApprovalMode(_)))
+    })));
+    assert_eq!(act(&app, start_intent("不该发出去")).await.error, None);
+    until(&app, &mut web, "报出原因、不再转圈", |s| {
+        s.home
+            .as_ref()
+            .is_some_and(|h| !h.starting && h.start_error.is_some())
+    })
+    .await;
+    assert!(
+        web.state
+            .home
+            .as_ref()
+            .and_then(|h| h.start_error.as_deref())
+            .is_some_and(|e| e.contains("消息没发出去")),
+        "原因：{:?}",
+        web.state.home.as_ref().map(|h| &h.start_error)
+    );
+    assert_eq!(messages_by_conversation(&d), vec![], "首条消息没有发出");
+    let mut models = 0;
+    d.mutate_tables(|t| {
+        models = t
+            .conversations
+            .values()
+            .filter(|r| r.conversation.model_override.is_some())
+            .count();
+    });
+    assert_eq!(models, 1, "对照：被拒之前的设模型发出去了");
+}
+
+/// 审查 2a 2/F-7：设模型、设档位在首条消息之前生效（首个回合就用它们）：后台日志里两者的 seq 都更小。
+#[tokio::test(flavor = "multi_thread")]
+async fn home_start_sets_choices_before_the_first_message() {
+    use pb::domain_event::Event as E;
+    let (d, app, mut web, _dir) = start("empty").await;
+    home(&app, "").await;
+    live(&app, &mut web).await;
+    choose_home(&app, pb::ApprovalMode::Auto).await;
+    assert_eq!(act(&app, start_intent("顺序")).await.error, None);
+    until(&app, &mut web, "发出后跳过去", |s| {
+        s.navigate
+            .as_ref()
+            .is_some_and(|n| n.started_project_id.is_some())
+    })
+    .await;
+    let seq_of = |want: fn(&E) -> bool| {
+        d.persisted_log()
+            .into_iter()
+            .find(|p| {
+                p.event
+                    .as_ref()
+                    .and_then(|e| e.event.as_ref())
+                    .is_some_and(want)
+            })
+            .map(|p| p.seq)
+            .expect("日志里有这一条")
+    };
+    let model = seq_of(|e| matches!(e, E::ConversationModelChanged(_)));
+    let mode = seq_of(|e| matches!(e, E::ApprovalModeChanged(_)));
+    let message = seq_of(|e| matches!(e, E::MessageAppended(_)));
+    assert!(
+        model < message && mode < message,
+        "设模型 {model}、设档位 {mode} 都在首条消息 {message} 之前"
+    );
+}

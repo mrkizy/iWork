@@ -36,12 +36,16 @@ struct Shared {
     pace: std::sync::atomic::AtomicU32,
     /// 只给测试用：命中的查询一律回错误（模拟查询受理出错）。
     failing_queries: Mutex<Option<QueryFilter>>,
+    /// 只给测试用：命中的命令一律拒绝（模拟后台不受理）。
+    failing_commands: Mutex<Option<CommandFilter>>,
     /// 重连时最多重放多少个 seq，再多给快照（ipc `ServerConfig::replay_limit`）；下一次重启监听时生效。
     replay_limit: std::sync::atomic::AtomicU64,
 }
 
 /// 哪些查询要回错误。
 pub type QueryFilter = Box<dyn Fn(&pb::Query) -> bool + Send + Sync>;
+/// 哪些命令要拒绝。
+pub type CommandFilter = Box<dyn Fn(&pb::Command) -> bool + Send + Sync>;
 
 impl Shared {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -209,6 +213,22 @@ impl RequestHandler for Handler {
         use pb::request::Body;
         use pb::response::Body as Out;
         let body = match req.body {
+            Some(Body::Command(c))
+                if self
+                    .0
+                    .failing_commands
+                    .lock()
+                    .expect("命令故障表锁中毒")
+                    .as_ref()
+                    .is_some_and(|f| f(&c)) =>
+            {
+                Out::Error(pb::Error {
+                    code: pb::ErrorCode::InvalidArgument.into(),
+                    message: "假后台：按测试设定拒绝这条命令".into(),
+                    retryable: false,
+                    details: Default::default(),
+                })
+            }
             Some(Body::Command(c)) => match self.0.command(c) {
                 Ok(a) => Out::Accepted(a),
                 Err(e) => Out::Error(e),
@@ -339,6 +359,7 @@ impl FakeDaemon {
             auto_reply: AtomicBool::new(false),
             pace: std::sync::atomic::AtomicU32::new(1),
             failing_queries: Mutex::new(None),
+            failing_commands: Mutex::new(None),
             replay_limit: std::sync::atomic::AtomicU64::new(
                 ServerConfig::new("iwork-fake-daemon").replay_limit,
             ),
@@ -394,6 +415,25 @@ impl FakeDaemon {
             .failing_queries
             .lock()
             .expect("查询故障表锁中毒") = f;
+    }
+
+    /// 只给测试用：之后命中 `f` 的命令一律拒绝（不追加事件）；`None` 恢复正常。
+    pub fn fail_commands(&self, f: Option<CommandFilter>) {
+        *self
+            .shared
+            .failing_commands
+            .lock()
+            .expect("命令故障表锁中毒") = f;
+    }
+
+    /// 只给测试用：到现在为止的全部持久事件（按 seq）。
+    pub fn persisted_log(&self) -> Vec<pb::PersistedEvent> {
+        self.shared
+            .lock()
+            .log
+            .iter()
+            .map(|e| e.event.clone())
+            .collect()
     }
 
     /// SendMessage 之后要不要自动回一个脚本化回合（默认关）。
