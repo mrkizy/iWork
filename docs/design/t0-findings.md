@@ -191,7 +191,8 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 - **会花订阅额度**。每次 `claude -p` 起一个实例就是一次真实的模型请求。下面每一步都写了大约起几个实例。数法：脚本给每个实例留一份 `<用例名>-stream.jsonl`（G7h 被杀掉的那几个不留），结果包里数这类文件就是这一步实际起了几个。
 - **`iwork-t0g.py` 只动自己建的目录**：`~/iwork-t0g-<随机>/`，跑完自己删；结果包是 `~/iwork-t0g-results-<时间>-<随机>.tar.gz`，不覆盖已有文件。两处例外：`~/.npmrc` 被写进沙箱的禁读名单（不读内容）；G4 ⑧ 的最小构建会写 `~/.npm`、`~/.cargo` 这些工具链缓存，不想动就加 `--skip-builds`。
 - **另外三个老脚本会清空并重写固定目录**：`~/iwork-t0-results/`、`~/iwork-t0b-results/`、`~/iwork-t0f-results/` 和同名的 `.tar.gz`。跑之前看一眼，有要留的先挪走。
-- **`iwork-t0.sh` 的结果里有邮箱**：它把 `claude auth status` 的原样输出存进 `q4-auth-status.txt`、`q4-auth-status-json.txt`。发出去之前删掉或把邮箱抹掉（安全不变量：邮箱不落盘、不进日志，这两份文件只在你本机留着）。
+- **登录状态只留四个字段**：`iwork-t0.sh`、`iwork-t0c.py`、`iwork-t0f.py` 落盘前只留 `claude auth status` 的 `loggedIn`、`authMethod`、`subscriptionType`、`loginExpiresAt`，不是 JSON 时只记字节数；`codex login status` 只记退出码与字节数（AGENTS.md 安全不变量：邮箱等不落盘）。`iwork-t0.sh` 因此要 `jq`。
+- **G2、G3、G5、G9d 的设置按产品设置写**（方案 3.2）：`disableAllHooks: false`、`permissions.disableBypassPermissionsMode: "disable"`、PreToolUse hook `timeout: 7200`（只有「超时后才拒绝 / 允许」两格是 5 秒，那是被测的东西；G3 测的就是各种 timeout 取值）、SessionStart 报到 hook（`timeout: 30`）。外层保护的预检与故障格子用同一份设置，只差被测的 hook。有意和产品不同的三处：`sandbox.allowUnsandboxedCommands` 写 `false`（外层保护：故障格子里坏掉的 hook 拦不住沙箱外重试；产品手动、自动档是 `true`）；不写 `sandbox.network.allowedDomains`（`["*"]` 本身要 G4 ② 实测，写进去万一校验不过，`-p` 模式会把整个设置文件静默忽略）；不写 `sandbox.credentials.envVars`（G9b 单独测）。文件系统的禁读名单用外层保护那一套，比产品的底线清单宽。
 - **结论只认四种证据**：流里的结构化工具调用与结果、哨兵 / 观测文件、hook 探针的调用记录、常驻会话活着时的生命周期事件。不看模型怎么说。每行是 `PASS` / `FAIL` / `INCONCLUSIVE`（没测成）/ `INFO`（只记录）。`summary.txt` 最后一行是合计；有 `FAIL` 或 `INCONCLUSIVE` 时脚本退出码是 1，这是正常的，看具体哪几行。
 
 ### 跑之前要准备的
@@ -219,7 +220,7 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 | 5 | 日常账号，人在旁边 | `python3 tools/t0/iwork-t0g.py --only G3 --long` | 30～45 分钟 | 13（探查 1 + 预检 5 + 六个取值 6 + 睡眠时钟 1） | 前面六个取值各睡 90 秒，要先跑完（十几分钟）才出提示；看到「看到这行后 30 秒内合盖」就合盖，睡满 5 分钟再打开；看 `G3 睡眠后命令没执行` 一行和它的墙钟用时。步 2 里外层保护的 Bash 两项没成立的话，这一步整组不跑（运行门），改到一次性环境里加 `--disposable-env` 跑 |
 | 6 | 日常账号 | 16.2 第 2 项（没有终端时的登录）：照方案里那一行命令跑 | 1 分钟 | 0（只起 `claude auth login`，用空的配置目录，不动现有登录） | 有没有打印登录网址、有没有自己开浏览器、有没有因为没终端报错退出 |
 | 7 | Linux | `bwrap` 临时改名后：`--only G4`，再 `--only G4 --no-fail-if-unavailable` | 各 20～30 分钟 | 各约 27 | 第一次：CLI 起不来、G4 全是 `INCONCLUSIVE`，记下 stderr 的退出码与文字；第二次：`G4 ①b 写工作区外` 那一行，和 `g4-1b-stream.jsonl` 里 `system/init` 有没有沙箱状态字段。跑完把 `bwrap` 改回来 |
-| 8 | 日常账号 | `bash tools/t0/iwork-t0.sh` | 1～2 分钟 | 3 | 原 2.1 的 Q3～Q5；结果在 `~/iwork-t0-results.tar.gz`（先抹掉邮箱，见上文） |
+| 8 | 日常账号 | `bash tools/t0/iwork-t0.sh` | 1～2 分钟 | 3 | 原 2.1 的 Q3～Q5；结果在 `~/iwork-t0-results.tar.gz`（登录状态只有四个字段） |
 | 9 | 日常账号 | `bash tools/t0/iwork-t0b.sh` | 约 14 分钟 | 2 | 原 2.1 的 Q6（hook 超时 = 放行）；结果在 `~/iwork-t0b-results.tar.gz` |
 | 10 | 日常账号 | `python3 tools/t0/iwork-t0f.py` | 5 分钟左右 | 约 5 | 原 2.2a 的 V0～V3；结果在 `~/iwork-t0f-results.tar.gz` |
 
