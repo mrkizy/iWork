@@ -1,7 +1,8 @@
 // 网页的视图状态（T09 方案 2.5）：只存 Rust 侧算好的视图模型；`applyPatch` 是唯一写入口，组件只读。
 // 语义与 crates/iwork-client-core/tests/support/web.rs 的网页替身一致：
 // - 整体视图模型脏了就整份发：替换；
-// - 对话：reset 或换了对话先清空行；removed_ids 删行；rows 按 key 整行替换或新增；appends 追加流式正文；
+// - 对话：reset 或换了对话先清空行；removed_ids 删行；rows 按 key 整行替换或新增；appends 追加流式文字
+//   （消息行追加到正文，工具行追加到输出：两种行都有流式增量，MessageDelta / ToolOutputDelta）；
 //   标题栏、输入框、窗口信息、整页说明每次随 patch 整份给；
 // - 跳转请求只记最新一条，由路由层按 seq 去重。
 import { createStore, produce, reconcile, type SetStoreFunction } from "solid-js/store";
@@ -65,7 +66,8 @@ const byteLength = (s: string) => utf8.encode(s).length;
 
 export function createViewStore(): ViewStore {
   const [state, setState] = createStore<ViewState>({});
-  // 每条消息行正文的 UTF-8 字节数：追加时核对 offset（view.proto MessageTextAppend）。不是视图状态，放在 store 外。
+  // 每个可追加行（消息正文、工具输出）的 UTF-8 字节数：追加时核对 offset（view.proto MessageTextAppend）。
+  // 不是视图状态，放在 store 外。
   const textBytes = new Map<string, number>();
 
   const applyPatch = (patch: ViewPatch) => {
@@ -156,14 +158,17 @@ function applyConversation(
       for (const row of p.rows) {
         if (!(row.key in c.rows)) reorder = true;
         c.rows[row.key] = row;
-        if (row.row.case === "message") textBytes.set(row.key, byteLength(row.row.value.text));
+        const text = streamedText(row);
+        if (text !== undefined) textBytes.set(row.key, byteLength(text));
       }
       for (const a of p.appends) {
         const row = c.rows[a.messageId];
         const have = textBytes.get(a.messageId);
-        // 对不上（行不在、长度不同）就丢掉这次追加，等 Rust 整行重发（它在下一次变脏时整行发）。
-        if (row?.row.case !== "message" || have !== Number(a.offset)) continue;
-        row.row.value.text += a.text;
+        // 对不上（行不在、不是可追加的行、长度不同）就丢掉这次追加，等 Rust 整行重发（它在下一次变脏时整行发）。
+        if (row === undefined || have !== Number(a.offset)) continue;
+        if (row.row.case === "message") row.row.value.text += a.text;
+        else if (row.row.case === "tool") row.row.value.output += a.text;
+        else continue;
         textBytes.set(a.messageId, have + byteLength(a.text));
       }
       c.header = p.header;
@@ -173,6 +178,13 @@ function applyConversation(
       if (reorder) c.order = sortedKeys(c.rows);
     }),
   );
+}
+
+/** 行里会流式追加的那段文字：消息正文、工具输出；别的行没有。 */
+function streamedText(row: RowView): string | undefined {
+  if (row.row.case === "message") return row.row.value.text;
+  if (row.row.case === "tool") return row.row.value.output;
+  return undefined;
 }
 
 function sortedKeys(rows: Record<string, RowView>): string[] {

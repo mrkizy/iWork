@@ -322,8 +322,9 @@ message MessageView {
   string message_id = 1;
 }
 
+// 流式追加：消息行接到正文后面，工具行接到输出后面（MessageDelta / ToolOutputDelta）。
 message MessageTextAppend {
-  // 行的 key。
+  // 行的 key（消息行或工具行）。
   string message_id = 1;
   // 追加前这一行正文的长度（UTF-8 字节），网页核对用：对不上就等整行重发。
   uint64 offset = 2;

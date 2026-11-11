@@ -38,6 +38,19 @@ describe("对话行", () => {
     expect(text(s, "m")).toBe("你好，世界！");
   });
 
+  it("工具行的输出也按追加接上（ToolOutputDelta）；别的行不接", () => {
+    const s = createViewStore();
+    const tool = create(RowViewSchema, { key: "t1/tc", ordinal: 3n, row: { case: "tool", value: { title: "Bash", output: "running 2 tests\n" } } });
+    const note = create(RowViewSchema, { key: "n", ordinal: 4n, row: { case: "note", value: { text: "说明" } } });
+    s.applyPatch(conv({ conversationId: "c", rows: [tool, note] }));
+    s.applyPatch(conv({ conversationId: "c", appends: [{ messageId: "t1/tc", offset: 16n, text: "test result: ok\n" }] }));
+    const r = s.state.conversation?.rows["t1/tc"]?.row;
+    expect(r?.case === "tool" ? r.value.output : undefined).toBe("running 2 tests\ntest result: ok\n");
+    s.applyPatch(conv({ conversationId: "c", appends: [{ messageId: "n", offset: 6n, text: "多" }] }));
+    const n = s.state.conversation?.rows.n?.row;
+    expect(n?.case === "note" ? n.value.text : undefined, "说明行不追加").toBe("说明");
+  });
+
   it("reset 或换了对话先清空", () => {
     const s = createViewStore();
     s.applyPatch(conv({ conversationId: "c", rows: [msg("a", 2n, "一")] }));
