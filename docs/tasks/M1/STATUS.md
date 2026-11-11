@@ -6,7 +6,7 @@
 ## 1 运行环境与规矩
 
 - **CAO 会话**：`cao-a46fd0b6`，supervisor 终端 `f6c88a81`（12:30 机器重启后新开）。worker 回报只发给创建它的 supervisor 终端；换 supervisor 后看 `agent-scaffold ps`、worker 窗口、分支提交、审查账本来接续。
-- **角色配置**（产品负责人重新生成；`.cao/agent-store/*.md`、`.cao/scaffold.json`、`.cao/workflows/*` 的改动未提交，不要动）：developer = claude_code `claude-opus-5-5`；code_reviewer = codex `gpt-6-astra`；architect = claude_code `claude-fable-5-2`。项目提示已把原规则填回新模板（`4f7db54`）。
+- **角色配置**（产品负责人重新生成；`.cao/agent-store/*.md`、`.cao/scaffold.json`、`.cao/workflows/*` 的改动未提交，不要动）：developer = claude_code `claude-opus-5-5`；code_reviewer = claude_code `claude-fable-5-2` effort medium（2026-11-10 11:00 产品负责人直接改 `.cao/agent-store/code_reviewer.md`，原 codex `gpt-6-astra` 额度用完；调优记录 T-2。`.cao/scaffold.json` 仍写 codex，跑 `agent-scaffold update` 会改回去，要先同步 scaffold.json）；functional_reviewer 仍是 codex，额度恢复前不派；architect = claude_code `claude-fable-5-2`。项目提示已把原规则填回新模板（`4f7db54`）。
 - **推送**：main 推送已获同意（最近一次推到 `9cfb4ae`，之后的本地提交未推）；任务分支推送跑 CI 已获同意。gh 已登录，CI 日志 `gh run view <id> --repo mrkizy/iWork --log-failed`。
 - **重测试排队**：`lockf /tmp/iwork-heavy-test.lock <命令>`（AGENTS.md）。本机先 `export PATH=$HOME/.cargo/bin:$PATH`（Homebrew 的旧 cargo 在前）。派活消息里写明。
 - **性能验收**：mac120（`ssh mac120`，Apple M1 8 核，rustup 1.99.1，仓库 `~/work/iWork`）夜间空闲时段测；Kaspersky 不排除、作客观因素记录（T11 卡）。开发机基准只作粗筛。
@@ -28,14 +28,14 @@
 | 卡 | 产物 | worker | 审查任务 / 轮次 | 开着的问题 | 下一步 |
 | --- | --- | --- | --- | --- | --- |
 | T01 / T02 / T03 / T05 / T08 | 已合入（ADR 0001–0012；T05 Windows 偶发修复 `a6a5007`） | — | 已关 | T01 验收 5 截图未补；T03 基准待 T11 空载复测 | — |
-| T05 补丁 | 任务 `2026-11-10-m1-t05-dispatch`（prompt 前提交开始执行、会话 ID 绑定事件），use_worktree | developer `e6df3dbe`（看门狗说已停、没回报——先看它窗口 / 分支） | 未送审 | — | 10:10 催回报（worktree 有未提交改动）；拿到回报后开 reviewer；合入后关 T04 1/F-11、F-12 |
-| T04 | 方案 `docs/plans/T04.md`（未提交，1343 行） | architect `3b7032e0`；reviewer `e4187f1a` | `2026-11-10-m1-t04-plan` **第 3 轮不通过**（已满三轮）：新 3/F-1（重拉函数不全、Usage 旁路）、3/F-2（有证书包监测漏完整性依赖，资源最后到位就永不验签）、3/F-3（旧进程 signer 固定探针，跨包形态升级永不重启）、3/F-4（有证书 SelfIdentity 没有运行中 cdhash） | 2/F-1、2/F-2 原场景已解决可关；1/F-8 按 Q5 记 intentional | 第 4 轮：3/F-1～F-4 已关；新 4/F-1（blocking，撤回安装误重启）、4/F-2（冷却时刻接班丢失）、4/F-3 nit；产品负责人批准第 5 轮，architect 在改（含 PD6 用例）；早轮 1/F-4、1/F-6、2/F-3、2/F-4 已确认解决并关闭 |
-| T06 | 方案 + `tools/t0/iwork-t0g.py`（未提交） | architect `4f7c1e8b`；reviewer `4674b8d1` | `2026-11-10-m1-t06-plan` 第 3 轮不通过，第 4 轮不通过：3/F-* 已关；新 4/F-1（漏 Scheduler.deferred_ask）、4/F-2（blocking，探针顺符号链接清空外部文件）、4/F-3/F-4（证据缺失判通过）；产品负责人批准第 5 轮按根因改（判据统一「拿不到正面证据就是 INCONCLUSIVE」、沙箱外探针只独占新建登记的哨兵文件），architect 在改；产品负责人要知道：G5/G9d 只在一次性环境跑（临时 macOS 用户或虚拟机里登录一次 Claude Code，方案 16.2 第 5 项） | 2/F-1～F-6 + 1/F-3/F-6/F-8/F-10 残留 | 改完原 reviewer 第 3 轮；ApprovalDelivered / Decided 引用 T07 |
-| T07 实施 | 分支 `cao/009e8660` @ `f716b15`（worktree `.cao/worktrees/009e8660`） | developer `f8877913`；A 侧 reviewer `4f01bbc2`；B 侧 reviewer `edeff392`（空闲） | `2026-11-10-m1-t07` A 侧第 7 轮：5/F-1、6/F-1～F-4 已修已关；三版 3582 格回归无新误拒 | A：3/F-2、7/F-2（重记 7/F-1，出处改为本任务引入：action/engine 都是本分支新文件；7/F-1 修好后一起关 fixed）；B：1/F-13、2/F-1、2/F-2、3/F-3～F-8（等引擎重做） | developer 第 8 轮修 3/F-2 + 7/F-2（命令原文只存一份 / 下游计入预算），回来送 4f01bbc2 第 8 轮；B 侧等引擎方案 |
-| T07 引擎方案 | `docs/plans/T07.md` 6.10 + `docs/plans/T02.md` 状态前提（未提交） | architect `890c712d`；reviewer `099b7f24` | `2026-11-10-m1-t07-engine-plan` 第 3 轮：2/F-1～F-3 已关；新 3/F-1（折叠缺等价归属事实 OwnerFacts）、3/F-2（sync 会写库，不能在写线程观察者里同步调）；第 4 轮复审中（OwnerFacts、观察者只唤醒；真实观察者接线测试推到 T10） | 1/F-1～F-5 | 改完原 reviewer 第 2 轮；PD6 问产品负责人 |
+| T05 补丁 | 分支 `cao/e6df3dbe` @ `2d6eb2c`，CI 绿；新事件 TurnSessionBound（oneof 86，PD6 只能向前修） | developer `e6df3dbe`；reviewer `6504698c` | `2026-11-10-m1-t05-dispatch` 第 1 轮不通过：1/F-1（Running→Failed 三条路径缺测试）+ 2 nit | 1/F-1～F-3 | developer 在补；过了合入，合入后关 T04 1/F-11、1/F-12 |
+| T04 | 方案 `docs/plans/T04.md`（未提交，1343 行） | architect `3b7032e0`；reviewer `e4187f1a` | `2026-11-10-m1-t04-plan` **第 3 轮不通过**（已满三轮）：新 3/F-1（重拉函数不全、Usage 旁路）、3/F-2（有证书包监测漏完整性依赖，资源最后到位就永不验签）、3/F-3（旧进程 signer 固定探针，跨包形态升级永不重启）、3/F-4（有证书 SelfIdentity 没有运行中 cdhash） | 2/F-1、2/F-2 原场景已解决可关；1/F-8 按 Q5 记 intentional | **方案定稿 `6721523`**（5/F-1 已核对关闭；只剩 1/F-11、1/F-12 等 T05 补丁合入后关） | T05 补丁合入后开实施：第 0 步 N5 最先做（自签证书 + 临时钥匙串，不用产品负责人的证书）；release 构建占盘大，派活时写明临时产物跑完就删 |
+| T06 | 方案 + `tools/t0/iwork-t0g.py`（未提交） | architect `4f7c1e8b`；reviewer `637a2b18`（Fable 5.2） | `2026-11-10-m1-t06-plan` 第 7 轮核对中（只核 6/F-1～F-4） | 6/F-1～F-4 | 过了定稿；G5 阳性对照在无头模式下可能立不起来，S0 实测时再议 |
+| T07 实施 | 分支 `cao/009e8660` @ `1dbec7a`（E1–E7） | developer `f8877913`；reviewer `b36743db` | `2026-11-10-m1-t07` 第 9 轮：原 B 侧 9 条全部 fixed；9/F-4 intentional、9/F-7 方案已改（`e3b4457`）；开着 9/F-1（审查结论碰 Busy 丢失）、9/F-2、9/F-3（性质测试覆盖）、9/F-5/6/8 nit | 见左 | developer 在修；复审用新任务 ID `2026-11-10-m1-t07-b`（旧 ID 轮次用完）；启动折叠 1229ms 与 T04 冷启动一起定 |
+| T07 引擎方案 | `docs/plans/T07.md` 6.10 + `docs/plans/T02.md` 状态前提（未提交） | architect `890c712d`；reviewer `099b7f24` | `2026-11-10-m1-t07-engine-plan` **第 4 轮通过，定稿 `b6bf0a6`** | — | developer f8877913 在分支上按 6.10.14 做 E1–E7；真实观察者接线测试归 T10a 合入门槛 |
 | T09 | 方案 `docs/plans/T09.md`（未提交，429 行） | architect `62db2f05`；reviewer `9cbb7f89` | `2026-11-10-m1-t09-plan` 第 2 轮不通过：2/F-1（断线丢在飞的摘要重查）、2/F-2（reload 不释放 Tauri 旧帧暂存）、2/F-3（非时间线大 patch 超 1 MiB 永远发不出，blocking）；1/F-3～F-7 已解决可关，1/F-1、F-2 部分 | 见左 | 第 3 轮不通过（3/F-1 interceptor 守门无效、3/F-2 跨代旧响应覆盖），**方案定稿 `1df7d74`**，实施见下一行；设计窗口 Q9～Q12 待答 |
-| T09 实施 | 第一组 = 方案第 11 节步 0–5（协议、client-core、假后台、Tauri 壳），use_worktree | developer `c0814d74` | `2026-11-10-m1-t09` 未送审 | — | 回报后开新 reviewer 审 diff；第二组 = 步 6–9 网页（7a/7b/7d 等 Q9～Q12），步 10 等 T04、步 11 等 T10 |
-| T10、T11 | 未开工 | — | — | — | T10 依赖 T06、T07、T08、T09 |
+| T09 实施 | 第一组 步 0–5：分支 `cao/c0814d74` @ `3530c86`，CI 绿 | developer `c0814d74`；reviewer `3b36c750` | `2026-11-10-m1-t09` 第 1 轮不通过：7 important（空转、断线后列表空、列表不刷新、无退避×2、缺测试、菜单丢编辑快捷键）+ 3 nit | 1/F-1～F-10 | developer 先返工，再做通知探针（后台发通知，要产品负责人真机点）；architect 62db2f05 写「通知改由后台发」改动稿；第二组等第一组合入 |
+| T10a～T10g、T11 | 未开工；T10 已拆成七张小卡（产品负责人 2026-11-10 同意，见 T10.md） | — | — | — | T10a 等 T04、T06、T07、T09 第一组合入；T10d/e/f 先出方案，可以和 T10a 的实施同时写 |
 
 查开着的问题：`agent-scaffold findings list --task <任务 ID> --open`。记账工具轮次只能 1～9，超过换新任务 ID。
 
@@ -50,6 +50,13 @@
 - 每个合入单元用新的 developer 和 reviewer；审方案和审 diff 的 reviewer 分开。
 
 ## 5 踩过的坑
+
+- **worker 窗口被缩成 93×7（2026-11-10 夜）**：所有 worker 收件箱卡了 9～12 小时。`agent-scaffold ps` 出现「收件箱有 N 条消息在等待投递」先看 `tmux list-windows -t cao-a46fd0b6 -F '#{window_index} #{window_width}x#{window_height}'`，太小就逐个 `resize-window -x 140 -y 45`。
+
+- **supervisor 收件箱卡住（2026-11-10 11:22–13:30）**：CAO 把 supervisor 窗口认成「在等回答」，14 条消息一直 pending。看 `agent-scaffold ps` 里 supervisor 那行；可以用 `curl -s 'http://127.0.0.1:9895/terminals/f6c88a81/inbox/messages?status=pending&limit=100'` 直接读出来。
+- 磁盘：`target/debug/incremental` 最占地方（T07 分支一个就 26G），空闲 worktree 可以直接删；派 reviewer 时让它复用 developer worktree 的 target，并设 `CARGO_INCREMENTAL=0`。
+
+- **磁盘满（2026-11-10 10:30）**：各 worktree 的 target 加起来七八十 G，reviewer 和 developer 的临时副本又各带一份 release target。已合入分支 worktree 的 `target/` 直接删（`2d513126`、`2e7bcbe5`、`49facf33`、`fecce968`）。派活时写明：临时副本跑完就删。
 
 - 新窗口太小消息投不进：`tmux resize-window -t cao-a46fd0b6:<窗口> -x 140 -y 45`。
 - 看门狗「停下没回报 / 卡住 / 在等回答」常是误报（等后台任务或 CI），先看窗口。非安全类权限框可 `answer_user_prompt`，但有倒计时会自动拦下。
