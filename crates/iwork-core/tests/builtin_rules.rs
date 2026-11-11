@@ -28,10 +28,19 @@ fn builtin_ids_stable() {
         "tests/snapshots/builtin_{}_macos.txt",
         iwork_core::approval::rules::builtin::RULESET_VERSION
     ));
+    // 快照固定的是条目与 ID，和平台无关：Windows 上路径拼出来是反斜杠（Debug 里转义成两个）、
+    // 检出的快照可能是 CRLF，比较前都统一成 macOS 的写法
+    let text = if cfg!(windows) {
+        text.replace("\\\\", "/")
+    } else {
+        text
+    };
     if std::env::var_os("IWORK_UPDATE_SNAPSHOTS").is_some() {
         std::fs::write(&path, &text).unwrap();
     }
-    let expected = std::fs::read_to_string(&path).expect("快照文件存在");
+    let expected = std::fs::read_to_string(&path)
+        .expect("快照文件存在")
+        .replace("\r\n", "\n");
     assert_eq!(
         text, expected,
         "内置规则集变了：改条目要升 RULESET_VERSION 并更新快照"
@@ -65,7 +74,10 @@ fn builtin_covers_credential_dirs() {
         .iter()
         .filter(|e| e.layer == RuleLayer::Baseline && e.effect == RuleEffect::UserActionEligible)
         .filter_map(|e| match &e.matcher {
-            RuleMatcher::PathUnder(p) | RuleMatcher::PathIs(p) => Some(p.display().to_string()),
+            // Windows 上拼出来的分隔符是反斜杠，期望值按 macOS 写
+            RuleMatcher::PathUnder(p) | RuleMatcher::PathIs(p) => {
+                Some(p.to_string_lossy().replace('\\', "/"))
+            }
             _ => None,
         })
         .collect();
