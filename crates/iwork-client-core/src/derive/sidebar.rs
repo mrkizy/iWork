@@ -203,10 +203,12 @@ fn quota_cells(store: &Store, ctx: Ctx) -> Vec<pb::QuotaCell> {
                     runtime_label: label,
                     value_text: text::QUOTA_MISSING.into(),
                     tooltip: text::QUOTA_MISSING_TIP.into(),
+                    used_pct: None,
                 },
                 Some(top) => pb::QuotaCell {
                     runtime_label: label,
                     value_text: format!("{}%", top.used_pct),
+                    used_pct: Some(top.used_pct.min(100)),
                     tooltip: windows
                         .iter()
                         .map(|w| {

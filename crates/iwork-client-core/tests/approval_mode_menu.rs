@@ -38,6 +38,8 @@ fn menu_has_descriptions_tag_and_confirm() {
     assert_eq!(c.title, "本对话切到全开？");
     assert_eq!(c.confirm_label, "切到全开");
     assert!(c.body.contains("只有 git push 仍会询问"));
+    assert_eq!(c.for_value, m.options[2].value, "选全开那一项才弹");
+    assert!(!m.shield_checked, "手动时盾牌不带勾");
 }
 
 #[test]
@@ -59,5 +61,6 @@ fn no_confirm_when_already_full_access() {
     ));
     let m = mode_view(&s);
     assert!(m.full_access);
+    assert!(m.shield_checked);
     assert_eq!(m.full_access_confirm, None);
 }

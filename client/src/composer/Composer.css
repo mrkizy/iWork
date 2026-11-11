@@ -1,0 +1,204 @@
+.iw-composer {
+  width: min(var(--composer-max), calc(100% - 48px));
+  margin: 0 auto 20px;
+}
+.iw-composer__block {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 0 4px;
+  color: var(--tx2);
+  font-size: var(--fs-sm2);
+}
+.iw-composer__block--warning {
+  color: var(--acc);
+}
+.iw-composer__box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 14px 10px 16px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-2xl);
+  background: var(--surf);
+}
+.iw-composer__box:focus-within {
+  border-color: var(--bd2);
+}
+.iw-composer__tray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.iw-composer__tray-chip {
+  max-width: 260px;
+}
+.iw-composer__chip-note {
+  color: var(--warnTx);
+}
+.iw-composer__input {
+  width: 100%;
+  min-height: 48px;
+  max-height: 240px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--tx);
+  font: inherit;
+  font-size: var(--fs-body);
+  line-height: 1.6;
+  resize: none;
+  outline: none;
+}
+.iw-composer__input::placeholder {
+  color: var(--tx3);
+}
+.iw-composer__bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.iw-composer__spacer {
+  flex: 1;
+}
+.iw-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--tx2);
+  font-size: var(--fs-sm2);
+  cursor: pointer;
+}
+.iw-pill:hover:not(:disabled),
+.iw-pill[aria-expanded="true"] {
+  background: var(--sideOn);
+  color: var(--tx);
+}
+.iw-pill:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* 全开：赭红粗体、底色淡赭红，常驻醒目（2 节第 9 条） */
+.iw-pill--full {
+  color: var(--acc);
+  font-weight: 700;
+  background: color-mix(in srgb, var(--acc) 12%, transparent);
+}
+.iw-pill__override {
+  color: var(--mus);
+}
+.iw-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: var(--acc);
+  color: var(--accTx);
+  cursor: pointer;
+}
+.iw-send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.iw-send--stop {
+  background: var(--surf2);
+  color: var(--tx);
+  border: 1px solid var(--bd);
+}
+
+/* 菜单内容 */
+.iw-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.iw-choice__check {
+  flex: none;
+  width: 16px;
+  padding-top: 2px;
+}
+.iw-choice__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.iw-choice__label {
+  font-weight: 600;
+}
+.iw-choice__tip,
+.iw-choice__desc {
+  color: var(--tx3);
+  font-size: var(--fs-sm);
+  font-weight: 400;
+}
+.iw-choice__tag {
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--acc);
+  border-radius: var(--r-xs);
+  color: var(--acc);
+  font-size: var(--fs-xs);
+  font-weight: 400;
+}
+.iw-segmented {
+  display: flex;
+  gap: 2px;
+  margin: 2px 6px 6px;
+  padding: 3px;
+  border-radius: var(--r-sm);
+  background: var(--surf2);
+}
+.iw-segmented button {
+  flex: 1;
+  height: 28px;
+  border: none;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--tx2);
+  cursor: pointer;
+}
+.iw-segmented button[aria-pressed="true"] {
+  background: var(--surf);
+  color: var(--tx);
+  font-weight: 600;
+  box-shadow: var(--shadow-seg);
+}
+.iw-segmented button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.iw-model-id {
+  display: flex;
+  gap: 6px;
+  padding: 4px 10px 6px;
+}
+.iw-model-id input {
+  flex: 1;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--bd2);
+  border-radius: var(--r-xs);
+  background: var(--surf);
+  color: var(--tx);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+.iw-mode-confirm__body {
+  margin: 0 0 10px;
+}
+.iw-mode-confirm__foot {
+  margin: 0;
+  color: var(--tx3);
+  font-size: var(--fs-sm);
+}

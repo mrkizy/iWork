@@ -1,0 +1,157 @@
+.iw-row {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: 6px 24px;
+}
+/* 用户消息：右侧气泡 */
+.iw-msg--user {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+.iw-msg--user .iw-msg__bubble {
+  max-width: 85%;
+  padding: 8px 14px;
+  border-radius: var(--r-lg);
+  background: var(--bub);
+}
+/* 助手消息：头像与名字一行，正文不加底 */
+.iw-msg__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  color: var(--tx);
+  font-weight: 600;
+  font-size: var(--fs-md);
+}
+.iw-msg__status {
+  color: var(--tx3);
+  font-weight: 400;
+  font-size: var(--fs-sm);
+}
+.iw-msg--system .iw-msg__body {
+  color: var(--tx2);
+}
+.iw-msg__pending {
+  color: var(--tx3);
+  font-size: var(--fs-sm);
+}
+.iw-msg__attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.iw-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-md);
+  background: var(--surf);
+  font-size: var(--fs-sm);
+}
+.iw-chip__size {
+  color: var(--tx3);
+}
+/* 这一轮失败的说明行（2a 第 10 条）：赭红警示图标 + 文字 + 详情 */
+.iw-failure {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  color: var(--acc);
+  font-size: var(--fs-md);
+}
+.iw-failure__detail {
+  flex-basis: 100%;
+  margin: 4px 0 0 22px;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  background: var(--surf2);
+  color: var(--tx2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  user-select: text;
+}
+/* 工具活动折叠行 */
+.iw-tool {
+  font-size: var(--fs-md);
+  color: var(--tx2);
+}
+.iw-tool__line {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.iw-tool__title {
+  flex: none;
+  color: var(--tx);
+}
+.iw-tool__summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm2);
+}
+.iw-tool__status {
+  flex: none;
+  color: var(--tx3);
+  font-size: var(--fs-sm);
+}
+.iw-tool--failed .iw-tool__status {
+  color: var(--acc);
+}
+.iw-tool__output {
+  margin: 4px 0 4px 20px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-md);
+  background: var(--surf2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+  user-select: text;
+}
+/* 说明行、模型切换、项目分隔线 */
+.iw-note {
+  color: var(--tx3);
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+.iw-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--tx3);
+  font-size: var(--fs-sm);
+}
+.iw-divider::before,
+.iw-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--bd);
+}
+.iw-row-later {
+  padding: 8px 12px;
+  border: 1px dashed var(--bd2);
+  border-radius: var(--r-lg);
+  color: var(--tx3);
+  font-size: var(--fs-sm);
+}

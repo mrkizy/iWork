@@ -1,0 +1,113 @@
+// 外壳：侧栏 + 主区域。路由（看哪一页）是网页本地状态；变了就整份声明可见视图。
+// 传输故障时只显示固定诊断页；连接类整页（诊断、版本切换等）归步 7d，这里先给连接中的最小提示。
+import { createEffect, createSignal, Match, on, Show, Switch, type Component, type JSX } from "solid-js";
+import { ConnectionState } from "../gen/iwork/v1/view_pb";
+import { HostProvider, type Host } from "../host";
+import { ConversationPage } from "../pages/Conversation";
+import { HomePage } from "../pages/Home";
+import { Spinner } from "../ui/Badge";
+import { applyPlayful } from "../ui/theme";
+import { createRouter, visibleFor, type Route } from "./route";
+import { Sidebar } from "./Sidebar";
+import { createStarter, StarterProvider } from "./starter";
+import { TransportFailurePage } from "./TransportFailure";
+import "./App.css";
+
+export function App(props: { host: Host; toasts: Component; initialRoute?: Route }) {
+  const host = props.host;
+  const router = createRouter(props.initialRoute);
+  const starter = createStarter(host, router);
+
+  // 路由变了：整份声明可见视图（方案 2.4 第 9 条：不可见的视图 Rust 不算增量）。
+  createEffect(
+    on(router.route, (r) => {
+      const v = visibleFor(r);
+      void host.act({
+        case: "setVisible",
+        value: {
+          sidebar: v.sidebar,
+          settings: v.settings,
+          pending: v.pending,
+          conversationId: v.conversationId,
+          assistantId: v.assistantId,
+          conversationList: v.conversationList,
+        },
+      });
+    }),
+  );
+
+  // Rust 发来的跳转请求（新建对话后、点了系统通知后），按 seq 只跳一次。
+  const [navigated, setNavigated] = createSignal(0n);
+  createEffect(() => {
+    const n = host.view.navigate;
+    if (n === undefined || n.seq <= navigated()) return;
+    setNavigated(n.seq);
+    router.go({ page: "conversation", id: n.conversationId, rowKey: n.rowKey || undefined });
+    starter.arrived(n.conversationId);
+  });
+
+  createEffect(() => applyPlayful(host.view.settings?.playfulUi ?? true));
+
+  const conn = () => host.view.connection;
+  const connecting = () => {
+    const s = conn()?.state;
+    return s === undefined || s === ConnectionState.CONNECTING || s === ConnectionState.UNSPECIFIED;
+  };
+
+  return (
+    <HostProvider value={host}>
+      <StarterProvider value={starter}>
+        <Show when={host.view.transportFailure} fallback={<Body router={router} connecting={connecting()} />}>
+          {(f) => <TransportFailurePage failure={f()} />}
+        </Show>
+        <props.toasts />
+      </StarterProvider>
+    </HostProvider>
+  );
+
+  function Body(p: { router: typeof router; connecting: boolean }): JSX.Element {
+    return (
+      <Show
+        when={host.view.sidebar !== undefined}
+        fallback={
+          <div class="iw-connecting" role="status">
+            <Spinner />
+            <span>{conn()?.title || "正在连接 iWork…"}</span>
+          </div>
+        }
+      >
+        <div class="iw-app">
+          <Sidebar router={p.router} />
+          <main class="iw-main">
+            <ConnectionBar />
+            <Switch fallback={<div class="iw-placeholder">这一页在下一组实现</div>}>
+              <Match when={home(p.router.route())}>{(r) => <HomePage projectId={r().projectId} />}</Match>
+              <Match when={conversation(p.router.route())}>{(r) => (
+                  <ConversationPage id={r().id} rowKey={r().rowKey} openRuntimeDetails={() => p.router.go({ page: "settings" })} />
+                )}</Match>
+            </Switch>
+          </main>
+        </div>
+      </Show>
+    );
+  }
+
+  function ConnectionBar() {
+    const text = () => {
+      const c = conn();
+      if (c === undefined) return undefined;
+      if (c.state === ConnectionState.RECONNECTING) return c.title || "正在重新连接";
+      return c.overloadNotice ?? c.queryNotice;
+    };
+    return (
+      <Show when={text()}>
+        <div class="iw-conn-bar" role="status">
+          {text()}
+        </div>
+      </Show>
+    );
+  }
+}
+
+const home = (r: Route) => (r.page === "home" ? r : undefined);
+const conversation = (r: Route) => (r.page === "conversation" ? r : undefined);

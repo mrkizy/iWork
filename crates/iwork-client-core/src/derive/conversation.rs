@@ -289,12 +289,14 @@ fn approval_mode(
         current: current as i32,
         scope_title: text::mode_scope_title(dm_name),
         // M1 一个对话只有一个助手作答：受影响的就是它（单独设置的成员 M2 才有）。
-        full_access_confirm: (current != pb::ApprovalMode::FullAccess).then(|| {
-            text::full_access_confirm(
+        full_access_confirm: (current != pb::ApprovalMode::FullAccess).then(|| pb::ConfirmView {
+            for_value: pb::ApprovalMode::FullAccess as i32,
+            ..text::full_access_confirm(
                 assistant
                     .and_then(|a| a.config.as_ref())
                     .map_or("助手", |c| c.name.as_str()),
             )
         }),
+        shield_checked: current != pb::ApprovalMode::Manual,
     }
 }

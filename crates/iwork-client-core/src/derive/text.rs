@@ -398,5 +398,6 @@ pub fn full_access_confirm(who: &str) -> pb::ConfirmView {
         ),
         footnote: "只在本对话有效，新对话回到默认".into(),
         confirm_label: "切到全开".into(),
+        for_value: 0,
     }
 }

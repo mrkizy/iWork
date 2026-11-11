@@ -152,6 +152,8 @@ message QuotaCell {
   string value_text = 2;
   // 悬停：窗口类型与重置时间。
   string tooltip = 3;
+  // 细进度条的用量（0–100）；取不到时不设，界面不画条。
+  optional uint32 used_pct = 4;
 }
 
 // ---------- 对话 ----------
@@ -272,6 +274,8 @@ message ApprovalModeView {
   string scope_title = 6;
   // 切到全开前的确认框（ui-m1.md 第 2 节第 9 条）：每次切到全开都弹；已经是全开时不设。
   optional ConfirmView full_access_confirm = 7;
+  // 盾牌里带勾（自动、全开时）。
+  bool shield_checked = 8;
 }
 
 // 确认框的全部文字：标题、正文、脚注、确认按钮字样（取消按钮字样固定）。
@@ -280,6 +284,8 @@ message ConfirmView {
   string body = 2;
   string footnote = 3;
   string confirm_label = 4;
+  // 选了哪个选项（OptionView.value）才弹这个确认框。
+  int32 for_value = 5;
 }
 
 message MessageView {
