@@ -102,17 +102,19 @@ pub fn validate(routes: &[OutboxRoute]) -> Result<(), String> {
 }
 
 /// 「结果不确定」的唯一处理：按去向的 `on_uncertain` 改回 `Queued`（次数在下次取出时把关）或标 `Failed`。
+/// 返回改成了哪个状态：改回 `Queued` 的条目要先重投完，同一去向后面的条目才能投（保持先后）。
 pub async fn settle_uncertain<St: StoragePort>(
     store: &St,
     route: &OutboxRoute,
     item: &OutboxItem,
-) -> Result<(), StorageError> {
+) -> Result<DeliveryState, StorageError> {
     let state = match route.on_uncertain {
         OnUncertain::Redeliver => DeliveryState::Queued,
         OnUncertain::Fail => DeliveryState::Failed,
     };
     tracing::warn!(id = item.id.0, target = %item.target.0, ?state, "outbox 投递结果不确定");
-    store.outbox_mark(item.id, state).await
+    store.outbox_mark(item.id, state).await?;
+    Ok(state)
 }
 
 /// 任务体。被监督器重启时从头来：先对账，再按登记表起各条道。
@@ -159,9 +161,10 @@ where
 }
 
 enum Next {
-    /// 这一条处理完了，取下一条。
+    /// 这一条处理完了（送达或失败），取下一条。
     Continue,
-    /// 可重试的错误：这条道退避后再来。
+    /// 这一条还在排队（可重试的错误、结果不确定后改回排队）：这条道退避后从头重取，它排在最前，
+    /// 同一去向后面的条目不越过它。
     Backoff,
 }
 
@@ -234,27 +237,35 @@ async fn deliver<St: StoragePort>(store: &St, route: &OutboxRoute, item: &Outbox
             Next::Continue
         }
         Ok(Ok(Err(e))) if e.retryable => {
-            tracing::warn!(id = item.id.0, target = %item.target.0, message = %e.message, "outbox 投递失败，可重试");
+            tracing::warn!(id = item.id.0, target = %item.target.0, reason = %e.message, "outbox 投递失败，可重试");
             mark(DeliveryState::Queued).await;
             Next::Backoff
         }
         Ok(Ok(Err(e))) => {
-            tracing::error!(id = item.id.0, target = %item.target.0, message = %e.message, "outbox 投递失败，不可重试");
+            tracing::error!(id = item.id.0, target = %item.target.0, reason = %e.message, "outbox 投递失败，不可重试");
             mark(DeliveryState::Failed).await;
             Next::Continue
         }
         Ok(Err(_panic)) => {
             tracing::error!(id = item.id.0, target = %item.target.0, "outbox 投递 panic");
-            if let Err(e) = settle_uncertain(store, route, item).await {
-                tracing::error!(id = item.id.0, error = %e, "收尾结果不确定的投递失败");
-            }
-            Next::Continue
+            after_uncertain(store, route, item).await
         }
-        Err(_elapsed) => {
-            if let Err(e) = settle_uncertain(store, route, item).await {
-                tracing::error!(id = item.id.0, error = %e, "收尾结果不确定的投递失败");
-            }
-            Next::Continue
+        Err(_elapsed) => after_uncertain(store, route, item).await,
+    }
+}
+
+/// 结果不确定（超时、投递 panic）之后：改回排队的要先重投它，标失败的往下走。
+async fn after_uncertain<St: StoragePort>(
+    store: &St,
+    route: &OutboxRoute,
+    item: &OutboxItem,
+) -> Next {
+    match settle_uncertain(store, route, item).await {
+        Ok(DeliveryState::Failed) => Next::Continue,
+        Ok(_) => Next::Backoff,
+        Err(e) => {
+            tracing::error!(id = item.id.0, error = %e, "收尾结果不确定的投递失败");
+            Next::Backoff
         }
     }
 }
@@ -318,6 +329,8 @@ mod tests {
         PanicInFuture,
         /// 第一次：记下收到、然后在同步部分 panic（道 panic → 整个任务 panic）；之后正常
         PanicInCall,
+        /// 第一次：永不返回（超时）；之后正常
+        HangFirst,
     }
 
     struct Fake {
@@ -340,6 +353,8 @@ mod tests {
                     Mode::PanicInFuture if n == 0 => panic!("投递的 future panic"),
                     Mode::PanicInFuture => Ok(()),
                     Mode::Hang => std::future::pending().await,
+                    Mode::HangFirst if n == 0 => std::future::pending().await,
+                    Mode::HangFirst => Ok(()),
                     Mode::AlwaysRetry => Err(DispatchError {
                         retryable: true,
                         message: "稍后再试".into(),
@@ -534,7 +549,8 @@ mod tests {
         assert_eq!(s.lock().unwrap().len(), 40);
     }
 
-    /// S18：去向 A 永不返回，B 正常：B 立刻送达；A 的第一条在时限后按 `Redeliver` 最多派发 3 次后失败，轮到下一条。
+    /// S18：去向 A 永不返回，B 正常：B 立刻送达；A 的第一条在时限后按 `Redeliver` 退避重投，最多派发 3 次后失败，
+    /// 之后才轮到 A 的下一条。
     #[tokio::test(flavor = "multi_thread")]
     async fn hung_route_does_not_block_others() {
         let w = World::new();
@@ -553,18 +569,71 @@ mod tests {
             started.elapsed() < Duration::from_millis(200),
             "B 没等 A 的时限"
         );
-        w.until("A 两条都失败", Duration::from_secs(10), |w| {
+        // 每次超时后改回排队、按可重试的退避（1s、2s、4s）重取：两条各 3 次，约 15s
+        w.until("A 两条都失败", Duration::from_secs(30), |w| {
             w.count("a:", "failed") == 2
         })
         .await;
         let a = sa.lock().unwrap().clone();
         assert_eq!(a.len(), 6, "每条最多派发 3 次：{a:?}");
         assert!(
+            a[..3].iter().all(|x| *x == a[0]) && a[3..].iter().all(|x| *x == a[3]) && a[0] < a[3],
+            "同一去向保持先后：第一条投完（失败）才轮到第二条：{a:?}"
+        );
+        assert!(
             w.states()
                 .iter()
                 .filter(|(t, ..)| t.starts_with("a:"))
                 .all(|(_, _, n)| *n == 3)
         );
+    }
+
+    /// 方案 2.11「同一个去向保持先后」：第一条结果不确定（超时、投递 panic）被改回排队后，要先把它重投完，
+    /// 才轮到后面的条目；接收方看到的次序是 [1, 1, 2]，不是 [1, 2, 1]。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uncertain_redelivery_keeps_order() {
+        for mode in [Mode::HangFirst, Mode::PanicInFuture] {
+            let w = World::new();
+            let s = seen();
+            w.add(&["a:1", "a:2"]).await;
+            let ids: Vec<u64> = {
+                let conn = rusqlite::Connection::open(w.env.db()).unwrap();
+                let mut st = conn.prepare("SELECT id FROM outbox ORDER BY id").unwrap();
+                st.query_map([], |r| r.get::<_, i64>(0).map(|v| v as u64))
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap()
+            };
+            let _t = w.start(vec![route("a:", OnUncertain::Redeliver, mode, &s)]);
+            w.until("两条都送达", Duration::from_secs(10), |w| {
+                w.count("a:", "accepted_by_runtime") == 2
+            })
+            .await;
+            assert_eq!(
+                *s.lock().unwrap(),
+                [ids[0], ids[0], ids[1]],
+                "{}",
+                if mode == Mode::HangFirst {
+                    "超时"
+                } else {
+                    "panic"
+                }
+            );
+        }
+    }
+
+    /// 对照：不能幂等的去向结果不确定时标失败，道照常往下走，不重投。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uncertain_fail_moves_on() {
+        let w = World::new();
+        let s = seen();
+        w.add(&["a:1", "a:2"]).await;
+        let _t = w.start(vec![route("a:", OnUncertain::Fail, Mode::HangFirst, &s)]);
+        w.until("一条失败一条送达", Duration::from_secs(5), |w| {
+            w.count("a:", "failed") == 1 && w.count("a:", "accepted_by_runtime") == 1
+        })
+        .await;
+        assert_eq!(s.lock().unwrap().len(), 2);
     }
 
     /// S18：不能幂等的去向超时一次就失败，不重投。
