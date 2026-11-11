@@ -83,11 +83,7 @@ fn constraints_baseline_mode_independent() {
         assert_eq!(x.read_only, c[0].read_only);
         assert_eq!(x.excluded_commands, c[0].excluded_commands);
     }
-    let deny: Vec<String> = c[0]
-        .deny_read_write
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect();
+    let deny: Vec<String> = c[0].deny_read_write.iter().map(|p| slashed(p)).collect();
     assert!(deny.contains(&"/home/u/.ssh".to_string()));
     assert!(deny.contains(&DATA.to_string()));
     // 敏感目录只由审批判定，不进沙箱（v1.52）；.git 与关键路径只由审批拦
@@ -99,7 +95,7 @@ fn constraints_baseline_mode_independent() {
     assert_eq!(c[0].read_only.len(), 2);
     match &c[0].allow_write {
         AllowWrite::Whitelist(w) => {
-            let w: Vec<String> = w.iter().map(|p| p.display().to_string()).collect();
+            let w: Vec<String> = w.iter().map(|p| slashed(p)).collect();
             assert!(w.contains(&WS.to_string()) && w.contains(&TMP.to_string()));
             assert!(w.contains(&"/home/u/.npm".to_string()));
         }
@@ -172,4 +168,9 @@ fn snapshot_includes_scoped_user_lists_and_transient_sensitive() {
             .contains(&cp("/home/u/iWork/assistants/bob"))
     );
     assert_eq!(s.ruleset_version.0, "m1-2");
+}
+
+/// 统一成 `/` 分隔再比：测试环境是 Unix 形状的路径，Windows 上 `join` 拼出的那一段用 `\`。
+fn slashed(p: &std::path::Path) -> String {
+    p.display().to_string().replace('\\', "/")
 }

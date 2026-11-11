@@ -105,14 +105,18 @@ fn sensitive_dir_rules() {
         check(SecurityList::SensitiveDirs, "~/secret").unwrap(),
         RuleMatcher::PathUnder("/home/u/secret".into())
     );
-    assert_eq!(
-        check(SecurityList::SensitiveDirs, "/data/../srv/./x").unwrap(),
-        RuleMatcher::PathUnder("/srv/x".into())
-    );
+    // 下面几条用 Unix 绝对路径字面量；Windows 上 `/x` 没有盘符，不算绝对路径（校验按平台判），只在 Unix 上比。
+    #[cfg(unix)]
+    {
+        assert_eq!(
+            check(SecurityList::SensitiveDirs, "/data/../srv/./x").unwrap(),
+            RuleMatcher::PathUnder("/srv/x".into())
+        );
+        rejected(SecurityList::SensitiveDirs, WS, "包含项目工作区");
+        rejected(SecurityList::SensitiveDirs, "/", "范围太大");
+    }
     rejected(SecurityList::SensitiveDirs, "~/iWork", "包含项目工作区");
-    rejected(SecurityList::SensitiveDirs, WS, "包含项目工作区");
     rejected(SecurityList::SensitiveDirs, "~", "范围太大");
-    rejected(SecurityList::SensitiveDirs, "/", "范围太大");
     rejected(SecurityList::SensitiveDirs, "relative/x", "绝对路径");
     rejected(SecurityList::SensitiveDirs, "~/Documents", "已在清单");
 }
@@ -131,9 +135,13 @@ fn writable_dir_rejects_ancestor_of_baseline() {
         "baseline.data-dir",
     );
     rejected(SecurityList::WritableDirs, "~", "范围太大");
-    rejected(SecurityList::WritableDirs, "/", "范围太大");
-    rejected(SecurityList::WritableDirs, "/usr/local/lib", "system");
-    rejected(SecurityList::WritableDirs, "/etc", "system");
+    // 下面几条用 Unix 绝对路径字面量；Windows 上 `/x` 没有盘符，不算绝对路径（校验按平台判），只在 Unix 上比。
+    #[cfg(unix)]
+    {
+        rejected(SecurityList::WritableDirs, "/", "范围太大");
+        rejected(SecurityList::WritableDirs, "/usr/local/lib", "system");
+        rejected(SecurityList::WritableDirs, "/etc", "system");
+    }
     // 对照：普通目录接受
     assert_eq!(
         check(SecurityList::WritableDirs, "~/build-out").unwrap(),
@@ -155,13 +163,17 @@ fn writable_dir_rejects_autorun_dir() {
 
 #[test]
 fn writable_dir_rejects_already_writable() {
-    rejected(
-        SecurityList::WritableDirs,
-        &format!("{WS}/build"),
-        "已经可写",
-    );
     rejected(SecurityList::WritableDirs, "~/.npm/_cacache", "已经可写");
-    rejected(SecurityList::WritableDirs, "/tmp/x", "已经可写");
+    // 下面几条用 Unix 绝对路径字面量；Windows 上 `/x` 没有盘符，不算绝对路径（校验按平台判），只在 Unix 上比。
+    #[cfg(unix)]
+    {
+        rejected(
+            SecurityList::WritableDirs,
+            &format!("{WS}/build"),
+            "已经可写",
+        );
+        rejected(SecurityList::WritableDirs, "/tmp/x", "已经可写");
+    }
 }
 
 #[test]
