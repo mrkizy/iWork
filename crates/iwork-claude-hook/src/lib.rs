@@ -8,4 +8,5 @@ pub mod client;
 pub mod deadline;
 pub mod output;
 pub mod peer;
+pub mod verdict;
 pub mod wire;

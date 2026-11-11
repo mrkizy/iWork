@@ -1,8 +1,7 @@
 //! 真的 hook 程序对着一个假桥接（同一测试进程里的本机 socket 服务端）：T06 方案 4.6 里 hook 一侧的
 //! 每一行，以及允许、改写、报到。每条都断言 hook 的输出是合法的结论 JSON。
 //!
-//! 第 15 行（hook panic）没有进程级测试：产品代码里不放只为测试存在的触发开关；panic 钩子写出的
-//! 结论与别的拒绝走同一个 `pre_tool_use_json`，由 `output.rs` 的单测锁住形状。
+//! 第 15 行（hook panic）在 `tests/panic_denies.rs`。
 //! 「别的用户连进来」（第 5 行）是桥接一侧的检查，随桥接在 S6 测。
 #![cfg(unix)]
 
@@ -444,4 +443,58 @@ fn impostor_listener_in_other_process_is_refused() {
     run(&env, INPUT).assert_denied("对端校验失败");
     let _ = impostor.kill();
     let _ = impostor.wait();
+}
+
+/// 1/F-1：结论很大、读端不读 stdout，主线程卡在写结论上；看门狗到时不等它，按时以退出码 2 结束，
+/// 不拖到 Claude Code 自己的 hook 超时（超时即放行）。
+#[test]
+fn deadline_fires_even_when_stdout_write_blocks() {
+    let big = "x".repeat(1024 * 1024);
+    let bridge = Bridge::answering(Response {
+        decision: Decision::Allow,
+        message: String::new(),
+        updated_input: Some(json!({ "command": big })),
+    });
+    let mut env = bridge.env();
+    env[3].1 = "2".into();
+    let start = Instant::now();
+    let mut child = Command::new(HOOK)
+        .arg("pre-tool-use")
+        .env_clear()
+        .envs(env.iter().map(|(k, v)| (*k, v.as_str())))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped()) // 拿着读端，从不读
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(INPUT).unwrap();
+    let _held = child.stdout.take();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            panic!("hook 10 秒还没退出：看门狗被卡住了");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let took = start.elapsed();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(status.code(), Some(2), "stderr: {stderr}");
+    assert!(stderr.contains("时限"), "{stderr}");
+    assert!(
+        took >= Duration::from_secs(2) && took < Duration::from_secs(5),
+        "{took:?}"
+    );
+    assert!(
+        bridge.next().is_some(),
+        "对照：请求确实到了桥接、桥接答了允许"
+    );
 }
