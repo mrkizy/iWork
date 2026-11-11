@@ -5,6 +5,7 @@
 //! - [`StoreFailure`] / [`SqliteStore::failed`](crate::SqliteStore::failed)：写连接失效、写线程或读线程意外退出时
 //!   给出一个能等的结构化信号。失效后存储的行为不变（写请求照旧立即返回 `Io`），只是多了这个信号。
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -49,16 +50,21 @@ pub(crate) struct FailureSignal {
 #[derive(Default)]
 struct FailureState {
     failure: Option<StoreFailure>,
-    wakers: Vec<Waker>,
+    /// 每个还在等的 [`Failed`] 一项，按它的编号登记；它被丢弃时摘掉，不会越积越多。
+    wakers: BTreeMap<u64, Waker>,
+    next_id: u64,
 }
 
 impl FailureSignal {
+    fn lock(&self) -> std::sync::MutexGuard<'_, FailureState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub(crate) fn fire(&self, failure: StoreFailure) {
         let wakers = {
-            let mut s = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut s = self.lock();
             if s.failure.is_some() {
                 return;
             }
@@ -66,39 +72,53 @@ impl FailureSignal {
             std::mem::take(&mut s.wakers)
         };
         tracing::error!(?failure, "存储失效");
-        wakers.into_iter().for_each(Waker::wake);
+        wakers.into_values().for_each(Waker::wake);
     }
 
     pub(crate) fn wait(self: &Arc<Self>) -> Failed {
+        let id = {
+            let mut s = self.lock();
+            s.next_id += 1;
+            s.next_id
+        };
         Failed {
             signal: self.clone(),
+            id,
         }
+    }
+
+    /// 还登记着的 waker 数（测试用）。
+    #[cfg(test)]
+    pub(crate) fn waiting(&self) -> usize {
+        self.lock().wakers.len()
     }
 }
 
 /// 存储失效时完成的 future。可以有多个等待者；正常关闭时永远不完成。
 pub struct Failed {
     signal: Arc<FailureSignal>,
+    id: u64,
 }
 
 impl Future for Failed {
     type Output = StoreFailure;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<StoreFailure> {
-        let mut s = self
-            .signal
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut s = self.signal.lock();
         match s.failure {
             Some(f) => Poll::Ready(f),
             None => {
-                if !s.wakers.iter().any(|w| w.will_wake(cx.waker())) {
-                    s.wakers.push(cx.waker().clone());
-                }
+                // 同一个 future 被多次 poll 时只留最新的 waker
+                s.wakers.insert(self.id, cx.waker().clone());
                 Poll::Pending
             }
         }
+    }
+}
+
+impl Drop for Failed {
+    fn drop(&mut self) {
+        self.signal.lock().wakers.remove(&self.id);
     }
 }
 

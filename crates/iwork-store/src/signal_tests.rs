@@ -300,3 +300,23 @@ fn close_does_not_signal() {
     std::thread::sleep(Duration::from_millis(200));
     assert!(poll_once(pending.as_mut()).is_pending(), "直接 drop 也不算");
 }
+
+/// 等待者被丢弃时摘掉自己的 waker：反复新建、poll、丢弃，登记的 waker 不越积越多（第 1 轮审查 1/F-7）。
+#[test]
+fn dropped_waiters_do_not_accumulate() {
+    let env = Env::new();
+    let store = env.open();
+    for _ in 0..100 {
+        let mut f = pin!(store.failed());
+        assert!(poll_once(f.as_mut()).is_pending());
+    }
+    assert_eq!(store.failure_waiting(), 0, "丢弃之后不该留下 waker");
+    let mut kept = pin!(store.failed());
+    assert!(poll_once(kept.as_mut()).is_pending());
+    assert!(poll_once(kept.as_mut()).is_pending());
+    assert_eq!(
+        store.failure_waiting(),
+        1,
+        "对照：活着的等待者登记一项，重复 poll 不重复登记"
+    );
+}

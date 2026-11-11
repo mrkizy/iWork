@@ -203,6 +203,11 @@ impl<C: EventCodec + 'static> SqliteStore<C> {
         self.failure.wait()
     }
 
+    #[cfg(test)]
+    pub(crate) fn failure_waiting(&self) -> usize {
+        self.failure.waiting()
+    }
+
     /// `wal_checkpoint(TRUNCATE)`：把 WAL 合回主库并截短（T04 空闲时调，方案 S11）。
     pub fn maintenance(&self) -> impl Future<Output = Result<(), StorageError>> + Send + use<C> {
         self.writer.exclusive(|conn, _now| {
