@@ -252,9 +252,19 @@ mod bundle {
         )
         .unwrap();
         std::fs::write(contents.join("Resources/data.txt"), b"resource").unwrap();
+        // 嵌套程序：在包外单独签好再放进来（在包里对它的路径签名，codesign 会当成签整个包），然后签整包
+        let helper = dir.join("helper.staged");
+        std::fs::copy(std::env::current_exe().unwrap(), &helper).unwrap();
+        codesign(&["-f", "-s", "-", "-i", "dev.iwork.test.helper"], &helper);
+        std::fs::rename(&helper, contents.join("MacOS/helper")).unwrap();
+        codesign(&["-f", "-s", "-"], &app);
+        app
+    }
+
+    fn codesign(args: &[&str], path: &Path) {
         let out = Command::new("codesign")
-            .args(["-f", "-s", "-"])
-            .arg(&app)
+            .args(args)
+            .arg(path)
             .output()
             .unwrap();
         assert!(
@@ -262,7 +272,46 @@ mod bundle {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        app
+    }
+
+    /// 签名覆盖范围中间某一页里的一个字节取反：签名本身（代码目录、cdhash）不变，只有逐页核对才看得出来。
+    fn flip_byte_in_signed_page(path: &Path) {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let out = Command::new("codesign")
+            .arg("-dvvv")
+            .arg(path)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stderr);
+        let pages: u64 = text
+            .split_whitespace()
+            .find_map(|w| w.strip_prefix("hashes="))
+            .and_then(|h| h.split('+').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("codesign 没给出 hashes=：{text}"));
+        let offset = pages / 2 * 4096 + 2048;
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let mut b = [0u8; 1];
+        f.seek(SeekFrom::Start(offset)).unwrap();
+        f.read_exact(&mut b).unwrap();
+        f.seek(SeekFrom::Start(offset)).unwrap();
+        f.write_all(&[b[0] ^ 0xff]).unwrap();
+    }
+
+    /// 「含嵌套代码」真的生效（第 1 轮审查 F-5）：嵌套程序的一个代码页被改、它自己的签名（cdhash）不变时，
+    /// 外层封印记的是嵌套程序的 cdhash，看不出来；只有逐个验嵌套代码才不过。去掉嵌套那一项，这条会变红。
+    #[test]
+    fn verify_bundle_checks_nested_code_pages() {
+        let root = tempfile::tempdir().unwrap();
+        let app = sealed_app(root.path());
+        verify_bundle(&app).expect("完整的包应当通过");
+        flip_byte_in_signed_page(&app.join("Contents/MacOS/helper"));
+        let err = verify_bundle(&app).expect_err("嵌套程序被改应当不过");
+        assert!(err.to_string().contains("OSStatus"), "{err}");
     }
 
     /// 整包验签：完整的包通过；拿走一个资源、多放一个文件都不过；放回去之后再查又通过（不记上次的结果）。
