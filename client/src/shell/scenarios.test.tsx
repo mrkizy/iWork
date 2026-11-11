@@ -18,9 +18,10 @@ describe.skipIf(noFixtures)("预览场景", () => {
   });
 
   it.each([
-    ["composer-path-missing", "找不到项目文件夹，重新定位后才能发送", "重新定位"],
-    ["composer-verifying", "正在验证这个版本的", undefined],
-    ["composer-incompatible", "没通过验证", "查看详情"],
+    // 2a 第 7、8 条的原文；版本号来自假后台的运行时（2.1.322）
+    ["composer-path-missing", "找不到项目文件夹，重新定位后才能继续", "重新定位"],
+    ["composer-verifying", "正在检查 Claude Code 2.1.322 能否安全使用…", undefined],
+    ["composer-incompatible", "Claude Code 2.1.322 没有通过安全检查，暂不能使用", "查看详情"],
     ["composer-not-installed", "没有找到", "查看详情"],
     ["composer-not-logged-in", "还没登录", "查看详情"],
     ["composer-offline", "正在重新连接，连上后就能发送", undefined],
@@ -45,7 +46,11 @@ describe.skipIf(noFixtures)("预览场景", () => {
     const nav = screen.getByRole("complementary", { name: "侧栏" });
     // 项目与它下面的对话各有一个徽标，都写「99+」
     expect(within(nav).getAllByText("99+").length).toBeGreaterThan(0);
-    expect(nav).toHaveTextContent("找不到路径");
+    // 划线名、标签、「重新定位」在同一行（2a 第 7 条）；名字放不下时缩，悬停看全名
+    const row = nav.querySelector(".iw-project--missing .iw-project__row") as HTMLElement;
+    expect(row.querySelector(".iw-project__name")?.getAttribute("title")).toBe("legacy-app");
+    expect(row.querySelector(".iw-project__missing-tag")).toHaveTextContent("找不到路径");
+    expect(row.querySelector(".iw-project__relocate")).toHaveTextContent("重新定位");
     fireEvent.contextMenu(within(nav).getByText("legacy-app"));
     expect(await screen.findByRole("menu")).toBeInTheDocument();
   });
@@ -55,6 +60,18 @@ describe.skipIf(noFixtures)("预览场景", () => {
     const line = screen.getByRole("button", { expanded: false, name: /Bash/ });
     fireEvent.click(line);
     expect(document.querySelector(".iw-tool__output")).toHaveTextContent("test result: ok. 12 passed");
+  });
+
+  it("characters-sorry-preview-only：三个形象出错时都是 sorry，不浮动", () => {
+    renderScenario("characters-sorry-preview-only");
+    const nav = screen.getByRole("complementary", { name: "侧栏" });
+    for (const [name, character] of [["阿森", "asen"], ["林岚", "linlan"], ["老周", "laozhou"]]) {
+      const el = within(nav).getByRole("img", { name });
+      expect(el.dataset.character, name).toBe(character);
+      expect(el.dataset.mood, name).toBe("sorry");
+      expect(el.querySelector(".iw-n svg")?.getAttribute("class"), name).toContain(`iw-char--${character} iw-mood--sorry`);
+      expect(el.classList.contains("iw-float"), name).toBe(false);
+    }
   });
 
   it("characters-preview-only：三个形象与圆团子；老周出错是 sorry", () => {

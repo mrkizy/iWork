@@ -269,6 +269,19 @@ pub const REGISTRY: &[Scenario] = &[
         timeline_cap: None,
     },
     Scenario {
+        name: "characters-sorry-preview-only",
+        about: "测试专用：阿森、林岚、老周最近一轮都失败了，三个都显示出错表情（sorry）。M1 没有选形象的入口，形象由场景按助手 id 映射",
+        build: characters_sorry_preview_only,
+        focus: Some("c-dm-asen"),
+        characters: &[
+            ("as-asen", "asen"),
+            ("as-linlan", "linlan"),
+            ("as-laozhou", "laozhou"),
+        ],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
         name: "back-to-latest-notice",
         about: "Q9：停在旧消息上时断线、重连给的是快照：回到最新并提示「已重新连接，回到最新」",
         build: back_to_latest_notice,
@@ -1035,6 +1048,46 @@ fn characters_preview_only() -> Vec<Step> {
         pb::MessageStatus::Failed,
     )));
     s.push(a(f::turn_finished("t-laozhou", T::Failed, false, None)));
+    s
+}
+
+/// 三个形象各自的私聊里最近一轮都失败：侧栏三个头像、阿森私聊里的消息头像都是 sorry。
+/// 失败放在打开对话之后，录像里有「工作中 → 出错」的增量。
+fn characters_sorry_preview_only() -> Vec<Step> {
+    let mut s = base();
+    let who = [
+        ("as-asen", "阿森", "c-dm-asen"),
+        ("as-linlan", "林岚", "c-dm-linlan"),
+        ("as-laozhou", "老周", "c-dm-laozhou"),
+    ];
+    for (id, name, dm) in who {
+        s.push(a(f::assistant(id, name, false)));
+        s.push(a(f::dm(dm, id)));
+        let t = format!("t-{id}");
+        let m = format!("m-{id}");
+        s.push(a(f::user_message(&format!("{m}-u"), dm, "看看为什么挂了")));
+        s.push(a(f::turn_queued(&t, dm, id)));
+        s.push(a(f::turn_state(&t, T::Queued, T::Running, None)));
+        s.push(a(f::assistant_message(&m, dm, &t, id, name)));
+    }
+    s.push(Step::OpenHere);
+    for (id, _, dm) in who {
+        let t = format!("t-{id}");
+        let m = format!("m-{id}");
+        s.push(a(f::turn_state(
+            &t,
+            T::Running,
+            T::Failed,
+            Some("模型暂时不可用"),
+        )));
+        s.push(a(f::message_ended(
+            dm,
+            &m,
+            "我先看一下日志",
+            pb::MessageStatus::Failed,
+        )));
+        s.push(a(f::turn_finished(&t, T::Failed, false, None)));
+    }
     s
 }
 
