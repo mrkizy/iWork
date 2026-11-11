@@ -37,7 +37,13 @@ impl EventCodec for ProtoEventCodec {
     }
 
     /// 解出的事件种类必须与 `kind`（`events.type` 列）一致，不一致说明行被写坏了。
+    /// `kind` 不在本版本的种类清单里：是更新的版本写的事件，报 `UnknownKind`（不是「行坏了」）。
     fn decode(&self, kind: &str, payload: &[u8]) -> Result<DomainEvent, CodecError> {
+        if !DomainEvent::KINDS.contains(&kind) {
+            return Err(CodecError::UnknownKind {
+                kind: kind.to_owned(),
+            });
+        }
         let malformed = |field: &str, message: String| CodecError::Malformed {
             kind: kind.to_owned(),
             field: field.to_owned(),

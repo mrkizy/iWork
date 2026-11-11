@@ -2937,8 +2937,15 @@ dependencies = [
  "iwork-proto",
  "iwork-store",
  "iwork-vcs-git",
+ "libc",
+ "rusqlite",
+ "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
 ]
 
 [[package]]
