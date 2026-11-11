@@ -6,6 +6,9 @@
 //!
 //! 只有 [`Tables::fold`] 改表（加上测试场景经 `FakeDaemon::mutate_tables` 的直接修改）；查询只读。
 
+mod anchors;
+mod paging;
+
 use std::collections::{BTreeMap, HashMap};
 
 use bytes::Bytes;
@@ -562,6 +565,7 @@ impl Tables {
             .ok_or_else(|| invalid("query", "查询为空"))?;
         let result = match kind {
             Q::GetConversation(g) => R::GetConversation(self.get_conversation(g)?),
+            Q::ListAnchors(a) => R::ListAnchors(self.list_anchors(a)?),
             Q::ListConversations(l) => R::ListConversations(self.list_conversations(l)?),
             Q::ListProjects(_) => R::ListProjects(pb::ListProjectsResult {
                 projects: self
@@ -892,29 +896,12 @@ impl Tables {
         &self,
         g: &pb::GetConversation,
     ) -> Result<pb::GetConversationResult, pb::Error> {
-        let row = self
-            .conversations
-            .get(&g.conversation_id)
-            .ok_or_else(|| pb::Error {
-                code: pb::ErrorCode::NotFound.into(),
-                message: format!("对话不存在：{}", g.conversation_id),
-                retryable: false,
-                details: Default::default(),
-            })?;
+        let row = self.conversation_row(&g.conversation_id)?;
         let limit = if g.limit == 0 { DEFAULT_PAGE } else { g.limit } as usize;
-        let end = match &g.before_message_id {
-            None => row.messages.len(),
-            Some(before) => row
-                .messages
-                .iter()
-                .position(|m| &m.id == before)
-                .ok_or_else(|| {
-                    invalid("before_message_id", &format!("消息不在对话里：{before}"))
-                })?,
-        };
-        let start = end.saturating_sub(limit);
+        let (start, end) = paging::page_range(&row.messages, g, limit)?;
         let page = &row.messages[start..end];
         let has_more = start > 0;
+        let has_newer = end < row.messages.len();
         // 页的 seq 范围 [lo, hi)：最旧一页从 0 起，最新一页到无穷。
         let lo = if has_more {
             page.first().map_or(0, |m| m.created_seq)
@@ -996,6 +983,16 @@ impl Tables {
             user_actions,
             attachments,
             usage_total,
+            has_newer,
+        })
+    }
+
+    fn conversation_row(&self, id: &str) -> Result<&ConversationRow, pb::Error> {
+        self.conversations.get(id).ok_or_else(|| pb::Error {
+            code: pb::ErrorCode::NotFound.into(),
+            message: format!("对话不存在：{id}"),
+            retryable: false,
+            details: Default::default(),
         })
     }
 }

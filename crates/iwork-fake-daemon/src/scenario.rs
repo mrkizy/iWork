@@ -175,6 +175,42 @@ pub const REGISTRY: &[Scenario] = &[
         timeline_cap: None,
     },
     Scenario {
+        name: "anchors-basic",
+        about: "消息锚点：用户消息、等你处理、失败的回合三种都有（T09 方案 2.9）",
+        focus: Some("c-anchors"),
+        build: anchors_basic,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "anchors-unloaded",
+        about: "消息锚点：对话很长，最早的几处不在打开时加载的那一页里",
+        focus: Some("c-anchors-long"),
+        build: anchors_unloaded,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "anchors-short",
+        about: "消息锚点：一屏看得完（组件不显示）",
+        focus: Some("c-anchors-short"),
+        build: anchors_short,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "anchors-single",
+        about: "消息锚点：只有一处（上下都回弹）",
+        focus: Some("c-anchors-single"),
+        build: anchors_single,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
         name: "resume-card",
         about: "崩溃中断的回合：继续 / 放弃卡片",
         build: resume_card,
@@ -725,6 +761,119 @@ fn turn_failed() -> Vec<Step> {
         pb::MessageStatus::Failed,
     )));
     s.push(a(f::turn_finished("t-mid", T::Failed, false, None)));
+    s
+}
+
+/// 锚点场景用的一问一答，回合正常结束。
+fn finished_exchange(conv: &str, n: &str, question: &str, answer: &str) -> Vec<Step> {
+    let mut s = exchange(conv, n, question, answer);
+    s.push(a(f::turn_finished(
+        &format!("t-{n}"),
+        T::Completed,
+        false,
+        None,
+    )));
+    s
+}
+
+fn anchors_basic() -> Vec<Step> {
+    let c = "c-anchors";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    for i in 0..12 {
+        s.extend(finished_exchange(
+            c,
+            &format!("ab{i:02}"),
+            &format!("第 {i} 个问题：退款接口要不要加幂等"),
+            &format!("第 {i} 个回答。先看存储层，再看中间件挂载点。"),
+        ));
+    }
+    // 失败的回合：输出一部分后失败
+    s.extend(exchange(c, "ab-fail", "再跑一遍集成测试", "开始跑……"));
+    s.push(a(f::turn_state(
+        "t-ab-fail",
+        T::Running,
+        T::Failed,
+        Some("模型暂时不可用"),
+    )));
+    s.push(a(f::message_ended(
+        c,
+        "m-ab-fail-a",
+        "开始跑……",
+        pb::MessageStatus::Failed,
+    )));
+    s.push(a(f::turn_finished("t-ab-fail", T::Failed, false, None)));
+    for i in 12..16 {
+        s.extend(finished_exchange(
+            c,
+            &format!("ab{i:02}"),
+            &format!("第 {i} 个问题"),
+            "好的。",
+        ));
+    }
+    // 等你处理：最后一轮停在审批上
+    s.push(a(f::user_message("m-ab-wait-u", c, "提交并推到远端")));
+    s.push(a(f::turn_queued("t-ab-wait", c, IWORK)));
+    s.push(a(f::turn_state("t-ab-wait", T::Queued, T::Running, None)));
+    s.push(a(f::approval(
+        "ap-ab-wait",
+        c,
+        "t-ab-wait",
+        f::command_action("git push origin main"),
+        pb::ApprovalKind::Ask,
+        &[],
+    )));
+    s.push(a(f::turn_state(
+        "t-ab-wait",
+        T::Running,
+        T::WaitingApproval,
+        None,
+    )));
+    s
+}
+
+/// 一页取不完：打开时只加载最新 50 条消息，最早的用户消息在那一页之外。
+pub const ANCHORS_LONG_EXCHANGES: usize = 120;
+
+fn anchors_unloaded() -> Vec<Step> {
+    let c = "c-anchors-long";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    for i in 0..ANCHORS_LONG_EXCHANGES {
+        s.extend(finished_exchange(
+            c,
+            &format!("al{i:03}"),
+            &format!("第 {i} 轮：把第 {i} 个模块的日志改成结构化的"),
+            "改好了。",
+        ));
+    }
+    s
+}
+
+fn anchors_short() -> Vec<Step> {
+    let c = "c-anchors-short";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(finished_exchange(
+        c,
+        "as0",
+        "看下 README",
+        "看过了，写得挺清楚。",
+    ));
+    s.extend(finished_exchange(c, "as1", "那就这样", "好。"));
+    s
+}
+
+fn anchors_single() -> Vec<Step> {
+    let c = "c-anchors-single";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(finished_exchange(
+        c,
+        "asg",
+        "给我讲讲这个仓库的分层",
+        &"从上往下依次是入口、应用服务、编排核心、端口与适配器。\n".repeat(40),
+    ));
     s
 }
 

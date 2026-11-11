@@ -365,14 +365,30 @@ impl<D: Dialer> Session<D> {
         }
         if self.live() {
             let with_list = self.store.conversation_list.is_some();
+            // 打开的对话已经有锚点窗口：这一轮按它的中心一起重取（方案 2.9）
+            let anchors = self
+                .store
+                .open
+                .as_ref()
+                .filter(|t| t.anchors.window.is_some())
+                .map(|t| (t.conversation_id.clone(), t.anchors.center));
             if !self.backed_off("summary", now)
-                && let Some((round, tables)) = self.store.refresh.due(now.into_std(), with_list)
+                && let Some((round, tables)) =
+                    self.store
+                        .refresh
+                        .due_with(now.into_std(), with_list, anchors.is_some())
             {
                 self.stats.refresh_rounds += 1;
                 for table in tables {
-                    match table.query() {
-                        Some(q) => self.view_query(q, QueryPurpose::Summary { round, table }),
-                        None => self.send_list_query(Some(round)),
+                    match (table.query(), table, &anchors) {
+                        (Some(q), _, _) => {
+                            self.view_query(q, QueryPurpose::Summary { round, table });
+                        }
+                        (None, SummaryTable::Anchors, Some((cid, center))) => {
+                            let (q, p) = anchors_query(cid, *center, Some(round));
+                            self.view_query(q, p);
+                        }
+                        (None, _, _) => self.send_list_query(Some(round)),
                     }
                 }
             }
@@ -552,7 +568,34 @@ impl<D: Dialer> Session<D> {
                 self.store.set_window(&conversation_id, first, last);
             }
             Local::LoadOlder(_) => self.want_older = true,
-            Local::JumpToLatest(_) => self.want_tail = true,
+            Local::JumpToLatest(cid) => {
+                // 跳到最新：等着的锚点跳转作废（方案 2.9 第 3 条）
+                if let Some(t) = self
+                    .store
+                    .open
+                    .as_mut()
+                    .filter(|t| t.conversation_id == cid)
+                {
+                    t.anchors.pending_jump = None;
+                }
+                self.want_tail = true;
+            }
+            Local::AnchorBrowse {
+                conversation_id,
+                key,
+            } => {
+                self.store.anchor_browse(&conversation_id, &key);
+            }
+            Local::JumpToAnchor {
+                conversation_id,
+                key,
+            } => {
+                self.store.jump_to_anchor(&conversation_id, &key);
+            }
+            Local::JumpRelative {
+                conversation_id,
+                delta,
+            } => self.store.jump_relative(&conversation_id, delta),
             Local::SetFocused(f) => self.store.set_focused(f),
             Local::LoadMoreConversations => {
                 self.list_append = true;
@@ -828,6 +871,7 @@ impl<D: Dialer> Session<D> {
                         p,
                         QueryPurpose::Summary { .. }
                             | QueryPurpose::ConversationList { round: Some(_), .. }
+                            | QueryPurpose::Anchors { round: Some(_), .. }
                     ) {
                         self.store.refresh.abandon_round();
                     }
@@ -911,6 +955,8 @@ impl<D: Dialer> Session<D> {
                 want.push((
                     pb::Query {
                         kind: Some(Q::GetConversation(pb::GetConversation {
+                            after_message_id: None,
+                            around_seq: None,
                             conversation_id: cid.clone(),
                             before_message_id: Some(oldest.to_owned()),
                             limit: PAGE_SIZE,
@@ -931,12 +977,74 @@ impl<D: Dialer> Session<D> {
                 want.push((
                     latest_page(&cid),
                     QueryPurpose::LatestPage {
-                        conversation_id: cid,
+                        conversation_id: cid.clone(),
                     },
                 ));
             }
             if tl.at_tail {
                 self.want_tail = false;
+            }
+            // 往下翻到这一段的末尾、而后面还有（跳到旧处之后）：往后翻一页，接到最新就回到 at_tail（G11）
+            let window_at_bottom = match (self.store.window, tl.identities().last()) {
+                (Some((_, last)), Some((k, _))) => last >= k.ordinal(),
+                _ => false,
+            };
+            if ready
+                && !tl.at_tail
+                && window_at_bottom
+                && !self.want_tail
+                && let Some(newest) = tl.newest_message_id()
+                && !self.backed_off("newer", now)
+                && !self.in_flight(|p| matches!(p, QueryPurpose::NewerPage { .. }))
+            {
+                want.push((
+                    pb::Query {
+                        kind: Some(Q::GetConversation(pb::GetConversation {
+                            after_message_id: Some(newest.to_owned()),
+                            around_seq: None,
+                            conversation_id: cid.clone(),
+                            before_message_id: None,
+                            limit: PAGE_SIZE,
+                        })),
+                    },
+                    QueryPurpose::NewerPage {
+                        conversation_id: cid.clone(),
+                        after: newest.to_owned(),
+                    },
+                ));
+            }
+            // 跳到没加载的锚点：取以它为中心的一段
+            if ready
+                && let Some(j) = &tl.anchors.pending_jump
+                && !self.backed_off("around", now)
+                && !self.in_flight(|p| matches!(p, QueryPurpose::AroundPage { seq, .. } if *seq == j.anchor.created_seq))
+            {
+                let seq = j.anchor.created_seq;
+                want.push((
+                    pb::Query {
+                        kind: Some(Q::GetConversation(pb::GetConversation {
+                            after_message_id: None,
+                            around_seq: Some(seq),
+                            conversation_id: cid.clone(),
+                            before_message_id: None,
+                            limit: crate::store::anchors::JUMP_PAGE,
+                        })),
+                    },
+                    QueryPurpose::AroundPage {
+                        conversation_id: cid.clone(),
+                        seq,
+                    },
+                ));
+            }
+            // 锚点窗口：还没取过、或要换中心时单独取；过时的重取进摘要重查轮（service 里）
+            if ready
+                && let Some(center) = tl.anchors.wanted_center()
+                && !self.backed_off("anchors", now)
+                && !self.in_flight(
+                    |p| matches!(p, QueryPurpose::Anchors { center: c, .. } if *c == center),
+                )
+            {
+                want.push(anchors_query(&cid, center, None));
             }
         }
         if self.store.visible.settings
@@ -1295,6 +1403,8 @@ impl<D: Dialer> Session<D> {
 fn latest_page(cid: &str) -> pb::Query {
     pb::Query {
         kind: Some(pb::query::Kind::GetConversation(pb::GetConversation {
+            after_message_id: None,
+            around_seq: None,
             conversation_id: cid.to_owned(),
             before_message_id: None,
             limit: PAGE_SIZE,
@@ -1369,6 +1479,26 @@ fn offline_error() -> pb::IntentError {
     }
 }
 
+/// 锚点窗口查询：以 `center` 为中心前后各取 `ANCHOR_SPAN` 条。
+fn anchors_query(cid: &str, center: u64, round: Option<u64>) -> (pb::Query, QueryPurpose) {
+    use crate::store::anchors::ANCHOR_SPAN;
+    (
+        pb::Query {
+            kind: Some(pb::query::Kind::ListAnchors(pb::ListAnchors {
+                conversation_id: cid.to_owned(),
+                around_seq: center,
+                before: ANCHOR_SPAN,
+                after: ANCHOR_SPAN,
+            })),
+        },
+        QueryPurpose::Anchors {
+            conversation_id: cid.to_owned(),
+            center,
+            round,
+        },
+    )
+}
+
 fn purpose_kind(p: &QueryPurpose) -> &'static str {
     match p {
         QueryPurpose::Summary { .. } => "summary",
@@ -1377,5 +1507,8 @@ fn purpose_kind(p: &QueryPurpose) -> &'static str {
         QueryPurpose::Rules => "rules",
         QueryPurpose::LocalConfig { .. } => "local_config",
         QueryPurpose::ConversationList { .. } => "list",
+        QueryPurpose::Anchors { .. } => "anchors",
+        QueryPurpose::NewerPage { .. } => "newer",
+        QueryPurpose::AroundPage { .. } => "around",
     }
 }

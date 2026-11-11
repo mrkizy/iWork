@@ -122,11 +122,21 @@ pub struct TimelineChange {
     /// 只追加了正文的行：行身份 → 追加前的长度。同一帧里这一行若也整行变了，只发整行。
     pub appended: BTreeMap<String, usize>,
     pub header: bool,
+    /// 锚点窗口、当前位置、滚动指令变了（T09 方案 2.9）。
+    pub anchors: bool,
+    pub cursor: bool,
+    pub scroll: bool,
 }
 
 impl TimelineChange {
     pub fn is_empty(&self) -> bool {
-        !self.reset && self.rows.is_empty() && self.appended.is_empty() && !self.header
+        !self.reset
+            && self.rows.is_empty()
+            && self.appended.is_empty()
+            && !self.header
+            && !self.anchors
+            && !self.cursor
+            && !self.scroll
     }
     pub fn merge(&mut self, other: TimelineChange) {
         self.reset |= other.reset;
@@ -135,6 +145,18 @@ impl TimelineChange {
             self.appended.entry(k).or_insert(v);
         }
         self.header |= other.header;
+        self.anchors |= other.anchors;
+        self.cursor |= other.cursor;
+        self.scroll |= other.scroll;
+    }
+    /// 锚点状态的一次变化记成脏。
+    pub fn from_anchor(e: super::anchors::AnchorEffect) -> Self {
+        Self {
+            anchors: e.anchors_dirty,
+            cursor: e.cursor_dirty,
+            scroll: e.scroll_dirty,
+            ..Self::default()
+        }
     }
     fn row(id: impl Into<String>) -> Self {
         let mut c = Self::default();
@@ -166,6 +188,8 @@ pub struct Timeline {
     pub incomplete: Option<Incomplete>,
     /// 有缺口在等检查点（最新页查询）时为真；结果回来就清。
     pub gap_pending: bool,
+    /// 消息锚点（T09 方案 2.9）：随时间线一起，换对话就丢；时间线重建时保留（居中加载要靠它落位）。
+    pub anchors: super::anchors::Anchors,
 }
 
 /// 查询结果进时间线的方式（方案 2.2「查询结果怎么进时间线」）。
@@ -177,6 +201,10 @@ pub enum PageMode {
     LiveLatest,
     /// 带 before_message_id 的翻页结果：往前接。
     Older,
+    /// 带 after_message_id 的翻页结果：往后接；接到最新（has_newer 为假）就回到 at_tail（T09 方案 G11）。
+    Newer,
+    /// 带 around_seq 的居中一段：和已加载的行不保证接得上，整个重建成这一段（跳到没加载的锚点）。
+    Around,
 }
 
 impl Timeline {
@@ -203,6 +231,7 @@ impl Timeline {
             new_below: 0,
             incomplete: None,
             gap_pending: false,
+            anchors: super::anchors::Anchors::default(),
         }
     }
 
@@ -730,15 +759,17 @@ impl Timeline {
             self.conversation = Some(conv.clone());
         }
         let rebuild = match mode {
-            PageMode::Snapshot => true,
+            PageMode::Snapshot | PageMode::Around => true,
             PageMode::LiveLatest => !self.at_tail,
-            PageMode::Older => false,
+            PageMode::Older | PageMode::Newer => false,
         };
         if rebuild {
             let id = self.conversation_id.clone();
             let conv = self.conversation.take();
+            let anchors = std::mem::take(&mut self.anchors);
             *self = Timeline::with_cap(id, self.cap);
             self.conversation = conv;
+            self.anchors = anchors;
         }
         if mode != PageMode::Older {
             self.usage_total = page.usage_total;
@@ -749,6 +780,18 @@ impl Timeline {
         }
         match mode {
             PageMode::Older => self.has_older = page.has_more,
+            PageMode::Newer => {
+                // 接到最新：这个结果在全序里有确定位置，之后的新消息事件都排在它后面，不变量成立（方案 2.2 第 3 条）。
+                if !page.has_newer {
+                    self.at_tail = true;
+                    self.new_below = 0;
+                }
+            }
+            PageMode::Around => {
+                self.has_older = page.has_more;
+                self.at_tail = !page.has_newer;
+                self.new_below = 0;
+            }
             PageMode::Snapshot | PageMode::LiveLatest => {
                 if rebuild {
                     self.has_older = page.has_more;
@@ -764,10 +807,11 @@ impl Timeline {
         if !rebuild {
             c.rows.extend(self.by_id.keys().cloned());
         }
-        if mode == PageMode::Older {
-            self.enforce_cap();
-        } else {
-            c.merge(self.trim_oldest());
+        // 上限：从离可见窗口远的那一端丢（方案 2.2 第 4 条）——往上翻丢新的一端，往下翻丢旧的一端。
+        match mode {
+            PageMode::Older => self.enforce_cap(),
+            PageMode::Newer => c.merge(self.drop_oldest_over_cap()),
+            _ => c.merge(self.trim_oldest()),
         }
         c
     }
@@ -973,8 +1017,16 @@ impl Timeline {
     /// 停在最新时超过上限：从老的一端丢，标成还能往上翻取回（supervisor 2026-11-11 定：长时间挂着的对话
     /// 内存要有上界）。返回被丢的行，帧引擎据此让网页删掉。
     fn trim_oldest(&mut self) -> TimelineChange {
+        if !self.at_tail {
+            return TimelineChange::default();
+        }
+        self.drop_oldest_over_cap()
+    }
+
+    /// 超过上限的部分从老的一端丢，标成还能往上翻取回。
+    fn drop_oldest_over_cap(&mut self) -> TimelineChange {
         let mut c = TimelineChange::default();
-        while self.at_tail && self.rows.len() > self.cap {
+        while self.rows.len() > self.cap {
             let Some(&key) = self.rows.keys().next() else {
                 break;
             };
@@ -986,7 +1038,6 @@ impl Timeline {
         c
     }
 
-    /// 行身份 → 键的全部映射，按位置排序（帧引擎算窗口用）。
     /// 满足条件的行的身份。行的视图模型读了行外的状态（回合状态、连接、摘要表、设置）时，
     /// 那份状态一变，持有它的一方用这个把受影响的行标脏（`derive::row` 里每一处行外读取都要有对应的标脏）。
     pub fn identities_where(&self, pred: impl Fn(&Row) -> bool) -> Vec<String> {
@@ -1006,6 +1057,40 @@ impl Timeline {
         c
     }
 
+    /// 锚点对应时间线里的哪一行：用户消息是那条消息；等你处理是那张卡片（审批、亲手执行）或继续卡片；
+    /// 失败的回合优先落在失败的那条助手消息上（说明行在那里，2a 第 10 条），没有就落在回合结束行。
+    /// 行不在时间线里返回 `None`。
+    pub fn anchor_row(&self, a: &pb::Anchor) -> Option<String> {
+        use pb::anchor::Kind as K;
+        let candidates: Vec<String> = match a.kind.as_ref()? {
+            K::UserMessage(m) => vec![m.message_id.clone()],
+            K::Waiting(w) => vec![
+                w.pending_item_id.clone(),
+                format!("resume:{}", w.pending_item_id),
+            ],
+            K::FailedTurn(f) => {
+                let mut v = self.identities_where(|r| {
+                    matches!(r, Row::Message(m) if m.turn_id.as_deref() == Some(f.turn_id.as_str())
+                        && m.status == pb::MessageStatus::Failed as i32)
+                });
+                v.push(format!("end:{}", f.turn_id));
+                v
+            }
+        };
+        candidates
+            .into_iter()
+            .find(|id| self.by_id.contains_key(id))
+    }
+
+    /// 最新一条消息的 id（往后翻页的游标）。
+    pub fn newest_message_id(&self) -> Option<&str> {
+        self.rows.values().rev().find_map(|r| match r {
+            Row::Message(m) => Some(m.id.as_str()),
+            _ => None,
+        })
+    }
+
+    /// 行身份 → 键的全部映射，按位置排序（帧引擎算窗口用）。
     pub fn identities(&self) -> Vec<(RowKey, String)> {
         let mut v: Vec<(RowKey, String)> =
             self.by_id.iter().map(|(id, k)| (*k, id.clone())).collect();

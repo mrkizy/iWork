@@ -433,7 +433,7 @@ fn snapshots_across_subscribed_clear_stale_only_without_events_between() {
                     SummaryTable::Conversations => K::ListConversations(Default::default()),
                     SummaryTable::Assistants => K::ListAssistants(Default::default()),
                     SummaryTable::Pending => K::ListPendingItems(Default::default()),
-                    SummaryTable::List => unreachable!(),
+                    SummaryTable::List | SummaryTable::Anchors => unreachable!(),
                 }),
             })
             .collect()

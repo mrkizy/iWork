@@ -38,6 +38,19 @@ pub enum Local {
     },
     LoadOlder(String),
     JumpToLatest(String),
+    /// 消息锚点（方案 2.9）：翻看到边缘重取、跳到一处、相对跳一处。
+    AnchorBrowse {
+        conversation_id: String,
+        key: String,
+    },
+    JumpToAnchor {
+        conversation_id: String,
+        key: String,
+    },
+    JumpRelative {
+        conversation_id: String,
+        delta: i32,
+    },
     SetFocused(bool),
     LoadMoreConversations,
     Retry,
@@ -99,6 +112,19 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
         }),
         I::LoadOlder(x) => Action::Local(Local::LoadOlder(x.conversation_id)),
         I::JumpToLatest(x) => Action::Local(Local::JumpToLatest(x.conversation_id)),
+        I::AnchorBrowse(x) => Action::Local(Local::AnchorBrowse {
+            conversation_id: x.conversation_id,
+            key: x.key,
+        }),
+        I::JumpToAnchor(x) => Action::Local(Local::JumpToAnchor {
+            conversation_id: x.conversation_id,
+            key: x.key,
+        }),
+        I::JumpRelative(x) if x.delta == 1 || x.delta == -1 => Action::Local(Local::JumpRelative {
+            conversation_id: x.conversation_id,
+            delta: x.delta,
+        }),
+        I::JumpRelative(_) => reject("invalid_delta", "只能往前或往后跳一处"),
         I::SetFocused(x) => Action::Local(Local::SetFocused(x.focused)),
         I::LoadMoreConversations(_) => Action::Local(Local::LoadMoreConversations),
         I::Retry(_) => Action::Local(Local::Retry),

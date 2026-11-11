@@ -410,12 +410,20 @@ fn every_query_purpose_has_a_disconnect_case() {
             QueryPurpose::Rules | QueryPurpose::LocalConfig { .. } => {
                 "session.rs::pending_query_table_cleared_on_close"
             }
+            QueryPurpose::Anchors { .. } => {
+                "anchors.rs::anchors_query_in_flight_survives_disconnect"
+            }
+            QueryPurpose::NewerPage { .. } => {
+                "anchors.rs::newer_page_in_flight_survives_disconnect"
+            }
+            QueryPurpose::AroundPage { .. } => "anchors.rs::jump_load_interrupted_resent",
         }
     }
     let src = format!(
-        "{}{}",
+        "{}{}{}",
         include_str!("session_more.rs"),
-        include_str!("session.rs")
+        include_str!("session.rs"),
+        include_str!("anchors.rs")
     );
     use iwork_client_core::store::SummaryTable;
     for p in [
@@ -439,6 +447,19 @@ fn every_query_purpose_has_a_disconnect_case() {
             filter: String::new(),
             append: false,
             round: None,
+        },
+        QueryPurpose::Anchors {
+            conversation_id: String::new(),
+            center: 0,
+            round: None,
+        },
+        QueryPurpose::NewerPage {
+            conversation_id: String::new(),
+            after: String::new(),
+        },
+        QueryPurpose::AroundPage {
+            conversation_id: String::new(),
+            seq: 0,
         },
     ] {
         let name = case(&p).rsplit("::").next().unwrap();

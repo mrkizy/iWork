@@ -74,6 +74,8 @@ fn scope_entry(scope: &Scope) -> Option<ScopeEntry> {
                 )],
                 snapshot: vec![
                     Q::GetConversation(pb::GetConversation {
+                        after_message_id: None,
+                        around_seq: None,
                         conversation_id: c.conversation_id.clone(),
                         before_message_id: None,
                         limit: CONVERSATION_SNAPSHOT_PAGE_SIZE,

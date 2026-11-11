@@ -64,7 +64,8 @@ pub fn query_lane(kind: &QueryKind) -> QueryLane {
         | QueryKind::ListRules(_)
         | QueryKind::ListLocalConfig(_)
         | QueryKind::ListSecurityLists(_)
-        | QueryKind::GetSettings(_) => QueryLane::ViewQuery,
+        | QueryKind::GetSettings(_)
+        | QueryKind::ListAnchors(_) => QueryLane::ViewQuery,
         QueryKind::ReadArtifact(_) | QueryKind::ListModels(_) => QueryLane::SideQuery,
     }
 }
@@ -100,6 +101,10 @@ mod tests {
         assert_eq!(
             query_lane(&QueryKind::ListModels(pb::ListModels::default())),
             QueryLane::SideQuery
+        );
+        assert_eq!(
+            query_lane(&QueryKind::ListAnchors(pb::ListAnchors::default())),
+            QueryLane::ViewQuery
         );
         assert_eq!(
             query_lane(&QueryKind::GetConversation(pb::GetConversation::default())),

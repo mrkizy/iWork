@@ -25,6 +25,10 @@ pub struct WebState {
     pub rows: BTreeMap<String, pb::RowView>,
     pub navigate: Option<pb::NavigatePatch>,
     pub home: Option<pb::HomeView>,
+    /// 锚点列表与当前位置（列表、位置变了才发，没发时保留上一份）；滚动指令只记最后一条。
+    pub anchors: Option<pb::AnchorsView>,
+    pub anchor_cursor: Option<pb::AnchorCursor>,
+    pub scroll_to: Option<pb::ScrollTo>,
 }
 
 #[derive(Debug, Default)]
@@ -93,9 +97,23 @@ impl Web {
                 C::Navigate(p) => s.navigate = Some(p.clone()),
                 C::Home(p) => s.home.clone_from(&p.view),
                 C::Conversation(p) => {
+                    if s.conversation_id.as_deref() != Some(p.conversation_id.as_str()) {
+                        s.anchors = None;
+                        s.anchor_cursor = None;
+                        s.scroll_to = None;
+                    }
                     if p.reset || s.conversation_id.as_deref() != Some(p.conversation_id.as_str()) {
                         s.rows.clear();
                         s.conversation_id = Some(p.conversation_id.clone());
+                    }
+                    if p.anchors.is_some() {
+                        s.anchors.clone_from(&p.anchors);
+                    }
+                    if p.anchor_cursor.is_some() {
+                        s.anchor_cursor.clone_from(&p.anchor_cursor);
+                    }
+                    if p.scroll_to.is_some() {
+                        s.scroll_to.clone_from(&p.scroll_to);
                     }
                     for id in &p.removed_ids {
                         s.rows.remove(id);

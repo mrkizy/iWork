@@ -17,6 +17,9 @@ pub enum SummaryTable {
     Pending,
     /// 「全部对话」列表页开着时这一轮多带的那一条（方案 2.2 第 2 条）；查询由会话层按列表页的条件拼。
     List,
+    /// 打开的对话已经有锚点窗口时这一轮多带的那一条（方案 2.9：锚点失效后进摘要重查的同一轮）；
+    /// 查询由会话层按当前窗口的中心拼。
+    Anchors,
 }
 
 impl SummaryTable {
@@ -40,7 +43,7 @@ impl SummaryTable {
             }),
             SummaryTable::Assistants => Q::ListAssistants(pb::ListAssistants {}),
             SummaryTable::Pending => Q::ListPendingItems(pb::ListPendingItems {}),
-            SummaryTable::List => return None,
+            SummaryTable::List | SummaryTable::Anchors => return None,
         };
         Some(pb::Query { kind: Some(kind) })
     }
@@ -139,6 +142,16 @@ impl Refresh {
     /// 现在该不该发一轮：失效、没有在飞、距上次发出不少于节流间隔。该发就记下这一轮，返回轮次号与要发的表。
     /// 轮次号随查询用途一起记下，结果回来时交回 [`Refresh::result_applied`]：作废轮次的迟到结果不算数。
     pub fn due(&mut self, now: Instant, with_list: bool) -> Option<(u64, Vec<SummaryTable>)> {
+        self.due_with(now, with_list, false)
+    }
+
+    /// 同 [`Refresh::due`]，`with_anchors` 时这一轮多带锚点窗口那一条。
+    pub fn due_with(
+        &mut self,
+        now: Instant,
+        with_list: bool,
+        with_anchors: bool,
+    ) -> Option<(u64, Vec<SummaryTable>)> {
         if !self.stale || self.round.is_some() {
             return None;
         }
@@ -154,6 +167,9 @@ impl Refresh {
         let mut tables = SummaryTable::ALL.to_vec();
         if with_list {
             tables.push(SummaryTable::List);
+        }
+        if with_anchors {
+            tables.push(SummaryTable::Anchors);
         }
         self.round = Some(Round {
             id,

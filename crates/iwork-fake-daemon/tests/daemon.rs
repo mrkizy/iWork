@@ -216,6 +216,8 @@ async fn confirming_unknown_card_finishes_pending_delete() {
             kind: Some(pb::query::Kind::GetConversation(pb::GetConversation {
                 conversation_id: "c-ua-deleting".into(),
                 before_message_id: None,
+                after_message_id: None,
+                around_seq: None,
                 limit: 0,
             })),
         })

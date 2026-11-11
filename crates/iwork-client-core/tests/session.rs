@@ -209,6 +209,7 @@ async fn inflight_command_resent_once() {
             conversation_id: "c-basic".into(),
             before_message_id: None,
             limit: 200,
+            ..Default::default()
         })),
     });
     let Some(pb::query_result::Kind::GetConversation(r)) = page.kind else {

@@ -207,6 +207,58 @@ message ConversationPatch {
   ComposerView composer = 9;
   // 时间线不可用时的整页说明（如「数据不完整，无法显示这个对话」）；设了就不显示行。
   optional string blocking_notice = 10;
+  // 消息锚点（T09 方案 2.9）：列表变了才整份发；还没取到时不设，组件不显示。
+  optional AnchorsView anchors = 11;
+  // 当前位置：变了才发。
+  optional AnchorCursor anchor_cursor = 12;
+  // 一次性的滚动指令（跳到锚点）：网页只对没见过的 token 滚动并高亮。
+  optional ScrollTo scroll_to = 13;
+}
+
+// 消息锚点：后台按窗口给的一段（以当前位置为中心前后各取若干条），文字都在 Rust 侧拼好。
+message AnchorsView {
+  repeated AnchorItem items = 1;
+  // 窗口前后还有没有（到头时滚轮回弹）。
+  bool has_before = 2;
+  bool has_after = 3;
+  // 静止态的两个状态点：整个对话里还有等你处理的事 / 有失败的回合。
+  bool has_waiting = 4;
+  bool has_failed = 5;
+  // 跳到还没加载的地方、正在取那一段时的提示（Q18：原地不动加提示）；不在加载时不设。
+  optional string jump_loading = 6;
+}
+
+enum AnchorKind {
+  ANCHOR_KIND_UNSPECIFIED = 0;
+  ANCHOR_KIND_USER = 1;
+  ANCHOR_KIND_WAITING = 2;
+  ANCHOR_KIND_FAILED = 3;
+}
+
+message AnchorItem {
+  // 锚点的身份，原样回传（JumpToAnchor、AnchorBrowse）。
+  string key = 1;
+  AnchorKind kind = 2;
+  // 你 / 等你处理 / 失败。
+  string kind_label = 3;
+  // 今天显示时刻，更早显示日期（本机时区）。
+  string time_label = 4;
+  // 信息卡的预览文字；网页只限制成两行。
+  string preview = 5;
+}
+
+message AnchorCursor {
+  // 当前位置是哪一处（AnchorItem.key）；没有锚点时为空。
+  string current_key = 1;
+}
+
+message ScrollTo {
+  // 滚到哪一行（RowView.key）。
+  string row_key = 1;
+  // 高亮多久，网页计时。
+  uint32 highlight_ms = 2;
+  // 每次跳转加一；同一个 token 只滚一次。
+  uint64 token = 3;
 }
 
 message ConversationHeader {
@@ -751,6 +803,10 @@ message UiIntent {
     LoadMoreConversations load_more_conversations = 6;
     Retry retry = 7;
     OpenExternal open_external = 8;
+    // 消息锚点（T09 方案 2.9）
+    AnchorBrowse anchor_browse = 9;
+    JumpToAnchor jump_to_anchor = 10;
+    JumpRelative jump_relative = 11;
 
     // 对话
     SendMessageIntent send_message = 20;
@@ -842,6 +898,24 @@ message LoadOlder {
 
 message JumpToLatest {
   string conversation_id = 1;
+}
+
+// 滚轮翻看到了离窗口边缘不远的一处：Rust 以那一处为中心重取锚点窗口（不跳转）。
+message AnchorBrowse {
+  string conversation_id = 1;
+  string key = 2;
+}
+
+// 点了刻度或信息卡：跳到那一处（没加载就先取以它为中心的一段）。
+message JumpToAnchor {
+  string conversation_id = 1;
+  string key = 2;
+}
+
+// ⌥↑ / ⌥↓：相对当前位置跳一处（-1 往前，+1 往后）。
+message JumpRelative {
+  string conversation_id = 1;
+  sint32 delta = 2;
 }
 
 message SetFocused {

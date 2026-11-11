@@ -526,3 +526,82 @@ mod composer_block_tests {
         );
     }
 }
+
+// ---------- 消息锚点（方案 2.9） ----------
+
+/// 跳到还没加载的一处、正在取那一段时的提示（Q18：原地不动加提示）。
+pub const ANCHOR_JUMP_LOADING: &str = "正在加载那一处…";
+
+pub fn anchor_kind(k: pb::AnchorKind) -> &'static str {
+    match k {
+        pb::AnchorKind::User => "你",
+        pb::AnchorKind::Waiting => "等你处理",
+        pb::AnchorKind::Failed => "失败",
+        pb::AnchorKind::Unspecified => "",
+    }
+}
+
+/// 失败回合的预览：与时间线里那一行同两种说法（2a 第 10 条）。
+pub fn anchor_failure(had_output: bool, reason: &str) -> String {
+    let shown = if reason.is_empty() {
+        "运行时没有给出原因"
+    } else {
+        reason
+    };
+    if had_output {
+        format!("这一轮中途失败：{shown}")
+    } else {
+        format!("这一轮没能开始：{shown}")
+    }
+}
+
+/// 锚点的时间：今天写时刻（14:05），今年更早写日期（11月3日），往年带年份（2025年11月3日）。按 `tz` 算日期。
+pub fn anchor_time(now: SystemTime, at: SystemTime, tz: &jiff::tz::TimeZone) -> String {
+    let (Ok(now), Ok(at)) = (
+        jiff::Timestamp::try_from(now),
+        jiff::Timestamp::try_from(at),
+    ) else {
+        return String::new();
+    };
+    let (now, at) = (now.to_zoned(tz.clone()), at.to_zoned(tz.clone()));
+    if now.date() == at.date() {
+        format!("{:02}:{:02}", at.hour(), at.minute())
+    } else if now.year() == at.year() {
+        format!("{}月{}日", at.month(), at.day())
+    } else {
+        format!("{}年{}月{}日", at.year(), at.month(), at.day())
+    }
+}
+
+#[cfg(test)]
+mod anchor_text_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn time_label_today_this_year_and_older() {
+        let tz = jiff::tz::TimeZone::fixed(jiff::tz::offset(8));
+        // 2026-11-12 10:00 +08:00
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_794_448_800);
+        let at = |back: u64| now - Duration::from_secs(back);
+        assert_eq!(anchor_time(now, at(3600 + 15 * 60), &tz), "08:45");
+        assert_eq!(
+            anchor_time(now, at(11 * 3600), &tz),
+            "11月11日",
+            "前一天（本地时区）"
+        );
+        assert_eq!(anchor_time(now, at(400 * 86_400), &tz), "2025年10月8日");
+    }
+
+    #[test]
+    fn failure_preview_has_both_wordings() {
+        assert_eq!(
+            anchor_failure(false, "启动失败"),
+            "这一轮没能开始：启动失败"
+        );
+        assert_eq!(
+            anchor_failure(true, ""),
+            "这一轮中途失败：运行时没有给出原因"
+        );
+    }
+}

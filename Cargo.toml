@@ -25,6 +25,8 @@ protox = "0.10"
 serde_json = "1"
 thiserror = "2"
 ulid = { version = "3", default-features = false }
+# 本机时区（锚点的时间文字：今天显示时刻，更早显示日期）；已经经 gix-date 在依赖图里，同一版本
+jiff = "0.2.41"
 proptest = "1"
 pollster = "1"
 tauri = "2.12"

@@ -67,6 +67,8 @@ impl World {
         match self.query(Q::GetConversation(pb::GetConversation {
             conversation_id: id.into(),
             before_message_id: before.map(Into::into),
+            after_message_id: None,
+            around_seq: None,
             limit,
         })) {
             R::GetConversation(g) => g,
