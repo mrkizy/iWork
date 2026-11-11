@@ -1,6 +1,55 @@
 {
-  "approvalDelivered": {
-    "approvalId": "01JC0V0000000000000000APR1",
-    "turnId": "01JC0T0000000000000000TRN1"
+  "approvalEvaluated": {
+    "turnId": "01JC0T0000000000000000TRN1",
+    "action": {
+      "kind": "ACTION_KIND_OUTSIDE_SANDBOX",
+      "target": {
+        "command": {
+          "program": "npm",
+          "subcommand": "publish",
+          "argv": [
+            "npm",
+            "publish",
+            "--access=public"
+          ]
+        }
+      },
+      "toolName": "Bash",
+      "rawSummary": "npm publish --access=public",
+      "outOfBounds": true,
+      "bypassSandboxRequested": true,
+      "opaqueScript": true
+    },
+    "rulesetVersion": "m1-2",
+    "verdict": {
+      "allow": {}
+    },
+    "layerHit": "RULE_LAYER_DEFAULT",
+    "durationMs": 2,
+    "snapshotListsSeq": "8",
+    "liveRulesSeq": "9",
+    "subActions": [
+      {
+        "kind": "ACTION_KIND_OUTSIDE_SANDBOX",
+        "target": {
+          "command": {
+            "program": "npm",
+            "subcommand": "publish",
+            "argv": [
+              "npm",
+              "publish",
+              "--access=public"
+            ]
+          }
+        },
+        "toolName": "Bash",
+        "rawSummary": "npm publish --access=public",
+        "outOfBounds": true,
+        "bypassSandboxRequested": true,
+        "opaqueScript": true
+      }
+    ],
+    "callShape": "CALL_SHAPE_SINGLE_SIMPLE_COMMAND",
+    "grantApprovalId": "01JC0V0000000000000000APR1"
   }
 }

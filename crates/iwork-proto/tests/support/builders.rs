@@ -1349,6 +1349,13 @@ pub fn ev_recovery_completed() -> DomainEvent {
     }))
 }
 
+pub fn ev_turn_session_bound() -> DomainEvent {
+    ev(E::TurnSessionBound(TurnSessionBound {
+        turn_id: s(TURN),
+        runtime_session_id: s("sess-1"),
+    }))
+}
+
 /// T07 收口：命中「路径查不清」内置拒绝条目的子动作，审计带规则路径的解析结果。
 fn action_path_unresolved() -> ActionSummary {
     ActionSummary {

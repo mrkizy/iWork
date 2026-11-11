@@ -890,6 +890,82 @@ fn missing_row_is_projection_error() {
     assert_eq!(block(store.head_seq()).unwrap(), head, "失败的命令整条回滚");
 }
 
+/// 会话绑定只写快照里的 `runtime_session_id`：读模型的 `Turn` 带着它，状态与中断计数不受影响，
+/// 重建后一致。
+#[test]
+fn session_bound_writes_runtime_session_id_only() {
+    let env = Env::new();
+    let store = env.open();
+    let feed = Feed::new(&store);
+    base(&feed);
+    let read_turn = || {
+        let view = block(read_model(&store).conversation(
+            cid(10),
+            MessagePage {
+                before: None,
+                limit: 10,
+            },
+        ))
+        .unwrap();
+        let [t] = view.turns.as_slice() else {
+            panic!("只有一个回合：{:?}", view.turns)
+        };
+        t.clone()
+    };
+    assert_eq!(
+        read_turn().runtime_session_id,
+        None,
+        "对照：排队时还没有会话"
+    );
+    feed.ok(vec![
+        TurnSessionBound {
+            turn_id: tid(20),
+            runtime_session_id: "sess-a".into(),
+        }
+        .into(),
+        TurnStateChanged {
+            turn_id: tid(20),
+            from: TurnState::Queued,
+            to: TurnState::Running,
+            reason: None,
+        }
+        .into(),
+    ]);
+    let t = read_turn();
+    assert_eq!(t.runtime_session_id.as_deref(), Some("sess-a"));
+    assert_eq!(t.state, TurnState::Running);
+
+    // 中断之后再绑定（续接换了会话）：中断计数与「继续」卡片不能被绑定冲掉
+    let interrupted = TurnState::Interrupted {
+        reason: InterruptReason::Crash,
+    };
+    feed.ok(vec![
+        TurnStateChanged {
+            turn_id: tid(20),
+            from: TurnState::Running,
+            to: interrupted,
+            reason: None,
+        }
+        .into(),
+    ]);
+    let q = "SELECT interrupted_seq FROM turns";
+    let seq_before = scalar(&env.db(), q);
+    feed.ok(vec![
+        TurnSessionBound {
+            turn_id: tid(20),
+            runtime_session_id: "sess-b".into(),
+        }
+        .into(),
+    ]);
+    assert_eq!(scalar(&env.db(), q), seq_before);
+    let t = read_turn();
+    assert_eq!(t.runtime_session_id.as_deref(), Some("sess-b"));
+    assert_eq!(t.state, interrupted);
+    assert_eq!(scalar(&env.db(), "SELECT unread FROM conversations"), 1);
+    rebuild(&store, &env);
+    assert_eq!(read_turn(), t, "重建后读模型一致");
+}
+
 #[test]
 fn updated_seq_tracks_last_event_touching_the_row() {
     let env = Env::new();

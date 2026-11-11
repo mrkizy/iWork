@@ -140,6 +140,7 @@ sample_types! {
         b::ev_recovery_completed,
         // 以下是后加的样本：只能追加在末尾，编号才不会挪动
         b::ev_approval_voided_turn_failed,
+        b::ev_turn_session_bound,
         b::ev_approval_evaluated_with_call,
         b::ev_approval_review_abandoned_executor_lost,
         b::ev_approval_evaluated_argument_path,

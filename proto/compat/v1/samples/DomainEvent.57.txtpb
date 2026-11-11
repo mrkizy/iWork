@@ -1,55 +1,31 @@
 approval_evaluated {
   turn_id: "01JC0T0000000000000000TRN1"
   action {
-    kind: ACTION_KIND_EXECUTE
+    kind: ACTION_KIND_WRITE
     target {
-      command {
-        program: "find"
-        argv: ["-H", "gate/root", "-delete"]
-      }
+      path: "/Users/me/proj/foo"
     }
     tool_name: "Bash"
-    raw_summary: "chmod u+x gate; find -H gate/root -delete"
-    resource_limit_hit: true
-    unlexable: true
-    path_unresolved: true
+    raw_summary: "npm test foo"
+    argument_path: true
   }
   matched_rule_ids: ["01JC0R0000000000000000RXE1"]
-  ruleset_version: "m1-2"
+  ruleset_version: "m1-1"
   verdict {
-    deny {
-      denial_memory {
-        kind: ACTION_KIND_DELETE
-        target {
-          path: "/Users/me/code/iwork/build"
-        }
-      }
-    }
+    allow {}
   }
-  layer_hit: RULE_LAYER_USER_DENY
+  layer_hit: RULE_LAYER_DEFAULT
   duration_ms: 1
-  snapshot_lists_seq: 5
-  live_rules_seq: 6
+  snapshot_lists_seq: 3
+  live_rules_seq: 4
   sub_actions: [{
-    kind: ACTION_KIND_EXECUTE
+    kind: ACTION_KIND_WRITE
     target {
-      command {
-        program: "find"
-        argv: ["-H", "gate/root", "-delete"]
-      }
+      path: "/Users/me/proj/foo"
     }
     tool_name: "Bash"
-    raw_summary: "chmod u+x gate; find -H gate/root -delete"
-    resource_limit_hit: true
-    unlexable: true
-    path_unresolved: true
+    raw_summary: "npm test foo"
+    argument_path: true
   }]
-  call_shape: CALL_SHAPE_COMPOUND
-  snapshot_rule_paths: [{
-    path: "/Users/me/.npmrc"
-    resolved: "/Users/me/dotfiles/npmrc"
-  }, {
-    path: "/etc"
-    resolved: "/private/etc"
-  }]
+  call_shape: CALL_SHAPE_SINGLE_SIMPLE_COMMAND
 }

@@ -294,6 +294,14 @@ pub struct TurnModelReported {
     pub model: ModelSelection,
 }
 
+/// 回合跑在哪条运行时会话上。编排开好（或续上）会话后、发 prompt 之前写下，与回合进 `Running`
+/// 同一次提交：后台服务崩溃后，「继续」从回合上取这个 ID 续接原会话（需求 12；T04 方案 1.1 P2）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnSessionBound {
+    pub turn_id: TurnId,
+    pub runtime_session_id: String,
+}
+
 /// 编排采纳了一条审批结果、即将交给运行时：「这条批准已经用掉」的唯一依据。允许和拒绝都算审批结果，
 /// 被拒绝的审批交付时同样有这条事件（T06 方案 2.6 第 2 条；T07 方案 6.10.8）。只由编排提交。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -579,6 +587,7 @@ domain_events! {
     TurnModelReported => "turn_model_reported",
     ToolCallStarted => "tool_call_started",
     ToolCallFinished => "tool_call_finished",
+    TurnSessionBound => "turn_session_bound",
     ApprovalDelivered => "approval_delivered",
     ApprovalRequested => "approval_requested",
     ApprovalReviewUpdated => "approval_review_updated",
@@ -670,6 +679,7 @@ impl DomainEvent {
             Self::TurnStateChanged(e) => (K::Turn, StreamId::of(e.turn_id)),
             Self::TurnFinished(e) => (K::Turn, StreamId::of(e.turn_id)),
             Self::TurnModelReported(e) => (K::Turn, StreamId::of(e.turn_id)),
+            Self::TurnSessionBound(e) => (K::Turn, StreamId::of(e.turn_id)),
             Self::ToolCallStarted(e) => (K::Turn, StreamId::of(e.turn_id)),
             Self::ToolCallFinished(e) => (K::Turn, StreamId::of(e.turn_id)),
             Self::ApprovalDelivered(e) => (K::Turn, StreamId::of(e.turn_id)),

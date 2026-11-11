@@ -104,6 +104,7 @@ fn dispatch<C: EventCodec + ?Sized>(
         E::TurnFinished(e) => turns::usage(cx, e.turn_id, &e.usage),
         E::UsageReported(e) => turns::usage(cx, e.turn_id, &e.usage),
         E::TurnModelReported(e) => turns::model_reported(cx, e),
+        E::TurnSessionBound(e) => turns::session_bound(cx, e),
         E::ToolCallStarted(e) => turns::tool_call_started(cx, e),
         E::ToolCallFinished(e) => turns::tool_call_finished(cx, e),
         E::ApprovalRequested(e) => approvals::requested(cx, e, event),
