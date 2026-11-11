@@ -278,8 +278,8 @@ impl Timeline {
         Some(key)
     }
 
-    /// 按键去掉一行（截掉一端用），连同它的正文。
-    fn remove_key(&mut self, key: RowKey) -> Option<String> {
+    /// 按键去掉一行（截掉一端用），连同它的正文。`from_old_end` 表示从老的一端截。
+    fn remove_key(&mut self, key: RowKey, from_old_end: bool) -> Option<String> {
         let row = self.rows.remove(&key)?;
         let id = self.ids.remove(&key)?;
         self.by_id.remove(&id);
@@ -294,7 +294,9 @@ impl Timeline {
                     self.attachments.remove(a);
                 }
             }
-            Row::TurnEnd(t) if !turn_is_active(t.state) => {
+            // 回合条目只在从老的一端截时删：从新的一端截（往上翻超过上限）时，回合结束行先被截掉，可这个回合
+            // 更早的消息与工具行还在，它们的表情、前面的模型切换行都要读这个回合（审查 3/F-1）。
+            Row::TurnEnd(t) if from_old_end && !turn_is_active(t.state) => {
                 self.turns.remove(&t.id);
             }
             _ => {}
@@ -946,7 +948,7 @@ impl Timeline {
             let Some(&key) = self.rows.keys().next_back() else {
                 break;
             };
-            self.remove_key(key);
+            self.remove_key(key, false);
             self.at_tail = false;
         }
     }
@@ -959,7 +961,7 @@ impl Timeline {
             let Some(&key) = self.rows.keys().next() else {
                 break;
             };
-            if let Some(id) = self.remove_key(key) {
+            if let Some(id) = self.remove_key(key, true) {
                 c.rows.insert(id);
             }
             self.has_older = true;

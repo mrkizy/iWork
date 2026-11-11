@@ -530,3 +530,52 @@ fn trimming_also_trims_side_tables() {
         "旁表 {turns}/{attachments}/{tools} 没跟着截"
     );
 }
+
+/// 审查 3/F-1：往上翻超过上限、从新的一端截掉回合结束行时，回合条目留着：这个回合更早的行还在，
+/// 前面的模型切换行也还在。
+#[test]
+fn trimming_newest_end_keeps_turn_entries() {
+    let turn = |id: &str, model: &str, created: u64, ended: u64| pb::Turn {
+        id: id.into(),
+        conversation_id: CID.into(),
+        model: Some(pb::ModelSelection {
+            model_id: model.into(),
+            effort: None,
+        }),
+        state: pb::TurnState::Completed as i32,
+        created_seq: created,
+        ended_seq: ended,
+        ..Default::default()
+    };
+    let mut m2 = assistant_msg("m2", 8995, S::Completed, "x");
+    m2.turn_id = Some("t2".into());
+    let mut s = store_with_open();
+    s.apply(snapshot(
+        CONV,
+        9001,
+        vec![pb::QueryResult {
+            seq: 9001,
+            kind: Some(pb::query_result::Kind::GetConversation(
+                pb::GetConversationResult {
+                    conversation: Some(conversation(CID, "", 0)),
+                    messages: vec![assistant_msg("m1", 8980, S::Completed, "x"), m2],
+                    turns: vec![turn("t1", "a", 8970, 8975), turn("t2", "b", 8990, 9000)],
+                    has_more: true,
+                    ..Default::default()
+                },
+            )),
+        }],
+    ));
+    // 行：end:t1、m1、model:t2、m2、end:t2 共 5 行。往前翻一页，正好多出一行：从新的一端截掉 end:t2。
+    let before = row_ids(&s).len();
+    assert_eq!(before, 5);
+    let older_msgs: Vec<pb::Message> = (0..(TIMELINE_CAP - before + 1) as u64)
+        .map(|i| assistant_msg(&format!("o{i}"), 1 + i, S::Completed, "x"))
+        .collect();
+    s.apply(view_result(older(&s), page(9002, older_msgs, true)));
+    let tl = s.open.as_ref().unwrap();
+    assert!(tl.row("end:t2").is_none(), "对照：结束行确实被截掉了");
+    assert!(tl.row("m2").is_some());
+    assert!(tl.turns.contains_key("t2"), "回合条目还在");
+    assert!(tl.row("model:t2").is_some(), "模型切换行还在");
+}

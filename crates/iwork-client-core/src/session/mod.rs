@@ -769,6 +769,8 @@ impl<D: Dialer> Session<D> {
                     self.drop_connection("订阅被拒");
                     self.store.connection_closed();
                     self.store.set_connection(Connection::Reconnecting);
+                    // TODO(T10)：订阅持续被拒时退避可能长不起来——别的范围的快照应用后会复位 Backoff（审查 3/F-2，
+                    // 目前没有已知触发途径）。等 T10 定下拒绝订阅的语义后再补。
                     self.retry_at = Some(self.now() + self.backoff.next_delay());
                 }
             }
