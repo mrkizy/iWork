@@ -50,6 +50,8 @@ extern crate self as iwork_store;
 #[path = "../tests/support/fixtures.rs"]
 mod fixtures;
 #[cfg(test)]
+mod precondition_tests;
+#[cfg(test)]
 mod projection_tests;
 #[cfg(test)]
 mod tests;

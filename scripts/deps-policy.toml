@@ -38,13 +38,24 @@ direct = ["thiserror"]
 direct_dev = ["pollster"]
 deny_transitive = "normal_build_dev"
 
+[crates.iwork-shell]
+# Bash 语法解析，把 brush-parser 隔离在这一个 crate 里（T07 方案 3.3、ADR-T07-a）
+# serde：只用来写一个收字符串的 Serializer，走完整 AST 找命令替换（方案 3.3），纯计算
+internal = []
+direct = ["brush-parser", "serde"]
+direct_dev = ["proptest"]
+deny_transitive = "normal_build_dev"
+
 [crates.iwork-core]
-internal = ["iwork-domain", "iwork-ports"]
+internal = ["iwork-domain", "iwork-ports", "iwork-shell"]
 # futures-channel / futures-core：无运行时的信箱与 Stream trait，回合编排同时等多路输入用（ADR-0006）
-direct = ["thiserror", "futures-channel", "futures-core"]
+# sha2：亲手执行提议哈希与调用摘要（T07 方案 5.4、6.2），纯计算
+# serde_json：解析运行时给的工具输入 JSON（T07 方案 3.1），纯计算
+# tracing：日志门面，审批引擎在没有返回值的提醒路径上记错误（T07 方案 6.10.4），不带输出端
+direct = ["thiserror", "futures-channel", "futures-core", "sha2", "serde_json", "tracing"]
 
 [crates.iwork-app]
-internal = ["iwork-core", "iwork-ports", "iwork-proto", "iwork-domain"]
+internal = ["iwork-core", "iwork-shell", "iwork-ports", "iwork-proto", "iwork-domain"]
 
 [crates.iwork-store]
 internal = ["iwork-ports", "iwork-domain"]
@@ -76,7 +87,7 @@ transitive_exempt = ["tokio"]
 
 [crates.iwork-daemon]
 internal = [
-    "iwork-domain", "iwork-ports", "iwork-proto", "iwork-core", "iwork-app",
+    "iwork-domain", "iwork-ports", "iwork-proto", "iwork-core", "iwork-shell", "iwork-app",
     "iwork-store", "iwork-agent-acp", "iwork-vcs-git", "iwork-host", "iwork-ipc",
     "iwork-rootfs",
 ]

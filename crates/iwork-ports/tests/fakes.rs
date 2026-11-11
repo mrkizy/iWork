@@ -3,6 +3,9 @@
 //! 实现两种写法都有：`async fn`（证明它满足 trait 的 `impl Future + Send`），以及先取数再返回
 //! `async move` 的显式写法（锁不跨 await 时这样写）。
 
+/// `PathResolver` 的假实现；别的 crate 的测试经 `#[path]` 引入同一份。
+mod fake_fs;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::ops::Range;

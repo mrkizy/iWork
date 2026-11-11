@@ -1,0 +1,26 @@
+id: "01JC0R0000000000000000RXE1"
+layer: RULE_LAYER_DEFAULT
+matcher {
+  all {
+    matchers: [{
+      action_kind_is: ACTION_KIND_WRITE
+    }, {
+      flag: ACTION_FLAG_OUT_OF_BOUNDS
+    }]
+  }
+}
+effect: RULE_EFFECT_ASK
+source {
+  builtin {
+    ruleset_version: "m1-1"
+  }
+}
+scope {
+  global {}
+}
+created_at {
+  seconds: 1762001100
+  nanos: 123000000
+}
+label: "default.write.oob"
+applies_in: [APPROVAL_MODE_MANUAL, APPROVAL_MODE_AUTO]

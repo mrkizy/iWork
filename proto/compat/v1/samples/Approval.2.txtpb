@@ -1,0 +1,58 @@
+id: "01JC0V0000000000000000APR1"
+turn_id: "01JC0T0000000000000000TRN1"
+conversation_id: "01JC0C0000000000000000CNV1"
+kind: APPROVAL_KIND_OUTSIDE_SANDBOX
+action {
+  kind: ACTION_KIND_WRITE
+  target {
+    paths {
+      paths: ["/tmp/a.txt", "/tmp/b.txt"]
+    }
+  }
+  tool_name: "Edit"
+  raw_summary: "\346\224\271\344\270\244\344\270\252\346\226\207\344\273\266"
+}
+matched_rule_ids: ["01JC0R0000000000000000RXE1"]
+ruleset_version: "m1-1"
+state: APPROVAL_STATE_PENDING
+review: REVIEW_STATE_NOT_REVIEWED
+offered_remember: [REMEMBER_SCOPE_ONCE]
+remember_label: "\345\217\252\350\203\275\345\205\201\350\256\270\344\270\200\346\254\241"
+requested_at {
+  seconds: 1762001200
+  nanos: 123000000
+}
+call {
+  tool_name: "Bash"
+  cwd: "/Users/me/proj"
+  shape: CALL_SHAPE_COMPOUND
+  placement: SANDBOX_PLACEMENT_AMBIGUOUS
+  bypass_sandbox_requested: true
+  actions: [{
+    kind: ACTION_KIND_OUTSIDE_SANDBOX
+    target {
+      command {
+        program: "npm"
+        subcommand: "publish"
+        argv: ["npm", "publish", "--access=public"]
+      }
+    }
+    tool_name: "Bash"
+    raw_summary: "npm publish --access=public"
+    out_of_bounds: true
+    bypass_sandbox_requested: true
+    opaque_script: true
+  }, {
+    kind: ACTION_KIND_WRITE
+    target {
+      paths {
+        paths: ["/tmp/a.txt", "/tmp/b.txt"]
+      }
+    }
+    tool_name: "Edit"
+    raw_summary: "\346\224\271\344\270\244\344\270\252\346\226\207\344\273\266"
+  }]
+  representative: 1
+  raw_input_digest: "\336\255\276\357\001\002\003\004\005\006\007\010\t\n\013\014\r\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034"
+  normalized_digest: "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+}

@@ -89,6 +89,8 @@ async fn full_turn_with_permission_allowed_matches_snapshot() {
     assert_eq!(
         h.store.snapshot(),
         [
+            // 会话绑定与进 Running 同一次提交，在发 prompt 之前
+            "session bound fake-session-1",
             "turn Queued -> Running",
             "message appended Streaming",
             "tool started t1 Bash",
@@ -147,6 +149,8 @@ async fn full_turn_with_permission_denied_matches_snapshot() {
     assert_eq!(
         h.store.snapshot(),
         [
+            // 会话绑定与进 Running 同一次提交，在发 prompt 之前
+            "session bound fake-session-1",
             "turn Queued -> Running",
             "message appended Streaming",
             "tool started t1 Bash",

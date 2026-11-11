@@ -364,6 +364,7 @@ pub fn approval(n: u128, turn: u128, conv: u128) -> Approval {
             raw_summary: "npm test".into(),
             flags: ActionFlags::default(),
         },
+        call: None,
         matched_rules: vec![],
         ruleset_version: RuleSetVersion("r1".into()),
         state: ApprovalState::Pending,
@@ -400,6 +401,7 @@ pub fn rule(n: u128, layer: RuleLayer, scope: RuleScope) -> RuleEntry {
         scope,
         created_at: Timestamp(T0),
         label: format!("r{n}"),
+        applies_in: Default::default(),
     }
 }
 

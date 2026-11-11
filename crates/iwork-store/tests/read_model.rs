@@ -23,6 +23,8 @@ fn setup() -> (Env, Store) {
         vec![
             ProjectAdded { project: project(1) }.into(),
             ProjectAdded { project: project(2) }.into(),
+            // 回合的助手：审批与卡片写入前查归属存续（T02 方案 2.6）
+            AssistantCreated { assistant: assistant(1, false) }.into(),
             ConversationCreated { conversation: project_conversation(10, 1) }.into(),
             TurnQueued { turn: turn(20, 10) }.into(),
         ],

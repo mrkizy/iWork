@@ -39,7 +39,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 - 协议兼容：新加或改了 `.proto` 字段后跑 `cargo run -p iwork-proto --example update-contract -- --additive` 把新字段登记进 `proto/compat/v1/contract.binpb`；它拒绝改号、改类型、删字段；加了样本构造函数后跑 `cargo run -p iwork-proto --example dump-compat -- proto/compat/v1/samples` 写出新的金样本（只增不改，已有样本内容不同会拒绝）。规则见 `proto/compat/README.md`
 - 前端：`pnpm -C client install --frozen-lockfile`、`pnpm -C client gen`（从 `proto/` 生成 TS 到 `client/src/gen/`，不入库）、`pnpm -C client typecheck`、`pnpm -C client test`（含开发服务器只绑 127.0.0.1、发布配置不含开发入口两项检查）
 - 客户端：Tauri 配置分三层，层清单只写在 `client/scripts/tauri-layers.ts`，包装脚本与 CI 检查共用它。开发用 `pnpm -C client tauri dev`（叠加 `tauri.dev.conf.json`）；发布构建用 `pnpm -C client tauri build`（叠加 `tauri.build.conf.json`）。tauri CLI 只支持 dev 和 build 两个子命令，且只能经这两条包装命令调用：包装脚本拒绝其他子命令（bundle、android、ios 等）、调用方自带的 `-c/--config` 和环境变量 `TAURI_CONFIG`；裸跑 `tauri build`、`tauri bundle` 会被拒；`client/src-tauri/` 下多出层清单没登记的 Tauri 配置文件时 `pnpm -C client test` 失败。`cargo build`/`cargo run -p iwork-client` 不需要 `dist/`，但 `cargo run` 起来的窗口是空的（没有开发服务器也没有嵌入资源），看界面要用 `tauri dev`
-- 性能基准：`cargo bench -p iwork-bench`（T01 建空 crate，T11 填实现）；存储写入基准初版 `cargo bench -p iwork-store --bench write_commit`（每组一行 JSON 到 stdout，macOS 上 fullfsync 开、关各一组；T11 收编后改这一条）；ipc 热路径：`cargo bench -p iwork-bench --bench ipc`（`IWORK_BENCH_FANOUT_SECS` 调推送扇出时长）；Claude hook 冷启动与体积：`cargo bench -p iwork-claude-hook --bench cold_start`（T06 S3，只 unix；S9 收进 `iwork-bench`）
+- 性能基准：`cargo bench -p iwork-bench`（T01 建空 crate，T11 填实现）；存储写入基准初版 `cargo bench -p iwork-store --bench write_commit`（每组一行 JSON 到 stdout，macOS 上 fullfsync 开、关各一组；T11 收编后改这一条）；审批求值热路径单跑 `cargo bench -p iwork-bench --bench approval`（T07）；审批引擎（追平、启动折叠、并发放行，真实 SqliteStore）`cargo bench -p iwork-bench --bench approval_engine`（T07 方案 6.10.12）；审批引擎前后对照（747db6b 对当前树，同一时段交替多轮）`scripts/bench-approval-engine-ab.sh [轮数]`（脚本里每次 cargo bench 自己套 `lockf /tmp/iwork-heavy-test.lock`，外面不要再套，否则自己等自己；正式数在 mac120 空闲时段量，每轮前查有没有构建在跑）；ipc 热路径：`cargo bench -p iwork-bench --bench ipc`（`IWORK_BENCH_FANOUT_SECS` 调推送扇出时长）；Claude hook 冷启动与体积：`cargo bench -p iwork-claude-hook --bench cold_start`（T06 S3，只 unix；S9 收进 `iwork-bench`）
 - 本机通信（T03）：
   - 不开 TCP/UDP：`scripts/check-no-tcp.sh`（源码层面；`--selftest` 证明检查会红；运行时监听检查归 T11）
   - 发布构建没有 `--dev-trust`：`scripts/check-no-dev-trust.sh`（feature 图 + release 产物 grep 含阳性对照 + 发布进程拒绝该参数；`--graph-only` 只查 feature 图，`--artifacts F...` 追加检查打包产物）
@@ -49,6 +49,8 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
   - 另一用户连接被拒（只 Linux，需要另一个系统用户）：见 `crates/iwork-ipc/tests/peer_other_user.rs` 文件头
   - 调试客户端（dev feature）：`cargo run -p iwork-ipc --features dev --example ipc-tool -- hello`；`-- --endpoint <sock> serve` 起一个玩具后台自测
   - 对端身份探针（dev feature，平台实测用）：`cargo run -p iwork-ipc --features dev --example peer-probe -- --help`
+- 审批引擎交错性质测试完整一轮（T07 方案 6.10.13；默认 256 例随 `cargo test` 跑）：`PROPTEST_CASES=5000 lockf /tmp/iwork-heavy-test.lock cargo test -p iwork-core --test engine_interleavings --test engine_fold`；复现某个种子加 `PROPTEST_RNG_SEED=<种子>`
+- 审批对拍语料：`cargo run -p iwork-core --example dump-credential-corpus` 导出需凭据命令的匹配语料（JSON），供 T06 对固定版本的 Claude Code 实测回填；内置规则集快照更新用 `IWORK_UPDATE_SNAPSHOTS=1 cargo test -p iwork-core --test builtin_rules`（改内置条目必须同时升 `RULESET_VERSION`）
 - 重测试排队（产品负责人 2026-11-10 定：同一时间只跑一张卡的重测试）：`cargo test --workspace`、`cargo clippy --workspace`、崩溃注入、`PROPTEST_CASES` 调大的属性测试、fuzz、`cargo bench`、release 构建、docker 里的测试，一律套 `lockf /tmp/iwork-heavy-test.lock <命令>` 跑（macOS 自带 `lockf`，拿不到锁就排队等）；单个 crate 的少量定向测试不用套。临时验证副本里跑也一样套
 
 ## 架构约定

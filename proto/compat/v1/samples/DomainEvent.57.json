@@ -1,0 +1,37 @@
+{
+  "approvalEvaluated": {
+    "turnId": "01JC0T0000000000000000TRN1",
+    "action": {
+      "kind": "ACTION_KIND_WRITE",
+      "target": {
+        "path": "/Users/me/proj/foo"
+      },
+      "toolName": "Bash",
+      "rawSummary": "npm test foo",
+      "argumentPath": true
+    },
+    "matchedRuleIds": [
+      "01JC0R0000000000000000RXE1"
+    ],
+    "rulesetVersion": "m1-1",
+    "verdict": {
+      "allow": {}
+    },
+    "layerHit": "RULE_LAYER_DEFAULT",
+    "durationMs": 1,
+    "snapshotListsSeq": "3",
+    "liveRulesSeq": "4",
+    "subActions": [
+      {
+        "kind": "ACTION_KIND_WRITE",
+        "target": {
+          "path": "/Users/me/proj/foo"
+        },
+        "toolName": "Bash",
+        "rawSummary": "npm test foo",
+        "argumentPath": true
+      }
+    ],
+    "callShape": "CALL_SHAPE_SINGLE_SIMPLE_COMMAND"
+  }
+}

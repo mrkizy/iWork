@@ -7,6 +7,7 @@ use std::time::Duration;
 use iwork_domain::action::ToolRef;
 use iwork_domain::common::{ArtifactRef, EffortLevel, ModelId, ModelSelection, Timestamp, Usage};
 use iwork_domain::event::{McpServerId, ToolCallId};
+use iwork_domain::runtime::QuotaWindow;
 use iwork_domain::session::{SessionConstraints, SessionToolSet};
 use iwork_domain::turn::TurnKind;
 
@@ -130,6 +131,18 @@ pub struct QuotaReading {
     /// 使用率百分比，0–100
     pub used_pct: u8,
     pub resets_at: Option<Timestamp>,
+}
+
+impl QuotaReading {
+    /// 记上观测时间，变成领域里的额度窗口。观测时间由收到读数的一方（编排）按自己的时钟给。
+    pub fn observed_at(self, at: Timestamp) -> QuotaWindow {
+        QuotaWindow {
+            window: self.window,
+            used_pct: self.used_pct,
+            resets_at: self.resets_at,
+            observed_at: at,
+        }
+    }
 }
 
 /// 一次 prompt 的更新流。返回 `None` 表示流结束。

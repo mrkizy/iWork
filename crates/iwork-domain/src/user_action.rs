@@ -260,3 +260,25 @@ impl UserActionCard {
         Ok(())
     }
 }
+
+/// 卡片事件的状态前提（T02 方案 2.6，PD2：校验整张表）：已落盘的状态种类「现在 → 新值」必须是
+/// [`USER_ACTION_TRANSITIONS`] 里的一条边。别的事件一律通过。
+pub fn check_committed(
+    state: &UserActionState,
+    event: &crate::event::DomainEvent,
+) -> Result<(), crate::approval::PreconditionFailed> {
+    let crate::event::DomainEvent::UserActionStateChanged(e) = event else {
+        return Ok(());
+    };
+    let (from, to) = (state.kind(), e.state.kind());
+    if USER_ACTION_TRANSITIONS
+        .iter()
+        .any(|(a, _, b)| *a == from && *b == to)
+    {
+        Ok(())
+    } else {
+        Err(crate::approval::PreconditionFailed {
+            message: format!("卡片状态 {from:?} → {to:?} 不是 USER_ACTION_TRANSITIONS 里的边"),
+        })
+    }
+}

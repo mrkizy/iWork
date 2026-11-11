@@ -111,6 +111,17 @@ fn base(feed: &Feed<'_>) {
     ]);
 }
 
+/// `base` 里回合的助手（`turn()` 夹具用 `aid(1)`）。审批与卡片写入前要查归属存续（方案 2.6），
+/// 建它们的用例先调这个。
+fn owner_assistant(feed: &Feed<'_>) {
+    feed.ok(vec![
+        AssistantCreated {
+            assistant: assistant(1, false),
+        }
+        .into(),
+    ]);
+}
+
 // ---------- 快照覆盖范围核对表（方案 2.6） ----------
 
 #[test]
@@ -121,6 +132,7 @@ fn snapshot_roundtrip_all_entities() {
     let rm = read_model(&store);
     let codec = ProtoEventCodec;
     base(&feed);
+    owner_assistant(&feed);
 
     // Project / Assistant / AssistantVersion
     let mut a = assistant(2, true);
@@ -140,7 +152,11 @@ fn snapshot_roundtrip_all_entities() {
     ]);
     a.current.version = 2;
     a.current.created_at = Timestamp(T0);
-    assert_eq!(block(rm.assistants()).unwrap(), vec![a.clone()]);
+    // 第二个是回合所属的助手（owner_assistant）
+    assert_eq!(
+        block(rm.assistants()).unwrap(),
+        vec![a.clone(), assistant(1, false)]
+    );
     let v = snapshot::decode_assistant_version(
         &codec,
         &conn(&env)
@@ -326,12 +342,14 @@ fn approval_terminal_states_online_and_rebuilt() {
     let store = env.open();
     let feed = Feed::new(&store);
     base(&feed);
+    owner_assistant(&feed);
     let mut expected = Vec::new();
     let mut n = 50;
     let mut push = |state: ApprovalState, event: Option<DomainEvent>, n: u128| {
         let mut a = approval(n, 20, 10);
         a.review = ReviewState::Passed {
             review_id: ReviewId(tid(99)),
+            reason: String::new(),
         };
         feed.ok(vec![
             ApprovalRequested {
@@ -387,6 +405,7 @@ fn approval_decided_sets_decided_at_from_envelope() {
     let store = env.open();
     let feed = Feed::new(&store);
     base(&feed);
+    owner_assistant(&feed);
     feed.ok(vec![
         ApprovalRequested {
             approval: approval(1, 20, 10),
@@ -704,6 +723,7 @@ fn conversation_deleted_cascades() {
     let store = env.open();
     let feed = Feed::new(&store);
     base(&feed);
+    owner_assistant(&feed);
     feed.ok(vec![
         ConversationCreated {
             conversation: project_conversation(11, 1),
@@ -870,6 +890,82 @@ fn missing_row_is_projection_error() {
     assert_eq!(block(store.head_seq()).unwrap(), head, "失败的命令整条回滚");
 }
 
+/// 会话绑定只写快照里的 `runtime_session_id`：读模型的 `Turn` 带着它，状态与中断计数不受影响，
+/// 重建后一致。
+#[test]
+fn session_bound_writes_runtime_session_id_only() {
+    let env = Env::new();
+    let store = env.open();
+    let feed = Feed::new(&store);
+    base(&feed);
+    let read_turn = || {
+        let view = block(read_model(&store).conversation(
+            cid(10),
+            MessagePage {
+                before: None,
+                limit: 10,
+            },
+        ))
+        .unwrap();
+        let [t] = view.turns.as_slice() else {
+            panic!("只有一个回合：{:?}", view.turns)
+        };
+        t.clone()
+    };
+    assert_eq!(
+        read_turn().runtime_session_id,
+        None,
+        "对照：排队时还没有会话"
+    );
+    feed.ok(vec![
+        TurnSessionBound {
+            turn_id: tid(20),
+            runtime_session_id: "sess-a".into(),
+        }
+        .into(),
+        TurnStateChanged {
+            turn_id: tid(20),
+            from: TurnState::Queued,
+            to: TurnState::Running,
+            reason: None,
+        }
+        .into(),
+    ]);
+    let t = read_turn();
+    assert_eq!(t.runtime_session_id.as_deref(), Some("sess-a"));
+    assert_eq!(t.state, TurnState::Running);
+
+    // 中断之后再绑定（续接换了会话）：中断计数与「继续」卡片不能被绑定冲掉
+    let interrupted = TurnState::Interrupted {
+        reason: InterruptReason::Crash,
+    };
+    feed.ok(vec![
+        TurnStateChanged {
+            turn_id: tid(20),
+            from: TurnState::Running,
+            to: interrupted,
+            reason: None,
+        }
+        .into(),
+    ]);
+    let q = "SELECT interrupted_seq FROM turns";
+    let seq_before = scalar(&env.db(), q);
+    feed.ok(vec![
+        TurnSessionBound {
+            turn_id: tid(20),
+            runtime_session_id: "sess-b".into(),
+        }
+        .into(),
+    ]);
+    assert_eq!(scalar(&env.db(), q), seq_before);
+    let t = read_turn();
+    assert_eq!(t.runtime_session_id.as_deref(), Some("sess-b"));
+    assert_eq!(t.state, interrupted);
+    assert_eq!(scalar(&env.db(), "SELECT unread FROM conversations"), 1);
+    rebuild(&store, &env);
+    assert_eq!(read_turn(), t, "重建后读模型一致");
+}
+
 #[test]
 fn updated_seq_tracks_last_event_touching_the_row() {
     let env = Env::new();
@@ -916,6 +1012,7 @@ fn unread_counts_messages_and_cards_and_recomputes_on_read() {
     let store = env.open();
     let feed = Feed::new(&store);
     base(&feed);
+    owner_assistant(&feed);
     let unread = || {
         block(read_model(&store).conversation(
             cid(10),

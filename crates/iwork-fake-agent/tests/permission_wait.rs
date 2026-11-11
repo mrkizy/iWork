@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use iwork_agent_acp::AcpRuntime;
-use iwork_core::turn::{PermissionDecider, SessionLine, TurnPlan, TurnPorts};
+use iwork_core::turn::{
+    Decided, PermissionDecider, SessionLine, TurnPlan, TurnPorts, VoidPlanError,
+};
 use iwork_domain::approval::VoidReason;
 use iwork_domain::event::{ApprovalVoided, DomainEvent};
 use iwork_domain::id::{ApprovalId, RawUlid, TurnId};
@@ -37,22 +39,34 @@ impl Gated {
 }
 
 impl PermissionDecider for Gated {
-    async fn decide(&self, _turn_id: TurnId, req: &PermissionRequest) -> PermissionDecision {
+    type VoidHold = ();
+
+    async fn decide(&self, _turn_id: TurnId, req: &PermissionRequest) -> Decided {
         self.asked.lock().unwrap().push(req.tool.0.clone());
         let mut rx = self.answer.subscribe();
         let answer = rx.wait_for(Option::is_some).await.expect("发送端活着");
-        answer.clone().expect("刚等到 Some")
+        Decided {
+            decision: answer.clone().expect("刚等到 Some"),
+            approval: None,
+        }
     }
 
-    async fn void_pending(&self, turn_id: TurnId, reason: VoidReason) -> Vec<DomainEvent> {
+    async fn void_pending(
+        &self,
+        turn_id: TurnId,
+        reason: VoidReason,
+    ) -> Result<(Vec<DomainEvent>, ()), VoidPlanError> {
         self.voided.lock().unwrap().push((turn_id, reason));
-        vec![
-            ApprovalVoided {
-                approval_id: ApprovalId::from_raw(RawUlid::from_u128(PENDING_APPROVAL)),
-                reason,
-            }
-            .into(),
-        ]
+        Ok((
+            vec![
+                ApprovalVoided {
+                    approval_id: ApprovalId::from_raw(RawUlid::from_u128(PENDING_APPROVAL)),
+                    reason,
+                }
+                .into(),
+            ],
+            (),
+        ))
     }
 }
 
