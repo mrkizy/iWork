@@ -1,0 +1,106 @@
+# T04 N5 真实包实测  2026-11-11 16:37:51
+macOS 27.2 (26B5086k) arm64；loadavg { 21.63 15.70 18.02 }
+
+## 0 tauri build（未配签名身份）的产物
+  整包封印 Contents/_CodeSignature/CodeResources：no；codesign 报的 Signature=adhoc；主程序 CodeDirectory flags=0x20002(adhoc,linker-signed)
+  主程序与 target/release/iwork-client 相同：是
+
+## A 无证书的形态（不做整包签名，最后加清单）
+### A1 启动与握手
+  PASS A1a 命令行起真实客户端 5 秒后：alive
+  PASS A1b open（双击同一条路径）起真实客户端 5 秒后：alive
+  PASS A1c 后台角色 manifest_loaded self_listed：1
+  PASS A1d 客户端角色 manifest_loaded self_listed：1
+  PASS A1e 握手：handshake=ok
+  PASS A1f 后台没有拒绝对端：0
+  A1g [iwork-client 位置，未封印的包] static_default=-67056 static_no_resources=0 dynamic=0
+  A1g [iwork-daemon 位置，未封印的包] static_default=0 static_no_resources=0 dynamic=0
+  A1g [散放的二进制] static_default=0 static_no_resources=0 dynamic=0
+  A1h 清单外的客户端 cdhash：0e696c4094cd2ee4bf9df28838ab29233282b2ec；清单里的：cdhash:b2cad515475012cc694012fbd3d901aebb4aeffd
+  PASS A1h （对照）客户端换成清单外的映像，后台拒绝的理由：reason=ImageNotTrusted
+### A2 清单登记项与运行中进程、文件全文
+  PASS A2a 真实客户端运行中 cdhash == 清单 cdhash：d2d3d3691a871da6850455a81ddb804d2f5508fa
+  PASS A2b iwork-client 清单 sha256 == 文件全文 SHA-256：sha256:d220e3234ce551382c1913e08c21a7c7fdd1d5e7cd2c7751a7043679ffa5e552
+  PASS A2b iwork-daemon 清单 sha256 == 文件全文 SHA-256：sha256:773e92723a0b482b0dd0d04c345185cf8a5058a6f6b3013e3d798ffd8c552867
+  PASS A2c 后台位置的运行中 cdhash == 清单 cdhash：deeece8d827a13e35c486300fd3ebe17dd83c0a7
+### A3 带清单那一行的判定
+  PASS A3a 完整的 A 包：Complete
+  PASS A3b 删掉清单：NotThisForm
+  PASS A3c 后台二进制截断一半：Incomplete
+  PASS A3d 完整的 A 包在整包签名那一行：NotThisForm
+### A4 记录项（不设通过条件）
+  见 A4.txt：<work>/A/iWork.app: code has no resources but signature indicates they must be present
+  隔离标记下 spctl：<work>/Aq.app: code has no resources but signature indicates they must be present
+  隔离标记下命令行起主程序：alive（双击会走 Gatekeeper 弹窗，无人值守不做，见 t0-findings）
+
+## B 有证书的形态（自签证书整包签名，包里不放清单）
+### B1 整包验签
+  PASS B1a codesign --verify --deep --strict：ok
+  PASS B1b SecStaticCodeCheckValidity 严格 + 嵌套 + 全部架构：verify=0
+  PASS B1c 整包签名那一行：Complete
+  PASS B1d 带清单那一行：NotThisForm
+  PASS B1e （对照）整包签名的包里两个角色握手：handshake=ok
+### B2 逐个破坏 → 验签不过、判没装齐
+  PASS B2 rm-resource：Incomplete
+  PASS B2 trunc-daemon：Incomplete
+  PASS B2 trunc-client：Incomplete
+  PASS B2 plist-byte：Incomplete
+  PASS B2 extra-file：Incomplete
+### B3 后台位置：磁盘静态 cdhash == 运行中 cdhash；换构建标记后两者都变
+  PASS B3a 标记 1：running == 静态（codesign 读文件）：6f360f51706f70673c1be1dd8649c3082bff2e76
+  PASS B3b 标记 2：running == 静态：6c59f0be913ab92a114f79c80634996646d90247
+  PASS B3c 两个标记的 cdhash 不同：differ
+  PASS B3d 两个包都整包验签通过：Complete/Complete
+  PASS B3e 真实客户端（证书签名）运行中 cdhash == 静态：693dfcfd94bc712c9fa57d3928745fe07e4fd6b4
+### B4 整包验签耗时（记数）
+  5 次：66.9 83.6 63.3 41.3 58.5 ms；包大小  10M
+### B5 反例：有证书的包里放清单
+  PASS B5a 签名之后加清单：整包验签：fail
+  B5b0 清单放在 Contents/MacOS 里再签整包：In subcomponent: <work>/B5/before/iWork.app/Contents/MacOS/iwork-manifest.json
+  PASS B5b 签名之前写清单（若签得上）：整包验签不过或清单对不上：not-both
+  B5c 签名之前写清单：验签 verify=-67056，清单那一行 Incomplete
+### B6 最后一个文件到位后重查能过；后台程序与封印文件的 stat 不变
+  PASS B6a 拿走一个资源：Incomplete
+  PASS B6b 放回去再查：Complete
+  PASS B6c 后台程序与封印文件的 size/mtime/inode 三个时刻相同：same
+  stat：450608 1794386355 446380676 2708 1794386355 446380674 
+
+## D 运行映像的身份（A、B 两种包各一遍）
+  PASS D1/a-mv 运行映像 cdhash 取得到：yes
+  PASS D2/a-mv 运行映像 == 自己路径的静态 cdhash（启动时）：yes
+  PASS D3/a-mv 换文件后运行映像从不报成新文件：none
+  a-mv 换文件后： 6 running=<原值>(0) static=81470811476d46b7bfbfc1455d488e382d3cb85e(0);
+  PASS D1/a-rm 运行映像 cdhash 取得到：yes
+  PASS D2/a-rm 运行映像 == 自己路径的静态 cdhash（启动时）：yes
+  PASS D3/a-rm 换文件后运行映像从不报成新文件：none
+  a-rm 换文件后： 6 running=-(-67034) static=81470811476d46b7bfbfc1455d488e382d3cb85e(0);
+  PASS D1/b-mv 运行映像 cdhash 取得到：yes
+  PASS D2/b-mv 运行映像 == 自己路径的静态 cdhash（启动时）：yes
+  PASS D3/b-mv 换文件后运行映像从不报成新文件：none
+  b-mv 换文件后： 6 running=<原值>(0) static=81470811476d46b7bfbfc1455d488e382d3cb85e(0);
+  PASS D1/b-rm 运行映像 cdhash 取得到：yes
+  PASS D2/b-rm 运行映像 == 自己路径的静态 cdhash（启动时）：yes
+  PASS D3/b-rm 换文件后运行映像从不报成新文件：none
+  b-rm 换文件后： 6 running=-(-67034) static=81470811476d46b7bfbfc1455d488e382d3cb85e(0);
+  PASS D1-cert 同一张证书签的两个构建，运行映像 cdhash 不同：differ
+  PASS D2-noread 改坏客户端文件中部一字节后读静态 cdhash（不校验）：d2d3d3691a871da6850455a81ddb804d2f5508fa
+  静态 cdhash 耗时：imgprobe（52520 字节）与客户端（10026720 字节）：5.934 21.495 6.740 ms
+  PASS D2-universal 通用二进制：运行映像 == 自己路径的静态 cdhash：yes
+  PASS D2-universal-arch 取的是本机架构那一片（== codesign 默认架构的 CDHash）：c8a2408d7b471b9082dbfc5383ae4f7511dee67c
+### D4 用 iwork-ipc 的正式函数（running_image_id / file_image_ids / verify_bundle）复核
+  PASS D4/a 运行映像 == 自己路径的文件身份（同一种）：true
+  PASS D4/a running_image_id == codesign 读的 cdhash：b2cad515475012cc694012fbd3d901aebb4aeffd
+  PASS D4/b 运行映像 == 自己路径的文件身份（同一种）：true
+  PASS D4/b running_image_id == codesign 读的 cdhash：e4c65a670af20176cb54b71dbcffdbe3d411e19d
+  PASS D4/a verify_bundle（未封印的 A 包）：1
+  PASS D4/b verify_bundle（整包签名的 B 包）：verify_bundle=Ok
+  PASS D4-cert 同一张证书两个构建：SelfIdentity 的签名者相同、运行映像不同：same-signer,different-image
+  签名者 certificate:f415695c；运行映像 cdhash:9b7dd8fc8055994b98d9e4b70fdb2946ea04c61f / cdhash:b867f5b1218d851757a5f5305fea6842c43627c3
+
+## E 两种形态互换
+  PASS E1a A 的目录整包换成 B：manifest=NotThisForm signed=Complete
+  PASS E1b B 的目录整包换成 A：manifest=Complete signed=NotThisForm
+  E2 把 B 合并拷进 A（旧清单残留）：manifest=Incomplete signed=Incomplete；验签报：verify=-67054 ms=19.9 The operation couldn’t be completed. (OSStatus error -67054.)
+  E2 删掉残留清单后：manifest=NotThisForm signed=Complete
+
+FAIL 共 0 项。原始输出在 tools/t0/out/t04-bundle/

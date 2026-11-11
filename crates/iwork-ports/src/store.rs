@@ -92,6 +92,34 @@ pub struct OutboxItem {
     pub attempts: u32,
 }
 
+/// 按去向挑待投递的条目（T04 方案 2.11）。前缀按字节比，不当通配符。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutboxSelector {
+    /// `target` 以这个前缀开头的（某一个去向取自己的）。
+    Prefix(String),
+    /// `target` 不以其中任何一个前缀开头的（没有去向认领的）。列表为空时就是全部。
+    NoneOf(Vec<String>),
+}
+
+impl OutboxSelector {
+    /// 这个去向的条目是否被选中。存储实现可以在 SQL 里做同样的筛选，语义以这里为准。
+    pub fn matches(&self, target: &OutboxTarget) -> bool {
+        match self {
+            Self::Prefix(p) => target.0.starts_with(p.as_str()),
+            Self::NoneOf(ps) => !ps.iter().any(|p| target.0.starts_with(p.as_str())),
+        }
+    }
+}
+
+/// [`StoragePort::outbox_requeue_dispatched`] 的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RequeueReport {
+    /// 改回 `Queued`、等着重投的条数。
+    pub requeued: u64,
+    /// 标成 `Failed` 的条数（去向不能幂等，不自动重投）。
+    pub failed: u64,
+}
+
 /// 一次命令的提交：事件、outbox、`command_id` 在同一个事务里。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommitRequest {
@@ -171,6 +199,19 @@ pub trait StoragePort: Send + Sync {
         id: OutboxId,
         state: DeliveryState,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
+    /// 把停在 `Dispatched`（派发了、没来得及记结果）的条目收尾，一个事务：`target` 以 `redeliver_prefixes`
+    /// 里任一前缀开头的改回 `Queued`（接收方按 `OutboxId` 去重，可以重投），其余标 `Failed`。`attempts` 不变。
+    fn outbox_requeue_dispatched(
+        &self,
+        redeliver_prefixes: Vec<String>,
+    ) -> impl Future<Output = Result<RequeueReport, StorageError>> + Send;
+    /// 符合 `selector`、状态是 `Queued` 的条目，按 id 递增，最多 `limit` 条。筛选在存储里做，
+    /// 排在别的去向后面的条目也挑得出来。
+    fn outbox_pending_where(
+        &self,
+        selector: OutboxSelector,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<OutboxItem>, StorageError>> + Send;
     /// 历史重建：清投影表 → 按序读全部事件 → 解码 → 同一个 projector；不写 outbox。
     fn rebuild_projections(
         &self,

@@ -13,6 +13,7 @@ use iwork_ports::store::StorageError;
 use rusqlite::{Connection, OpenFlags};
 
 use crate::reply::{self, Reply};
+use crate::signals::{ExitGuard, FailureSignal, StoreFailure};
 use crate::sql::sql_err;
 
 const READER_GONE: &str = "读线程已退出";
@@ -25,16 +26,28 @@ pub(crate) struct ReaderPool {
 }
 
 impl ReaderPool {
-    pub(crate) fn open(db: &Path, readers: usize, queue: usize) -> Result<Self, StorageError> {
+    pub(crate) fn open(
+        db: &Path,
+        readers: usize,
+        queue: usize,
+        failure: &Arc<FailureSignal>,
+    ) -> Result<Self, StorageError> {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Job>(queue);
         let rx = Arc::new(Mutex::new(rx));
         for i in 0..readers.max(1) {
             let conn = open_reader(db)?;
             let rx = rx.clone();
             let db = db.to_path_buf();
+            let failure = failure.clone();
             std::thread::Builder::new()
                 .name(format!("iwork-store-reader-{i}"))
-                .spawn(move || serve(conn, &db, &rx))
+                .spawn(move || {
+                    // 队列断开（存储关了）是正常退出；panic 或换不出新连接时守卫发 ReaderGone
+                    let guard = ExitGuard::new(failure, StoreFailure::ReaderGone);
+                    if serve(conn, &db, &rx) == Exit::QueueClosed {
+                        guard.disarm();
+                    }
+                })
                 .map_err(|e| StorageError::Io {
                     message: format!("起读线程失败：{e}"),
                 })?;
@@ -97,14 +110,25 @@ fn in_read_tx<T>(
     }
 }
 
-fn serve(mut conn: Connection, db: &Path, rx: &Mutex<Receiver<Job>>) {
+/// 读线程为什么退出。
+#[derive(Debug, PartialEq, Eq)]
+enum Exit {
+    /// 存储关了：正常
+    QueueClosed,
+    /// 卡在事务里的连接换不出新的
+    NoConnection,
+}
+
+fn serve(mut conn: Connection, db: &Path, rx: &Mutex<Receiver<Job>>) -> Exit {
     loop {
         // 只在取任务时持锁，任务本身不持锁执行
         let job = {
             let guard = rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.recv()
         };
-        let Ok(job) = job else { return };
+        let Ok(job) = job else {
+            return Exit::QueueClosed;
+        };
         job(&conn);
         if !conn.is_autocommit() && conn.execute_batch("ROLLBACK").is_err() {
             // 结束不了的读事务会一直挡住 checkpoint：丢掉这条连接，换一条新的
@@ -113,7 +137,7 @@ fn serve(mut conn: Connection, db: &Path, rx: &Mutex<Receiver<Job>>) {
                 Ok(fresh) => conn = fresh,
                 Err(e) => {
                     tracing::error!(error = %e, "重开读连接失败，读线程退出");
-                    return;
+                    return Exit::NoConnection;
                 }
             }
         }

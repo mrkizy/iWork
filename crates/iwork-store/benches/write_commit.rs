@@ -7,6 +7,8 @@
 //! 每组一行 JSON 到 stdout，人读的表到 stderr。
 //!
 //! 运行：`cargo bench -p iwork-store --bench write_commit`
+//! 装上提交观察者再量（T04 方案第 6 节「存储写入」）：`IWORK_BENCH_OBSERVER=1 cargo bench -p iwork-store --bench write_commit`。
+//! 观察者做的事和后台服务的一样重：每条事件转成 proto、算路由键，再丢进一个有界缓冲。
 
 #[path = "../tests/support/fixtures.rs"]
 mod fixtures;
@@ -22,7 +24,29 @@ use iwork_domain::event::{
 };
 use iwork_domain::turn::TurnState;
 use iwork_ports::store::StoragePort;
-use iwork_store::{OpenOptions, StoreConfig};
+use iwork_store::{CommitObserver, CommittedBatch, OpenOptions, StoreConfig};
+
+/// 和后台服务的观察者同样的工作量：转 proto + 算路由键。结果放进有界缓冲，满了就清（只为不让优化器删掉）。
+struct DaemonLikeObserver {
+    sink: Vec<(iwork_proto::pb::DomainEvent, usize)>,
+}
+
+impl CommitObserver for DaemonLikeObserver {
+    fn committed(&mut self, batch: CommittedBatch<'_>) {
+        for e in batch.events {
+            let pb = iwork_app::convert::event_to_proto(&e.event).expect("转 proto");
+            let routes = iwork_app::subscription::routes_for(&e.event).len();
+            if self.sink.len() >= 4096 {
+                self.sink.clear();
+            }
+            self.sink.push((pb, routes));
+        }
+    }
+}
+
+fn observer_on() -> bool {
+    std::env::var("IWORK_BENCH_OBSERVER").is_ok_and(|v| v == "1")
+}
 
 struct Scenario {
     name: &'static str,
@@ -124,6 +148,10 @@ fn run(scenario: &Scenario, fullfsync: Option<bool>, label: &str) {
         ],
     )))
     .unwrap();
+    if observer_on() {
+        block(store.set_commit_observer(Box::new(DaemonLikeObserver { sink: Vec::new() })))
+            .expect("装观察者");
+    }
 
     let started = Instant::now();
     let handles: Vec<_> = (0..scenario.threads)
@@ -160,18 +188,20 @@ fn run(scenario: &Scenario, fullfsync: Option<bool>, label: &str) {
     );
     println!(
         "{{\"bench\":\"store_write\",\"scenario\":\"{}\",\"commands\":{commands},\"p50_us\":{p50},\"p95_us\":{p95},\
-         \"p99_us\":{p99},\"commands_per_sec\":{per_sec:.1},\"batches\":{},\"fullfsync\":\"{label}\",\
+         \"p99_us\":{p99},\"commands_per_sec\":{per_sec:.1},\"batches\":{},\"fullfsync\":\"{label}\",\"observer\":{},\
          \"sqlite_version\":\"{}\",\"platform\":\"{}-{}\"}}",
         scenario.name,
         store.committed_batches(),
+        observer_on(),
         rusqlite::version(),
         std::env::consts::OS,
         std::env::consts::ARCH,
     );
     eprintln!(
-        "{:<14} fullfsync={:<4} 命令 {commands:>5}  P50 {p50:>6}µs  P95 {p95:>6}µs  P99 {p99:>6}µs  {per_sec:>8.1} 条/秒  批数 {}",
+        "{:<14} fullfsync={:<4} observer={:<5} 命令 {commands:>5}  P50 {p50:>6}µs  P95 {p95:>6}µs  P99 {p99:>6}µs  {per_sec:>8.1} 条/秒  批数 {}",
         scenario.name,
         label,
+        observer_on(),
         store.committed_batches()
     );
 }

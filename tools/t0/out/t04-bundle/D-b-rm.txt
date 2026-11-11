@@ -1,0 +1,9 @@
+pid=50748 mark=iwork-t04-imgprobe-mark-1
+running=6f360f51706f70673c1be1dd8649c3082bff2e76 status=0 path=<work>/D/b-rm/iWork.app/Contents/MacOS/iwork-daemon
+static=6f360f51706f70673c1be1dd8649c3082bff2e76 status=0 equal=yes
+tick=0 running=-(-67034) static=81470811476d46b7bfbfc1455d488e382d3cb85e(0)
+tick=1 running=-(-67034) static=81470811476d46b7bfbfc1455d488e382d3cb85e(0)
+tick=2 running=-(-67034) static=81470811476d46b7bfbfc1455d488e382d3cb85e(0)
+tick=3 running=-(-67034) static=81470811476d46b7bfbfc1455d488e382d3cb85e(0)
+tick=4 running=-(-67034) static=81470811476d46b7bfbfc1455d488e382d3cb85e(0)
+tick=5 running=-(-67034) static=81470811476d46b7bfbfc1455d488e382d3cb85e(0)
