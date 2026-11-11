@@ -1795,3 +1795,41 @@ async fn everyday_approval_flows_commit() {
         "日常流程没有一次被拒后重算"
     );
 }
+
+/// t07-b/1/F-1：请求那笔提交成功、紧跟的追平读失败（只记日志），折叠里还没有这条审批。审查通过回来时
+/// `settle_review` 先追平再查索引，结论照常生效、hook 拿到放行；不先追平就查不到、当成已处理丢掉，hook 一直等。
+#[tokio::test]
+async fn t_settle_review_catches_up_before_lookup() {
+    let b = Bench::new(Some(Auto)).await;
+    let review = notify();
+    b.reviewer.push(ReviewScript::SaysAfter(
+        "{\"pass\": true, \"reason\": \"ok\"}".into(),
+        review.clone(),
+    ));
+    let commit = notify();
+    *b.store.before_commit.lock().unwrap() = Some(commit.clone());
+    let h = b.ask(
+        &b.decider(),
+        turn(1),
+        read_req("/home/u/Documents/notes/x.txt"),
+    );
+    until("请求那笔入队", || {
+        b.store.commit_entered.load(Ordering::SeqCst)
+    })
+    .await;
+    // 让请求提交之后的那次追平读失败
+    b.store.fail_read.store(true, Ordering::SeqCst);
+    commit.notify_one();
+    let id = b.approval(0).await;
+    until("追平失败过", || {
+        !b.store.fail_read.load(Ordering::SeqCst)
+    })
+    .await;
+    assert!(
+        b.engine.pending_approval(id).is_none(),
+        "对照：折叠里还没有这条审批"
+    );
+    review.notify_one();
+    assert_eq!(settle(h).await, PermissionDecision::Allow);
+    assert!(!no_approved(&b, id));
+}
