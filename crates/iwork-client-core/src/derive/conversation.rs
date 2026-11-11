@@ -238,7 +238,12 @@ fn composer_view(store: &Store, input: ComposerInput<'_>) -> pb::ComposerView {
             ..Block::plain(text::COMPOSER_PATH_MISSING.into())
         })
     } else {
-        text::composer_block(runtime_state, &runtime_name).map(|msg| match runtime_state {
+        text::composer_block(
+            runtime_state,
+            &runtime_name,
+            runtime.and_then(|r| r.cli_version.as_deref()),
+        )
+        .map(|msg| match runtime_state {
             pb::RuntimeState::ReadyUnverified => Block {
                 busy: true,
                 ..Block::plain(msg)

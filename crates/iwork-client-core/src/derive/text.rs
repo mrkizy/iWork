@@ -260,19 +260,30 @@ pub fn runtime_guidance(state: pb::RuntimeState, name: &str) -> Option<String> {
 }
 
 /// 输入框被挡住时的说明（方案 2.7 首页一行；R10：验证状态在这里只说「为什么发不了」）。
-pub fn composer_block(state: pb::RuntimeState, name: &str) -> Option<String> {
+/// 输入框上方挡住发送的一行（运行时）。验证中、未通过两句照 ui-m1.md 2a 第 8 条，带版本号
+/// （「Claude Code 2.1.3」）；取不到版本时只写名字。未安装、未登录 2a 没写原文，沿用这里的说法。
+pub fn composer_block(
+    state: pb::RuntimeState,
+    name: &str,
+    version: Option<&str>,
+) -> Option<String> {
     use pb::RuntimeState as S;
+    let named = match version.filter(|v| !v.is_empty()) {
+        Some(v) => format!("{name} {v}"),
+        None => name.to_owned(),
+    };
     match state {
         S::Missing => Some(format!("没有找到 {name}，装好后才能发送")),
         S::NotLoggedIn => Some(format!("{name} 还没登录，登录后才能发送")),
-        S::ReadyUnverified => Some(format!("正在验证这个版本的 {name}，验证通过后就能发送")),
-        S::Incompatible => Some(format!("这个版本的 {name} 没通过验证，暂时不能发送")),
+        S::ReadyUnverified => Some(format!("正在检查 {named} 能否安全使用…")),
+        S::Incompatible => Some(format!("{named} 没有通过安全检查，暂不能使用")),
         S::ReadyVerified | S::Unspecified => None,
     }
 }
 
 pub const COMPOSER_OFFLINE: &str = "正在重新连接，连上后就能发送";
-pub const COMPOSER_PATH_MISSING: &str = "找不到项目文件夹，重新定位后才能发送";
+/// ui-m1.md 2a 第 7 条原文。
+pub const COMPOSER_PATH_MISSING: &str = "找不到项目文件夹，重新定位后才能继续";
 pub const COMPOSER_DELETING: &str = "对话正在删除";
 pub const RELOCATE: &str = "重新定位";
 pub const DETAILS: &str = "查看详情";
@@ -485,6 +496,33 @@ mod badge_tests {
         assert_eq!(
             t(pending_badge(250)),
             Some(("99+".into(), "250 项待你处理".into()))
+        );
+    }
+}
+
+#[cfg(test)]
+mod composer_block_tests {
+    use super::composer_block;
+    use iwork_proto::pb::RuntimeState as S;
+
+    /// ui-m1.md 2a 第 8 条的原文，带版本号；取不到版本只写名字。
+    #[test]
+    fn verifying_and_incompatible_follow_the_spec_wording() {
+        assert_eq!(
+            composer_block(S::ReadyUnverified, "Claude Code", Some("2.1.3")).as_deref(),
+            Some("正在检查 Claude Code 2.1.3 能否安全使用…")
+        );
+        assert_eq!(
+            composer_block(S::Incompatible, "Claude Code", Some("2.1.3")).as_deref(),
+            Some("Claude Code 2.1.3 没有通过安全检查，暂不能使用")
+        );
+        assert_eq!(
+            composer_block(S::Incompatible, "Claude Code", None).as_deref(),
+            Some("Claude Code 没有通过安全检查，暂不能使用")
+        );
+        assert_eq!(
+            composer_block(S::ReadyVerified, "Claude Code", Some("2.1.3")),
+            None
         );
     }
 }
