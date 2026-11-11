@@ -762,7 +762,6 @@ mod tests {
         let w = World::new();
         let (sa, sb) = (seen(), seen());
         w.add(&["a:1", "a:2", "b:1"]).await;
-        let started = Instant::now();
         let _t = w.start(vec![
             route("a:", OnUncertain::Redeliver, Mode::Hang, &sa),
             route("b:", OnUncertain::Redeliver, Mode::Ok, &sb),
@@ -771,9 +770,12 @@ mod tests {
             w.count("b:", "accepted_by_runtime") == 1
         })
         .await;
-        assert!(
-            started.elapsed() < Duration::from_millis(200),
-            "B 没等 A 的时限"
+        // B 不排在 A 卡住的那条后面：B 送达时，A 的第一条还没走完它的几次重试（要约 7s），不和墙钟比
+        assert_eq!(
+            w.count("a:", "failed"),
+            0,
+            "B 没等 A 的条目收尾：{:?}",
+            w.states()
         );
         // 每次超时后改回排队、按可重试的退避（1s、2s、4s）重取：两条各 3 次，约 15s
         w.until("A 两条都失败", Duration::from_secs(30), |w| {
