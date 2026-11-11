@@ -171,7 +171,7 @@ fn load_manifest_at_start(exe_dir: &Path, own: &SignerIdentity) -> Option<Manife
             Some(m)
         }
         Err(e) => {
-            tracing::warn!(target: crate::audit::TARGET, event = "manifest_unavailable", path = %path.display(), reason = %e);
+            tracing::warn!(target: crate::audit::TARGET, event = crate::audit::EVENT_MANIFEST_UNAVAILABLE, path = %path.display(), reason = %e);
             None
         }
     }
@@ -280,6 +280,82 @@ pub enum PeerError {
     Credentials(#[source] std::io::Error),
     #[error("取本进程身份失败：{0}")]
     SelfIdentity(String),
+    #[error("取 {path} 的映像身份失败：{reason}")]
+    Image { path: PathBuf, reason: String },
+}
+
+// ---------------------------------------------------------------- 安装检查用的三个只读函数（T04 方案 2.9）
+// 它们不参与对端判定：SelfIdentity、PeerIdentity、judge_peer 一律不动。两种身份分开取、分开用：
+// `running_image_id` 是「我正在运行的这一份」，`file_image_ids` 是「磁盘上现在那个文件」，不混用。
+
+/// 本进程**运行中映像**的身份。Linux：`/proc/self/exe` 的全文 SHA-256；macOS：`SecCodeCopySelf` 的动态代码对象的
+/// cdhash，有没有证书都取。和 [`SelfIdentity::detect`] 走同一段取运行映像的代码、同一处绑定验证，不读路径上的文件。
+///
+/// 只在启动时取一次：运行中途路径上的文件被换掉后，macOS 上再取可能报错（不会取成新文件）。
+/// Windows（M1 不支持）总是返回错误。
+pub fn running_image_id() -> Result<ImageId, PeerError> {
+    platform::running_image_id()
+}
+
+/// [`file_image_ids`] 要取哪几种身份。
+#[derive(Debug, Clone, Copy)]
+pub enum Want<'a> {
+    /// 只要和这个身份同一种的那一个（判断「磁盘上的是不是我」时传运行映像的身份）。macOS 上要 cdhash 时只读签名，
+    /// 不算全文哈希。
+    SameKindAs(&'a ImageId),
+    /// 这个平台能给的全部（核对清单登记项时用）。
+    All,
+}
+
+/// 磁盘上一个程序文件的身份，只算调用方要的那几种。Linux、Windows 只有全文 SHA-256；macOS 另有签名里的 cdhash
+/// （未签名的文件没有）。文件不存在、读不了、签名结构坏了都是错误（半个文件就是这样）。
+pub fn file_image_ids(path: &Path, want: Want<'_>) -> Result<Vec<ImageId>, PeerError> {
+    let (sha256, cdhash) = match want {
+        Want::All => (true, true),
+        Want::SameKindAs(ImageId::Sha256(_)) => (true, false),
+        Want::SameKindAs(ImageId::CdHash(_)) => (false, true),
+    };
+    let fail = |reason: String| PeerError::Image {
+        path: path.to_path_buf(),
+        reason,
+    };
+    let mut ids = Vec::new();
+    if sha256 {
+        ids.push(ImageId::Sha256(
+            sha256_file(path).map_err(|e| fail(e.to_string()))?,
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    if cdhash && let Some(h) = macos::file_cdhash(path).map_err(fail)? {
+        ids.push(ImageId::CdHash(h));
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = cdhash;
+    Ok(ids)
+}
+
+/// macOS：对 .app 做整包静态验签（严格模式、含嵌套代码、全部架构）。每次都完整重查，不记上次的结果。
+#[cfg(target_os = "macos")]
+pub fn verify_bundle(app: &Path) -> Result<(), PeerError> {
+    macos::verify_bundle(app).map_err(|reason| PeerError::Image {
+        path: app.to_path_buf(),
+        reason,
+    })
+}
+
+fn sha256_file(path: &Path) -> std::io::Result<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            return Ok(hasher.finalize().into());
+        }
+        hasher.update(&buf[..n]);
+    }
 }
 
 /// 唯一的判定入口。纯函数，三平台同一份，两端同一份。
