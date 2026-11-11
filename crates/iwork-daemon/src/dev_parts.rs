@@ -202,6 +202,61 @@ pub async fn stop_on(file: PathBuf, reason: StopReason, stop: StopSwitch) {
     }
 }
 
+/// 让写线程失效的触发器配置。
+pub fn break_writer_trigger() -> Option<PathBuf> {
+    std::env::var(BREAK_WRITER_ENV).ok().map(PathBuf::from)
+}
+
+/// 任务体：等文件出现，删掉，提交一条触发器事件（这次提交会因写线程退出而失败）。
+pub async fn break_writer_on(file: PathBuf, store: std::sync::Arc<crate::boot::Store>) {
+    use iwork_ports::clock::IdGenerator;
+    use iwork_ports::store::StoragePort;
+    loop {
+        if std::fs::remove_file(&file).is_ok() {
+            tracing::warn!("开发触发器：让存储写线程失效");
+            let ids = crate::time::MonotonicIds::new(crate::time::SystemClock::new());
+            let r = store
+                .commit(iwork_ports::store::CommitRequest {
+                    command_id: iwork_domain::id::CommandId::from_raw(ids.next()),
+                    actor: iwork_domain::common::Actor(BREAK_WRITER_ACTOR.into()),
+                    events: vec![
+                        iwork_domain::event::GlobalSettingsChanged {
+                            playful_ui: None,
+                            autostart: None,
+                            projects_root: None,
+                        }
+                        .into(),
+                    ],
+                    outbox: vec![],
+                })
+                .await;
+            tracing::warn!(result = ?r.map(|_| ()), "开发触发器的提交返回");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// 设了 `IWORK_DEV_BREAK_WRITER_ON` 时给观察者包一层；没设原样返回。
+pub fn wrap_observer<O: iwork_store::CommitObserver>(
+    inner: O,
+) -> Box<dyn iwork_store::CommitObserver> {
+    if break_writer_trigger().is_none() {
+        return Box::new(inner);
+    }
+    Box::new(BreakOnTrigger(inner))
+}
+
+struct BreakOnTrigger<O>(O);
+
+impl<O: iwork_store::CommitObserver> iwork_store::CommitObserver for BreakOnTrigger<O> {
+    fn committed(&mut self, batch: iwork_store::CommittedBatch<'_>) {
+        if batch.events.iter().any(|e| e.actor.0 == BREAK_WRITER_ACTOR) {
+            panic!("开发触发器：在写线程上 panic，让存储失效");
+        }
+        self.0.committed(batch);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,60 +368,5 @@ mod tests {
         let opened = late.await.unwrap();
         assert!(opened.is_err(), "封口之后开会话应被拒：{opened:?}");
         assert!(w.procs.lock().unwrap().is_empty());
-    }
-}
-
-/// 让写线程失效的触发器配置。
-pub fn break_writer_trigger() -> Option<PathBuf> {
-    std::env::var(BREAK_WRITER_ENV).ok().map(PathBuf::from)
-}
-
-/// 任务体：等文件出现，删掉，提交一条触发器事件（这次提交会因写线程退出而失败）。
-pub async fn break_writer_on(file: PathBuf, store: std::sync::Arc<crate::boot::Store>) {
-    use iwork_ports::clock::IdGenerator;
-    use iwork_ports::store::StoragePort;
-    loop {
-        if std::fs::remove_file(&file).is_ok() {
-            tracing::warn!("开发触发器：让存储写线程失效");
-            let ids = crate::time::MonotonicIds::new(crate::time::SystemClock::new());
-            let r = store
-                .commit(iwork_ports::store::CommitRequest {
-                    command_id: iwork_domain::id::CommandId::from_raw(ids.next()),
-                    actor: iwork_domain::common::Actor(BREAK_WRITER_ACTOR.into()),
-                    events: vec![
-                        iwork_domain::event::GlobalSettingsChanged {
-                            playful_ui: None,
-                            autostart: None,
-                            projects_root: None,
-                        }
-                        .into(),
-                    ],
-                    outbox: vec![],
-                })
-                .await;
-            tracing::warn!(result = ?r.map(|_| ()), "开发触发器的提交返回");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// 设了 `IWORK_DEV_BREAK_WRITER_ON` 时给观察者包一层；没设原样返回。
-pub fn wrap_observer<O: iwork_store::CommitObserver>(
-    inner: O,
-) -> Box<dyn iwork_store::CommitObserver> {
-    if break_writer_trigger().is_none() {
-        return Box::new(inner);
-    }
-    Box::new(BreakOnTrigger(inner))
-}
-
-struct BreakOnTrigger<O>(O);
-
-impl<O: iwork_store::CommitObserver> iwork_store::CommitObserver for BreakOnTrigger<O> {
-    fn committed(&mut self, batch: iwork_store::CommittedBatch<'_>) {
-        if batch.events.iter().any(|e| e.actor.0 == BREAK_WRITER_ACTOR) {
-            panic!("开发触发器：在写线程上 panic，让存储失效");
-        }
-        self.0.committed(batch);
     }
 }
