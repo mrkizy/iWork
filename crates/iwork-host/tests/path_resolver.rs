@@ -241,10 +241,11 @@ fn fake_fs_agrees_with_os() {
         "",
         "/",
     ];
-    let mut raws = raws.to_vec();
     // Windows 上普通文件后再接分量报「找不到」而不是「不是目录」，权限也没有 chmod 000：只在 unix 对拍
     #[cfg(unix)]
-    raws.extend(["src/a.rs/x", "gate/root", "gate"]);
+    let raws = [raws.as_slice(), &["src/a.rs/x", "gate/root", "gate"]].concat();
+    #[cfg(not(unix))]
+    let raws = raws.to_vec();
     for raw in raws {
         let os = l.os.resolve(&l.ws(), raw);
         let fake = l.fake.resolve(&l.ws(), raw);
