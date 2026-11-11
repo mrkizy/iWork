@@ -121,6 +121,10 @@
   padding-top: 8px;
   padding-bottom: 8px;
 }
+/* 没有最近动态只有名字一行：名字与头像垂直居中（审查 2a F-17） */
+.iw-assistant--one-line {
+  align-items: center;
+}
 .iw-assistant__text {
   display: flex;
   flex: 1;

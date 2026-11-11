@@ -99,17 +99,30 @@ message SidebarPatch {
 }
 
 message SidebarView {
-  // 「待你处理」计数（不含已作废）。
-  uint32 pending_count = 1;
+  // 原来的「待你处理」计数：换成了 pending_badge（文字由 Rust 给，超过 99 写「99+」）。
+  reserved 1;
+  reserved "pending_count";
   repeated ProjectRow projects = 2;
   repeated AssistantRow assistants = 3;
   repeated QuotaCell quota = 4;
+  // 「待你处理」计数（不含已作废）；0 时不设。
+  CountBadge pending_badge = 5;
+}
+
+// 数字徽标（ui-m1.md 第 2 节第 4 条）：超过 99 写「99+」，侧栏徽标、「待你处理」与 Dock 角标同一个规则。
+// 计数为 0 时整个不设，界面不画。
+message CountBadge {
+  string text = 1;
+  // 读屏读的整句（带真实数目），如「120 条未读」。
+  string label = 2;
 }
 
 message ProjectRow {
   string project_id = 1;
   string name = 2;
-  uint32 unread = 3;
+  // 原来的未读数：换成了 unread_badge。
+  reserved 3;
+  reserved "unread";
   bool pinned = 4;
   // 找不到路径：划线、标签、行内「重新定位」。
   bool path_missing = 5;
@@ -119,6 +132,7 @@ message ProjectRow {
   // 有没有更多对话（显示「全部对话」）。
   bool has_more_conversations = 8;
   string root_path = 9;
+  CountBadge unread_badge = 10;
 }
 
 message ConversationItem {
@@ -129,12 +143,15 @@ message ConversationItem {
   string dot_label = 4;
   bool can_rename = 5;
   bool can_delete = 6;
-  uint32 unread = 7;
+  // 原来的未读数：换成了 unread_badge。
+  reserved 7;
+  reserved "unread";
   // 当前打开的对话。
   bool selected = 8;
   // 「全部对话」页用：最近一条消息首行与最近活动时间（已格式化）。
   string last_message_first_line = 9;
   string last_active_label = 10;
+  CountBadge unread_badge = 11;
 }
 
 message AssistantRow {
@@ -146,12 +163,15 @@ message AssistantRow {
   reserved "expression";
   // 最近动态一行；从没说过话时不设，界面不显示第二行。
   optional string activity_line = 5;
-  // 只算它那条私聊。
-  uint32 unread = 6;
+  // 原来的未读数：换成了 unread_badge。
+  reserved 6;
+  reserved "unread";
   bool can_delete = 7;
   string dm_conversation_id = 8;
   bool builtin = 9;
   bool selected = 10;
+  // 只算它那条私聊。
+  CountBadge unread_badge = 11;
 }
 
 // 额度一行里的一格：取不到时 value_text 是「—」。
@@ -235,6 +255,8 @@ message ComposerView {
   repeated AttachmentChip tray = 13;
   // 「运行时 · 模型」菜单（ui-m1.md 第 2 节第 14 条）。
   ModelMenuView model_menu = 14;
+  // 正文框里的占位文字：跟答话的助手说（ui-m1.md 3.4 的例子「跟阿森说点什么」）。
+  string placeholder = 15;
 }
 
 // 「运行时 · 模型」菜单：运行时、模型（仅本对话）、思考强度三节。选中项与可否选都由 Rust 侧给。

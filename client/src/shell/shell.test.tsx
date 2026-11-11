@@ -24,7 +24,11 @@ describe.skipIf(noFixtures)("侧栏", () => {
     renderScenario("quota-missing");
     const quota = screen.getByLabelText("本机额度");
     expect(quota).toHaveTextContent("—");
-    expect(quota.querySelector("[data-tip]")?.getAttribute("data-tip")).toBe("暂时取不到额度");
+    const cell = quota.querySelector<HTMLElement>("[data-tip]")!;
+    expect(cell.getAttribute("data-tip")).toBe("暂时取不到额度");
+    // 键盘也能看到提示（F-18）；名字与「—」是两个元素，中间有间距（F-15）
+    expect(cell.tabIndex).toBe(0);
+    expect([...cell.children].map((c) => c.textContent)).toEqual(["Claude Code", "—"]);
   });
 
   it("对照：有额度时显示百分比与进度条", () => {
@@ -141,6 +145,13 @@ describe.skipIf(noFixtures)("对话页", () => {
     expect(menu).toHaveTextContent("模型 · 仅本对话");
     expect(menu).toHaveTextContent("思考强度");
     expect(within(menu).getByRole("menuitem", { name: /Claude Code/ })).toBeDisabled();
+    // 选中项有底色；还没接入的运行时灰着、写「M2 接入」（F-19）
+    expect(within(menu).getByRole("menuitem", { name: /Claude Code/ })).toHaveClass("iw-menu__item--selected");
+    expect(within(menu).getByRole("menuitem", { name: /Fake Large/ })).toHaveClass("iw-menu__item--selected");
+    expect(within(menu).getByRole("menuitem", { name: /Fake Small/ })).not.toHaveClass("iw-menu__item--selected");
+    const codex = within(menu).getByRole("menuitem", { name: /Codex/ });
+    expect(codex).toBeDisabled();
+    expect(codex).toHaveTextContent("M2 接入");
     fireEvent.click(within(menu).getByRole("menuitem", { name: /Fake Small/ }));
     expect(userActs(acts)).toEqual([
       expect.objectContaining({ case: "setModel", value: expect.objectContaining({ modelId: "fake-small", effort: "medium" }) }),
@@ -162,6 +173,7 @@ describe.skipIf(noFixtures)("首页", () => {
   it("发出交给 Rust 一次 startConversation；受理后草稿还在，等跳转收尾才清", async () => {
     const { acts } = renderScenario("empty");
     const box = screen.getByRole("textbox", { name: "消息" }) as HTMLTextAreaElement;
+    expect(box.placeholder, "占位文字由 Rust 按答话的助手给（F-14）").toBe("跟 iWork 说点什么");
     fireEvent.input(box, { target: { value: "首页的第一条" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     await Promise.resolve();

@@ -79,11 +79,12 @@
   cursor: not-allowed;
 }
 
-/* 悬停提示：带 data-tip 的元素，纯 CSS，不另起浮层 */
+/* 悬停提示：带 data-tip 的元素，纯 CSS，不另起浮层；键盘聚焦时也出（审查 2a F-18） */
 [data-tip] {
   position: relative;
 }
-[data-tip]:hover::after {
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
   content: attr(data-tip);
   position: absolute;
   z-index: 50;
@@ -102,7 +103,8 @@
   pointer-events: none;
   box-shadow: var(--shadow-tip);
 }
-[data-tip-side="top"]:hover::after {
+[data-tip-side="top"]:hover::after,
+[data-tip-side="top"]:focus-visible::after {
   top: auto;
   bottom: calc(100% + 6px);
 }

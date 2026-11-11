@@ -24,7 +24,7 @@ export function ModelMenu(props: { target: ComposerTarget; menu: ModelMenuView; 
       <MenuTitle>运行时</MenuTitle>
       <For each={props.menu.runtimes}>
         {(r) => (
-          <MenuItem disabled={!r.enabled} tip={r.enabled ? undefined : r.tip} onSelect={props.onClose}>
+          <MenuItem disabled={!r.enabled} selected={r.selected} tip={r.enabled ? undefined : r.tip} onSelect={props.onClose}>
             <Choice c={r} inlineTip />
           </MenuItem>
         )}
@@ -34,14 +34,14 @@ export function ModelMenu(props: { target: ComposerTarget; menu: ModelMenuView; 
       <Show when={!props.menu.modelsLoading} fallback={<MenuTitle><Spinner label="正在取模型清单" /></MenuTitle>}>
         <For each={props.menu.models}>
           {(m) => (
-            <MenuItem disabled={!m.enabled} onSelect={() => setModel(m.value, currentEffort())}>
+            <MenuItem disabled={!m.enabled} selected={m.selected} onSelect={() => setModel(m.value, currentEffort())}>
               <Choice c={m} />
             </MenuItem>
           )}
         </For>
       </Show>
       <Show when={props.menu.customModel}>
-        <MenuItem disabled onSelect={props.onClose}>
+        <MenuItem disabled selected onSelect={props.onClose}>
           <Choice c={{ value: props.menu.customModel, label: props.menu.customModel, selected: true, enabled: true, tip: "" } as MenuChoice} />
         </MenuItem>
       </Show>

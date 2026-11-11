@@ -6,6 +6,9 @@ use iwork_proto::pb;
 use super::text;
 use crate::store::Store;
 
+/// 还没接入的运行时：灰着列在运行时一节末尾，标「M2 接入」（画布 01-Main-modelmenu）。接入后从这里删掉。
+pub const UPCOMING_RUNTIMES: &[&str] = &["Codex"];
+
 /// 菜单要的输入：当前运行时、当前模型选择、运行时一节是否已锁（对话开始后）。
 pub struct MenuInput<'a> {
     pub runtime_id: &'a str,
@@ -14,7 +17,7 @@ pub struct MenuInput<'a> {
 }
 
 pub fn model_menu(store: &Store, input: &MenuInput<'_>) -> pb::ModelMenuView {
-    let runtimes = store
+    let mut runtimes: Vec<pb::MenuChoice> = store
         .runtimes
         .values()
         .map(|r| {
@@ -35,6 +38,19 @@ pub fn model_menu(store: &Store, input: &MenuInput<'_>) -> pb::ModelMenuView {
             }
         })
         .collect();
+    runtimes.extend(
+        UPCOMING_RUNTIMES
+            .iter()
+            .filter(|name| !runtimes.iter().any(|r| r.label == **name))
+            .map(|name| pb::MenuChoice {
+                value: String::new(),
+                label: (*name).to_owned(),
+                selected: false,
+                enabled: false,
+                tip: text::RUNTIME_NOT_IN_M1.into(),
+            })
+            .collect::<Vec<_>>(),
+    );
     let catalog = store.models.get(input.runtime_id);
     let current_model = input
         .model

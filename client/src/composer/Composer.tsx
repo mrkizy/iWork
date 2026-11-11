@@ -25,7 +25,6 @@ export interface ComposerProps {
   /** 首页：上一次没能发出去的原因（草稿还在）。 */
   startError?: string;
   draftKey: string;
-  placeholder?: string;
   /** 输入框上方那一行的出口（「查看详情」「重新定位」）；返回假表示这个出口现在用不了，按钮置灰。 */
   blockAction?: (a: BlockAction) => (() => void) | undefined;
 }
@@ -132,7 +131,7 @@ export function Composer(props: ComposerProps) {
         <textarea
           class="iw-composer__input"
           aria-label="消息"
-          placeholder={props.placeholder}
+          placeholder={c()?.placeholder}
           value={text()}
           onInput={(e) => edit(e.currentTarget.value)}
           onCompositionStart={() => (composing = true)}

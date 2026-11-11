@@ -1,15 +1,17 @@
 // 小件：未读徽标、状态圆点、转圈。数字、状态与状态名全由 Rust 侧给（ui-m1.md 第 2 节第 4 条、2a 第 1 条）。
 import { Show } from "solid-js";
-import { DotState } from "../gen/iwork/v1/view_pb";
+import { DotState, type CountBadge } from "../gen/iwork/v1/view_pb";
 import "./Badge.css";
 
-/** 未读徽标：0 不显示。 */
-export function Badge(props: { count: number; label?: string }) {
+/** 数字徽标：文字（含「99+」）与读屏标签都由 Rust 给；没有就不画。 */
+export function Badge(props: { badge?: CountBadge }) {
   return (
-    <Show when={props.count > 0}>
-      <span class="iw-badge" aria-label={props.label ?? `${props.count} 条未读`}>
-        {props.count}
-      </span>
+    <Show when={props.badge}>
+      {(b) => (
+        <span class="iw-badge" aria-label={b().label}>
+          {b().text}
+        </span>
+      )}
     </Show>
   );
 }

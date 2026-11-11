@@ -73,6 +73,8 @@ export function Menu(props: { anchor: MenuAnchor; onClose: () => void; label: st
 export function MenuItem(props: {
   onSelect: () => void;
   disabled?: boolean;
+  /** 当前选中的那一项：底色标出（画布 01-Main-modelmenu）。 */
+  selected?: boolean;
   danger?: boolean;
   tip?: string;
   children: JSX.Element;
@@ -81,7 +83,7 @@ export function MenuItem(props: {
     <button
       type="button"
       role="menuitem"
-      class={`iw-menu__item${props.danger ? " iw-menu__item--danger" : ""}`}
+      class={`iw-menu__item${props.selected ? " iw-menu__item--selected" : ""}${props.danger ? " iw-menu__item--danger" : ""}`}
       disabled={props.disabled}
       data-tip={props.tip}
       onClick={() => props.onSelect()}

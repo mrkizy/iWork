@@ -341,6 +341,49 @@ pub fn quota_tooltip(window: &str, used: u32, reset: Option<String>) -> String {
 pub const RUNTIME_LOCKED_TIP: &str = "要换运行时请开新对话";
 pub const RUNTIME_NOT_IN_M1: &str = "M2 接入";
 
+/// 徽标上最多写到的数（ui-m1.md 第 2 节第 4 条，产品负责人 2026-11-11 定）；再多写「99+」。
+pub const BADGE_MAX: u32 = 99;
+
+/// 未读徽标；0 不画。
+pub fn unread_badge(n: u32) -> Option<pb::CountBadge> {
+    count_badge(n, format!("{n} 条未读"))
+}
+
+/// 「待你处理」徽标；0 不画。Dock 角标（步 5a）用同一个文字。
+pub fn pending_badge(n: u32) -> Option<pb::CountBadge> {
+    count_badge(n, format!("{n} 项待你处理"))
+}
+
+fn count_badge(n: u32, label: String) -> Option<pb::CountBadge> {
+    (n > 0).then(|| pb::CountBadge {
+        text: if n > BADGE_MAX {
+            format!("{BADGE_MAX}+")
+        } else {
+            n.to_string()
+        },
+        label,
+    })
+}
+
+/// 输入框的占位文字（ui-m1.md 3.4）：「跟阿森说点什么」；名字以拉丁字母开头或结尾时两边留空格（「跟 iWork 说点什么」）。
+pub fn composer_placeholder(assistant_name: &str) -> String {
+    if assistant_name.is_empty() {
+        return "说点什么".into();
+    }
+    let ascii = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+    let before = if ascii(assistant_name.chars().next()) {
+        " "
+    } else {
+        ""
+    };
+    let after = if ascii(assistant_name.chars().last()) {
+        " "
+    } else {
+        ""
+    };
+    format!("跟{before}{assistant_name}{after}说点什么")
+}
+
 /// 思考强度的显示文字；运行时给的取值不认识就原样显示。
 pub fn effort_label(level: &str) -> String {
     match level {
@@ -409,5 +452,39 @@ pub fn start_error(e: &crate::store::home::StartError) -> String {
         E::Create(why) => format!("没能新建对话：{why}"),
         E::Send(why) => format!("新对话建好了，但消息没发出去：{why}。可以在侧栏打开它再发"),
         E::Lost => "重新连接后认不出刚建的对话，消息没发出去。可以在侧栏打开它再发".into(),
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::composer_placeholder;
+
+    #[test]
+    fn spaces_only_around_latin_names() {
+        assert_eq!(composer_placeholder("阿森"), "跟阿森说点什么");
+        assert_eq!(composer_placeholder("iWork"), "跟 iWork 说点什么");
+        assert_eq!(composer_placeholder("小 k"), "跟小 k 说点什么");
+        assert_eq!(composer_placeholder(""), "说点什么");
+    }
+}
+
+#[cfg(test)]
+mod badge_tests {
+    use super::{pending_badge, unread_badge};
+
+    #[test]
+    fn over_99_reads_99_plus_and_zero_draws_nothing() {
+        let t = |b: Option<iwork_proto::pb::CountBadge>| b.map(|b| (b.text, b.label));
+        assert_eq!(t(unread_badge(0)), None);
+        assert_eq!(t(unread_badge(7)), Some(("7".into(), "7 条未读".into())));
+        assert_eq!(t(unread_badge(99)), Some(("99".into(), "99 条未读".into())));
+        assert_eq!(
+            t(unread_badge(100)),
+            Some(("99+".into(), "100 条未读".into()))
+        );
+        assert_eq!(
+            t(pending_badge(250)),
+            Some(("99+".into(), "250 项待你处理".into()))
+        );
     }
 }

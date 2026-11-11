@@ -20,7 +20,9 @@ pub fn sidebar(store: &Store, ctx: Ctx) -> pb::SidebarView {
         .map(|p| project_row(store, &waiting, ctx, p))
         .collect();
     pb::SidebarView {
-        pending_count: u32::try_from(store.summary.pending.len()).unwrap_or(u32::MAX),
+        pending_badge: text::pending_badge(
+            u32::try_from(store.summary.pending.len()).unwrap_or(u32::MAX),
+        ),
         projects,
         assistants: store
             .summary
@@ -69,7 +71,7 @@ pub(crate) fn conversation_item(
         dot_label: text::dot_label(dot).into(),
         can_rename: can_rename(c),
         can_delete: super::is_project_conversation(c),
-        unread: c.unread,
+        unread_badge: text::unread_badge(c.unread),
         selected: store.visible.conversation_id.as_deref() == Some(c.id.as_str()),
         last_message_first_line: c.last_message_first_line.clone(),
         last_active_label: c
@@ -104,7 +106,7 @@ fn project_row(
     pb::ProjectRow {
         project_id: p.id.clone(),
         name: p.name.clone(),
-        unread: p.unread,
+        unread_badge: text::unread_badge(p.unread),
         pinned: p.pinned,
         path_missing,
         path_missing_label: if path_missing {
@@ -144,7 +146,7 @@ fn assistant_row(store: &Store, a: &pb::Assistant) -> pb::AssistantRow {
         avatar: Some(avatar(store, &a.id, state)),
         activity_line: activity.and_then(|x| activity_line(store, x)),
         // 助手未读 = 它那条私聊的未读（2a 第 3 条）。
-        unread: dm.map_or(0, |c| c.unread),
+        unread_badge: text::unread_badge(dm.map_or(0, |c| c.unread)),
         can_delete: !a.builtin,
         dm_conversation_id: dm.map(|c| c.id.clone()).unwrap_or_default(),
         builtin: a.builtin,

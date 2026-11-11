@@ -28,7 +28,7 @@ export function ApprovalModeMenu(props: { target: ComposerTarget; mode: Approval
           <MenuTitle>审批方式 · {props.mode.scopeTitle}</MenuTitle>
           <For each={props.mode.options}>
             {(o) => (
-              <MenuItem onSelect={() => choose(o.value)}>
+              <MenuItem selected={o.value === props.mode.current} onSelect={() => choose(o.value)}>
                 <span class="iw-choice">
                   <span class="iw-choice__check">{o.value === props.mode.current ? <Icon name="check" size={14} /> : null}</span>
                   <span class="iw-choice__main">

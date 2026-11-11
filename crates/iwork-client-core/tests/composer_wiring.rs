@@ -87,13 +87,23 @@ async fn model_menu_fetches_catalog_for_the_open_conversation() {
     assert_eq!(selected(&m.efforts), ["medium"]);
     assert_eq!(m.custom_model, "", "当前模型在清单里，不算手填");
     // 对话已经开始（有回合）：运行时一节整节不可选，提示写明原因
-    assert!(!m.runtimes.is_empty());
+    let (installed, upcoming): (Vec<_>, Vec<_>) =
+        m.runtimes.iter().partition(|r| !r.value.is_empty());
+    assert!(!installed.is_empty());
     assert!(
-        m.runtimes
+        installed
             .iter()
             .all(|r| !r.enabled && r.tip == "要换运行时请开新对话")
     );
-    assert!(m.runtimes.iter().any(|r| r.selected));
+    assert!(installed.iter().any(|r| r.selected));
+    // 还没接入的运行时灰着列在末尾（画布 01-Main-modelmenu）
+    assert_eq!(
+        upcoming
+            .iter()
+            .map(|r| (r.label.as_str(), r.enabled, r.tip.as_str()))
+            .collect::<Vec<_>>(),
+        [("Codex", false, "M2 接入")]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

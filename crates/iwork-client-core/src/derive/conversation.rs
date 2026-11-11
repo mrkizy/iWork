@@ -281,6 +281,7 @@ fn composer_view(store: &Store, input: ComposerInput<'_>) -> pb::ComposerView {
         approval_mode: Some(input.approval),
         attach_error: store.attach_error.clone(),
         tray: input.tray,
+        placeholder: text::composer_placeholder(config.map_or("", |c| c.name.as_str())),
     }
 }
 

@@ -23,8 +23,16 @@
   border-radius: var(--r-2xl);
   background: var(--surf);
 }
+/* 焦点只画在圆角外框上：正文框自己不画（全局 :focus-visible 会给它一层直角的环，审查 2a F-16） */
 .iw-composer__box:focus-within {
   border-color: var(--bd2);
+}
+.iw-composer__box:has(.iw-composer__input:focus-visible) {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+.iw-composer__input:focus-visible {
+  outline: none;
 }
 .iw-composer__tray {
   display: flex;

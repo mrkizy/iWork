@@ -81,7 +81,7 @@ export function Sidebar(props: { router: Router }) {
         onClick={() => props.router.go({ page: "pending" })}
       >
         <span class="iw-side-item__label">待你处理</span>
-        <Badge count={view()?.pendingCount ?? 0} label={`${view()?.pendingCount ?? 0} 项待你处理`} />
+        <Badge badge={view()?.pendingBadge} />
       </button>
 
       <div class="iw-sidebar__scroll">
@@ -105,7 +105,7 @@ export function Sidebar(props: { router: Router }) {
                 >
                   {p.name}
                 </span>
-                <Badge count={p.unread} />
+                <Badge badge={p.unreadBadge} />
               </button>
               <Show when={p.pathMissing}>
                 <div class="iw-project__missing">
@@ -144,7 +144,7 @@ export function Sidebar(props: { router: Router }) {
                       >
                         <Dot state={c.dot} label={c.dotLabel} />
                         <span class="iw-side-item__label">{c.title}</span>
-                        <Badge count={c.unread} />
+                        <Badge badge={c.unreadBadge} />
                       </button>
                     </Show>
                   )}
@@ -206,7 +206,7 @@ export function Sidebar(props: { router: Router }) {
     return (
       <button
         type="button"
-        class={`iw-side-item iw-assistant${a().selected ? " iw-side-item--selected" : ""}`}
+        class={`iw-side-item iw-assistant${a().activityLine === undefined ? " iw-assistant--one-line" : ""}${a().selected ? " iw-side-item--selected" : ""}`}
         onClick={() => props.router.go({ page: "conversation", id: a().dmConversationId })}
         onContextMenu={(e) => openMenu(e, (at) => ({ kind: "assistant", assistant: a(), at }))}
       >
@@ -220,7 +220,7 @@ export function Sidebar(props: { router: Router }) {
           </span>
           <Show when={a().activityLine}>{(line) => <span class="iw-assistant__activity">{line()}</span>}</Show>
         </span>
-        <Badge count={a().unread} />
+        <Badge badge={a().unreadBadge} />
       </button>
     );
   }
@@ -292,14 +292,22 @@ export function Sidebar(props: { router: Router }) {
 
 function Quota(p: { q: QuotaCell }) {
   return (
-    <span class="iw-quota__cell" data-tip={p.q.tooltip} data-tip-side="top">
-      {p.q.runtimeLabel}
+    // 能用键盘聚焦：提示里是窗口类型与重置时间（验收 5），读屏从 aria-label 读到同一段
+    <span
+      class="iw-quota__cell"
+      tabIndex={0}
+      aria-label={`${p.q.runtimeLabel} ${p.q.valueText}，${p.q.tooltip}`}
+      data-tip={p.q.tooltip}
+      data-tip-side="top"
+    >
+      {/* 名字与数值各占一个 flex 项：两段相邻文字会并成一项，中间的间距就没了（审查 2a F-15） */}
+      <span>{p.q.runtimeLabel}</span>
       <Show when={p.q.usedPct !== undefined}>
         <span class="iw-quota__bar" aria-hidden="true">
           <span class="iw-quota__fill" style={{ width: `${p.q.usedPct ?? 0}%` }} />
         </span>
       </Show>
-      {p.q.valueText}
+      <span>{p.q.valueText}</span>
     </span>
   );
 }

@@ -36,6 +36,9 @@
   background: var(--sideOn);
   outline: none;
 }
+.iw-menu__item--selected {
+  background: var(--sideOn);
+}
 .iw-menu__item:disabled {
   color: var(--tx3);
   cursor: not-allowed;
