@@ -93,7 +93,11 @@ async fn fold_and_full(s: &scenario::Scenario) -> (WebState, WebState) {
             assert_eq!(app.intent(visible(s.focus)).await.error, None);
             focused = true;
         }
-        if !got && done && focused {
+        // 安静了还不够：声明打开对话后快照可能还没到（CI 上慢），要等 focus 对话的行到了网页才算收敛。
+        let arrived = s.focus.is_none_or(|c| {
+            web.state.conversation_id.as_deref() == Some(c) && !web.state.rows.is_empty()
+        });
+        if !got && done && focused && arrived {
             break;
         }
     }

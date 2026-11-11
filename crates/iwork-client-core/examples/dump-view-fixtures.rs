@@ -186,6 +186,13 @@ mod unix {
             .is_ok()
     }
 
+    fn has_rows(patch: &pb::ViewPatch, conversation: &str) -> bool {
+        patch.changes.iter().any(|c| {
+            matches!(&c.change, Some(pb::view_change::Change::Conversation(p))
+                if p.conversation_id == conversation && !p.rows.is_empty())
+        })
+    }
+
     fn visible(conversation: Option<&str>) -> pb::UiIntent {
         pb::UiIntent {
             kind: Some(I::SetVisible(pb::SetVisible {
@@ -261,6 +268,8 @@ mod unix {
         let mut frames: Vec<Vec<u8>> = Vec::new();
         let mut puller = Puller::new(epoch);
         let mut focused = s.focus.is_none();
+        // focus 对话的行到了没有：声明打开后快照可能还没到，安静了也要等它（CI 上慢）。
+        let mut arrived = s.focus.is_none();
         let run = daemon.run_scenario(s.name);
         tokio::pin!(run);
         let mut done = false;
@@ -284,13 +293,14 @@ mod unix {
             }
             match got {
                 Pulled::Frame(bytes) => {
-                    pb::ViewPatch::decode(bytes.as_slice())
+                    let patch = pb::ViewPatch::decode(bytes.as_slice())
                         .map_err(|e| format!("帧解不开：{e}"))?;
+                    arrived |= s.focus.is_some_and(|c| has_rows(&patch, c));
                     frames.push(bytes);
                 }
                 Pulled::Partial => {}
-                Pulled::Quiet if done && focused => break,
-                Pulled::Quiet if done => {
+                Pulled::Quiet if done && focused && arrived => break,
+                Pulled::Quiet if done && !focused => {
                     return Err(format!(
                         "场景跑完了，假后台里一直没有 focus 对话 {:?}",
                         s.focus
