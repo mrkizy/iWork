@@ -64,15 +64,30 @@ message GetConversationResult {
   repeated Turn turns = 3;
   // 更早的消息还有没有。
   bool has_more = 4;
+  // 本页回合的工具调用、审批（含终态）、亲手执行卡片，本页消息的附件（T09 方案 G3）。
+  repeated ToolCall tool_calls = 5;
+  repeated Approval approvals = 6;
+  repeated UserActionCard user_actions = 7;
+  repeated Attachment attachments = 8;
+  // 整个对话的累计用量（标题栏「本对话用量」）。
+  Usage usage_total = 9;
 }
 
 message ListConversations {
   // 未设置表示全部（含私聊）。
   optional string project_id = 1;
+  // 按标题筛选（包含，不区分大小写）；筛选在后台做（T09 方案 G8）。
+  optional string title_contains = 2;
+  // 上一批最后一条的游标（取自上一批最后一个 Conversation 的 id）；不设表示从最近活动的开始。
+  optional string before = 3;
+  // 每批条数；0 表示不分页（侧栏快照用）。按最近活动倒序。
+  uint32 limit = 4;
 }
 
 message ListConversationsResult {
   repeated Conversation conversations = 1;
+  // 分页时：后面还有没有。
+  bool has_more = 2;
 }
 
 message ListProjects {}
@@ -85,6 +100,26 @@ message ListAssistants {}
 
 message ListAssistantsResult {
   repeated Assistant assistants = 1;
+  // 每个助手至多一条最近动态；从没说过话的助手没有（T09 方案 G7）。
+  repeated AssistantActivity activities = 2;
+}
+
+// 助手的最近动态：跨这个助手参与的全部对话，按 等你处理 > 运行中 > 最近一条发给用户的消息 取一条。
+message AssistantActivity {
+  string assistant_id = 1;
+  AssistantActivityKind kind = 2;
+  string conversation_id = 3;
+  // WAITING 时：待处理项的 id（审批 id、卡片 id 或回合 id）。
+  optional string pending_item_id = 4;
+  // MESSAGE 时：那条消息的首行。
+  optional string message_first_line = 5;
+}
+
+enum AssistantActivityKind {
+  ASSISTANT_ACTIVITY_KIND_UNSPECIFIED = 0;
+  ASSISTANT_ACTIVITY_KIND_WAITING = 1;
+  ASSISTANT_ACTIVITY_KIND_RUNNING = 2;
+  ASSISTANT_ACTIVITY_KIND_MESSAGE = 3;
 }
 
 message ListPendingItems {}

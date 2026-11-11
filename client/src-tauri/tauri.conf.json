@@ -8,15 +8,9 @@
     "beforeBundleCommand": "node scripts/refuse-bare-build.ts"
   },
   "app": {
-    "windows": [
-      {
-        "title": "iWork",
-        "width": 800,
-        "height": 600
-      }
-    ],
+    "windows": [],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
     }
   },
   "bundle": {

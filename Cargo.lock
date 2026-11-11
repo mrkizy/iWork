@@ -2840,6 +2840,7 @@ name = "iwork-bench"
 version = "0.1.0"
 dependencies = [
  "iwork-app",
+ "iwork-client-core",
  "iwork-core",
  "iwork-domain",
  "iwork-host",
@@ -2876,17 +2877,30 @@ name = "iwork-client"
 version = "0.1.0"
 dependencies = [
  "iwork-client-core",
+ "iwork-ipc",
  "iwork-proto",
+ "prost",
  "tauri",
  "tauri-build",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "iwork-client-core"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "iwork-fake-daemon",
  "iwork-ipc",
  "iwork-proto",
+ "proptest",
+ "prost",
+ "prost-types",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "ulid",
 ]
 
 [[package]]
@@ -2955,6 +2969,22 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "iwork-fake-daemon"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "iwork-app",
+ "iwork-ipc",
+ "iwork-proto",
+ "prost",
+ "prost-types",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

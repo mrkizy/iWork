@@ -141,6 +141,10 @@ fn conversation_project() -> Conversation {
         model_override: model_sel(),
         approval_mode: Some(ApprovalMode::FullAccess.into()),
         updated_at: ts(1_762_000_200),
+        title: String::new(),
+        title_source: TitleSource::Unspecified.into(),
+        last_turn_state: None,
+        last_message_first_line: String::new(),
     }
 }
 
@@ -157,6 +161,10 @@ fn conversation_dm() -> Conversation {
         model_override: None,
         approval_mode: Some(ApprovalMode::Manual.into()),
         updated_at: ts(1_762_000_300),
+        title: String::new(),
+        title_source: TitleSource::Unspecified.into(),
+        last_turn_state: None,
+        last_message_first_line: String::new(),
     }
 }
 
@@ -178,6 +186,7 @@ fn message_assistant() -> Message {
         attachment_ids: vec![s(ATTACHMENT)],
         created_at: ts(1_762_000_400),
         turn_id: Some(s(TURN)),
+        created_seq: 0,
     }
 }
 
@@ -196,6 +205,11 @@ fn turn() -> Turn {
         ended_at: ts(1_762_000_600),
         kind: TurnKind::Assistant.into(),
         interrupt_reason: Some(InterruptReason::ApprovalWaitLimit.into()),
+        created_seq: 0,
+        ended_seq: 0,
+        usage: None,
+        celebrate: false,
+        change_summary: None,
     }
 }
 
@@ -329,6 +343,9 @@ fn approval() -> Approval {
         requested_at: ts(1_762_000_700),
         decided_at: ts(1_762_000_800),
         review_id: Some(s(REVIEW)),
+        created_seq: 0,
+        decider: None,
+        void_reason: None,
         call: None,
     }
 }
@@ -351,6 +368,7 @@ fn user_action_card() -> UserActionCard {
         output_artifact: artifact(ArtifactArea::Artifacts),
         error: Some(s("后台服务中断")),
         void_reason: Some(VoidReason::ConversationDeleted.into()),
+        created_seq: 0,
     }
 }
 
@@ -672,6 +690,11 @@ pub fn query_result_get_conversation() -> QueryResult {
             messages: vec![message_assistant()],
             turns: vec![turn()],
             has_more: true,
+            tool_calls: vec![],
+            approvals: vec![],
+            user_actions: vec![],
+            attachments: vec![],
+            usage_total: None,
         })),
     }
 }
@@ -713,6 +736,7 @@ pub fn query_result_pending() -> QueryResult {
                             turn_id: s(TURN),
                             conversation_id: s(CONVERSATION),
                             reason: InterruptReason::Crash.into(),
+                            created_seq: 0,
                         })),
                     },
                 ],
@@ -756,6 +780,9 @@ pub fn approval_with_call() -> Approval {
             raw_input_digest: Bytes::from_static(&PROPOSAL_HASH),
             normalized_digest: Bytes::from_static(&[0x5a; 32]),
         }),
+        created_seq: 0,
+        decider: None,
+        void_reason: None,
     }
 }
 
@@ -1404,6 +1431,178 @@ pub fn ev_recovery_completed() -> DomainEvent {
     }))
 }
 
+// ---------- T09 方案第 3 节 G1–G4、G7、G8 新字段的样本（只增，旧样本不动） ----------
+
+fn conversation_titled() -> Conversation {
+    Conversation {
+        title: s("把登录页改成深色"),
+        title_source: TitleSource::User.into(),
+        last_turn_state: Some(TurnState::Failed.into()),
+        last_message_first_line: s("好的，我先看一下"),
+        ..conversation_project()
+    }
+}
+
+fn change_summary_full() -> Option<ChangeSummary> {
+    Some(ChangeSummary {
+        files_changed: 2,
+        insertions: 10,
+        deletions: 3,
+        paths: vec![s("src/a.rs"), s("src/b.rs")],
+    })
+}
+
+fn tool_call() -> ToolCall {
+    ToolCall {
+        turn_id: s(TURN),
+        tool_call_id: s("toolu_01"),
+        tool_name: s("Edit"),
+        action: Some(action_paths()),
+        finished: true,
+        ok: true,
+        output_artifact: artifact(ArtifactArea::Artifacts),
+        created_seq: 1002,
+    }
+}
+
+/// 审批终态：用户批准（decider 必有、没有 void_reason）。
+pub fn approval_approved() -> Approval {
+    Approval {
+        state: ApprovalState::Approved.into(),
+        review: ReviewState::Passed.into(),
+        created_seq: 1001,
+        decider: Some(ApprovalDecider::User.into()),
+        void_reason: None,
+        ..approval()
+    }
+}
+
+/// 审批终态：作废（void_reason 必有、没有 decider）。
+pub fn approval_voided() -> Approval {
+    Approval {
+        state: ApprovalState::Voided.into(),
+        created_seq: 1001,
+        decider: None,
+        void_reason: Some(VoidReason::TurnCancelled.into()),
+        ..approval()
+    }
+}
+
+pub fn turn_finished_full() -> Turn {
+    Turn {
+        state: TurnState::Completed.into(),
+        interrupt_reason: None,
+        created_seq: 1000,
+        ended_seq: 1010,
+        usage: usage(),
+        celebrate: true,
+        change_summary: change_summary_full(),
+        ..turn()
+    }
+}
+
+pub fn user_action_card_seq() -> UserActionCard {
+    UserActionCard {
+        created_seq: 1005,
+        ..user_action_card()
+    }
+}
+
+pub fn command_rename_conversation() -> Command {
+    Command {
+        command_id: s("01JC0K0000000000000000CMD9"),
+        kind: Some(command::Kind::RenameConversation(RenameConversation {
+            conversation_id: s(CONVERSATION),
+            title: s("登录页深色"),
+        })),
+    }
+}
+
+pub fn query_list_conversations_page() -> Query {
+    Query {
+        kind: Some(query::Kind::ListConversations(ListConversations {
+            project_id: Some(s(PROJECT)),
+            title_contains: Some(s("登录")),
+            before: Some(s(CONVERSATION)),
+            limit: 50,
+        })),
+    }
+}
+
+pub fn query_result_get_conversation_full() -> QueryResult {
+    QueryResult {
+        seq: 1011,
+        kind: Some(query_result::Kind::GetConversation(GetConversationResult {
+            conversation: Some(conversation_titled()),
+            messages: vec![Message {
+                created_seq: 1001,
+                ..message_assistant()
+            }],
+            turns: vec![turn_finished_full()],
+            has_more: false,
+            tool_calls: vec![tool_call()],
+            approvals: vec![approval_approved(), approval_voided()],
+            user_actions: vec![user_action_card_seq()],
+            attachments: vec![attachment()],
+            usage_total: usage(),
+        })),
+    }
+}
+
+pub fn query_result_list_conversations_page() -> QueryResult {
+    QueryResult {
+        seq: 1012,
+        kind: Some(query_result::Kind::ListConversations(
+            ListConversationsResult {
+                conversations: vec![conversation_titled()],
+                has_more: true,
+            },
+        )),
+    }
+}
+
+pub fn query_result_list_assistants_activity() -> QueryResult {
+    QueryResult {
+        seq: 1013,
+        kind: Some(query_result::Kind::ListAssistants(ListAssistantsResult {
+            assistants: vec![assistant()],
+            activities: vec![
+                AssistantActivity {
+                    assistant_id: s(ASSISTANT),
+                    kind: AssistantActivityKind::Waiting.into(),
+                    conversation_id: s(CONVERSATION),
+                    pending_item_id: Some(s(APPROVAL)),
+                    message_first_line: None,
+                },
+                AssistantActivity {
+                    assistant_id: s(ASSISTANT),
+                    kind: AssistantActivityKind::Message.into(),
+                    conversation_id: s(CONVERSATION),
+                    pending_item_id: None,
+                    message_first_line: Some(s("改好了，跑过测试")),
+                },
+            ],
+        })),
+    }
+}
+
+pub fn query_result_pending_resume_seq() -> QueryResult {
+    QueryResult {
+        seq: 1014,
+        kind: Some(query_result::Kind::ListPendingItems(
+            ListPendingItemsResult {
+                items: vec![PendingItem {
+                    item: Some(pending_item::Item::Resume(ResumeCard {
+                        turn_id: s(TURN),
+                        conversation_id: s(CONVERSATION),
+                        reason: InterruptReason::ApprovalWaitLimit.into(),
+                        created_seq: 1009,
+                    })),
+                }],
+            },
+        )),
+    }
+}
 pub fn ev_turn_session_bound() -> DomainEvent {
     ev(E::TurnSessionBound(TurnSessionBound {
         turn_id: s(TURN),

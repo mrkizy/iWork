@@ -1,0 +1,11 @@
+seq: 1014
+list_pending_items {
+  items: [{
+    resume {
+      turn_id: "01JC0T0000000000000000TRN1"
+      conversation_id: "01JC0C0000000000000000CNV1"
+      reason: INTERRUPT_REASON_APPROVAL_WAIT_LIMIT
+      created_seq: 1009
+    }
+  }]
+}

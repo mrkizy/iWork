@@ -1,0 +1,44 @@
+{
+  "seq": "1013",
+  "listAssistants": {
+    "assistants": [
+      {
+        "id": "01JC0A0000000000000000AST1",
+        "builtin": true,
+        "version": 4,
+        "config": {
+          "name": "审查员",
+          "avatar": {
+            "initial": "审",
+            "color": "#4f46e5"
+          },
+          "prompt": "你负责代码审查。",
+          "runtimeId": "01JC0X0000000000000000RTM1",
+          "model": {
+            "modelId": "opus",
+            "effort": "high"
+          },
+          "disabledGroups": [
+            "TOOL_GROUP_WEB",
+            "TOOL_GROUP_RUN_COMMANDS"
+          ]
+        },
+        "updatedAt": "2025-11-01T12:28:20.123Z"
+      }
+    ],
+    "activities": [
+      {
+        "assistantId": "01JC0A0000000000000000AST1",
+        "kind": "ASSISTANT_ACTIVITY_KIND_WAITING",
+        "conversationId": "01JC0C0000000000000000CNV1",
+        "pendingItemId": "01JC0V0000000000000000APR1"
+      },
+      {
+        "assistantId": "01JC0A0000000000000000AST1",
+        "kind": "ASSISTANT_ACTIVITY_KIND_MESSAGE",
+        "conversationId": "01JC0C0000000000000000CNV1",
+        "messageFirstLine": "改好了，跑过测试"
+      }
+    ]
+  }
+}

@@ -18,7 +18,8 @@ use crate::frame::{HEADER_LEN, put_header};
 /// 待发的一帧。持久事件持有 `Arc`，在写任务里直接编码，不为每条连接复制一份事件。
 #[derive(Debug, Clone)]
 pub(crate) enum Outbound {
-    Response(pb::Response),
+    // 装箱：响应可能带很大的查询结果，不让事件项也按它占位。
+    Response(Box<pb::Response>),
     Persisted {
         ids: Vec<u32>,
         event: Arc<RoutedEvent>,
@@ -131,7 +132,7 @@ impl ConnectionBudget {
 
     /// 响应永远入队：它对应客户端自己发的请求，数量由读循环的暂停兜底。
     pub(crate) fn push_response(&mut self, r: pb::Response) {
-        self.enqueue(Outbound::Response(r));
+        self.enqueue(Outbound::Response(Box::new(r)));
     }
 
     /// 补发往队列放事件：能用到整个上限（含保底）。
