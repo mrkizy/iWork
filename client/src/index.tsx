@@ -6,6 +6,7 @@ import { FrameBridge } from "./bridge/frames";
 import { intentSender } from "./bridge/intent";
 import { createViewStore } from "./state/store";
 import { App } from "./shell/App";
+import { routeFromHash } from "./shell/route";
 import { createToaster } from "./ui/Toast";
 import "./ui/theme";
 
@@ -33,6 +34,7 @@ render(
         },
       }}
       toasts={toaster.View}
+      initialRoute={routeFromHash(location.hash)}
     />
   ),
   root,

@@ -40,11 +40,16 @@ describe("Tauri invoke 只有一个出口", () => {
 });
 
 describe("开发服务器与发布入口", () => {
-  it("server.fs.allow 只有 client/ 与设计系统目录", async () => {
+  it("server.fs.allow 除了 client/ 以内，只多放行设计系统目录", async () => {
     const config = await resolveConfig({ configFile: `${CLIENT_DIR}vite.config.ts`, root: CLIENT_DIR }, "serve");
-    const design = fileURLToPath(new URL("../../docs/design/design-system/", import.meta.url));
-    const norm = (p: string) => p.replace(/\/$/, "");
-    expect(config.server.fs.allow.map(norm).sort()).toEqual([CLIENT_DIR, design].map(norm).sort());
+    // 统一写法再比：Windows 上 vite 给的是正斜杠，还会自己加上 client/node_modules/.pnpm（在 client/ 以内）
+    const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/$/, "");
+    const client = norm(CLIENT_DIR);
+    const design = norm(fileURLToPath(new URL("../../docs/design/design-system/", import.meta.url)));
+    const allow = config.server.fs.allow.map(norm);
+    const outside = allow.filter((p) => p !== client && !p.startsWith(`${client}/`));
+    expect(outside).toEqual([design]);
+    expect(allow).toContain(client);
   });
 
   it("发布构建只以 index.html 为入口", async () => {

@@ -37,8 +37,9 @@ mod unix {
     use prost::Message;
     use tokio::time::timeout;
 
-    /// 场景跑完后，这么久没有新块就算取空了。
-    const QUIET: Duration = Duration::from_millis(400);
+    /// 场景跑完后，这么久没有新块就算取空了。要盖住一轮摘要重查（节流 250ms 加查询往返）：
+    /// CI 上 400ms 不够，录像停在重查回来之前，组件测试看到的不是场景的终态（run 42992011638）。
+    const QUIET: Duration = Duration::from_millis(1200);
     /// 单个场景的总时限：超过就报错点名，不写半截录像。
     const SCENARIO_LIMIT: Duration = Duration::from_secs(300);
 

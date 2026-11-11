@@ -28,3 +28,9 @@ export function visibleFor(route: Route) {
     conversationList: route.page === "allConversations" ? { projectId: route.projectId, filter: "" } : undefined,
   };
 }
+
+/** 深链：`#/c/<对话 id>` 直接打开某个对话（开发、录像对照与真实 WebView 测试用；没有就是首页）。 */
+export function routeFromHash(hash: string): Route {
+  const m = /^#\/c\/([^/?#]+)$/.exec(hash);
+  return m ? { page: "conversation", id: decodeURIComponent(m[1]) } : { page: "home" };
+}

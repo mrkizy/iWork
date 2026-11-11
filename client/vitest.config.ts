@@ -17,7 +17,8 @@ export default defineConfig({
         },
       },
       {
-        plugins: [solid()],
+        // 测试里不要热更新：它注入的 @solid-refresh 模块在 Windows 上按文件路径解析会失败（CI run 42992011638）
+        plugins: [solid({ hot: false })],
         resolve: { alias: { [DESIGN_SYSTEM_ALIAS]: DESIGN_SYSTEM_DIR } },
         // 与开发服务器相同：只多放行设计系统目录（组件内联形象 SVG）
         server: { fs: { allow: [fileURLToPath(new URL("./", import.meta.url)), DESIGN_SYSTEM_DIR] } },

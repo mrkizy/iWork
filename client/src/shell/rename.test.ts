@@ -18,3 +18,14 @@ describe("重命名规则（2a 第 6 条）", () => {
     expect(clampTitle("短")).toBe("短");
   });
 });
+
+import { routeFromHash } from "./route";
+
+describe("深链", () => {
+  it("#/c/<id> 打开对话，其余是首页", () => {
+    expect(routeFromHash("#/c/c-xss")).toEqual({ page: "conversation", id: "c-xss" });
+    expect(routeFromHash("#/c/a%20b")).toEqual({ page: "conversation", id: "a b" });
+    expect(routeFromHash("")).toEqual({ page: "home" });
+    expect(routeFromHash("#/x/c1")).toEqual({ page: "home" });
+  });
+});

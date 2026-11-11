@@ -3,23 +3,8 @@
 // 戳头像不触发任何业务操作。动效类由 motion.css 管：减少动态效果、轻松元素关闭时自动停用。
 import { createSignal, onCleanup, Show } from "solid-js";
 import { Expression, type AvatarView } from "../gen/iwork/v1/view_pb";
+import { CHARACTERS, svgOf, type Mood } from "./characters";
 import "./Avatar.css";
-
-// 形象素材：文件名 <形象>-<表情>.svg。设计系统自带的静态素材，不是来自协议的内容，所以可以按 HTML 内联。
-const SVGS = import.meta.glob<string>("@design/characters/*.svg", { query: "?raw", import: "default", eager: true });
-
-type Mood = "idle" | "work" | "wait" | "done" | "hover" | "angry";
-
-function svgOf(character: string, mood: Mood): string | undefined {
-  const suffix = `/characters/${character}-${mood}.svg`;
-  for (const [path, svg] of Object.entries(SVGS)) if (path.endsWith(suffix)) return svg;
-  return undefined;
-}
-
-/** 已有素材的形象名（Rust 给的 character 只有在这里面才内联，其余画字头像）。 */
-export const CHARACTERS: readonly string[] = [
-  ...new Set(Object.keys(SVGS).map((p) => /\/characters\/([a-z]+)-[a-z]+\.svg$/.exec(p)?.[1] ?? "")),
-].filter(Boolean);
 
 // 表情 → 素材（表情本身由 Rust 侧随状态给）。出错没有专门的素材，先用空闲。
 const MOOD: Record<Expression, Mood> = {

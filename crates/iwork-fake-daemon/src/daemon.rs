@@ -32,6 +32,8 @@ struct Shared {
     /// 当前这一代服务端的发布端；重启（断开全部连接）时换新的。
     publisher: Mutex<Option<Publisher>>,
     auto_reply: AtomicBool,
+    /// 场景里等待的倍数（1 = 照原样）：把同样形状的流量摊长（真实 WebView 的 1 分钟用例）。
+    pace: std::sync::atomic::AtomicU32,
     /// 只给测试用：命中的查询一律回错误（模拟查询受理出错）。
     failing_queries: Mutex<Option<QueryFilter>>,
 }
@@ -333,6 +335,7 @@ impl FakeDaemon {
             state: Mutex::new(State::default()),
             publisher: Mutex::new(None),
             auto_reply: AtomicBool::new(false),
+            pace: std::sync::atomic::AtomicU32::new(1),
             failing_queries: Mutex::new(None),
         });
         let running = spawn_server(&shared, &socket_path, own.clone(), NORMAL_TRUST)?;
@@ -389,6 +392,11 @@ impl FakeDaemon {
     }
 
     /// SendMessage 之后要不要自动回一个脚本化回合（默认关）。
+    /// 场景里的每一次等待乘上这个倍数（至少 1）。
+    pub fn set_pace(&self, factor: u32) {
+        self.shared.pace.store(factor.max(1), Ordering::Relaxed);
+    }
+
     pub fn set_auto_reply(&self, on: bool) {
         self.shared.auto_reply.store(on, Ordering::Relaxed);
     }
@@ -429,7 +437,9 @@ impl FakeDaemon {
                     self.append(*e);
                 }
                 Step::Transient(e) => self.transient(e),
-                Step::Sleep(d) => tokio::time::sleep(d).await,
+                Step::Sleep(d) => {
+                    tokio::time::sleep(d * self.shared.pace.load(Ordering::Relaxed)).await;
+                }
                 Step::DisconnectAll => self.disconnect_all().await,
                 Step::Mutate(f) => self.mutate_tables(f),
             }
