@@ -43,6 +43,8 @@ pub struct MemStore {
     pub commits: Arc<AtomicU64>,
     /// 处理到第几笔（从 1 数，含空提交）时返回 Busy；0 表示不注入
     pub fail_commit_at: Arc<AtomicU64>,
+    /// 被提交时校验拒掉（Projection）的笔数
+    pub rejections: Arc<AtomicU64>,
     /// 处理过的空提交（屏障）笔数
     pub empty_commits: Arc<AtomicU64>,
     pub commit_entered: Arc<AtomicBool>,
@@ -78,6 +80,7 @@ impl MemStore {
         }
         let first = Seq(events.len() as u64 + 1);
         apply_all(&mut self.projection.lock().unwrap(), &req.events).map_err(|message| {
+            self.rejections.fetch_add(1, Ordering::SeqCst);
             StorageError::Projection {
                 seq: first,
                 message,

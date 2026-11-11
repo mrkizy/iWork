@@ -1724,3 +1724,74 @@ async fn t_sync_leaves_running_review_alone() {
     b.engine.sync().await.unwrap();
     assert!(b.pending(id).await.unwrap().awaits_user());
 }
+
+/// 方案 G3：日常流程每条都一次提交成功，没有一次被提交时校验拒掉再重算。
+/// 请求 → 审查通过；请求 → 用户允许（记住本项目）；请求 → 用户拒绝；请求 → 回合取消；
+/// 请求 → 等待上限中断 → 用户允许 → 续接后同一调用命中一次性放行 → 交付。
+#[tokio::test]
+async fn everyday_approval_flows_commit() {
+    // 审查通过
+    let b = Bench::new(Some(Auto)).await;
+    b.reviewer.push(ReviewScript::Says(
+        "{\"pass\": true, \"reason\": \"ok\"}".into(),
+    ));
+    assert_eq!(
+        b.call(
+            &b.decider(),
+            turn(1),
+            read_req("/home/u/Documents/notes/x.txt")
+        )
+        .await,
+        PermissionDecision::Allow
+    );
+    assert_eq!(b.store.rejections.load(Ordering::SeqCst), 0, "审查通过");
+
+    let b = Bench::new(Some(Manual)).await;
+    let d = b.decider();
+    // 用户允许并记住
+    let h = b.ask(&d, turn(1), write_req("src/a.rs"));
+    let id = b.approval(0).await;
+    b.engine
+        .decide(id, allow(RememberScope::Project), user())
+        .await
+        .unwrap();
+    assert_eq!(settle(h).await, PermissionDecision::Allow);
+    // 用户拒绝
+    let h = b.ask(&d, turn(1), bash_req("npm test"));
+    let id = b.approval(1).await;
+    b.engine
+        .decide(id, UserDecision::Deny, user())
+        .await
+        .unwrap();
+    assert!(is_deny(&settle(h).await, MSG_USER_DENIED));
+    // 回合取消
+    let h = b.ask(&d, turn(2), bash_req("npm install"));
+    let _ = b.approval(2).await;
+    b.void_turn(&d, turn(2), VoidReason::TurnCancelled).await;
+    assert!(is_deny(&settle(h).await, MSG_TURN_CANCELLED));
+    // 等待上限 → 允许 → 续接后命中一次性放行 → 交付
+    let h = b.ask(&d, turn(3), bash_req("rm a.txt && touch a.txt"));
+    let a = b.approval(3).await;
+    h.abort();
+    let _ = h.await;
+    b.interrupt(turn(3)).await;
+    let out = b
+        .engine
+        .decide(a, allow(RememberScope::Once), user())
+        .await
+        .unwrap();
+    assert_eq!(out.resume_turn, Some(turn(3)));
+    b.waiting(turn(3), assistant());
+    let hit = b
+        .engine
+        .on_permission(d.keys(), turn(3), &bash_req("rm a.txt && touch a.txt"))
+        .await;
+    assert_eq!(hit.approval, Some(a));
+    b.external(vec![delivered(a, turn(3))]).await;
+    assert!(b.grant(a).await.is_none());
+    assert_eq!(
+        b.store.rejections.load(Ordering::SeqCst),
+        0,
+        "日常流程没有一次被拒后重算"
+    );
+}
