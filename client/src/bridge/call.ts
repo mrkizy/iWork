@@ -2,7 +2,7 @@
 //
 // 不接受调用方传选项，尤其是自定义请求头：Rust 侧靠请求头里有没有 Tauri 自己加的 `Tauri-Callback` 认出
 // 走的是自定义协议还是回退到了 postMessage，网页代码不许伪造或干扰这个判断。
-// `client/src` 里除了这里，别处不许直接调 Tauri 的 invoke（tests/bridge-call.test.ts 检查）。
+// `client/src` 里除了这里，别处不许直接调 Tauri 的 invoke（tests/web-boundaries.test.ts 检查）。
 import { invoke } from "@tauri-apps/api/core";
 
 export type Command = "attach" | "next_frame" | "ui_intent";

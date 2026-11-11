@@ -28,12 +28,12 @@ export default defineConfig({
       ignored: ["**/src-tauri/**"],
     },
     fs: {
-      // 默认只放行 client/；只多放行设计系统这一个目录（tests/dev-server.test.ts 检查）
+      // 默认只放行 client/；只多放行设计系统这一个目录（tests/web-boundaries.test.ts 检查）
       allow: [fileURLToPath(new URL("./", import.meta.url)), DESIGN_SYSTEM_DIR],
     },
   },
   build: {
-    // 发布入口只有 index.html；录像播放页 preview.html 只在开发服务器上用（tests/release-config.test.ts 检查）
+    // 发布入口只有 index.html；录像播放页 preview.html 只在开发服务器上用（tests/web-boundaries.test.ts 检查）
     rollupOptions: { input: fileURLToPath(new URL("./index.html", import.meta.url)) },
   },
 });
