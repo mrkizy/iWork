@@ -251,6 +251,43 @@ pub fn attachment(id: &str, conversation_id: &str, name: &str, size: u64) -> pb:
     }))
 }
 
+/// 给 TurnQueued 换上别的模型（默认 fake-large · medium）。
+pub fn with_model(mut e: pb::DomainEvent, model_id: &str) -> pb::DomainEvent {
+    if let Some(E::TurnQueued(pb::TurnQueued { turn: Some(t) })) = &mut e.event {
+        t.model = Some(pb::ModelSelection {
+            model_id: model_id.into(),
+            effort: Some("medium".into()),
+        });
+    } else {
+        panic!("with_model 只用于 TurnQueued：{e:?}");
+    }
+    e
+}
+
+/// 本对话改选模型（「已切换为 X」的当次说明）。
+pub fn model_changed(conversation_id: &str, model_id: &str) -> pb::DomainEvent {
+    ev(E::ConversationModelChanged(pb::ConversationModelChanged {
+        conversation_id: conversation_id.into(),
+        model: Some(pb::ModelSelection {
+            model_id: model_id.into(),
+            effort: Some("medium".into()),
+        }),
+    }))
+}
+
+/// 本对话切档位（「审批方式已切换为…」的当次说明）。
+pub fn approval_mode_changed(conversation_id: &str, mode: pb::ApprovalMode) -> pb::DomainEvent {
+    ev(E::ApprovalModeChanged(pb::ApprovalModeChanged {
+        target: Some(pb::ApprovalModeTarget {
+            kind: Some(pb::approval_mode_target::Kind::ConversationId(
+                conversation_id.into(),
+            )),
+        }),
+        mode: Some(mode.into()),
+        cause: pb::ApprovalModeChangeCause::User.into(),
+    }))
+}
+
 pub fn turn_queued(id: &str, conversation_id: &str, assistant_id: &str) -> pb::DomainEvent {
     ev(E::TurnQueued(pb::TurnQueued {
         turn: Some(pb::Turn {

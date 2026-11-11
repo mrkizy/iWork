@@ -62,6 +62,23 @@ describe.skipIf(noFixtures)("预览场景", () => {
     expect(document.querySelector(".iw-tool__output")).toHaveTextContent("test result: ok. 12 passed");
   });
 
+  it("switch-rows：项目、模型、档位切换，打开前（重建得出）与打开后（当次说明）各一轮", () => {
+    renderScenario("switch-rows");
+    const rows = [...document.querySelectorAll(".iw-divider, .iw-note")].map((el) => [
+      el.classList.contains("iw-divider") ? "分隔线" : "说明行",
+      el.textContent,
+    ]);
+    expect(rows).toEqual([
+      // 打开前那一轮：当次说明随快照重建丢掉，留下重建得出的分隔线与模型切换行（档位没有重建得出的行）
+      ["分隔线", "切换到 web"],
+      ["说明行", "已切换为 fake-small · medium"],
+      // 打开后那一轮：实时的当次说明，同类的重建行不再重复贴
+      ["分隔线", "切换到 demo"],
+      ["说明行", "已切换为 fake-large · medium"],
+      ["说明行", "审批方式已切换为手动"],
+    ]);
+  });
+
   it("characters-sorry-preview-only：三个形象出错时都是 sorry，不浮动", () => {
     renderScenario("characters-sorry-preview-only");
     const nav = screen.getByRole("complementary", { name: "侧栏" });

@@ -282,6 +282,15 @@ pub const REGISTRY: &[Scenario] = &[
         timeline_cap: None,
     },
     Scenario {
+        name: "switch-rows",
+        about: "私聊里切项目、切模型、切档位：打开前一轮（快照重建出的分隔线、模型切换行），打开后一轮（实时的当次说明）",
+        build: switch_rows,
+        focus: Some(IWORK_DM),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
         name: "back-to-latest-notice",
         about: "Q9：停在旧消息上时断线、重连给的是快照：回到最新并提示「已重新连接，回到最新」",
         build: back_to_latest_notice,
@@ -1088,6 +1097,61 @@ fn characters_sorry_preview_only() -> Vec<Step> {
         )));
         s.push(a(f::turn_finished(&t, T::Failed, false, None)));
     }
+    s
+}
+
+/// 私聊里的一轮：上下文项目、回合用的模型都可指定。
+fn dm_round(n: &str, project: &str, model: &str, q: &str, ans: &str) -> Vec<Step> {
+    let c = IWORK_DM;
+    let turn = format!("t-{n}");
+    let reply = format!("m-{n}-a");
+    vec![
+        a(f::in_project(
+            f::user_message(&format!("m-{n}-u"), c, q),
+            project,
+        )),
+        a(f::with_model(f::turn_queued(&turn, c, IWORK), model)),
+        a(f::turn_state(&turn, T::Queued, T::Running, None)),
+        a(f::in_project(
+            f::assistant_message(&reply, c, &turn, IWORK, "iWork"),
+            project,
+        )),
+        a(f::message_completed(c, &reply, ans)),
+        a(f::turn_finished(&turn, T::Completed, false, None)),
+    ]
+}
+
+/// 切项目、切模型、切档位各两次。打开对话前那一轮的当次说明随快照重建丢掉，留下的是重建得出的行
+/// （相邻消息项目不同 → 分隔线；相邻回合模型不同 → 模型切换行；档位没有重建得出的行）；
+/// 打开后那一轮是实时的当次说明（它们在，重建得出的同类行就不再贴）。
+fn switch_rows() -> Vec<Step> {
+    let c = IWORK_DM;
+    let mut s = base();
+    s.push(a(f::project(OTHER_PROJECT, "web", "~/work/web")));
+    // 打开前：demo · fake-large → web · fake-small，中间切了档位
+    s.extend(dm_round(
+        "sw1",
+        PROJECT,
+        "fake-large",
+        "demo 怎么跑",
+        "pnpm dev",
+    ));
+    s.push(a(f::dm_project_switched(c, Some(OTHER_PROJECT))));
+    s.push(a(f::model_changed(c, "fake-small")));
+    s.push(a(f::approval_mode_changed(c, pb::ApprovalMode::Auto)));
+    s.extend(dm_round(
+        "sw2",
+        OTHER_PROJECT,
+        "fake-small",
+        "web 呢",
+        "也是 pnpm dev",
+    ));
+    s.push(Step::OpenHere);
+    // 打开后：切回 demo · fake-large、档位切回手动
+    s.push(a(f::dm_project_switched(c, Some(PROJECT))));
+    s.push(a(f::model_changed(c, "fake-large")));
+    s.push(a(f::approval_mode_changed(c, pb::ApprovalMode::Manual)));
+    s.extend(dm_round("sw3", PROJECT, "fake-large", "回到 demo", "好"));
     s
 }
 
