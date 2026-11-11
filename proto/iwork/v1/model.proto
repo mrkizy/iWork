@@ -245,6 +245,14 @@ message ActionSummary {
   bool bypass_sandbox_requested = 6;
   // 「执行脚本」类：命令带起的脚本内容不可见。
   bool opaque_script = 7;
+  // 角色未知的参数路径（表外程序的位置参数、--opt=值 / name=值 的值）：只为过底线与越界（T07）。
+  bool argument_path = 8;
+  // 命令文字超过解析资源上限（T07 方案 3.3）。
+  bool resource_limit_hit = 9;
+  // 整条命令词法都切不出来（T07 方案 3.3）。
+  bool unlexable = 10;
+  // 调用里有路径查不清（T07 方案 3.5）。
+  bool path_unresolved = 11;
 }
 
 enum ActionKind {
@@ -311,12 +319,47 @@ message Approval {
   google.protobuf.Timestamp decided_at = 14;
   // 当前（或最近一次）AI 审查的身份，与 review 一起落盘：重建投影后迟到的审查结果仍能判作废（T01 方案 4.3）。
   optional string review_id = 15;
+  // 被审批调用的完整记录（T07 Q8）：拒绝记忆、一次性放行、崩溃恢复都用它。旧事件没有。
+  ApprovalCallRecord call = 16;
   // ApprovalRequested 的信封 seq（T09 方案 G2）。
-  uint64 created_seq = 16;
+  uint64 created_seq = 17;
   // 终态契约（T09 方案 G3）：APPROVED 必有 decider、没有 void_reason；VOIDED 必有 void_reason、没有 decider；
   // PENDING、DENIED 两者都没有。终态都带 decided_at。
-  optional ApprovalDecider decider = 17;
-  optional VoidReason void_reason = 18;
+  optional ApprovalDecider decider = 18;
+  optional VoidReason void_reason = 19;
+}
+
+// 恢复与复查所需的最小调用记录（T07 方案 6.2）。全部是归一后的值，不含原始 JSON 全文。
+message ApprovalCallRecord {
+  string tool_name = 1;
+  string cwd = 2;
+  CallShape shape = 3;
+  SandboxPlacement placement = 4;
+  bool bypass_sandbox_requested = 5;
+  // 全部子动作，保持顺序；代表动作是 actions[representative]。
+  repeated ActionSummary actions = 6;
+  uint32 representative = 7;
+  // 32 字节 SHA-256：sha256(工具名 ‖ 规范化 JSON)。
+  bytes raw_input_digest = 8;
+  // 32 字节 SHA-256：sha256(有序子动作 ‖ 形状 ‖ 沙箱位置 ‖ cwd)。
+  bytes normalized_digest = 9;
+}
+
+// 一次调用的形状（T07 方案 3.1）。
+enum CallShape {
+  CALL_SHAPE_UNSPECIFIED = 0;
+  CALL_SHAPE_TOOL = 1;
+  CALL_SHAPE_SINGLE_SIMPLE_COMMAND = 2;
+  CALL_SHAPE_COMPOUND = 3;
+  CALL_SHAPE_UNPARSABLE = 4;
+}
+
+// 命令在沙箱里还是沙箱外运行（T07 方案 3.7）；AMBIGUOUS 按沙箱外求值。
+enum SandboxPlacement {
+  SANDBOX_PLACEMENT_UNSPECIFIED = 0;
+  SANDBOX_PLACEMENT_INSIDE = 1;
+  SANDBOX_PLACEMENT_OUTSIDE = 2;
+  SANDBOX_PLACEMENT_AMBIGUOUS = 3;
 }
 
 enum ApprovalKind {
@@ -427,6 +470,8 @@ message Rule {
   google.protobuf.Timestamp created_at = 7;
   // 给人看的说明，如「本项目内 `npm test …` 不再问」。
   string label = 8;
+  // 只在这些档位生效；空 = 全部档位（T07 Q1）。
+  repeated ApprovalMode applies_in = 9;
 }
 
 enum RuleLayer {
@@ -455,7 +500,27 @@ message RuleMatcher {
     string tool_name = 4;
     ActionKind action_kind_is = 5;
     AnyMatcher any = 6;
+    // 全部子条件同时命中（T07 Q1）。
+    AllMatcher all = 7;
+    // 动作带这个标记（T07 Q1）。
+    ActionFlag flag = 8;
   }
+}
+
+message AllMatcher {
+  repeated RuleMatcher matchers = 1;
+}
+
+// 规则按标记匹配时用的标记名，与 ActionSummary 的标记布尔字段一一对应。
+enum ActionFlag {
+  ACTION_FLAG_UNSPECIFIED = 0;
+  ACTION_FLAG_OUT_OF_BOUNDS = 1;
+  ACTION_FLAG_BYPASS_SANDBOX_REQUESTED = 2;
+  ACTION_FLAG_OPAQUE_SCRIPT = 3;
+  ACTION_FLAG_ARGUMENT_PATH = 4;
+  ACTION_FLAG_RESOURCE_LIMIT_HIT = 5;
+  ACTION_FLAG_UNLEXABLE = 6;
+  ACTION_FLAG_PATH_UNRESOLVED = 7;
 }
 
 message ProgramSubcommand {

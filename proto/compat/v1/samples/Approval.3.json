@@ -26,8 +26,8 @@
     "01JC0R0000000000000000RXE1"
   ],
   "rulesetVersion": "2026.11.1",
-  "state": "APPROVAL_STATE_VOIDED",
-  "review": "REVIEW_STATE_IN_PROGRESS",
+  "state": "APPROVAL_STATE_APPROVED",
+  "review": "REVIEW_STATE_PASSED",
   "reviewReason": "等待审查",
   "offeredRemember": [
     "REMEMBER_SCOPE_ONCE",
@@ -38,5 +38,5 @@
   "decidedAt": "2025-11-01T12:40:00.123Z",
   "reviewId": "01JC0V0000000000000000RVW1",
   "createdSeq": "1001",
-  "voidReason": "VOID_REASON_TURN_CANCELLED"
+  "decider": "APPROVAL_DECIDER_USER"
 }

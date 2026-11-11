@@ -2,8 +2,10 @@
 //!
 //! 后台服务只经这里和任何运行时说 ACP：每条会话起一个运行时进程（桥接或原生 ACP 适配器），
 //! 进程树由 [`process`] 监管；运行时的原始更新在 [`convert`] 里标准化成 `AgentUpdate`，
-//! 原始消息只进 [`diagnostics`]（脱敏、限量）；版本登记与不兼容组合在 [`registry`]。
+//! 原始消息只进 [`diagnostics`]（脱敏、限量）；版本登记与不兼容组合在 [`registry`]；运行时点名的
+//! 错误码在 [`bridge_error`] 里映射成 `AgentError`。
 
+pub mod bridge_error;
 mod client;
 pub mod convert;
 pub mod diagnostics;

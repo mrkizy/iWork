@@ -74,16 +74,22 @@ sample_types! {
         b::query_result_list_assistants_activity,
         b::query_result_pending_resume_seq,
     ],
-    Approval => [b::approval_full, b::approval_approved, b::approval_voided],
+    // 只许在末尾追加：main 的 approval_with_call 先占了 Approval.2，T09 的两条排在它后面。
+    Approval => [b::approval_full, b::approval_with_call, b::approval_approved, b::approval_voided],
     Turn => [b::turn_full, b::turn_finished_full],
     UserActionCard => [b::user_action_card_full, b::user_action_card_seq],
-    Rule => [b::rule_full],
+    Rule => [b::rule_full, b::rule_composite, b::rule_argument_path, b::rule_flag_deny],
     RuntimeStatus => [b::runtime_status_full],
     Error => [b::error],
     SessionConstraints => [b::session_constraints],
     SessionToolSet => [b::session_tool_set],
     SessionModel => [b::session_model],
-    SessionSetup => [b::session_setup],
+    SessionSetup => [b::session_setup, b::session_setup_2],
+    RuntimeReport => [
+        b::runtime_report_model,
+        b::runtime_report_usage,
+        b::runtime_report_quota,
+    ],
     TransientEvent => [
         b::transient_message_delta,
         b::transient_tool_output_delta,
@@ -145,6 +151,13 @@ sample_types! {
         b::ev_recovery_completed,
         // 以下是后加的样本：只能追加在末尾，编号才不会挪动
         b::ev_approval_voided_turn_failed,
+        b::ev_turn_session_bound,
+        b::ev_approval_evaluated_with_call,
+        b::ev_approval_review_abandoned_executor_lost,
+        b::ev_approval_evaluated_argument_path,
+        b::ev_approval_evaluated_rule_paths,
+        b::ev_approval_evaluated_grant,
+        b::ev_approval_delivered,
     ],
 }
 

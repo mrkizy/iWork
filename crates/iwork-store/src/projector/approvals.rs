@@ -1,13 +1,15 @@
 //! 审批。主状态的真值在 `state / decider / void_reason` 三列，快照只存 `Pending` 基底
 //! （方案 2.6 快照覆盖范围核对表）。`awaits_user` 每次都由 domain 的 `Approval::awaits_user` 算。
 
+use iwork_domain::approval::check_committed;
 use iwork_domain::approval::{Approval, ApprovalState};
-use iwork_domain::event::{ApprovalRequested, ApprovalReviewUpdated, ApprovalVoided};
+use iwork_domain::event::{ApprovalRequested, ApprovalReviewUpdated, ApprovalVoided, DomainEvent};
 use iwork_domain::id::ApprovalId;
 use iwork_ports::store::{EventCodec, StorageError};
 use rusqlite::{OptionalExtension, params};
 
 use super::Cx;
+use super::owner::{precondition, require_owner};
 use crate::snapshot::{
     approval_state_columns, approval_state_from_columns, approval_state_text, decode_approval,
     encode_approval,
@@ -17,8 +19,10 @@ use crate::sql::{ColumnText, sql_err};
 pub(super) fn requested<C: EventCodec + ?Sized>(
     cx: &Cx<'_, C>,
     e: &ApprovalRequested,
+    event: &DomainEvent,
 ) -> Result<(), StorageError> {
     let a = &e.approval;
+    require_owner(cx, event, &format!("审批 {}", a.id), a.turn_id)?;
     let (decider, void_reason) = approval_state_columns(a.state);
     cx.exec(
         "INSERT INTO approvals(id, turn_id, conversation_id, state, decider, void_reason, review_phase, \
@@ -61,9 +65,15 @@ fn load<C: EventCodec + ?Sized>(cx: &Cx<'_, C>, id: &str) -> Result<Approval, St
 pub(super) fn review_updated<C: EventCodec + ?Sized>(
     cx: &Cx<'_, C>,
     e: &ApprovalReviewUpdated,
+    event: &DomainEvent,
 ) -> Result<(), StorageError> {
     let id = e.approval_id.to_string();
     let mut a = load(cx, &id)?;
+    precondition(
+        cx,
+        &format!("审批 {id}"),
+        check_committed(a.state, &a.review, event),
+    )?;
     a.review = e.review.clone();
     cx.exec_hit(
         "UPDATE approvals SET review_phase = ?1, awaits_user = ?2, snapshot = ?3, updated_seq = ?4 \
@@ -86,9 +96,16 @@ pub(super) fn decided<C: EventCodec + ?Sized>(
     cx: &Cx<'_, C>,
     approval_id: ApprovalId,
     state: ApprovalState,
+    event: &DomainEvent,
 ) -> Result<(), StorageError> {
     let id = approval_id.to_string();
     let mut a = load(cx, &id)?;
+    precondition(
+        cx,
+        &format!("审批 {id}"),
+        check_committed(a.state, &a.review, event),
+    )?;
+    require_owner(cx, event, &format!("审批 {id}"), a.turn_id)?;
     a.state = state;
     let (decider, void_reason) = approval_state_columns(state);
     cx.exec_hit(
@@ -111,10 +128,12 @@ pub(super) fn decided<C: EventCodec + ?Sized>(
 pub(super) fn voided<C: EventCodec + ?Sized>(
     cx: &Cx<'_, C>,
     e: &ApprovalVoided,
+    event: &DomainEvent,
 ) -> Result<(), StorageError> {
     decided(
         cx,
         e.approval_id,
         ApprovalState::Voided { reason: e.reason },
+        event,
     )
 }

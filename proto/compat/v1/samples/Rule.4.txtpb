@@ -1,0 +1,19 @@
+id: "01JC0R0000000000000000RXE1"
+layer: RULE_LAYER_USER_DENY
+matcher {
+  flag: ACTION_FLAG_PATH_UNRESOLVED
+}
+effect: RULE_EFFECT_DENY
+source {
+  builtin {
+    ruleset_version: "m1-1"
+  }
+}
+scope {
+  global {}
+}
+created_at {
+  seconds: 1762001300
+  nanos: 123000000
+}
+label: "deny.path-unresolved"

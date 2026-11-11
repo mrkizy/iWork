@@ -66,6 +66,8 @@ pub fn primary(event: &E) -> StreamKey {
         E::TurnStateChanged(e) => one(TURN, &e.turn_id),
         E::TurnFinished(e) => one(TURN, &e.turn_id),
         E::TurnModelReported(e) => one(TURN, &e.turn_id),
+        E::TurnSessionBound(e) => one(TURN, &e.turn_id),
+        E::ApprovalDelivered(e) => one(TURN, &e.turn_id),
         E::ToolCallStarted(e) => one(TURN, &e.turn_id),
         E::ToolCallFinished(e) => one(TURN, &e.turn_id),
         E::ApprovalRequested(e) => one(APPROVAL, of(e.approval.as_ref().map(|a| a.id.clone()))),

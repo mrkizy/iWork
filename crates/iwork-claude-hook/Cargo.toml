@@ -6,4 +6,22 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# 只用 std + serde_json + 平台调用：每次工具调用都要冷启动一次（T06 方案 2.3），不进 tokio。
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bench]]
+name = "cold_start"
+harness = false
+
+# 不用 libtest：这个测试程序带上环境变量时自己就是 panic 探针（重新起自己），stdout 上只有 hook 的结论
+[[test]]
+name = "panic_denies"
+harness = false

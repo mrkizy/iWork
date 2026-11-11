@@ -4,39 +4,71 @@
   "conversationId": "01JC0C0000000000000000CNV1",
   "kind": "APPROVAL_KIND_OUTSIDE_SANDBOX",
   "action": {
-    "kind": "ACTION_KIND_OUTSIDE_SANDBOX",
+    "kind": "ACTION_KIND_WRITE",
     "target": {
-      "command": {
-        "program": "npm",
-        "subcommand": "publish",
-        "argv": [
-          "npm",
-          "publish",
-          "--access=public"
+      "paths": {
+        "paths": [
+          "/tmp/a.txt",
+          "/tmp/b.txt"
         ]
       }
     },
-    "toolName": "Bash",
-    "rawSummary": "npm publish --access=public",
-    "outOfBounds": true,
-    "bypassSandboxRequested": true,
-    "opaqueScript": true
+    "toolName": "Edit",
+    "rawSummary": "改两个文件"
   },
   "matchedRuleIds": [
     "01JC0R0000000000000000RXE1"
   ],
-  "rulesetVersion": "2026.11.1",
-  "state": "APPROVAL_STATE_APPROVED",
-  "review": "REVIEW_STATE_PASSED",
-  "reviewReason": "等待审查",
+  "rulesetVersion": "m1-1",
+  "state": "APPROVAL_STATE_PENDING",
+  "review": "REVIEW_STATE_NOT_REVIEWED",
   "offeredRemember": [
-    "REMEMBER_SCOPE_ONCE",
-    "REMEMBER_SCOPE_PROJECT"
+    "REMEMBER_SCOPE_ONCE"
   ],
-  "rememberLabel": "本项目内 `npm publish …` 不再问",
-  "requestedAt": "2025-11-01T12:38:20.123Z",
-  "decidedAt": "2025-11-01T12:40:00.123Z",
-  "reviewId": "01JC0V0000000000000000RVW1",
-  "createdSeq": "1001",
-  "decider": "APPROVAL_DECIDER_USER"
+  "rememberLabel": "只能允许一次",
+  "requestedAt": "2025-11-01T12:46:40.123Z",
+  "call": {
+    "toolName": "Bash",
+    "cwd": "/Users/me/proj",
+    "shape": "CALL_SHAPE_COMPOUND",
+    "placement": "SANDBOX_PLACEMENT_AMBIGUOUS",
+    "bypassSandboxRequested": true,
+    "actions": [
+      {
+        "kind": "ACTION_KIND_OUTSIDE_SANDBOX",
+        "target": {
+          "command": {
+            "program": "npm",
+            "subcommand": "publish",
+            "argv": [
+              "npm",
+              "publish",
+              "--access=public"
+            ]
+          }
+        },
+        "toolName": "Bash",
+        "rawSummary": "npm publish --access=public",
+        "outOfBounds": true,
+        "bypassSandboxRequested": true,
+        "opaqueScript": true
+      },
+      {
+        "kind": "ACTION_KIND_WRITE",
+        "target": {
+          "paths": {
+            "paths": [
+              "/tmp/a.txt",
+              "/tmp/b.txt"
+            ]
+          }
+        },
+        "toolName": "Edit",
+        "rawSummary": "改两个文件"
+      }
+    ],
+    "representative": 1,
+    "rawInputDigest": "3q2+7wECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxw=",
+    "normalizedDigest": "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo="
+  }
 }

@@ -435,7 +435,8 @@ fn read_events<C: EventCodec>(
     sql.push_str(" ORDER BY seq LIMIT ?");
     args.push(limit_val(limit).into());
 
-    let mut stmt = conn.prepare(&sql).map_err(sql_err)?;
+    // 同一个过滤器（引擎每次追平都用同一组流）拼出的 SQL 相同，按文本缓存，省掉每次请求的准备开销
+    let mut stmt = conn.prepare_cached(&sql).map_err(sql_err)?;
     let rows = stmt
         .query_map(params_from_iter(args), |r| {
             Ok((

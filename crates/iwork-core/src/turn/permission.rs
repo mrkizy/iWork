@@ -17,25 +17,56 @@ use std::sync::{Arc, Mutex};
 use futures_channel::{mpsc, oneshot};
 use iwork_domain::approval::VoidReason;
 use iwork_domain::event::DomainEvent;
-use iwork_domain::id::TurnId;
+use iwork_domain::id::{ApprovalId, TurnId};
 use iwork_ports::agent::{PermissionDecision, PermissionHandler, PermissionRequest};
+use iwork_ports::store::StorageError;
+
+/// 一次判定的结论和它对应的审批（T06 方案 2.6 第 3 条）。`approval`：规则直接放行或拒绝、没有审批实体时
+/// 为 `None`；经审批得到的答复、一次性授权命中时为 `Some`（T07 方案 6.10.6 第 8 步）。编排采纳结论时
+/// 凭它提交 `ApprovalDelivered`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decided {
+    pub decision: PermissionDecision,
+    pub approval: Option<ApprovalId>,
+}
+
+/// 判定方算不出作废计划（T07 方案 6.10.8，方案审查 1/F-3）。算不出就报错，不返回空计划——
+/// 空计划的意思是「确实没有要作废的」。
+#[derive(Debug, thiserror::Error)]
+pub enum VoidPlanError {
+    /// 屏障的空提交或读事件失败（`Busy`、`Io`）
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+    /// 判定方的状态不可用：折叠对不上日志。文字里点名 seq 与事件种类
+    #[error("判定方状态不可用：{0}")]
+    Unavailable(String),
+}
 
 /// 权限判定方。
 pub trait PermissionDecider: Send + Sync + 'static {
+    /// 作废计划交出期间占着的东西，丢弃即释放。桩用 `()`。
+    type VoidHold: Send;
+
     /// 判定一次请求。可以一直不返回（等用户），调用方不设超时。
     fn decide(
         &self,
         turn_id: TurnId,
         req: &PermissionRequest,
-    ) -> impl Future<Output = PermissionDecision> + Send;
+    ) -> impl Future<Output = Decided> + Send;
 
-    /// 回合因 `reason` 结束等待：作废它挂着的审批，返回要与回合状态变化写进同一次提交的事件
-    /// （`ApprovalVoided`）。没有挂着的审批时返回空。
+    /// 回合因 `reason` 结束等待：只算作废计划，不改任何状态。成功时返回的事件由编排和回合状态变化写进
+    /// 同一笔提交；`VoidHold` 留到那笔提交返回或到期再丢，期间编排不等别的东西。
     fn void_pending(
         &self,
         turn_id: TurnId,
         reason: VoidReason,
-    ) -> impl Future<Output = Vec<DomainEvent>> + Send;
+    ) -> impl Future<Output = Result<(Vec<DomainEvent>, Self::VoidHold), VoidPlanError>> + Send;
+
+    /// 编排提交成功后调：只是提醒判定方「有新事件」，漏调不影响正确性；判定方在里面出了错自己记日志。
+    /// 编排调它时带期限（`NUDGE_LIMIT`），到期就丢。
+    fn committed(&self, _events: &[DomainEvent]) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 }
 
 /// 审批桩：全部放行或全部拒绝，运行中可切换。T07 完成后由审批引擎替换。
@@ -67,19 +98,29 @@ impl StubDecider {
 }
 
 impl PermissionDecider for StubDecider {
-    async fn decide(&self, _turn_id: TurnId, _req: &PermissionRequest) -> PermissionDecision {
-        if self.allow.load(Ordering::Acquire) {
+    type VoidHold = ();
+
+    async fn decide(&self, _turn_id: TurnId, _req: &PermissionRequest) -> Decided {
+        let decision = if self.allow.load(Ordering::Acquire) {
             PermissionDecision::Allow
         } else {
             PermissionDecision::Deny {
                 message: STUB_DENY_MESSAGE.into(),
             }
+        };
+        Decided {
+            decision,
+            approval: None,
         }
     }
 
     /// 桩当场答复，不留审批记录，没有可作废的。
-    async fn void_pending(&self, _turn_id: TurnId, _reason: VoidReason) -> Vec<DomainEvent> {
-        Vec::new()
+    async fn void_pending(
+        &self,
+        _turn_id: TurnId,
+        _reason: VoidReason,
+    ) -> Result<(Vec<DomainEvent>, ()), VoidPlanError> {
+        Ok((Vec::new(), ()))
     }
 }
 
@@ -103,9 +144,10 @@ pub(crate) enum Signal {
         reply: oneshot::Sender<Option<Ticket>>,
         after: u64,
     },
-    /// 回执 `true` 表示结果被采纳
+    /// 回执 `true` 表示结果被采纳。`approval`：结果出自哪条审批；有值时编排采纳时提交 `ApprovalDelivered`
     PermissionDecided {
         ticket: Ticket,
+        approval: Option<ApprovalId>,
         ack: oneshot::Sender<bool>,
     },
 }
@@ -178,7 +220,7 @@ impl<D: PermissionDecider> PermissionHandler for PermissionGate<D> {
         let Ok(Some(ticket)) = asked.await else {
             return turn_gone();
         };
-        let decision = self.decider.decide(inbox.turn_id, &req).await;
+        let Decided { decision, approval } = self.decider.decide(inbox.turn_id, &req).await;
         // 判定期间回合可能已经结束、换成别的回合：只把结果交给领票时的那个回合
         let Some(inbox) = self.slot.current(Some(inbox.turn_id)) else {
             return turn_gone();
@@ -186,7 +228,11 @@ impl<D: PermissionDecider> PermissionHandler for PermissionGate<D> {
         let (ack, acked) = oneshot::channel();
         if inbox
             .signals
-            .unbounded_send(Signal::PermissionDecided { ticket, ack })
+            .unbounded_send(Signal::PermissionDecided {
+                ticket,
+                approval,
+                ack,
+            })
             .is_err()
         {
             return turn_gone();

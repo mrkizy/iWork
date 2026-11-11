@@ -87,6 +87,8 @@ impl Tables {
             E::TurnStateChanged(e) => by_turn(&e.turn_id),
             E::TurnFinished(e) => by_turn(&e.turn_id),
             E::TurnModelReported(e) => by_turn(&e.turn_id),
+            E::TurnSessionBound(e) => by_turn(&e.turn_id),
+            E::ApprovalDelivered(e) => by_turn(&e.turn_id),
             E::ToolCallStarted(e) => by_turn(&e.turn_id),
             E::ToolCallFinished(e) => by_turn(&e.turn_id),
             E::ApprovalRequested(e) => e.approval.as_ref().map(|a| a.conversation_id.clone()),
@@ -375,6 +377,13 @@ impl Tables {
                 }
             }
             E::ApprovalEvaluated(_) | E::ApprovalStaleResultDropped(_) => {}
+            // 交付记录只给编排用（T07），不改任何视图。
+            E::ApprovalDelivered(_) => {}
+            E::TurnSessionBound(e) => {
+                if let Some(t) = self.turns.get_mut(&e.turn_id) {
+                    t.runtime_session_id = Some(e.runtime_session_id.clone());
+                }
+            }
             E::RuleRemembered(e) => {
                 if let Some(r) = &e.rule {
                     self.rules.insert(r.id.clone(), r.clone());

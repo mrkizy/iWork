@@ -54,7 +54,7 @@ finite_enum! {
         /// 崩溃恢复：后台服务重启时进程已不在
         ProcessLost,
         WaitLimitReached,
-        /// `ResumeTurn`，或等待上限中断后审批被批准自动续接
+        /// `ResumeTurn`，或中断后审批被批准、留下一次性放行时自动续接（引擎的 `turns_to_resume`）
         Resume,
         /// `AbandonTurn`；它的待审批随之作废
         Abandon,

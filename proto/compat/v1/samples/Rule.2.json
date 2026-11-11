@@ -1,0 +1,31 @@
+{
+  "id": "01JC0R0000000000000000RXE1",
+  "layer": "RULE_LAYER_DEFAULT",
+  "matcher": {
+    "all": {
+      "matchers": [
+        {
+          "actionKindIs": "ACTION_KIND_WRITE"
+        },
+        {
+          "flag": "ACTION_FLAG_OUT_OF_BOUNDS"
+        }
+      ]
+    }
+  },
+  "effect": "RULE_EFFECT_ASK",
+  "source": {
+    "builtin": {
+      "rulesetVersion": "m1-1"
+    }
+  },
+  "scope": {
+    "global": {}
+  },
+  "createdAt": "2025-11-01T12:45:00.123Z",
+  "label": "default.write.oob",
+  "appliesIn": [
+    "APPROVAL_MODE_MANUAL",
+    "APPROVAL_MODE_AUTO"
+  ]
+}

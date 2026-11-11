@@ -3,6 +3,9 @@
 //! 实现两种写法都有：`async fn`（证明它满足 trait 的 `impl Future + Send`），以及先取数再返回
 //! `async move` 的显式写法（锁不跨 await 时这样写）。
 
+/// `PathResolver` 的假实现；别的 crate 的测试经 `#[path]` 引入同一份。
+mod fake_fs;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::ops::Range;
@@ -471,6 +474,15 @@ impl AgentSession for FakeSession {
     fn runtime_session_id(&self) -> Option<&str> {
         Some("s1")
     }
+    fn permission_wait_limit(&self) -> Option<std::time::Duration> {
+        None
+    }
+    fn sandbox(&self) -> iwork_ports::agent::SandboxStatus {
+        iwork_ports::agent::SandboxStatus::Unavailable
+    }
+    async fn terminate(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
     async fn prompt(&self, _blocks: Vec<ContentBlock>) -> Result<FakeUpdates, AgentError> {
         Ok(FakeUpdates(vec![AgentUpdate::Finished(
             TurnOutcome::Completed,
@@ -491,6 +503,8 @@ impl AgentPort for FakeAgent {
             supports_resume: true,
             supports_image_input: false,
             effort_levels: vec![],
+            sandbox_platform: iwork_ports::agent::SandboxPlatform::Unsupported,
+            model_options: vec![],
         })
     }
     async fn open_session<H: PermissionHandler + 'static>(
@@ -757,6 +771,7 @@ fn fakes_are_callable() {
             tool: iwork_domain::action::ToolRef("t".into()),
             raw_input: iwork_ports::agent::RawToolInput("{}".into()),
             bypass_sandbox: false,
+            cwd: None,
         })),
         PermissionDecision::Deny { .. }
     ));

@@ -57,6 +57,8 @@ message DomainEvent {
     TurnModelReported turn_model_reported = 83;
     ToolCallStarted tool_call_started = 84;
     ToolCallFinished tool_call_finished = 85;
+    TurnSessionBound turn_session_bound = 86;
+    ApprovalDelivered approval_delivered = 87;
 
     // 审批 110–129
     ApprovalRequested approval_requested = 110;
@@ -294,6 +296,22 @@ message TurnModelReported {
   ModelSelection model = 2;
 }
 
+// 流：turn（turn_id）。回合跑在哪条运行时会话上：发 prompt 之前、与回合进 Running 同一次提交，
+// 后台服务崩溃后「继续」靠它续接原会话（需求 12）。
+// 新事件种类（M1 补丁 2026-11-10 加）：按 PD6 算「带迁移」，只能向前修。旧程序读到这种事件起不来，
+// 写过它的库不能靠装回不带它的版本回退。
+message TurnSessionBound {
+  string turn_id = 1;
+  string runtime_session_id = 2;
+}
+
+// 流：turn（turn_id）。编排采纳了一条审批结果、即将交给运行时：它是「这条批准已经用掉」的唯一依据。
+// 允许和拒绝都算审批结果，被拒绝的审批交付时同样有这条事件（T06 方案 2.6 第 2 条；T07 方案 6.10.8）。
+message ApprovalDelivered {
+  string approval_id = 1;
+  string turn_id = 2;
+}
+
 // 流：turn（turn_id）。ui-m1.md 第 04 页「工具活动」。
 message ToolCallStarted {
   string turn_id = 1;
@@ -352,6 +370,24 @@ message ApprovalEvaluated {
   // 命中的层（领域 Evaluation.layer_hit）。
   RuleLayer layer_hit = 6;
   uint32 duration_ms = 7;
+  // 会话快照读取三张安全清单时 rule 流的游标；与 live_rules_seq 分别记、不取最大（T07 Q10）。
+  uint64 snapshot_lists_seq = 8;
+  // 活规则缓存最后应用的 rule 流游标（T07 Q10）。
+  uint64 live_rules_seq = 9;
+  // 全部子动作；action 是其中的代表动作（T07 Q10）。命令原文只在 action.raw_summary 存一份，
+  // 子动作的 raw_summary 为空（T07 7/F-2：否则动作数 × 原文长度是平方级）。
+  repeated ActionSummary sub_actions = 10;
+  CallShape call_shape = 11;
+  // 会话快照里规则路径的解析结果，只含解析后与原位置不同的项，按 path 排序；重放据此重算别名，不读磁盘（T07 方案 4.3、6.8）。
+  repeated RulePathResolution snapshot_rule_paths = 12;
+  // 这次求值命中的一次性放行出自哪条审批；没命中为空。结果是放行表示用它放行，不是放行表示它作废
+  // （T07 方案 6.10.6 第 1 条、PD1）。
+  optional string grant_approval_id = 13;
+}
+
+message RulePathResolution {
+  string path = 1;
+  string resolved = 2;
 }
 
 // 流：audit（approval_id）。迟到或对不上号的 AI 审查结果被丢弃。投影不读它、不改审批表（T01 方案 4.3）。

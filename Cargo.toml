@@ -39,6 +39,8 @@ sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Diagnostics_ToolHelp"] }
 base64 = "0.22"
+# Bash 语法解析，只许 iwork-shell 用（T07 方案 3.3、ADR-T07-a）
+brush-parser = "0.4"
 tauri-build = "2.7"
 tokio-util = { version = "0.7", features = ["codec"] }
 # 读 git 仓库（gitoxide）。只开 status（含 dirwalk、index、blob-diff），不要默认的网络与 CLI 便利功能
@@ -58,6 +60,7 @@ iwork-proto = { path = "crates/iwork-proto" }
 iwork-domain = { path = "crates/iwork-domain" }
 iwork-ports = { path = "crates/iwork-ports" }
 iwork-core = { path = "crates/iwork-core" }
+iwork-shell = { path = "crates/iwork-shell" }
 iwork-app = { path = "crates/iwork-app" }
 iwork-store = { path = "crates/iwork-store" }
 iwork-agent-acp = { path = "crates/iwork-agent-acp" }
@@ -68,3 +71,7 @@ iwork-ipc = { path = "crates/iwork-ipc" }
 iwork-claude-hook = { path = "crates/iwork-claude-hook" }
 iwork-client-core = { path = "crates/iwork-client-core" }
 iwork-fake-daemon = { path = "crates/iwork-fake-daemon" }
+
+# hook 每次工具调用都冷启动一次，体积与启动时间进基准（T06 方案 2.3、第 14 节）
+[profile.release.package.iwork-claude-hook]
+opt-level = "s"

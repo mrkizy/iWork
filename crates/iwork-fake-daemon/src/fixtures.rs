@@ -283,6 +283,7 @@ pub fn command_action(raw: &str) -> pb::ActionSummary {
         out_of_bounds: false,
         bypass_sandbox_requested: false,
         opaque_script: false,
+        ..Default::default()
     }
 }
 

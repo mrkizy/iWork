@@ -49,6 +49,16 @@ impl RawLog {
         self.push(json!({ "stream": "stdout", "rejected": true }).to_string());
     }
 
+    /// 记一条约定项读不懂、按拒绝答复了的权限请求。内容不记。
+    pub fn record_bad_permission_meta(&self) {
+        self.push(json!({ "stream": "stdout", "bad_permission_meta": true }).to_string());
+    }
+
+    /// 记一条解不出来的运行时上报（`_meta.iwork.report`）。内容不记，上报本身丢弃。
+    pub fn record_bad_report(&self) {
+        self.push(json!({ "stream": "stdout", "bad_report": true }).to_string());
+    }
+
     fn push(&self, mut entry: String) {
         if entry.len() > MAX_ENTRY_BYTES {
             // 摘要字段都有长度上限，正常到不了这里；万一到了，截断成合法 UTF-8

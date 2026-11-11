@@ -6,6 +6,12 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CanonicalPath(pub PathBuf);
 
+impl AsRef<std::path::Path> for CanonicalPath {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
 /// 动作类型（技术设计 7.1 表）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ActionKind {
@@ -51,6 +57,63 @@ pub struct ActionFlags {
     pub bypass_sandbox_requested: bool,
     /// 「执行脚本」类：看不出脚本会做什么
     pub opaque_script: bool,
+    /// 角色未知的参数路径：归类成功的表外程序的位置参数、`--opt=值` / `name=值` 的值。
+    /// 既记读又记写只为过底线与越界；工作区内不单独再问（T07 方案 3.4 补充，supervisor 2026-11-10 定）
+    pub argument_path: bool,
+    /// 命令文字超过解析资源上限（256 KiB），事实没收全：内置条目三档拒绝（T07 方案 3.3、4.2）
+    pub resource_limit_hit: bool,
+    /// 整条命令原文词法都切不出来，没有事实可抽：内置条目三档拒绝（T07 方案 3.3、4.2）
+    pub unlexable: bool,
+    /// 调用里有路径查不清（权限错误、链接成环等）：内置条目三档拒绝（T07 方案 3.5、4.2）
+    pub path_unresolved: bool,
+}
+
+/// 规则按标记匹配时用的标记名（[`crate::rule::RuleMatcher::Flag`]），与 [`ActionFlags`] 的字段一一对应。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ActionFlag {
+    OutOfBounds,
+    BypassSandboxRequested,
+    OpaqueScript,
+    ArgumentPath,
+    ResourceLimitHit,
+    Unlexable,
+    PathUnresolved,
+}
+
+impl ActionFlags {
+    /// 这个标记是否为真。
+    pub fn has(&self, flag: ActionFlag) -> bool {
+        match flag {
+            ActionFlag::OutOfBounds => self.out_of_bounds,
+            ActionFlag::BypassSandboxRequested => self.bypass_sandbox_requested,
+            ActionFlag::OpaqueScript => self.opaque_script,
+            ActionFlag::ArgumentPath => self.argument_path,
+            ActionFlag::ResourceLimitHit => self.resource_limit_hit,
+            ActionFlag::Unlexable => self.unlexable,
+            ActionFlag::PathUnresolved => self.path_unresolved,
+        }
+    }
+}
+
+/// 一次调用的形状（T07 方案 3.1）。决定能否生成亲手执行卡片、能否放行规则与记住。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CallShapeKind {
+    /// 非 Bash 工具：恰好一个动作
+    Tool,
+    /// 恰好一个简单命令，全部词字面
+    SingleSimpleCommand,
+    /// 多个简单命令，且每个都归类成功
+    Compound,
+    /// 解析不了：三档询问、不记住、不审查
+    Unparsable,
+}
+
+/// 命令会在沙箱里还是沙箱外运行（T07 方案 3.7）。`Ambiguous` 按沙箱外求值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SandboxPlacement {
+    Inside,
+    Outside,
+    Ambiguous,
 }
 
 /// 一次工具调用归一后的动作。

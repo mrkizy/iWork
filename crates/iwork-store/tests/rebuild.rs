@@ -42,6 +42,7 @@ fn history(store: &Store) {
     let mut reviewed = approval(41, 20, 10);
     reviewed.review = ReviewState::Passed {
         review_id: ReviewId(tid(90)),
+        reason: String::new(),
     };
     let mut req = cmd(
         1,

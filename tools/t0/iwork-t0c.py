@@ -29,6 +29,34 @@ def log(msg):
         f.write(line + "\n")
 
 
+AUTH_FIELDS = ("loggedIn", "authMethod", "subscriptionType", "loginExpiresAt")
+
+
+def claude_auth_fields():
+    """claude auth status 只留四个字段；不是 JSON 时只记长度。原文不进日志。"""
+    try:
+        r = subprocess.run(["claude", "auth", "status"], capture_output=True, text=True, timeout=60)
+    except Exception as e:
+        return f"ERROR {type(e).__name__}"
+    try:
+        doc = json.loads(r.stdout)
+        kept = {k: doc.get(k) for k in AUTH_FIELDS} if isinstance(doc, dict) else None
+    except ValueError:
+        kept = None
+    if kept is None:
+        return f"输出不是 JSON 对象（{len(r.stdout)} 字节，内容不记录）\n(exit={r.returncode})"
+    return json.dumps(kept, ensure_ascii=False) + f"\n(exit={r.returncode})"
+
+
+def redacted_status(cmd):
+    """登录状态类命令：输出格式不固定、可能带账号，只记退出码与字节数。"""
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+    except Exception as e:
+        return f"ERROR {type(e).__name__}"
+    return f"stdout {len(r.stdout)} 字节、stderr {len(r.stderr)} 字节（内容不记录）\n(exit={r.returncode})"
+
+
 def sh(cmd):
     try:
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
@@ -280,9 +308,12 @@ def main():
     shutil.rmtree(OUT, ignore_errors=True)
     os.makedirs(OUT)
     log(f"python {sys.version.split()[0]}；quick={quick}")
-    for cmd in ("claude --version", "claude auth status", "codex --version", "codex login status",
+    for cmd in ("claude --version", "codex --version",
                 "gemini --version", "agy --version", "agy acp --help", "node --version", "npx --version"):
         log(f"$ {cmd}\n{sh(cmd)}")
+    # 登录状态的原文带邮箱等账号信息，不得落盘（AGENTS.md 安全不变量）：只记白名单字段或长度
+    log(f"$ claude auth status（只留四个字段）\n{claude_auth_fields()}")
+    log(f"$ codex login status（只记退出码与长度）\n{redacted_status('codex login status')}")
     if shutil.which("gemini") is None:
         log("未安装 gemini，跳过（安装：npm i -g @google/gemini-cli，然后运行 gemini 完成登录）")
     help_g = sh("gemini --help")

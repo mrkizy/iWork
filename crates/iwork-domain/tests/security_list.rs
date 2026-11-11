@@ -19,6 +19,7 @@ fn rule(layer: RuleLayer, source: RuleSource) -> RuleEntry {
         scope: RuleScope::Project(ProjectId::from_raw(RawUlid::from_u128(2))),
         created_at: Timestamp(0),
         label: String::new(),
+        applies_in: Default::default(),
     }
 }
 

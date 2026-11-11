@@ -102,6 +102,8 @@ pub fn spec(cwd: &Path) -> SessionSpec {
             enabled_groups: BTreeSet::from([ToolGroup::ReadAndSearch, ToolGroup::RunCommands]),
             include_always_on: true,
         },
+        disabled_tools: Vec::new(),
+        plugin_dirs: Vec::new(),
         resume: None,
         kind: TurnKind::Assistant,
     }
@@ -224,6 +226,7 @@ pub fn describe(e: &DomainEvent) -> String {
             format!("tool finished {} ok={}", t.tool_call_id.0, t.ok)
         }
         DomainEvent::TurnFinished(t) => format!("turn finished {:?}", t.state),
+        DomainEvent::TurnSessionBound(b) => format!("session bound {}", b.runtime_session_id),
         other => other.kind().to_string(),
     }
 }

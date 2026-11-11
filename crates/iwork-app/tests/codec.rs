@@ -189,6 +189,7 @@ fn pending_approval() -> Approval {
                 ..ActionFlags::default()
             },
         },
+        call: None,
         matched_rules: vec![],
         ruleset_version: RuleSetVersion("2026.11".into()),
         state: ApprovalState::Pending,
@@ -245,7 +246,13 @@ fn approval_review_identity_survives_rebuild() {
     let before = rebuilt.clone();
     let approval_events_before = store.count_in_stream(StreamKind::Approval);
     let err = rebuilt
-        .apply(ApprovalTrigger::AiReviewPassed { review_id: r2 }, &AUTO)
+        .apply(
+            ApprovalTrigger::AiReviewPassed {
+                review_id: r2,
+                reason: "需要".into(),
+            },
+            &AUTO,
+        )
         .unwrap_err();
     let ApprovalApplyError::Stale { review_id, why, .. } = err else {
         panic!("应为 Stale：{err:?}")
@@ -272,7 +279,13 @@ fn approval_review_identity_survives_rebuild() {
 
     // 对号的「通过」在自动档下放行
     rebuilt
-        .apply(ApprovalTrigger::AiReviewPassed { review_id: r1 }, &AUTO)
+        .apply(
+            ApprovalTrigger::AiReviewPassed {
+                review_id: r1,
+                reason: "需要".into(),
+            },
+            &AUTO,
+        )
         .unwrap();
     assert_eq!(
         rebuilt.state,

@@ -47,7 +47,8 @@ pub enum NoteKind {
 pub enum Row {
     Message(pb::Message),
     Tool(pb::ToolCall),
-    Approval(pb::Approval),
+    /// 装箱：审批带完整调用记录（T07），比其他行大得多。
+    Approval(Box<pb::Approval>),
     UserAction(pb::UserActionCard),
     /// 回合结束行：改动摘要与印章，或失败、取消的原因。
     TurnEnd(pb::Turn),
@@ -514,7 +515,7 @@ impl Timeline {
                 if !self.admit_new(&id, false) {
                     return Some(TimelineChange::default());
                 }
-                self.insert(RowKey::entity(seq), id, Row::Approval(a))
+                self.insert(RowKey::entity(seq), id, Row::Approval(Box::new(a)))
             }
             E::ApprovalReviewUpdated(e) => self.update(&e.approval_id, |r| {
                 if let Row::Approval(a) = r {
@@ -806,7 +807,11 @@ impl Timeline {
         }
         for a in &page.approvals {
             let seq = need("Approval", &a.id, a.created_seq)?;
-            self.insert(RowKey::entity(seq), a.id.clone(), Row::Approval(a.clone()));
+            self.insert(
+                RowKey::entity(seq),
+                a.id.clone(),
+                Row::Approval(Box::new(a.clone())),
+            );
         }
         for c in &page.user_actions {
             let seq = need("UserActionCard", &c.id, c.created_seq)?;

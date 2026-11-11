@@ -16,6 +16,7 @@ pub mod artifact;
 pub mod clock;
 pub mod discovery;
 pub mod exec;
+pub mod fs;
 pub mod live;
 pub mod notify;
 pub mod project_files;
