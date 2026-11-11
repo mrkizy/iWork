@@ -701,6 +701,61 @@ pub fn session_setup() -> SessionSetup {
         model: model_sel(),
         constraints: Some(session_constraints()),
         tool_set: Some(session_tool_set()),
+        disabled_tools: Vec::new(),
+        plugin_dirs: Vec::new(),
+    }
+}
+
+/// T06 加的两个字段：禁用工具名与插件目录。
+pub fn session_setup_2() -> SessionSetup {
+    SessionSetup {
+        model: model_sel(),
+        constraints: Some(session_constraints()),
+        tool_set: Some(session_tool_set()),
+        disabled_tools: vec![s("CronCreate"), s("RemoteTrigger")],
+        plugin_dirs: vec![s("/data/iwork/imports/plugins/p1")],
+    }
+}
+
+// ---------- 运行时上报（T06 方案 2.5） ----------
+
+pub fn runtime_report_model() -> RuntimeReport {
+    RuntimeReport {
+        kind: Some(runtime_report::Kind::Model(ModelSelection {
+            model_id: s("claude-opus-4-1"),
+            effort: Some(s("max")),
+        })),
+    }
+}
+
+pub fn runtime_report_usage() -> RuntimeReport {
+    RuntimeReport {
+        kind: Some(runtime_report::Kind::Usage(Usage {
+            input_tokens: 2048,
+            output_tokens: 512,
+            cache_read_tokens: 4096,
+            cache_write_tokens: 128,
+            cost_usd: Some(0.125),
+        })),
+    }
+}
+
+pub fn runtime_report_quota() -> RuntimeReport {
+    RuntimeReport {
+        kind: Some(runtime_report::Kind::Quota(QuotaReport {
+            windows: vec![
+                QuotaWindowReport {
+                    window: s("five_hour"),
+                    used_pct: 42,
+                    resets_at: ts(1_731_300_000),
+                },
+                QuotaWindowReport {
+                    window: s("seven_day"),
+                    used_pct: 7,
+                    resets_at: ts(1_731_800_000),
+                },
+            ],
+        })),
     }
 }
 

@@ -1,5 +1,5 @@
 // 随会话下发给桥接（iwork-bridge-claude、iwork-fake-agent）的类型（设计 2、7.0、7.2b）。
-// 桥接只依赖本文件与 common.proto：不需要知道命令与视图，客户端协议改动不会让桥接重编。
+// 桥接只依赖本文件与 common.proto（外加标准的 Timestamp）：不需要知道命令与视图，客户端协议改动不会让桥接重编。
 // 这里只放抽象约束；翻译成厂商设置项是适配器的事，核心不写厂商特例。
 //
 // 兼容规则：字段只增不改号；删字段先 `reserved` 编号与名字（同一主版本内只标 deprecated 不删）；
@@ -8,6 +8,7 @@ syntax = "proto3";
 
 package iwork.v1;
 
+import "google/protobuf/timestamp.proto";
 import "iwork/v1/common.proto";
 
 // 沙箱抽象约束（设计 7.0 表）。系统底线三档相同；只写白名单只在手动、自动档生效，全开档放开为 anywhere。
@@ -69,4 +70,34 @@ message SessionSetup {
   ModelSelection model = 1;
   SessionConstraints constraints = 2;
   SessionToolSet tool_set = 3;
+  // 启动时不提供的工具名：核心按会话工具集与永久禁用表算好（设计 7.1、7.2b），适配器原样交给运行时。
+  repeated string disabled_tools = 4;
+  // 按会话加载的插件目录（导入区下的绝对路径，设计 9.5）。
+  repeated string plugin_dirs = 5;
+}
+
+// 运行时向后台上报的事实。编码同 SessionSetup（Protobuf 二进制再做标准 base64），挂在一条
+// `session/update` 通知的 `_meta["iwork"]["report"]` 上（T06 方案 2.5）。只在回合进行中上报：
+// 回合之外到达的更新后台一律丢弃。
+message RuntimeReport {
+  oneof kind {
+    // 运行时实际使用的模型；每个回合报一次。
+    ModelSelection model = 1;
+    // 一个回合的用量。
+    Usage usage = 2;
+    QuotaReport quota = 3;
+  }
+}
+
+message QuotaReport {
+  repeated QuotaWindowReport windows = 1;
+}
+
+// 一个额度窗口。观测时间由后台记，这里不带（model.proto 的 QuotaWindow 带观测时间，本文件不引用它）。
+message QuotaWindowReport {
+  // 窗口类型，运行时给的不透明字符串。
+  string window = 1;
+  // 使用率百分比，0–100。
+  uint32 used_pct = 2;
+  google.protobuf.Timestamp resets_at = 3;
 }

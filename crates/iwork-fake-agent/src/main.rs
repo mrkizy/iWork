@@ -3,6 +3,9 @@
 //!
 //! 用法：`iwork-fake-agent --script <脚本.json> [--record <记录.jsonl>]`
 //! 记录文件每行一个 JSON：自己的进程号、收到的请求与通知（`{"method":..,"params":..}`）、权限答复、启动的子进程号。
+//!
+//! `_meta["iwork"]` 下的约定项（T06 方案 2.5）照同一份字符串写，不依赖 `iwork-agent-acp`；
+//! 两边对不对得上由 `iwork-agent-acp` 对着它的端到端测试核对。
 
 mod script;
 
@@ -18,20 +21,26 @@ use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
     AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Implementation,
-    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, Meta,
     NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
     PromptCapabilities, PromptRequest, PromptResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, SessionCapabilities, SessionId, SessionNotification,
-    SessionSystemPromptCapabilities, SessionUpdate, StopReason, TextContent, ToolCall,
-    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    RequestPermissionRequest, SessionCapabilities, SessionId, SessionInfoUpdate,
+    SessionNotification, SessionSystemPromptCapabilities, SessionUpdate, StopReason, TextContent,
+    ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
 };
 use agent_client_protocol::{Agent, Client, Lines};
-use serde_json::{Value, json};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use iwork_proto::pb;
+use prost::Message as _;
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
 
 use crate::script::{Script, Step};
 
+/// iWork 在 ACP `_meta` 里占用的键。
+const META_KEY: &str = "iwork";
 const ALLOW_ID: &str = "allow-once";
 const REJECT_ID: &str = "reject-once";
 /// 崩溃前留给已发出消息写出的时间。
@@ -160,14 +169,30 @@ async fn run() -> Result<(), String> {
         .on_receive_request(
             async move |req: NewSessionRequest, responder, _cx| {
                 s2.record.request("session/new", &req);
-                responder.respond(NewSessionResponse::new(SessionId::new("fake-session-1")))
+                let mut response = NewSessionResponse::new(SessionId::new("fake-session-1"));
+                if let Some(sandbox) = &s2.script.agent.session_sandbox {
+                    response = response.meta(iwork_meta(json!({ "sandbox": sandbox })));
+                }
+                responder.respond(response)
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async move |req: LoadSessionRequest, responder, _cx| {
                 s3.record.request("session/load", &req);
-                responder.respond(LoadSessionResponse::new())
+                let info = &s3.script.agent;
+                let mut inner = Map::new();
+                if let Some(sandbox) = &info.session_sandbox {
+                    inner.insert("sandbox".into(), json!(sandbox));
+                }
+                if let Some(id) = &info.resumed_session_id {
+                    inner.insert("cliSessionId".into(), json!(id));
+                }
+                let mut response = LoadSessionResponse::new();
+                if !inner.is_empty() {
+                    response = response.meta(iwork_meta(Value::Object(inner)));
+                }
+                responder.respond(response)
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -177,8 +202,11 @@ async fn run() -> Result<(), String> {
                 let state = s4.clone();
                 // 回合里要发权限请求并等答复，不能占住派发循环
                 cx.clone().spawn(async move {
-                    let stop = run_prompt(&state, &cx, req.session_id).await?;
-                    responder.respond(PromptResponse::new(stop))
+                    // 出错时回 JSON-RPC 错误，不让错误冒出任务（那会结束整个连接）
+                    let result = run_prompt(&state, &cx, req.session_id)
+                        .await
+                        .map(PromptResponse::new);
+                    responder.respond_with_result(result)
                 })
             },
             agent_client_protocol::on_receive_request!(),
@@ -209,15 +237,45 @@ fn initialize_response(script: &Script) -> InitializeResponse {
     let mut response = InitializeResponse::new(ProtocolVersion::V1)
         .agent_capabilities(caps)
         .agent_info(Implementation::new(info.name.clone(), info.version.clone()));
+    let mut inner = Map::new();
     if let Some(cli) = &info.cli {
-        let mut meta = serde_json::Map::new();
-        meta.insert(
-            "iwork".into(),
-            json!({ "cli": { "path": cli.path, "version": cli.version } }),
+        inner.insert(
+            "cli".into(),
+            json!({ "path": cli.path, "version": cli.version }),
         );
-        response = response.meta(meta);
+    }
+    if let Some(v) = &info.permission_wait_limit_secs {
+        inner.insert("permissionWaitLimitSecs".into(), v.clone());
+    }
+    if let Some(v) = &info.sandbox_platform {
+        inner.insert("sandboxPlatform".into(), v.clone());
+    }
+    if !info.effort_levels.is_empty() {
+        inner.insert("effortLevels".into(), json!(info.effort_levels));
+    }
+    if !info.models.is_empty() {
+        let models: Vec<Value> = info
+            .models
+            .iter()
+            .map(|m| json!({ "id": m.id, "label": m.label }))
+            .collect();
+        inner.insert("models".into(), Value::Array(models));
+    }
+    if !inner.is_empty() {
+        response = response.meta(iwork_meta(Value::Object(inner)));
     }
     response
+}
+
+fn iwork_meta(inner: Value) -> Meta {
+    let mut meta = Map::new();
+    meta.insert(META_KEY.into(), inner);
+    meta
+}
+
+fn encode_report(kind: pb::runtime_report::Kind) -> Value {
+    let report = pb::RuntimeReport { kind: Some(kind) };
+    Value::String(BASE64.encode(report.encode_to_vec()))
 }
 
 async fn run_prompt(
@@ -279,6 +337,16 @@ impl Ctx<'_> {
     fn send(&self, update: SessionUpdate) -> Result<(), agent_client_protocol::Error> {
         self.cx
             .send_notification(SessionNotification::new(self.session.clone(), update))
+    }
+
+    /// 上报挂在一条空的 `session_info_update` 通知的 `_meta.iwork.report` 上。
+    fn report(&self, value: Value) -> Result<(), agent_client_protocol::Error> {
+        let n = SessionNotification::new(
+            self.session.clone(),
+            SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new()),
+        )
+        .meta(iwork_meta(json!({ "report": value })));
+        self.cx.send_notification(n)
     }
 
     fn text(&self, text: &str) -> Result<(), agent_client_protocol::Error> {
@@ -419,10 +487,11 @@ impl Ctx<'_> {
             }
             Step::Permission {
                 tool_call_id,
+                cwd,
                 allowed,
                 denied,
             } => {
-                let request = RequestPermissionRequest::new(
+                let mut request = RequestPermissionRequest::new(
                     self.session.clone(),
                     ToolCallUpdate::new(tool_call_id.clone(), self.tool_fields(tool_call_id)),
                     vec![
@@ -430,6 +499,9 @@ impl Ctx<'_> {
                         PermissionOption::new(REJECT_ID, "拒绝", PermissionOptionKind::RejectOnce),
                     ],
                 );
+                if let Some(cwd) = cwd {
+                    request = request.meta(iwork_meta(json!({ "cwd": cwd })));
+                }
                 let response = self.cx.send_request(request).block_task().await?;
                 self.state.record.write(json!({
                     "permission_response": serde_json::to_value(&response).expect("可序列化"),
@@ -463,6 +535,58 @@ impl Ctx<'_> {
                     .record
                     .write(json!({ "spawned_child": child.id() }));
                 Ok(Flow::Done)
+            }
+            Step::ReportModel { model_id, effort } => {
+                self.report(encode_report(pb::runtime_report::Kind::Model(
+                    pb::ModelSelection {
+                        model_id: model_id.clone(),
+                        effort: effort.clone(),
+                    },
+                )))?;
+                Ok(Flow::Done)
+            }
+            Step::ReportUsage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                cost_usd,
+            } => {
+                self.report(encode_report(pb::runtime_report::Kind::Usage(pb::Usage {
+                    input_tokens: *input_tokens,
+                    output_tokens: *output_tokens,
+                    cache_read_tokens: *cache_read_tokens,
+                    cache_write_tokens: *cache_write_tokens,
+                    cost_usd: *cost_usd,
+                })))?;
+                Ok(Flow::Done)
+            }
+            Step::ReportQuota { windows } => {
+                let windows = windows
+                    .iter()
+                    .map(|w| pb::QuotaWindowReport {
+                        window: w.window.clone(),
+                        used_pct: w.used_pct,
+                        resets_at: w
+                            .resets_at_secs
+                            .map(|seconds| prost_types::Timestamp { seconds, nanos: 0 }),
+                    })
+                    .collect();
+                self.report(encode_report(pb::runtime_report::Kind::Quota(
+                    pb::QuotaReport { windows },
+                )))?;
+                Ok(Flow::Done)
+            }
+            Step::ReportRaw { value } => {
+                self.report(value.clone())?;
+                Ok(Flow::Done)
+            }
+            Step::Error { code, reason } => {
+                let mut inner = json!({ "code": code });
+                if let Some(reason) = reason {
+                    inner["reason"] = json!(reason);
+                }
+                Err(agent_client_protocol::Error::internal_error().data(json!({ META_KEY: inner })))
             }
         }
     }

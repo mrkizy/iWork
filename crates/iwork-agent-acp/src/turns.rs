@@ -91,6 +91,18 @@ impl TurnBook {
         }
     }
 
+    /// 运行时的一条上报（用量、额度、实际模型），已经解好。和别的更新一样只送进当前回合、照常计数；
+    /// 回合之外到达的丢弃，所以运行时只在回合里上报（T06 方案 6.2）。
+    pub fn on_report(&self, update: AgentUpdate) {
+        let mut inner = self.lock();
+        let Some(active) = inner.active.as_mut() else {
+            return;
+        };
+        if active.tx.send(update).is_ok() {
+            active.emitted += 1;
+        }
+    }
+
     /// 当前回合已交出的更新条数；没有回合时为 0。
     pub fn emitted(&self) -> u64 {
         self.lock().active.as_ref().map_or(0, |a| a.emitted)

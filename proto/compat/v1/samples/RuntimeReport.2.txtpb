@@ -1,0 +1,7 @@
+usage {
+  input_tokens: 2048
+  output_tokens: 512
+  cache_read_tokens: 4096
+  cache_write_tokens: 128
+  cost_usd: 0.125
+}

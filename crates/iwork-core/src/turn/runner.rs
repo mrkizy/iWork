@@ -38,6 +38,7 @@ use iwork_domain::event::{
 };
 use iwork_domain::id::{CommandId, MessageId, ProjectId, TurnId};
 use iwork_domain::message::{Author, Message, MessageBody, MessageStatus};
+use iwork_domain::runtime::QuotaWindow;
 use iwork_domain::turn::{Turn, TurnIllegal, TurnState, TurnTrigger};
 use iwork_ports::agent::{
     AgentError, AgentPort, AgentSession, AgentUpdate, ContentBlock, SessionSpec, TurnOutcome,
@@ -541,12 +542,23 @@ where
                 self.usage = usage;
                 return Ok(None);
             }
-            AgentUpdate::Quota(windows) => QuotaObserved {
-                runtime_id: self.turn.runtime_id,
-                windows,
-                observed_at: self.ports.clock.now(),
+            AgentUpdate::Quota(readings) => {
+                let observed_at = self.ports.clock.now();
+                QuotaObserved {
+                    runtime_id: self.turn.runtime_id,
+                    windows: readings
+                        .into_iter()
+                        .map(|r| QuotaWindow {
+                            window: r.window,
+                            used_pct: r.used_pct,
+                            resets_at: r.resets_at,
+                            observed_at,
+                        })
+                        .collect(),
+                    observed_at,
+                }
+                .into()
             }
-            .into(),
             AgentUpdate::Finished(outcome) => return Ok(Some(End::Finished(outcome))),
             AgentUpdate::Failed(error) => return Ok(Some(End::Failed(error))),
         };

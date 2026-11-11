@@ -7,7 +7,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+iwork-proto.workspace = true
 agent-client-protocol.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+base64.workspace = true
 tokio.workspace = true
 futures.workspace = true
 serde.workspace = true

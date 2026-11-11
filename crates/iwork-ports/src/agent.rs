@@ -2,11 +2,11 @@
 
 use std::future::Future;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use iwork_domain::action::ToolRef;
-use iwork_domain::common::{ArtifactRef, EffortLevel, ModelSelection, Usage};
+use iwork_domain::common::{ArtifactRef, EffortLevel, ModelId, ModelSelection, Timestamp, Usage};
 use iwork_domain::event::{McpServerId, ToolCallId};
-use iwork_domain::runtime::QuotaWindow;
 use iwork_domain::session::{SessionConstraints, SessionToolSet};
 use iwork_domain::turn::TurnKind;
 
@@ -18,6 +18,33 @@ pub struct RuntimeCapabilities {
     /// 能否接收图片附件
     pub supports_image_input: bool,
     pub effort_levels: Vec<EffortLevel>,
+    /// 这个平台上运行时有没有沙箱可用。只说平台能力，不代表某条会话的沙箱真的起来了（见
+    /// [`AgentSession::sandbox`]）
+    pub sandbox_platform: SandboxPlatform,
+    /// 运行时报的可选模型；不报的运行时为空
+    pub model_options: Vec<ModelOption>,
+}
+
+/// 平台上运行时有没有沙箱可用。运行时没报时按 `Unsupported`：不替它声称有沙箱。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxPlatform {
+    Supported,
+    Unsupported,
+}
+
+/// 一条会话的沙箱实际起没起来。运行时没报时按 `Unavailable`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxStatus {
+    Enforced,
+    Unavailable,
+}
+
+/// 运行时报的一个可选模型。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelOption {
+    pub id: ModelId,
+    /// 给人看的名字
+    pub label: String,
 }
 
 /// 会话要挂的 MCP 服务（只限用户导入过的，技术设计 9.5）。密钥由适配器按需向 SecretStore 取，不随这里传。
@@ -37,6 +64,10 @@ pub struct SessionSpec {
     pub mcp: Vec<McpServerRef>,
     pub constraints: SessionConstraints,
     pub tool_set: SessionToolSet,
+    /// 启动时就不提供的工具：核心按会话工具集与永久禁用表算好（技术设计 7.1、7.2b），适配器原样转交
+    pub disabled_tools: Vec<ToolRef>,
+    /// 按会话加载的插件目录（导入区下的绝对路径，技术设计 9.5）
+    pub plugin_dirs: Vec<PathBuf>,
     /// 续接的运行时会话 ID
     pub resume: Option<String>,
     pub kind: TurnKind,
@@ -85,9 +116,20 @@ pub enum AgentUpdate {
     /// 运行时实际报告的模型，与请求的不一致时以它为准
     ModelReported(ModelSelection),
     Usage(Usage),
-    Quota(Vec<QuotaWindow>),
+    /// 额度窗口的读数；观测时间由编排在收到时记
+    Quota(Vec<QuotaReading>),
     Finished(TurnOutcome),
     Failed(AgentError),
+}
+
+/// 运行时报的一个额度窗口（不带观测时间）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotaReading {
+    /// 窗口类型，运行时给的不透明字符串
+    pub window: String,
+    /// 使用率百分比，0–100
+    pub used_pct: u8,
+    pub resets_at: Option<Timestamp>,
 }
 
 /// 一次 prompt 的更新流。返回 `None` 表示流结束。
@@ -105,6 +147,8 @@ pub struct PermissionRequest {
     /// 这次请求之前，适配器在本回合更新流里已交出的更新条数。编排处理完这么多条更新才受理
     /// 这次请求，「工具调用开始」因此一定排在「等待审批」之前，不管更新流里积压了多少
     pub updates_before: u64,
+    /// 运行时报告的这次调用的工作目录；`None` = 运行时没给
+    pub cwd: Option<PathBuf>,
 }
 
 /// 对权限请求的答复。
@@ -139,8 +183,16 @@ pub trait AgentSession: Send + Sync {
         &self,
         blocks: Vec<ContentBlock>,
     ) -> impl Future<Output = Result<Self::Updates, AgentError>> + Send;
-    /// 中断当前回合；之后更新流以 `Finished(Cancelled)` 或结束收尾。
+    /// 运行时等一个权限请求最多多久；`None` = 不限。编排必须在这之前给出结论或中断回合，
+    /// 否则运行时可能按它自己的超时处理（Claude Code 的 hook 超时即放行）。
+    fn permission_wait_limit(&self) -> Option<Duration>;
+    /// 这条会话的沙箱实际起没起来。
+    fn sandbox(&self) -> SandboxStatus;
+    /// 中断当前回合；之后更新流以 `Finished(Cancelled)` 或结束收尾。回合已经自己结束时什么都不做。
     fn cancel(&self) -> impl Future<Output = Result<(), AgentError>> + Send;
+    /// 结束这条会话名下的整棵进程树并确认清空；确认不了返回 `Err(ProcessExited)`。
+    /// 不看有没有回合，只管树；可以重复调，已经清空就立刻返回 `Ok`。
+    fn terminate(&self) -> impl Future<Output = Result<(), AgentError>> + Send;
     fn close(self) -> impl Future<Output = Result<(), AgentError>> + Send;
 }
 
@@ -178,6 +230,9 @@ pub enum AgentError {
         model: String,
         reason: ModelUnavailableReason,
     },
+    /// 这个运行时版本正在本机验证（T06 方案 10.1），过一会儿再试
+    #[error("运行时 {version} 正在本机验证")]
+    Verifying { version: String },
     #[error("与运行时通信出错：{message}")]
     Protocol { message: String },
     #[error("运行时进程意外退出：{message}")]
@@ -185,7 +240,7 @@ pub enum AgentError {
 }
 
 impl AgentError {
-    /// 只有模型过载、进程意外退出值得原样重试；其余要用户先处理。
+    /// 模型过载、进程意外退出、版本还在本机验证，值得原样重试；其余要用户先处理。
     pub fn retryable(&self) -> bool {
         matches!(
             self,
@@ -193,6 +248,7 @@ impl AgentError {
                 reason: ModelUnavailableReason::Overloaded,
                 ..
             } | Self::ProcessExited { .. }
+                | Self::Verifying { .. }
         )
     }
 }

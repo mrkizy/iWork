@@ -2636,6 +2636,7 @@ dependencies = [
  "iwork-proto",
  "libc",
  "prost",
+ "prost-types",
  "serde_json",
  "sysinfo",
  "tokio",
@@ -2742,11 +2743,15 @@ name = "iwork-fake-agent"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "base64 0.22.1",
  "futures",
  "iwork-agent-acp",
  "iwork-core",
  "iwork-domain",
  "iwork-ports",
+ "iwork-proto",
+ "prost",
+ "prost-types",
  "serde",
  "serde_json",
  "sysinfo",

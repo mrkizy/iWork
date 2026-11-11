@@ -2,9 +2,11 @@
 //! - 下行：`SessionSpec` 里随会话下发的配置 → `agent.proto` 的 `SessionSetup` → ACP `_meta`；
 //!   prompt 内容块 → ACP 内容块。
 //! - 上行：ACP `session/update` → [`AgentUpdate`]（厂商原始事件在这一层标准化，技术设计 6.1）；
-//!   权限请求 ↔ [`PermissionRequest`] / [`PermissionDecision`]。
+//!   权限请求 ↔ [`PermissionRequest`] / [`PermissionDecision`]；`_meta["iwork"]` 下的约定项
+//!   （T06 方案 2.5 一张表）在边界上一次解析成类型，值不对就报错、不猜。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{
     ContentBlock as AcpContent, Meta, PermissionOption, PermissionOptionKind,
@@ -15,14 +17,14 @@ use agent_client_protocol::v1::schema::{
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use iwork_domain::action::ToolRef;
-use iwork_domain::common::{ModelSelection, ToolGroup};
+use iwork_domain::common::{EffortLevel, ModelId, ModelSelection, Timestamp, ToolGroup, Usage};
 use iwork_domain::event::ToolCallId;
 use iwork_domain::session::{
     AllowWrite, CommandPattern, NetworkPolicy, SessionConstraints, SessionToolSet,
 };
 use iwork_ports::agent::{
-    AgentError, AgentUpdate, ContentBlock, PermissionDecision, PermissionRequest, RawToolInput,
-    TurnOutcome,
+    AgentError, AgentUpdate, ContentBlock, ModelOption, PermissionDecision, PermissionRequest,
+    QuotaReading, RawToolInput, SandboxPlatform, SandboxStatus, SessionSpec, TurnOutcome,
 };
 use iwork_proto::pb;
 use prost::Message as _;
@@ -37,25 +39,60 @@ pub const CLI_KEY: &str = "cli";
 /// `_meta["iwork"]` 下放拒绝理由、改写后输入的键（权限响应）。
 pub const DENY_MESSAGE_KEY: &str = "message";
 pub const UPDATED_INPUT_KEY: &str = "updatedInput";
+/// `initialize` 响应：运行时等一个权限请求最多多少秒（正整数）。没有这个键 = 不限。
+pub const PERMISSION_WAIT_LIMIT_KEY: &str = "permissionWaitLimitSecs";
+/// `initialize` 响应：平台上有没有沙箱，`"supported"` / `"unsupported"`。
+pub const SANDBOX_PLATFORM_KEY: &str = "sandboxPlatform";
+/// `initialize` 响应：思考强度可选值（字符串数组）。
+pub const EFFORT_LEVELS_KEY: &str = "effortLevels";
+/// `initialize` 响应：可选模型（`[{id, label}]`）。
+pub const MODELS_KEY: &str = "models";
+/// `session/new`、`session/load` 响应：这条会话的沙箱，`"enforced"` / `"unavailable"`。
+pub const SANDBOX_KEY: &str = "sandbox";
+/// `session/load` 响应：续接后运行时报的会话 id（与请求里的不同时才带）。
+pub const CLI_SESSION_ID_KEY: &str = "cliSessionId";
+/// `session/update` 通知：base64 编码的 `RuntimeReport`。
+pub const REPORT_KEY: &str = "report";
+/// `session/request_permission` 请求：这次调用的工作目录。
+pub const CWD_KEY: &str = "cwd";
+
+/// 取 `_meta["iwork"][key]`。
+fn iwork_value<'a>(meta: Option<&'a Meta>, key: &str) -> Option<&'a Value> {
+    meta?.get(META_KEY)?.get(key)
+}
 
 // ---------- 下行 ----------
 
 /// 把会话配置编码进 ACP `_meta`。路径不是 UTF-8 时报错：proto 里路径是字符串，
 /// 有损转换会让沙箱规则指向别的路径。
-pub fn session_setup_meta(
-    model: &ModelSelection,
-    constraints: &SessionConstraints,
-    tool_set: &SessionToolSet,
-) -> Result<Meta, AgentError> {
-    let setup = pb::SessionSetup {
-        model: Some(model_to_proto(model)),
-        constraints: Some(constraints_to_proto(constraints)?),
-        tool_set: Some(tool_set_to_proto(tool_set)),
-    };
+pub fn session_setup_meta(spec: &SessionSpec) -> Result<Meta, AgentError> {
+    let setup = session_setup(
+        &spec.model,
+        &spec.constraints,
+        &spec.tool_set,
+        &spec.disabled_tools,
+        &spec.plugin_dirs,
+    )?;
     let encoded = BASE64.encode(setup.encode_to_vec());
     let mut meta = Map::new();
     meta.insert(META_KEY.into(), json!({ SESSION_SETUP_KEY: encoded }));
     Ok(meta)
+}
+
+fn session_setup(
+    model: &ModelSelection,
+    constraints: &SessionConstraints,
+    tool_set: &SessionToolSet,
+    disabled_tools: &[ToolRef],
+    plugin_dirs: &[PathBuf],
+) -> Result<pb::SessionSetup, AgentError> {
+    Ok(pb::SessionSetup {
+        model: Some(model_to_proto(model)),
+        constraints: Some(constraints_to_proto(constraints)?),
+        tool_set: Some(tool_set_to_proto(tool_set)),
+        disabled_tools: disabled_tools.iter().map(|t| t.0.clone()).collect(),
+        plugin_dirs: paths(plugin_dirs)?,
+    })
 }
 
 /// 从 `_meta` 解出会话配置。桥接与假运行时用同一个约定；这里给测试对拍用。
@@ -87,7 +124,7 @@ fn path_str(path: &Path) -> Result<String, AgentError> {
         })
 }
 
-fn paths(list: &[std::path::PathBuf]) -> Result<Vec<String>, AgentError> {
+fn paths(list: &[PathBuf]) -> Result<Vec<String>, AgentError> {
     list.iter().map(|p| path_str(p)).collect()
 }
 
@@ -249,11 +286,16 @@ pub fn permission_request(
         .and_then(|v| v.get("BypassSandbox"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // 不是字符串就当运行时没给：它只帮判定方解析相对路径，缺了判定方用会话目录
+    let cwd = iwork_value(req.meta.as_ref(), CWD_KEY)
+        .and_then(Value::as_str)
+        .map(PathBuf::from);
     PermissionRequest {
         tool: ToolRef(tool),
         raw_input: raw_input(fields.raw_input.as_ref()),
         bypass_sandbox,
         updates_before,
+        cwd,
     }
 }
 
@@ -295,6 +337,199 @@ pub fn permission_response(
         response = response.meta(meta);
     }
     response
+}
+
+// ---------- `_meta["iwork"]` 的约定项（T06 方案 2.5） ----------
+
+/// `initialize` 响应里 iWork 约定的几项。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitMeta {
+    /// `None` = 运行时能一直等
+    pub permission_wait_limit: Option<Duration>,
+    pub sandbox_platform: SandboxPlatform,
+    pub effort_levels: Vec<EffortLevel>,
+    pub model_options: Vec<ModelOption>,
+}
+
+/// 解析 `initialize` 响应的 `_meta["iwork"]`。键缺失按「没报」处理（平台沙箱按不支持）；
+/// 键在而值不对就报错：等待上限读错了，编排可能等过头，让运行时自己按超时处理。
+/// 报错只点名键，不回显收到的值。
+pub fn init_meta(meta: Option<&Meta>) -> Result<InitMeta, String> {
+    let bad = |key: &str, want: &str| format!("_meta.{META_KEY}.{key} 须是{want}");
+    let permission_wait_limit = match iwork_value(meta, PERMISSION_WAIT_LIMIT_KEY) {
+        None => None,
+        Some(v) => match v.as_u64() {
+            Some(secs) if secs > 0 => Some(Duration::from_secs(secs)),
+            _ => return Err(bad(PERMISSION_WAIT_LIMIT_KEY, "正整数")),
+        },
+    };
+    let sandbox_platform = match iwork_value(meta, SANDBOX_PLATFORM_KEY) {
+        None => SandboxPlatform::Unsupported,
+        Some(v) => match v.as_str() {
+            Some("supported") => SandboxPlatform::Supported,
+            Some("unsupported") => SandboxPlatform::Unsupported,
+            _ => {
+                return Err(bad(
+                    SANDBOX_PLATFORM_KEY,
+                    " \"supported\" 或 \"unsupported\"",
+                ));
+            }
+        },
+    };
+    let effort_levels = match iwork_value(meta, EFFORT_LEVELS_KEY) {
+        None => Vec::new(),
+        Some(v) => non_empty_strings(v)
+            .ok_or_else(|| bad(EFFORT_LEVELS_KEY, "非空字符串数组"))?
+            .into_iter()
+            .map(EffortLevel)
+            .collect(),
+    };
+    let model_options = match iwork_value(meta, MODELS_KEY) {
+        None => Vec::new(),
+        Some(v) => model_options(v).ok_or_else(|| bad(MODELS_KEY, " [{id, label}] 数组"))?,
+    };
+    Ok(InitMeta {
+        permission_wait_limit,
+        sandbox_platform,
+        effort_levels,
+        model_options,
+    })
+}
+
+fn non_empty_strings(v: &Value) -> Option<Vec<String>> {
+    v.as_array()?
+        .iter()
+        .map(|x| x.as_str().filter(|s| !s.is_empty()).map(str::to_owned))
+        .collect()
+}
+
+fn model_options(v: &Value) -> Option<Vec<ModelOption>> {
+    v.as_array()?
+        .iter()
+        .map(|m| {
+            let id = m.get("id")?.as_str().filter(|s| !s.is_empty())?;
+            let label = m.get("label")?.as_str()?;
+            Some(ModelOption {
+                id: ModelId(id.into()),
+                label: label.into(),
+            })
+        })
+        .collect()
+}
+
+/// 开会话（`session/new`、`session/load`）响应里 iWork 约定的几项。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMeta {
+    pub sandbox: SandboxStatus,
+    /// 续接后运行时换了会话 id 时才有
+    pub cli_session_id: Option<String>,
+}
+
+/// 解析开会话响应的 `_meta["iwork"]`。没报沙箱按「没起来」：静态的平台能力不冒充会话的实际状态。
+pub fn session_meta(meta: Option<&Meta>) -> Result<SessionMeta, String> {
+    let sandbox = match iwork_value(meta, SANDBOX_KEY) {
+        None => SandboxStatus::Unavailable,
+        Some(v) => match v.as_str() {
+            Some("enforced") => SandboxStatus::Enforced,
+            Some("unavailable") => SandboxStatus::Unavailable,
+            _ => {
+                return Err(format!(
+                    "_meta.{META_KEY}.{SANDBOX_KEY} 须是 \"enforced\" 或 \"unavailable\""
+                ));
+            }
+        },
+    };
+    let cli_session_id = match iwork_value(meta, CLI_SESSION_ID_KEY) {
+        None => None,
+        Some(v) => match v.as_str() {
+            Some(id) if !id.is_empty() => Some(id.to_owned()),
+            _ => {
+                return Err(format!(
+                    "_meta.{META_KEY}.{CLI_SESSION_ID_KEY} 须是非空字符串"
+                ));
+            }
+        },
+    };
+    Ok(SessionMeta {
+        sandbox,
+        cli_session_id,
+    })
+}
+
+/// 一条 `session/update` 通知带的上报。没有上报返回 `None`；有而解不出来返回错误（调用方记诊断、丢弃）。
+pub fn report_of(meta: Option<&Meta>) -> Option<Result<AgentUpdate, String>> {
+    let encoded = iwork_value(meta, REPORT_KEY)?;
+    Some(decode_report(encoded))
+}
+
+fn decode_report(encoded: &Value) -> Result<AgentUpdate, String> {
+    let bytes = encoded
+        .as_str()
+        .and_then(|s| BASE64.decode(s).ok())
+        .ok_or_else(|| format!("_meta.{META_KEY}.{REPORT_KEY} 不是 base64 字符串"))?;
+    let report = pb::RuntimeReport::decode(bytes.as_slice())
+        .map_err(|e| format!("_meta.{META_KEY}.{REPORT_KEY} 解码失败：{e}"))?;
+    match report.kind {
+        Some(pb::runtime_report::Kind::Model(m)) => {
+            if m.model_id.is_empty() {
+                return Err("上报的模型 id 为空".into());
+            }
+            Ok(AgentUpdate::ModelReported(ModelSelection {
+                model_id: ModelId(m.model_id),
+                effort: m.effort.map(EffortLevel),
+            }))
+        }
+        Some(pb::runtime_report::Kind::Usage(u)) => Ok(AgentUpdate::Usage(Usage {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            cache_read_tokens: u.cache_read_tokens,
+            cache_write_tokens: u.cache_write_tokens,
+            cost_usd: u.cost_usd,
+        })),
+        Some(pb::runtime_report::Kind::Quota(q)) => q
+            .windows
+            .into_iter()
+            .map(quota_reading)
+            .collect::<Result<_, _>>()
+            .map(AgentUpdate::Quota),
+        None => Err("上报没有内容".into()),
+    }
+}
+
+fn quota_reading(w: pb::QuotaWindowReport) -> Result<QuotaReading, String> {
+    let used_pct = u8::try_from(w.used_pct)
+        .ok()
+        .filter(|p| *p <= 100)
+        .ok_or("额度使用率不在 0–100 之间")?;
+    let resets_at = w.resets_at.map(timestamp).transpose()?;
+    Ok(QuotaReading {
+        window: w.window,
+        used_pct,
+        resets_at,
+    })
+}
+
+/// Protobuf 时间 → 领域时间（Unix 纪元起的毫秒）。
+fn timestamp(t: prost_types::Timestamp) -> Result<Timestamp, String> {
+    let nanos = u32::try_from(t.nanos)
+        .ok()
+        .filter(|n| *n < 1_000_000_000)
+        .ok_or("时间的纳秒部分越界")?;
+    t.seconds
+        .checked_mul(1000)
+        .and_then(|ms| ms.checked_add(i64::from(nanos / 1_000_000)))
+        .map(Timestamp)
+        .ok_or_else(|| "时间越界".to_owned())
+}
+
+/// 把一条上报编码成通知的 `_meta`。运行时那边照同一份约定写；这里给测试与假运行时对拍用。
+pub fn report_meta(report: &pb::RuntimeReport) -> Meta {
+    let mut meta = Map::new();
+    meta.insert(
+        META_KEY.into(),
+        json!({ REPORT_KEY: BASE64.encode(report.encode_to_vec()) }),
+    );
+    meta
 }
 
 #[cfg(test)]
@@ -448,8 +683,25 @@ mod tests {
             enabled_groups: BTreeSet::from([ToolGroup::EditFiles, ToolGroup::Web]),
             include_always_on: false,
         };
-        let meta = session_setup_meta(&model, &constraints, &tool_set).unwrap();
+        let spec = SessionSpec {
+            cwd: PathBuf::from("/work"),
+            model,
+            system_prompt: String::new(),
+            mcp: Vec::new(),
+            constraints,
+            tool_set,
+            disabled_tools: vec![
+                ToolRef("CronCreate".into()),
+                ToolRef("RemoteTrigger".into()),
+            ],
+            plugin_dirs: vec![PathBuf::from("/data/imports/plugins/p1")],
+            resume: None,
+            kind: iwork_domain::turn::TurnKind::Assistant,
+        };
+        let meta = session_setup_meta(&spec).unwrap();
         let setup = decode_session_setup(Some(&meta)).unwrap();
+        assert_eq!(setup.disabled_tools, vec!["CronCreate", "RemoteTrigger"]);
+        assert_eq!(setup.plugin_dirs, vec!["/data/imports/plugins/p1"]);
         assert_eq!(setup.model.unwrap().model_id, "m1");
         let c = setup.constraints.unwrap();
         assert_eq!(c.deny_read_write, vec!["/home/u/.ssh".to_string()]);
@@ -477,5 +729,218 @@ mod tests {
         let bad = PathBuf::from(OsStr::from_bytes(b"/tmp/\xff"));
         let err = path_str(&bad).unwrap_err();
         assert!(matches!(err, AgentError::Protocol { .. }));
+    }
+
+    fn iwork_meta(inner: Value) -> Meta {
+        let mut meta = Map::new();
+        meta.insert(META_KEY.into(), inner);
+        meta
+    }
+
+    #[test]
+    fn init_meta_reads_every_key_and_defaults_when_absent() {
+        let m = iwork_meta(json!({
+            PERMISSION_WAIT_LIMIT_KEY: 7080,
+            SANDBOX_PLATFORM_KEY: "supported",
+            EFFORT_LEVELS_KEY: ["low", "high"],
+            MODELS_KEY: [{"id": "opus", "label": "Opus"}],
+        }));
+        assert_eq!(
+            init_meta(Some(&m)).unwrap(),
+            InitMeta {
+                permission_wait_limit: Some(Duration::from_secs(7080)),
+                sandbox_platform: SandboxPlatform::Supported,
+                effort_levels: vec![EffortLevel("low".into()), EffortLevel("high".into())],
+                model_options: vec![ModelOption {
+                    id: ModelId("opus".into()),
+                    label: "Opus".into()
+                }],
+            }
+        );
+        // 没报：不限时、平台按不支持（不替运行时声称有沙箱）、列表为空
+        assert_eq!(
+            init_meta(None).unwrap(),
+            InitMeta {
+                permission_wait_limit: None,
+                sandbox_platform: SandboxPlatform::Unsupported,
+                effort_levels: Vec::new(),
+                model_options: Vec::new(),
+            }
+        );
+    }
+
+    /// 键在而值不对就报错、点名键，不回显值，不退回「没报」：等待上限读丢了编排会等过头。
+    #[test]
+    fn init_meta_rejects_malformed_values_by_key() {
+        for (key, value) in [
+            (PERMISSION_WAIT_LIMIT_KEY, json!(0)),
+            (PERMISSION_WAIT_LIMIT_KEY, json!(-5)),
+            (PERMISSION_WAIT_LIMIT_KEY, json!("7080")),
+            (SANDBOX_PLATFORM_KEY, json!("maybe-secret")),
+            (EFFORT_LEVELS_KEY, json!(["low", 3])),
+            (EFFORT_LEVELS_KEY, json!([""])),
+            (MODELS_KEY, json!([{"id": "opus"}])),
+            (MODELS_KEY, json!("opus")),
+        ] {
+            let m = iwork_meta(json!({ key: value }));
+            let err = init_meta(Some(&m)).unwrap_err();
+            assert!(err.contains(key), "{key}: {err}");
+            assert!(!err.contains("maybe-secret"), "{err}");
+        }
+    }
+
+    #[test]
+    fn session_meta_reads_sandbox_and_new_session_id() {
+        let m = iwork_meta(json!({ SANDBOX_KEY: "enforced", CLI_SESSION_ID_KEY: "new-id" }));
+        assert_eq!(
+            session_meta(Some(&m)).unwrap(),
+            SessionMeta {
+                sandbox: SandboxStatus::Enforced,
+                cli_session_id: Some("new-id".into()),
+            }
+        );
+        assert_eq!(
+            session_meta(None).unwrap(),
+            SessionMeta {
+                sandbox: SandboxStatus::Unavailable,
+                cli_session_id: None,
+            },
+            "没报沙箱 = 没起来"
+        );
+        for bad in [
+            json!({ SANDBOX_KEY: "on" }),
+            json!({ CLI_SESSION_ID_KEY: "" }),
+            json!({ CLI_SESSION_ID_KEY: 1 }),
+        ] {
+            assert!(
+                session_meta(Some(&iwork_meta(bad.clone()))).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    fn report(kind: pb::runtime_report::Kind) -> Meta {
+        report_meta(&pb::RuntimeReport { kind: Some(kind) })
+    }
+
+    #[test]
+    fn reports_decode_to_updates() {
+        let model = report(pb::runtime_report::Kind::Model(pb::ModelSelection {
+            model_id: "claude-opus".into(),
+            effort: Some("max".into()),
+        }));
+        assert_eq!(
+            report_of(Some(&model)).unwrap().unwrap(),
+            AgentUpdate::ModelReported(ModelSelection {
+                model_id: ModelId("claude-opus".into()),
+                effort: Some(EffortLevel("max".into())),
+            })
+        );
+        let usage = report(pb::runtime_report::Kind::Usage(pb::Usage {
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 30,
+            cache_write_tokens: 40,
+            cost_usd: None,
+        }));
+        assert_eq!(
+            report_of(Some(&usage)).unwrap().unwrap(),
+            AgentUpdate::Usage(Usage {
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_read_tokens: 30,
+                cache_write_tokens: 40,
+                cost_usd: None,
+            })
+        );
+        let quota = report(pb::runtime_report::Kind::Quota(pb::QuotaReport {
+            windows: vec![
+                pb::QuotaWindowReport {
+                    window: "five_hour".into(),
+                    used_pct: 42,
+                    resets_at: Some(prost_types::Timestamp {
+                        seconds: 1_731_300_000,
+                        nanos: 250_000_000,
+                    }),
+                },
+                pb::QuotaWindowReport {
+                    window: "seven_day".into(),
+                    used_pct: 100,
+                    resets_at: None,
+                },
+            ],
+        }));
+        assert_eq!(
+            report_of(Some(&quota)).unwrap().unwrap(),
+            AgentUpdate::Quota(vec![
+                QuotaReading {
+                    window: "five_hour".into(),
+                    used_pct: 42,
+                    resets_at: Some(Timestamp(1_731_300_000_250)),
+                },
+                QuotaReading {
+                    window: "seven_day".into(),
+                    used_pct: 100,
+                    resets_at: None,
+                },
+            ])
+        );
+        assert!(report_of(None).is_none());
+        assert!(report_of(Some(&iwork_meta(json!({ "other": 1 })))).is_none());
+    }
+
+    #[test]
+    fn malformed_reports_are_errors_not_guesses() {
+        let bad = [
+            iwork_meta(json!({ REPORT_KEY: "!!not base64" })),
+            iwork_meta(json!({ REPORT_KEY: 12 })),
+            report_meta(&pb::RuntimeReport { kind: None }),
+            report(pb::runtime_report::Kind::Model(pb::ModelSelection {
+                model_id: String::new(),
+                effort: None,
+            })),
+            report(pb::runtime_report::Kind::Quota(pb::QuotaReport {
+                windows: vec![pb::QuotaWindowReport {
+                    window: "w".into(),
+                    used_pct: 101,
+                    resets_at: None,
+                }],
+            })),
+            report(pb::runtime_report::Kind::Quota(pb::QuotaReport {
+                windows: vec![pb::QuotaWindowReport {
+                    window: "w".into(),
+                    used_pct: 1,
+                    resets_at: Some(prost_types::Timestamp {
+                        seconds: i64::MAX,
+                        nanos: 0,
+                    }),
+                }],
+            })),
+        ];
+        for m in &bad {
+            assert!(report_of(Some(m)).unwrap().is_err(), "{m:?}");
+        }
+    }
+
+    #[test]
+    fn permission_request_carries_runtime_cwd() {
+        use agent_client_protocol::v1::schema::ToolCallUpdate as Upd;
+        let req = |meta: Option<Meta>| {
+            let mut r = RequestPermissionRequest::new(
+                "s",
+                Upd::new("t1", ToolCallUpdateFields::new().name("Bash".to_string())),
+                options(),
+            );
+            r.meta = meta;
+            r
+        };
+        let with_cwd = req(Some(iwork_meta(json!({ CWD_KEY: "/work/sub" }))));
+        assert_eq!(
+            permission_request(&with_cwd, 3).cwd,
+            Some(PathBuf::from("/work/sub"))
+        );
+        assert_eq!(permission_request(&req(None), 3).cwd, None);
+        let not_string = req(Some(iwork_meta(json!({ CWD_KEY: 5 }))));
+        assert_eq!(permission_request(&not_string, 3).cwd, None);
     }
 }

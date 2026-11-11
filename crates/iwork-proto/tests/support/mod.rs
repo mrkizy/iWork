@@ -78,7 +78,12 @@ sample_types! {
     SessionConstraints => [b::session_constraints],
     SessionToolSet => [b::session_tool_set],
     SessionModel => [b::session_model],
-    SessionSetup => [b::session_setup],
+    SessionSetup => [b::session_setup, b::session_setup_2],
+    RuntimeReport => [
+        b::runtime_report_model,
+        b::runtime_report_usage,
+        b::runtime_report_quota,
+    ],
     TransientEvent => [
         b::transient_message_delta,
         b::transient_tool_output_delta,
