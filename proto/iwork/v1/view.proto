@@ -79,6 +79,10 @@ enum DotState {
 message OptionView {
   int32 value = 1;
   string label = 2;
+  // 选项下面的一句说明（如档位菜单里每一档的说明）；没有为空。
+  string description = 3;
+  // 选项旁的小标签（如全开的「仅本对话」）；没有为空。
+  string tag = 4;
 }
 
 // ---------- 侧栏 ----------
@@ -266,6 +270,16 @@ message ApprovalModeView {
   repeated OptionView options = 4;
   int32 current = 5;
   string scope_title = 6;
+  // 切到全开前的确认框（ui-m1.md 第 2 节第 9 条）：每次切到全开都弹；已经是全开时不设。
+  optional ConfirmView full_access_confirm = 7;
+}
+
+// 确认框的全部文字：标题、正文、脚注、确认按钮字样（取消按钮字样固定）。
+message ConfirmView {
+  string title = 1;
+  string body = 2;
+  string footnote = 3;
+  string confirm_label = 4;
 }
 
 message MessageView {

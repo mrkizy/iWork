@@ -278,9 +278,23 @@ fn approval_mode(
         .map(|m| pb::OptionView {
             value: m as i32,
             label: text::approval_mode(m).into(),
+            description: text::approval_mode_description(m).into(),
+            tag: if m == pb::ApprovalMode::FullAccess {
+                text::FULL_ACCESS_TAG.into()
+            } else {
+                String::new()
+            },
         })
         .collect(),
         current: current as i32,
         scope_title: text::mode_scope_title(dm_name),
+        // M1 一个对话只有一个助手作答：受影响的就是它（单独设置的成员 M2 才有）。
+        full_access_confirm: (current != pb::ApprovalMode::FullAccess).then(|| {
+            text::full_access_confirm(
+                assistant
+                    .and_then(|a| a.config.as_ref())
+                    .map_or("助手", |c| c.name.as_str()),
+            )
+        }),
     }
 }

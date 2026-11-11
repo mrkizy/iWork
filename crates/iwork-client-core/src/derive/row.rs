@@ -240,6 +240,7 @@ pub(crate) fn approval(a: &pb::Approval, live: bool) -> pb::ApprovalRow {
                         pb::RememberScope::try_from(*s).unwrap_or_default(),
                     )
                     .into(),
+                    ..Default::default()
                 })
                 .collect()
         } else {

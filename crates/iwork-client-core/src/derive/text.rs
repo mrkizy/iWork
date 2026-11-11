@@ -375,3 +375,28 @@ pub fn turn_failure(empty: bool, turn: Option<&pb::Turn>) -> pb::FailureLine {
 
 /// 重连走了快照、时间线重建时用户正在看旧消息：回到最新，标题栏下提示（Q9，产品负责人 2026-11-11）。
 pub const BACK_TO_LATEST: &str = "已重新连接，回到最新";
+
+// ---------- 审批档位菜单（ui-m1.md 第 2 节第 9 条，文案已由产品负责人定稿） ----------
+
+pub fn approval_mode_description(mode: pb::ApprovalMode) -> &'static str {
+    match mode {
+        pb::ApprovalMode::Manual | pb::ApprovalMode::Unspecified => "写文件、执行命令前始终询问",
+        pb::ApprovalMode::Auto => "仅对检测到的风险操作请求批准",
+        pb::ApprovalMode::FullAccess => "可不受限地访问和操作一切，只有 git push 仍会询问",
+    }
+}
+
+/// 全开只在当前对话生效、不可设为默认（需求 FR11）。
+pub const FULL_ACCESS_TAG: &str = "仅本对话";
+
+/// 切到全开的确认框（画布 10-ApprovalMode-fullconfirm）。`who` 是受影响的助手名，用顿号连起来。
+pub fn full_access_confirm(who: &str) -> pb::ConfirmView {
+    pb::ConfirmView {
+        title: "本对话切到全开？".into(),
+        body: format!(
+            "{who}将不再询问你，删除也直接执行；只有 git push 仍会询问。凭据和 iWork 数据仍受保护，只有需凭据的命令（如 git pull）会在沙箱外运行。"
+        ),
+        footnote: "只在本对话有效，新对话回到默认".into(),
+        confirm_label: "切到全开".into(),
+    }
+}

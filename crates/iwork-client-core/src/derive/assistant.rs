@@ -42,6 +42,7 @@ pub fn assistant(store: &Store, id: &str) -> Option<pb::AssistantProfileView> {
             .map(|(i, r)| pb::OptionView {
                 value: i32::try_from(i).unwrap_or(i32::MAX),
                 label: r.display_name.clone(),
+                ..Default::default()
             })
             .collect(),
         runtime_locked: false,
