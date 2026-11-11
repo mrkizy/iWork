@@ -92,29 +92,36 @@ export function Sidebar(props: { router: Router }) {
         <For each={view()?.projects}>
           {(p) => (
             <div class={p.pathMissing ? "iw-project iw-project--missing" : "iw-project"}>
-              <button
-                type="button"
-                class="iw-side-item"
-                aria-expanded={isExpanded(p.projectId)}
-                onClick={() => toggle(p.projectId)}
-                onContextMenu={(e) => openMenu(e, (at) => ({ kind: "project", project: p, at }))}
-              >
-                <Icon class="iw-project__chevron" name={isExpanded(p.projectId) ? "chevronDown" : "chevronRight"} size={14} />
-                <span
-                  class={`iw-side-item__label iw-project__name${p.projectId === currentProject() ? " iw-project__name--current" : ""}`}
+              {/* 找不到路径时同一行：划线名、「找不到路径」标签、靠右的「重新定位」（ui-m1 2a 第 7 条、画布 07）。
+                  放不下时只缩项目名（末尾「…」，悬停看全名），标签与「重新定位」不缩不折行——
+                  依据 ui-m1 2a 第 7 条 + 对话标题的截断规则，supervisor 2026-11-11 暂定。
+                  「重新定位」在按钮外面：2b 接上文件夹选择框后它是独立的按钮，不能嵌在按钮里。 */}
+              <div class="iw-project__row">
+                <button
+                  type="button"
+                  class="iw-side-item iw-project__toggle"
+                  aria-expanded={isExpanded(p.projectId)}
+                  onClick={() => toggle(p.projectId)}
+                  onContextMenu={(e) => openMenu(e, (at) => ({ kind: "project", project: p, at }))}
                 >
-                  {p.name}
-                </span>
-                <Badge badge={p.unreadBadge} />
-              </button>
-              <Show when={p.pathMissing}>
-                <div class="iw-project__missing">
-                  <span class="iw-project__missing-tag">{p.pathMissingLabel}</span>
-                  <span data-tip={NEEDS_PICKER} class="iw-btn iw-btn--link" aria-disabled="true">
+                  <Icon class="iw-project__chevron" name={isExpanded(p.projectId) ? "chevronDown" : "chevronRight"} size={14} />
+                  <span
+                    class={`iw-side-item__label iw-project__name${p.projectId === currentProject() ? " iw-project__name--current" : ""}`}
+                    title={p.name}
+                  >
+                    {p.name}
+                  </span>
+                  <Show when={p.pathMissing}>
+                    <span class="iw-project__missing-tag">{p.pathMissingLabel}</span>
+                  </Show>
+                  <Badge badge={p.unreadBadge} />
+                </button>
+                <Show when={p.pathMissing}>
+                  <span data-tip={NEEDS_PICKER} class="iw-btn iw-btn--link iw-project__relocate" aria-disabled="true">
                     重新定位
                   </span>
-                </div>
-              </Show>
+                </Show>
+              </div>
               <Show when={isExpanded(p.projectId)}>
                 <For each={p.recent}>
                   {(c) => (

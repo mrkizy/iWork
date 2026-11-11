@@ -81,15 +81,29 @@
   text-decoration: line-through;
   color: var(--tx3);
 }
-.iw-project__missing {
+.iw-project__row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 10px 4px 32px;
+}
+.iw-project__toggle {
+  flex: 1;
+  min-width: 0;
+}
+/* 找不到路径：名字只占自己的宽度（标签紧跟其后），放不下时只缩名字 */
+.iw-project--missing .iw-project__name {
+  flex: 0 1 auto;
+}
+.iw-project__relocate {
+  flex: none;
+  margin-left: auto;
+  padding-right: 10px;
   font-size: var(--fs-sm);
-  color: var(--tx3);
+  white-space: nowrap;
 }
 .iw-project__missing-tag {
+  flex: none;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
   padding: 0 6px;
   border-radius: var(--r-xs);
   background: var(--warnBg);
