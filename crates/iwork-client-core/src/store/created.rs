@@ -6,7 +6,11 @@
 //! 每个受理范围记着建它是为了什么（[`Purpose`]）：侧栏「新对话」配上就跳；首页发首条消息配上后还要先发消息。
 //!
 //! 断线重连时事件可能不再逐条重放、而是给一份快照（快照里的对话不带建出它的 seq）：快照盖过了的受理范围
-//! 再也等不到事件，由 [`CreatedWatch::covered_by_snapshot`] 交出来，调用方按用途收尾。
+//! 再也等不到事件。两种先后都要收尾（审查 2a 2/F-6）：
+//! - 受理先到、快照后到：范围在等着，[`CreatedWatch::covered_by_snapshot`] 把它交出来；
+//! - 快照先到、受理后到（重连时先订阅、后重发在飞命令）：受理来时范围已经落在游标之内又配不上，
+//!   [`CreatedWatch::accepted`] 当场回 [`Accepted::Missed`]，不再进等待表。
+//! 调用方按用途收尾：侧栏那次丢掉，首页那次报原因。
 
 use std::collections::VecDeque;
 
@@ -22,6 +26,17 @@ pub enum Purpose {
     Start,
 }
 
+/// 一次受理的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Accepted {
+    /// 事件已经到了，配上了。
+    Matched(String, Purpose),
+    /// 事件还没到，等着。
+    Waiting,
+    /// 范围已在游标之内却配不上：事件是随快照来的（或早已挤出「最近建的」），再也配不上了。
+    Missed(Purpose),
+}
+
 #[derive(Debug, Default)]
 pub struct CreatedWatch {
     /// 受理了、还没见到对应事件的 seq 范围。
@@ -31,22 +46,21 @@ pub struct CreatedWatch {
 }
 
 impl CreatedWatch {
-    /// 本客户端的 CreateConversation 受理了：事件已经到了就返回要打开的对话。
-    pub fn accepted(
-        &mut self,
-        first: u64,
-        last: u64,
-        purpose: Purpose,
-    ) -> Option<(String, Purpose)> {
+    /// 本客户端的 CreateConversation 受理了。`cursor` 是已经应用到的 seq（含快照）。
+    pub fn accepted(&mut self, first: u64, last: u64, purpose: Purpose, cursor: u64) -> Accepted {
         if let Some(i) = self
             .recent
             .iter()
             .position(|(seq, _)| (first..=last).contains(seq))
+            && let Some((_, id)) = self.recent.remove(i)
         {
-            return self.recent.remove(i).map(|(_, id)| (id, purpose));
+            return Accepted::Matched(id, purpose);
+        }
+        if last <= cursor {
+            return Accepted::Missed(purpose);
         }
         self.pending.push((first, last, purpose));
-        None
+        Accepted::Waiting
     }
 
     /// 见到一个 ConversationCreated：落在等着的受理范围里就返回要打开的对话。
@@ -83,7 +97,7 @@ mod tests {
     #[test]
     fn event_after_accept_navigates() {
         let mut w = CreatedWatch::default();
-        assert_eq!(w.accepted(10, 11, Purpose::Open), None);
+        assert_eq!(w.accepted(10, 11, Purpose::Open, 9), Accepted::Waiting);
         assert_eq!(w.created(9, "别人的"), None, "范围外的不跳");
         assert_eq!(
             w.created(11, "c-new"),
@@ -97,10 +111,14 @@ mod tests {
         let mut w = CreatedWatch::default();
         assert_eq!(w.created(20, "c-new"), None);
         assert_eq!(
-            w.accepted(20, 20, Purpose::Start),
-            Some(("c-new".into(), Purpose::Start))
+            w.accepted(20, 20, Purpose::Start, 20),
+            Accepted::Matched("c-new".into(), Purpose::Start)
         );
-        assert_eq!(w.accepted(20, 20, Purpose::Start), None, "已经配过的不再配");
+        assert_eq!(
+            w.accepted(20, 20, Purpose::Start, 20),
+            Accepted::Missed(Purpose::Start),
+            "已经配过的不再配"
+        );
     }
 
     #[test]
@@ -110,20 +128,42 @@ mod tests {
             assert_eq!(w.created(seq, "x"), None);
         }
         assert_eq!(w.recent.len(), RECENT_CAP);
-        assert_eq!(w.accepted(1, 50, Purpose::Open), None, "早已挤出去的不配");
+        assert_eq!(
+            w.accepted(1, 50, Purpose::Open, 99),
+            Accepted::Missed(Purpose::Open),
+            "早已挤出去的不配，也不留在等待表里"
+        );
+        assert!(w.pending.is_empty());
     }
 
     #[test]
     fn snapshot_hands_back_ranges_it_covers() {
         let mut w = CreatedWatch::default();
-        assert_eq!(w.accepted(5, 6, Purpose::Start), None);
-        assert_eq!(w.accepted(9, 9, Purpose::Open), None);
+        assert_eq!(w.accepted(5, 6, Purpose::Start, 4), Accepted::Waiting);
+        assert_eq!(w.accepted(9, 9, Purpose::Open, 4), Accepted::Waiting);
         assert_eq!(w.covered_by_snapshot(7), vec![Purpose::Start]);
         assert_eq!(w.covered_by_snapshot(7), vec![], "交过的不再交");
         assert_eq!(
             w.created(9, "c-9"),
             Some(("c-9".into(), Purpose::Open)),
             "快照之后的照常配"
+        );
+    }
+
+    /// 快照先到、受理后到（重连时先订阅、后重发在飞命令）：受理来时就判配不上，不留在等待表里。
+    #[test]
+    fn accept_after_covering_snapshot_is_missed_at_once() {
+        let mut w = CreatedWatch::default();
+        assert_eq!(w.covered_by_snapshot(10), vec![]);
+        assert_eq!(
+            w.accepted(5, 6, Purpose::Start, 10),
+            Accepted::Missed(Purpose::Start)
+        );
+        assert!(w.pending.is_empty());
+        assert_eq!(
+            w.accepted(11, 12, Purpose::Start, 10),
+            Accepted::Waiting,
+            "对照：范围在游标之后的照常等"
         );
     }
 }

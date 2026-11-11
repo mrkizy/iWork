@@ -19,6 +19,19 @@ fn snapshot_covering_the_create_stops_the_start() {
     assert!(s.navigate.is_none(), "不跳");
 }
 
+/// 审查 2a 2/F-6：重连时先订阅、后重发在飞命令，快照先到、受理后到。受理来时就认定配不上，报原因、不转圈。
+#[test]
+fn accept_after_the_covering_snapshot_stops_the_start() {
+    let mut s = store_with_open();
+    s.start_begin(PID.into(), "首条".into());
+    s.apply(snapshot(SIDEBAR, 10, vec![]));
+    assert_eq!(s.home.error, None, "快照先到时还没有受理范围");
+    s.create_accepted(5, 6, Purpose::Start);
+    assert_eq!(s.home.error, Some(StartError::Lost));
+    assert!(s.home.start.is_none(), "不再转圈，下一次能发");
+    assert!(s.navigate.is_none(), "不跳");
+}
+
 #[test]
 fn snapshot_before_the_create_leaves_it_waiting_for_the_event() {
     let mut s = store_with_open();

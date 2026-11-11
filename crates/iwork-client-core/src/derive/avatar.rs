@@ -44,6 +44,7 @@ pub fn state_of_turn(state: Option<i32>) -> AvatarState {
 }
 
 /// 只给录像与预览：按助手 id 换形象（阿森、林岚、老周）。M1 没有选形象的入口，正式运行时为空。
+/// 助手配置有了形象字段就删掉（见 `Store::character_overrides`）。
 pub type CharacterOverrides = BTreeMap<String, String>;
 
 pub fn avatar(store: &Store, assistant_id: &str, state: AvatarState) -> pb::AvatarView {

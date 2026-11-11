@@ -276,7 +276,12 @@ pub struct Store {
     snapshot_tables: BTreeSet<SummaryTable>,
     /// 时间线行数上限。
     timeline_cap: usize,
-    /// 只给录像与预览：按助手 id 换形象（derive::avatar）。正式运行时为空。
+    /// 只给录像与预览：按助手 id 换形象（derive::avatar 读）。正式运行时为空（`Options::characters` 默认空）。
+    ///
+    /// 这不是产品状态，和方案 R8（客户端里没有只为测试存在的分支）不合，是暂时的例外。放在这里，是因为
+    /// 头像在行、侧栏、助手页三处派生里算，三处都只拿得到 `&Store`：挪出去要给三处都加参数。关进 feature 也不划算：
+    /// 现有的 `dev` feature 连着 DevTrust，另开一个又要让测试自依赖。正式运行时它为空，不产生分支差异。
+    /// **删除时机**：助手配置（`pb::Avatar`）有了形象字段时删掉它和 `Options::characters`，形象改从配置读。
     pub character_overrides: crate::derive::avatar::CharacterOverrides,
     /// 有视图查询失败、在退避中：连接条上显示一行（审查 1/F-5）。
     pub query_failing: bool,
@@ -513,8 +518,18 @@ impl Store {
 
     /// 本客户端的 CreateConversation 受理了（seq 范围来自 CommandAccepted）。
     pub fn create_accepted(&mut self, first: u64, last: u64, purpose: created::Purpose) {
-        if let Some((id, purpose)) = self.created.accepted(first, last, purpose) {
-            self.created_matched(id, purpose);
+        match self.created.accepted(first, last, purpose, self.cursor) {
+            created::Accepted::Matched(id, purpose) => self.created_matched(id, purpose),
+            created::Accepted::Waiting => {}
+            created::Accepted::Missed(purpose) => self.created_missed(purpose),
+        }
+    }
+
+    /// 新建的对话再也配不上（事件随快照来了）：侧栏「新对话」就不跳（对话在侧栏里）；
+    /// 首页那次停下来报原因，不猜哪个是新对话（猜错会把首条消息发进别的对话）。
+    fn created_missed(&mut self, purpose: created::Purpose) {
+        if purpose == created::Purpose::Start && self.home.start.is_some() {
+            self.start_failed(home::StartError::Lost);
         }
     }
 
@@ -733,12 +748,9 @@ impl Store {
         if let Some(snapshot) = s.snapshot {
             applied.had_seq = true;
             self.cursor = self.cursor.max(s.snapshot_seq);
-            // 快照盖过的新建：建出它的事件不会再逐条来了，配不上。侧栏「新对话」就不跳（对话在侧栏里）；
-            // 首页那次停下来报原因，不猜哪个是新对话（猜错会把首条消息发进别的对话）。
+            // 快照盖过的新建：建出它的事件不会再逐条来了（受理后到的那种先后在 create_accepted 里收）。
             for purpose in self.created.covered_by_snapshot(s.snapshot_seq) {
-                if purpose == created::Purpose::Start && self.home.start.is_some() {
-                    self.start_failed(home::StartError::Lost);
-                }
+                self.created_missed(purpose);
             }
             self.snapshot_tables.extend(
                 snapshot
