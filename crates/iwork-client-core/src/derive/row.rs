@@ -69,17 +69,19 @@ pub fn row(store: &Store, tl: &Timeline, key: RowKey, identity: &str, row: &Row)
         Row::Divider { project_id } => V::Divider(pb::NoteRow {
             text: text::switched_project(project_name(store, project_id.as_deref()).as_deref()),
         }),
-        Row::Note { text: t, .. } => V::Note(pb::NoteRow {
-            text: match t {
-                NoteText::ApprovalMode(m) => {
-                    text::switched_mode(m.and_then(|m| pb::ApprovalMode::try_from(m).ok()))
-                }
-                NoteText::Model(m) => text::switched_model(m),
-                NoteText::DmProject(p) => {
-                    text::switched_project(project_name(store, p.as_deref()).as_deref())
-                }
-            },
-        }),
+        // 视图种类按「说的是什么」选，不按行从哪来（当次说明还是重建得出）：同一件事一个样子（审查 2a 2/F-4，
+        // 画布 09 的项目切换只有分隔线一种）。
+        Row::Note { text: t, .. } => match t {
+            NoteText::ApprovalMode(m) => V::Note(pb::NoteRow {
+                text: text::switched_mode(m.and_then(|m| pb::ApprovalMode::try_from(m).ok())),
+            }),
+            NoteText::Model(m) => V::ModelSwitch(pb::NoteRow {
+                text: text::switched_model(m),
+            }),
+            NoteText::DmProject(p) => V::Divider(pb::NoteRow {
+                text: text::switched_project(project_name(store, p.as_deref()).as_deref()),
+            }),
+        },
     };
     pb::RowView {
         ordinal: key.ordinal(),
