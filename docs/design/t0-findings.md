@@ -222,7 +222,7 @@
 
 包的主程序的静态代码对象代表整个包：链接器签名没有资源封印，按默认参数就判「签名说有资源、却找不到」。T03 的实测（6.3）只测过散放的二进制，没碰到。影响两个方向：客户端算不出自己的身份、拒绝启动；后台判客户端这个对端时走同一个 `check_image_file`，同样会得到 `Unavailable` 并拒绝。后台（不是主程序）不受影响。
 
-**修法**（产品负责人定，提交 `b34b518`）：`check_image_file` 的静态校验带上 `kSecCSDoNotValidateResources`。它只跳过包资源，代码页哈希照样验；T03 加这一步本来就是为了验「还没调入的页」，用 T03 的实测脚本重跑后，这两项仍是 -67061（`tools/t0/out/t04-t03-rerun/`）。代价是握手时不验对端包里的资源、嵌套程序与 Frameworks 里的库（这个参数把它们一起放过了），T04 的安装检查也不覆盖对端；登记为已知缺口，见技术设计第 1 节。修法之后：形态 A、B 两个角色都握手成功；把客户端换成清单外的映像（换签名标识重签，cdhash 必变），后台以 `ImageNotTrusted` 拒绝；平台测试见 `crates/iwork-ipc/tests/peer_bundle_macos.rs`。注意「在文件末尾追加一字节」造不出清单外的映像：签名之外的尾部不在代码目录覆盖范围内，cdhash 不变。
+**修法**（产品负责人定，提交 `b34b518`）：`check_image_file` 的静态校验带上 `kSecCSDoNotValidateResources`。它只跳过包资源，代码页哈希照样验；T03 加这一步本来就是为了验「还没调入的页」，用 T03 的实测脚本重跑后，这两项仍是 -67061（`tools/t0/out/t04-t03-rerun/`）。代价是握手时不验对端包里的资源、嵌套程序与 Frameworks 里的库（这个参数把它们一起放过了），T04 的安装检查也不覆盖对端；登记为已知缺口，见技术设计第 1 节。约束：有证书的包里不放会被加载的 dylib、framework 或影响行为的资源；嵌套程序可以放（如 Contents/MacOS 里的 iwork-daemon），前提是别的进程只经握手校验过的连接和它往来；被信任进程直接起、且不经握手就信其结果的程序同样不放。修法之后：形态 A、B 两个角色都握手成功；把客户端换成清单外的映像（换签名标识重签，cdhash 必变），后台以 `ImageNotTrusted` 拒绝；平台测试见 `crates/iwork-ipc/tests/peer_bundle_macos.rs`。注意「在文件末尾追加一字节」造不出清单外的映像：签名之外的尾部不在代码目录覆盖范围内，cdhash 不变。
 
 **D4（修法之后加的复核）**：用 `iwork-ipc` 的正式函数（T04 第 3 步的 `running_image_id`、`file_image_ids`、`verify_bundle`）在真实包里再走一遍：两种包里运行映像 = 自己路径的文件身份 = `codesign` 读的 cdhash；`verify_bundle` 对未封印的 A 包报错、对整包签名的 B 包通过；同一张证书签的两个构建，`SelfIdentity` 的签名者相同、运行映像不同。
 

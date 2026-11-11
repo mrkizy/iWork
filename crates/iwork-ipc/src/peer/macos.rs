@@ -349,7 +349,9 @@ fn confirm_running(code: &Cf, claim: Claim) -> Result<SignerIdentity, String> {
 ///
 /// 代价（已知缺口，技术设计第 1 节）：握手时**不验对端包里的资源、嵌套程序与 Frameworks 里的库**——这个参数把它们
 /// 一起放过了，换掉嵌套程序或 dylib 照样通过。T04 的安装检查只查后台自己的安装目录，不覆盖对端。
-/// 约束：有证书的包里不放会被加载的 dylib、framework 或影响行为的资源；将来要放时，证书分支改回默认参数
+/// 约束：有证书的包里不放会被加载的 dylib、framework 或影响行为的资源；嵌套程序可以放（如 Contents/MacOS 里的
+/// iwork-daemon），前提是别的进程只经握手校验过的连接和它往来；被信任进程直接起、且不经握手就信其结果的程序同样不放。
+/// 将来要放这类东西时，证书分支改回默认参数
 /// （整包签名的包默认参数能过，T04 N5 B1）。
 fn check_image_file(code: &Cf, requirement: &Cf) -> Result<(), String> {
     let mut image_file: SecRef = ptr::null();
