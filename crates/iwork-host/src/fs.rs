@@ -23,11 +23,10 @@ pub struct OsPathResolver {
 
 impl OsPathResolver {
     /// `home` 必须已是规范路径（daemon 启动时 `canonicalize` 一次）。`case_insensitive` 由
-    /// [`OsPathResolver::detect_case_insensitive`] 在数据目录上探测。Windows 上 `canonicalize` 带的
-    /// `\\?\` 前缀在这里去掉：解析结果是指纹的键，同一处文件不能有带前缀、不带前缀两种写法。
+    /// [`OsPathResolver::detect_case_insensitive`] 在数据目录上探测。
     pub fn new(home: PathBuf, case_insensitive: bool) -> Self {
         Self {
-            home: strip_verbatim(home),
+            home,
             case_insensitive,
         }
     }
@@ -183,8 +182,7 @@ impl OsPathResolver {
         } else if raw.starts_with('~') {
             return Err(PathResolveError::OtherUserHome { raw: err_raw() });
         } else {
-            // cwd 可能是调用方自己 `canonicalize` 出来的（Windows 上带 `\\?\`），与 home 同样去掉
-            (strip_verbatim(cwd.0.clone()), raw)
+            (cwd.0.clone(), raw)
         };
         // 快路径：整条路径已存在时 realpath 就是逐分量、先解析链接的同一个顺序，一次系统调用链完成
         let joined = current.join(rest);
