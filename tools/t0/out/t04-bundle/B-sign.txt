@@ -1,0 +1,42 @@
+== codesign -dvvv B
+Executable=<work>/B/iWork.app/Contents/MacOS/iwork-client
+Identifier=dev.iwork.client
+Format=app bundle with Mach-O thin (arm64)
+CodeDirectory v=20400 size=19657 flags=0x0(none) hashes=608+3 location=embedded
+Hash type=sha256 size=32
+CandidateCDHash sha256=693dfcfd94bc712c9fa57d3928745fe07e4fd6b4
+CandidateCDHashFull sha256=693dfcfd94bc712c9fa57d3928745fe07e4fd6b45c0cb607a29774bd765a5f1c
+Hash choices=sha256
+CMSDigest=693dfcfd94bc712c9fa57d3928745fe07e4fd6b45c0cb607a29774bd765a5f1c
+CMSDigestType=2
+CDHash=693dfcfd94bc712c9fa57d3928745fe07e4fd6b4
+Signature size=1753
+Authority=iWork T04 Signer
+Signed Time=11 Nov 2026 at 4:38:58 PM
+Info.plist entries=14
+TeamIdentifier=not set
+Sealed Resources version=2 rules=13 files=2
+Internal requirements count=1 size=92
+Total signatures=1
+Chosen signature=1
+== codesign -dvvv B/iwork-daemon
+Executable=<work>/B/iWork.app/Contents/MacOS/iwork-daemon
+Identifier=dev.iwork.daemon
+Format=Mach-O thin (arm64)
+CodeDirectory v=20400 size=1033 flags=0x0(none) hashes=27+2 location=embedded
+Hash type=sha256 size=32
+CandidateCDHash sha256=347cf79c23dba10bc888500132417386e9062b0e
+CandidateCDHashFull sha256=347cf79c23dba10bc888500132417386e9062b0e8c22e3a56e9d979dc758fe95
+Hash choices=sha256
+CMSDigest=347cf79c23dba10bc888500132417386e9062b0e8c22e3a56e9d979dc758fe95
+CMSDigestType=2
+CDHash=347cf79c23dba10bc888500132417386e9062b0e
+Signature size=1753
+Authority=iWork T04 Signer
+Signed Time=11 Nov 2026 at 4:38:58 PM
+Info.plist=not bound
+TeamIdentifier=not set
+Sealed Resources=none
+Internal requirements count=1 size=92
+Total signatures=1
+Chosen signature=1

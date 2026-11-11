@@ -1,0 +1,14 @@
+{
+  "manifest_version": 1,
+  "app_version": "0.1.0",
+  "binaries": {
+    "iwork-daemon": [
+      "sha256:773e92723a0b482b0dd0d04c345185cf8a5058a6f6b3013e3d798ffd8c552867",
+      "cdhash:5ba76ff83c7a6319f6571f95d4a99846c9401884"
+    ],
+    "iwork-client": [
+      "sha256:d220e3234ce551382c1913e08c21a7c7fdd1d5e7cd2c7751a7043679ffa5e552",
+      "cdhash:d2d3d3691a871da6850455a81ddb804d2f5508fa"
+    ]
+  }
+}

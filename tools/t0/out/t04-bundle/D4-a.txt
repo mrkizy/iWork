@@ -1,0 +1,4 @@
+2026-11-11T08:39:45.213754Z  INFO iwork.ipc.audit: event="manifest_loaded" path=<work>/D4/a/iWork.app/Contents/MacOS/iwork-manifest.json app_version=0.1.0 entries=4 self_listed=true
+self signer=cdhash:b2cad515 exe_dir=<work>/D4/a/iWork.app/Contents/MacOS manifest=app_version=0.1.0 entries=4
+running=cdhash:b2cad515475012cc694012fbd3d901aebb4aeffd file=cdhash:b2cad515475012cc694012fbd3d901aebb4aeffd equal=true
+verify_bundle=Err("取 <work>/D4/a/iWork.app 的映像身份失败：SecStaticCodeCheckValidity（整包） 失败（OSStatus -67056）")

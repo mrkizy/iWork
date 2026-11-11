@@ -155,6 +155,19 @@ impl StoragePort for Shared {
     ) -> Result<Vec<iwork_ports::store::OutboxItem>, iwork_ports::store::StorageError> {
         self.0.outbox_pending(limit).await
     }
+    async fn outbox_requeue_dispatched(
+        &self,
+        redeliver_prefixes: Vec<String>,
+    ) -> Result<iwork_ports::store::RequeueReport, iwork_ports::store::StorageError> {
+        self.0.outbox_requeue_dispatched(redeliver_prefixes).await
+    }
+    async fn outbox_pending_where(
+        &self,
+        selector: iwork_ports::store::OutboxSelector,
+        limit: usize,
+    ) -> Result<Vec<iwork_ports::store::OutboxItem>, iwork_ports::store::StorageError> {
+        self.0.outbox_pending_where(selector, limit).await
+    }
     async fn outbox_mark(
         &self,
         id: iwork_ports::store::OutboxId,

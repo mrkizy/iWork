@@ -9,6 +9,9 @@ ROOT=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 OUT="$ROOT/tools/t0/out/t03-macos-forkexec"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/iwork-t03-fx.XXXXXX")
 KC="$WORK/t03.keychain-db"
+# 临时钥匙串：建好后关掉自动上锁（默认空闲 5 分钟、睡眠就锁，之后 codesign 会弹框找人要密码）；
+# 每次签名前再解锁一次。整个过程不该出现要人输密码的框。
+kc_codesign() { security unlock-keychain -p t "$KC"; codesign --keychain "$KC" "$@"; }
 SOCK="$WORK/s.sock"
 CHILDREN=()
 cleanup() {
@@ -17,7 +20,7 @@ cleanup() {
   security delete-keychain "$KC" 2>/dev/null || true
   rm -rf "$WORK"
 }
-trap cleanup EXIT
+trap cleanup EXIT  # bash 3.2 收到 TERM、INT 也会跑 EXIT trap（实测），被 timeout 掐断时照样清理
 rm -rf "$OUT"; mkdir -p "$OUT"
 SUMMARY="$OUT/summary.txt"
 note() { echo "$*" | tee -a "$SUMMARY"; }
@@ -28,6 +31,7 @@ PROBE="$ROOT/target/debug/examples/peer-probe"
 
 # ---- 自签证书 A，签出「被信任的二进制」
 security create-keychain -p t "$KC"; security unlock-keychain -p t "$KC"
+security set-keychain-settings "$KC"
 cat > "$WORK/A.cnf" <<'EOF'
 [req]
 distinguished_name=dn
@@ -45,7 +49,7 @@ openssl pkcs12 -export -legacy -inkey "$WORK/A.key" -in "$WORK/A.pem" -out "$WOR
 security import "$WORK/A.p12" -k "$KC" -P t -T /usr/bin/codesign >/dev/null
 security set-key-partition-list -S apple-tool:,apple: -s -k t "$KC" >/dev/null
 cp "$PROBE" "$WORK/trusted"
-codesign -f --keychain "$KC" -s "iWork T03 Signer A" -i t03.trusted "$WORK/trusted" 2>/dev/null
+kc_codesign -f -s "iWork T03 Signer A" -i t03.trusted "$WORK/trusted" 2>/dev/null
 note "trusted（证书 A）leaf sha256=$(openssl x509 -in "$WORK/A.pem" -outform DER | openssl dgst -sha256 -r | cut -d' ' -f1)"
 
 # ---- 攻击程序（ad-hoc，链接器签名）：connect → 等 pre 秒 → fork；子进程留 socket，每秒发一行；父进程 exec trusted

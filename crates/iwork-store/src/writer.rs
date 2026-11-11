@@ -15,11 +15,12 @@ use iwork_domain::common::{Actor, Timestamp};
 use iwork_domain::id::{CommandId, Seq};
 use iwork_ports::clock::Clock;
 use iwork_ports::store::{
-    CommitReceipt, CommitRequest, EventCodec, Projector, RebuildReport, StorageError,
+    CommitReceipt, CommitRequest, EventCodec, Projector, RebuildReport, StorageError, StoredEvent,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::reply::{self, Reply, Responder};
+use crate::signals::{CommitObserver, CommittedBatch, ExitGuard, FailureSignal, StoreFailure};
 use crate::sql::{ColumnText, id_col, seq_col, seq_val, sql_err};
 use crate::tables::PROJECTION_TABLES;
 
@@ -93,6 +94,8 @@ pub(crate) enum WriteOp {
     Sql(Box<dyn SqlOp>),
     Rebuild(Responder<RebuildReport>),
     Exclusive(ExclusiveFn),
+    /// 装提交观察者；只能装一次
+    SetObserver(Box<dyn CommitObserver>, Responder<()>),
     Shutdown,
     #[cfg(test)]
     Fault(Fault),
@@ -102,7 +105,7 @@ impl WriteOp {
     fn is_exclusive(&self) -> bool {
         match self {
             Self::Commit(..) | Self::Sql(_) => false,
-            Self::Rebuild(_) | Self::Exclusive(_) | Self::Shutdown => true,
+            Self::Rebuild(_) | Self::Exclusive(_) | Self::SetObserver(..) | Self::Shutdown => true,
             #[cfg(test)]
             Self::Fault(_) => true,
         }
@@ -122,6 +125,8 @@ pub(crate) enum Fault {
     InterruptEventInsert { skip: u32 },
     /// 从此刻起本连接上的 COMMIT 与 ROLLBACK 一律被 authorizer 拒绝（BEGIN、SAVEPOINT 照常）
     DenyTxEnd,
+    /// 写线程立刻 panic（模拟写线程意外退出）
+    Panic,
 }
 
 /// 写线程与外界共享的计数（测试与基准读）。
@@ -218,6 +223,7 @@ pub(crate) fn spawn<C, P, K>(
     projector: Arc<P>,
     clock: Arc<K>,
     config: WriterConfig,
+    failure: Arc<FailureSignal>,
 ) -> Result<(WriterHandle, JoinHandle<()>), StorageError>
 where
     C: EventCodec + 'static,
@@ -242,13 +248,20 @@ where
         config,
         next_seq,
         broken: false,
+        observer: None,
+        failure: failure.clone(),
         stats: stats.clone(),
         #[cfg(test)]
         faults: Vec::new(),
     };
     let join = std::thread::Builder::new()
         .name("iwork-store-writer".into())
-        .spawn(move || writer.run(rx))
+        .spawn(move || {
+            // panic 离开时守卫发 WriterGone；收到关闭请求或所有发送端都没了是正常退出
+            let guard = ExitGuard::new(failure, StoreFailure::WriterGone);
+            writer.run(rx);
+            guard.disarm();
+        })
         .map_err(|e| StorageError::Io {
             message: format!("起写线程失败：{e}"),
         })?;
@@ -272,8 +285,10 @@ struct Writer<C, P, K> {
     clock: Arc<K>,
     config: WriterConfig,
     next_seq: u64,
-    /// 回滚失败后连接不可信：之后的写请求一律立即失败，由 T04 整体重启（设计 10.4）
+    /// 回滚失败后连接不可信：之后的写请求一律立即失败，由 T04 整体重启（设计 10.4）。只经 `mark_broken` 置位
     broken: bool,
+    observer: Option<Box<dyn CommitObserver>>,
+    failure: Arc<FailureSignal>,
     stats: Arc<WriterStats>,
     #[cfg(test)]
     faults: Vec<Fault>,
@@ -363,6 +378,16 @@ where
                 };
                 reply.send(r);
             }
+            WriteOp::SetObserver(observer, reply) => {
+                reply.send(if self.observer.is_some() {
+                    Err(StorageError::Io {
+                        message: "提交观察者只能装一次".into(),
+                    })
+                } else {
+                    self.observer = Some(observer);
+                    Ok(())
+                });
+            }
             WriteOp::Exclusive(f) => {
                 if self.broken {
                     // f 捕获的发送端随 f 一起 drop，调用方得到「写线程已退出」类错误
@@ -395,6 +420,8 @@ where
                     }))
                     .expect("装 authorizer");
             }
+            #[cfg(test)]
+            WriteOp::Fault(Fault::Panic) => panic!("注入的写线程 panic"),
             #[cfg(test)]
             WriteOp::Fault(f) => self.faults.push(f),
             WriteOp::Commit(..) | WriteOp::Sql(_) => unreachable!("不是独占操作"),
@@ -443,6 +470,8 @@ where
         match lost {
             None => {
                 self.stats.commits.fetch_add(1, Ordering::Relaxed);
+                // 先交给观察者、再送回执：调用方拿到回执时，它的事件一定已经交出去了
+                self.notify_observer(&mut items, now);
                 items.into_iter().for_each(|i| i.finish(None));
             }
             Some(cause) => {
@@ -450,6 +479,51 @@ where
                 items.into_iter().for_each(|i| i.finish(Some(&err)));
             }
         }
+    }
+
+    /// 把这批里真正写进去的事件按 seq 顺序交给观察者。没装观察者时什么都不做（也不搬事件）。
+    fn notify_observer(&mut self, items: &mut [BatchItem], now: Timestamp) {
+        let Some(observer) = self.observer.as_mut() else {
+            return;
+        };
+        let mut events = Vec::new();
+        let mut outbox_added = 0;
+        for item in items.iter_mut() {
+            let BatchItem::Commit {
+                req,
+                result: Some(Ok(receipt)),
+                ..
+            } = item
+            else {
+                continue;
+            };
+            if receipt.replayed {
+                continue;
+            }
+            outbox_added += req.outbox.len();
+            // 回执已经定了，请求里的事件不再用：直接搬走，不多拷贝
+            let first = receipt.first_seq.0;
+            for (i, event) in std::mem::take(&mut req.events).into_iter().enumerate() {
+                events.push(StoredEvent {
+                    seq: Seq(first + i as u64),
+                    at: now,
+                    actor: req.actor.clone(),
+                    event,
+                });
+            }
+        }
+        if !events.is_empty() || outbox_added > 0 {
+            observer.committed(CommittedBatch {
+                events: &events,
+                outbox_added,
+            });
+        }
+    }
+
+    /// 回滚失败后：连接不可信，之后的写请求一律立即失败，并发失效信号。
+    fn mark_broken(&mut self) {
+        self.broken = true;
+        self.failure.fire(StoreFailure::WriterBroken);
     }
 
     /// 在本条的 savepoint 里执行。条目自己的失败记在条目上（返回 `Ok`）；返回 `Err` 表示事务已经
@@ -606,14 +680,14 @@ where
             && let Err(e) = self.rollback()
         {
             tracing::error!(error = %e, "整批回滚失败，写连接标为失效");
-            self.broken = true;
+            self.mark_broken();
             return broken();
         }
         match durable_next_seq(&self.tx.conn) {
             Ok(n) => self.next_seq = n,
             Err(e) => {
                 tracing::error!(error = %e, "回滚后读不出持久 head，写连接标为失效");
-                self.broken = true;
+                self.mark_broken();
                 return broken();
             }
         }
@@ -664,7 +738,7 @@ where
             }
             Err(e) => {
                 tracing::error!(what, error = %e, "遗留事务回滚失败，写连接标为失效");
-                self.broken = true;
+                self.mark_broken();
                 Err(broken())
             }
         }

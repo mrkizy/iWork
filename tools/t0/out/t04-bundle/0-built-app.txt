@@ -1,0 +1,61 @@
+== codesign -dvvv iWork.app
+Executable=<home>/LiWork/iWork/.cao/worktrees/226429ec/target/release/bundle/macos/iWork.app/Contents/MacOS/iwork-client
+Identifier=iwork_client-41267d8b12699da3
+Format=app bundle with Mach-O thin (arm64)
+CodeDirectory v=20400 size=77848 flags=0x20002(adhoc,linker-signed) hashes=2429+0 location=embedded
+Hash type=sha256 size=32
+CandidateCDHash sha256=d2d3d3691a871da6850455a81ddb804d2f5508fa
+CandidateCDHashFull sha256=d2d3d3691a871da6850455a81ddb804d2f5508fa9b6bb06260bfa21e34f01ab0
+Hash choices=sha256
+CMSDigest=d2d3d3691a871da6850455a81ddb804d2f5508fa9b6bb06260bfa21e34f01ab0
+CMSDigestType=2
+CDHash=d2d3d3691a871da6850455a81ddb804d2f5508fa
+Signature=adhoc
+Info.plist=not bound
+TeamIdentifier=not set
+Sealed Resources=none
+Internal requirements=none
+== Contents/_CodeSignature
+ls: <home>/LiWork/iWork/.cao/worktrees/226429ec/target/release/bundle/macos/iWork.app/Contents/_CodeSignature: No such file or directory
+== codesign -dvvv iwork-client
+Executable=<home>/LiWork/iWork/.cao/worktrees/226429ec/target/release/bundle/macos/iWork.app/Contents/MacOS/iwork-client
+Identifier=iwork_client-41267d8b12699da3
+Format=app bundle with Mach-O thin (arm64)
+CodeDirectory v=20400 size=77848 flags=0x20002(adhoc,linker-signed) hashes=2429+0 location=embedded
+Hash type=sha256 size=32
+CandidateCDHash sha256=d2d3d3691a871da6850455a81ddb804d2f5508fa
+CandidateCDHashFull sha256=d2d3d3691a871da6850455a81ddb804d2f5508fa9b6bb06260bfa21e34f01ab0
+Hash choices=sha256
+CMSDigest=d2d3d3691a871da6850455a81ddb804d2f5508fa9b6bb06260bfa21e34f01ab0
+CMSDigestType=2
+CDHash=d2d3d3691a871da6850455a81ddb804d2f5508fa
+Signature=adhoc
+Info.plist=not bound
+TeamIdentifier=not set
+Sealed Resources=none
+Internal requirements=none
+== codesign -dvvv target/release/iwork-client
+Executable=<home>/LiWork/iWork/.cao/worktrees/226429ec/target/release/iwork-client
+Identifier=iwork_client-41267d8b12699da3
+Format=Mach-O thin (arm64)
+CodeDirectory v=20400 size=77848 flags=0x20002(adhoc,linker-signed) hashes=2429+0 location=embedded
+Hash type=sha256 size=32
+CandidateCDHash sha256=d2d3d3691a871da6850455a81ddb804d2f5508fa
+CandidateCDHashFull sha256=d2d3d3691a871da6850455a81ddb804d2f5508fa9b6bb06260bfa21e34f01ab0
+Hash choices=sha256
+CMSDigest=d2d3d3691a871da6850455a81ddb804d2f5508fa9b6bb06260bfa21e34f01ab0
+CMSDigestType=2
+CDHash=d2d3d3691a871da6850455a81ddb804d2f5508fa
+Signature=adhoc
+Info.plist=not bound
+TeamIdentifier=not set
+Sealed Resources=none
+Internal requirements=none
+== codesign --verify --deep --strict iWork.app
+<home>/LiWork/iWork/.cao/worktrees/226429ec/target/release/bundle/macos/iWork.app: code has no resources but signature indicates they must be present
+== cmp 包里的主程序 与 target/release/iwork-client
+identical
+== find
+./Contents/Info.plist
+./Contents/MacOS/iwork-client
+./Contents/Resources/icon.icns

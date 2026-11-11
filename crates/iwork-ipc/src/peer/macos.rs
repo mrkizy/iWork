@@ -4,7 +4,7 @@
 //! 1. 对端用 socket 上的审计令牌（`LOCAL_PEERTOKEN`）换成内核跟踪的动态 `SecCode`，不经 pid，不受 pid 复用影响；
 //! 2. `SecCodeCopySigningInformation` 读出证书 / cdhash。头文件说明这些信息有一部分**来自磁盘**，可能已被换掉；
 //! 3. 所以把读到的身份写成代码要求（`certificate leaf = H"…"` 或 `cdhash H"…"`），先对映像文件做全量静态校验
-//!    （每一页哈希都对，见 [`check_image_file`]），再让 `SecCodeCheckValidity` 对同一个动态对象验一遍。后者按头文件
+//!    （每一页哈希都对，不验包资源，见 [`check_image_file`]），再让 `SecCodeCheckValidity` 对同一个动态对象验一遍。后者按头文件
 //!    说明「不受文件系统来源被改动的影响」：只有运行中的代码确实是这个身份才通过；磁盘上的代码目录与运行中的不一致
 //!    时返回 `errSecCSStaticCodeChanged`（-67034）。
 //!
@@ -15,7 +15,7 @@ use std::ffi::{CStr, c_void};
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 
 use core_foundation_sys::array::{
@@ -32,7 +32,10 @@ use core_foundation_sys::dictionary::{
     kCFTypeDictionaryValueCallBacks,
 };
 use core_foundation_sys::string::{CFStringCreateWithBytes, CFStringRef, kCFStringEncodingUTF8};
-use core_foundation_sys::url::{CFURLGetFileSystemRepresentation, CFURLGetTypeID, CFURLRef};
+use core_foundation_sys::url::{
+    CFURLCreateFromFileSystemRepresentation, CFURLGetFileSystemRepresentation, CFURLGetTypeID,
+    CFURLRef,
+};
 use sha2::{Digest, Sha256};
 
 use super::{ImageId, PeerError, PeerIdentity, SignerIdentity, UserId};
@@ -43,6 +46,12 @@ type SecRef = CFTypeRef;
 
 const K_SEC_CS_DEFAULT_FLAGS: SecCSFlags = 0;
 const K_SEC_CS_SIGNING_INFORMATION: SecCSFlags = 1 << 1;
+/// 整包验签的三个开关（CSCommon.h）：全部架构、嵌套代码、严格模式。
+const K_SEC_CS_CHECK_ALL_ARCHITECTURES: SecCSFlags = 1 << 0;
+const K_SEC_CS_CHECK_NESTED_CODE: SecCSFlags = 1 << 3;
+const K_SEC_CS_STRICT_VALIDATE: SecCSFlags = 1 << 4;
+/// `kSecCSDoNotValidateResources`（CSCommon.h）：静态校验时不验包资源（`_CodeSignature/CodeResources` 登记的文件）。
+const K_SEC_CS_DO_NOT_VALIDATE_RESOURCES: SecCSFlags = 1 << 2;
 /// CommonCrypto 的 `CC_SHA1_DIGEST_LENGTH`。
 const SHA1_LEN: usize = 20;
 
@@ -57,6 +66,11 @@ unsafe extern "C" {
     static kSecCodeInfoMainExecutable: CFStringRef;
 
     fn SecCodeCopySelf(flags: SecCSFlags, code: *mut SecRef) -> OSStatus;
+    fn SecStaticCodeCreateWithPath(
+        path: CFURLRef,
+        flags: SecCSFlags,
+        static_code: *mut SecRef,
+    ) -> OSStatus;
     fn SecCodeCopyGuestWithAttributes(
         host: SecRef,
         attributes: CFDictionaryRef,
@@ -105,6 +119,90 @@ pub(crate) fn own_image() -> Result<(SignerIdentity, PathBuf), PeerError> {
         ))
     })?;
     Ok((image.signer, exe))
+}
+
+/// 本进程运行中映像的 cdhash（T04 方案 2.9）。有没有证书都取：同一张证书签的两版程序，叶证书相同、cdhash 不同。
+///
+/// 和 [`own_image`] 同一条路：动态对象来自 `SecCodeCopySelf`，读出的 cdhash 钉成要求后经 [`confirm_running`]
+/// 对映像文件与运行中的代码各验一遍。启动后路径上的文件被换掉时，这里只会取到原值或报错，不会取成新文件
+/// （T04 N5 D3 实测），所以调用方只在启动时取一次。
+pub(crate) fn running_image_id() -> Result<ImageId, PeerError> {
+    let code = copy_self().map_err(PeerError::SelfIdentity)?;
+    let cdhash = copy_signing_information(&code)
+        .and_then(|info| cdhash_in(&info))
+        .and_then(|cdhash| cdhash.ok_or_else(|| "未签名：签名信息里没有 cdhash".to_string()))
+        .map_err(PeerError::SelfIdentity)?;
+    match confirm_running(&code, Claim::CdHash(cdhash)).map_err(PeerError::SelfIdentity)? {
+        SignerIdentity::Image(id) => Ok(id),
+        other => Err(PeerError::SelfIdentity(format!(
+            "运行映像身份不是 cdhash：{}",
+            other.summary()
+        ))),
+    }
+}
+
+/// 磁盘上一个程序文件签名里的 cdhash（静态代码对象）。只读代码目录、不校验、不读全文
+/// （T04 N5 D2：文件中部改坏一字节照样读到原值，10 MB 文件几毫秒）。未签名返回 `None`。
+/// 通用二进制取本机架构那一片，和运行起来后 [`running_image_id`] 取的是同一片（N5 D2）。
+pub(crate) fn file_cdhash(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    let code = static_code_at(path)?;
+    cdhash_in(&copy_signing_information(&code)?)
+}
+
+/// 对 .app 做整包静态验签：严格模式、含嵌套代码、全部架构。封印登记了包里的每一个文件，
+/// 少一个、坏一个、多一个没登记的都过不了（T04 N5 B2）；每次调用都完整地重查，不记上次的结果。
+pub(crate) fn verify_bundle(app: &Path) -> Result<(), String> {
+    let code = static_code_at(app)?;
+    // SAFETY: code 是有效 SecStaticCode；要求传空 = 只验签名本身。
+    let status = unsafe {
+        SecStaticCodeCheckValidity(
+            code.as_ptr(),
+            K_SEC_CS_STRICT_VALIDATE
+                | K_SEC_CS_CHECK_NESTED_CODE
+                | K_SEC_CS_CHECK_ALL_ARCHITECTURES,
+            ptr::null(),
+        )
+    };
+    check(status, "SecStaticCodeCheckValidity（整包）")
+}
+
+fn static_code_at(path: &Path) -> Result<Cf, String> {
+    let bytes = path.as_os_str().as_bytes();
+    // SAFETY: 指针与长度来自同一个切片；返回 +1 引用交给 Cf。
+    let url = unsafe {
+        Cf::adopt(
+            CFURLCreateFromFileSystemRepresentation(
+                kCFAllocatorDefault,
+                bytes.as_ptr(),
+                bytes.len() as CFIndex,
+                u8::from(path.is_dir()),
+            )
+            .cast(),
+        )
+    }
+    .ok_or_else(|| {
+        format!(
+            "CFURLCreateFromFileSystemRepresentation 返回空：{}",
+            path.display()
+        )
+    })?;
+    let mut code: SecRef = ptr::null();
+    // SAFETY: url 是有效 CFURL；出参成功时是 +1 引用，交给 Cf。
+    let status = unsafe {
+        SecStaticCodeCreateWithPath(url.as_ptr() as CFURLRef, K_SEC_CS_DEFAULT_FLAGS, &mut code)
+    };
+    check(status, "SecStaticCodeCreateWithPath").map_err(|e| format!("{e}：{}", path.display()))?;
+    // SAFETY: 上面成功，code 非空且 +1。
+    unsafe { Cf::adopt(code) }.ok_or_else(|| "SecStaticCodeCreateWithPath 返回空".into())
+}
+
+/// 签名信息里的 cdhash（`kSecCodeInfoUnique`）；没有（未签名）是 `None`。
+fn cdhash_in(info: &Cf) -> Result<Option<Vec<u8>>, String> {
+    // SAFETY: 读 Security.framework 导出的常量 CFString，链接期已解析，进程内只读。
+    let key = unsafe { kSecCodeInfoUnique };
+    Ok(dict_value(info, key, cf_data_type(), "kSecCodeInfoUnique")?
+        // 借用的 CFData：info 活着它就活着；data_bytes 立刻复制出来。
+        .map(|unique| data_bytes(&Borrowed(unique))))
 }
 
 /// 已连接 UDS 的对端身份。uid、pid 取不到是系统错误；映像身份取不到装成 `Unavailable`，由 `judge_peer` 拒。
@@ -243,6 +341,18 @@ fn confirm_running(code: &Cf, claim: Claim) -> Result<SignerIdentity, String> {
 /// 动态校验只看签名本身和内核的有效位；内核是在**页被调入时**才逐页核对的。实测（N1 反例 b）：对端运行中
 /// 原地改掉一个还没调入的页，动态校验照样通过，等那一页被执行才出事。这里把这种文件当作已被篡改，直接拒。
 /// 文件按内核记录的映像定位（不是按路径重新找），之后的动态校验再确认它与运行中的代码目录一致。
+///
+/// 带 `kSecCSDoNotValidateResources`：主程序的代码页哈希照样逐页验，上面要挡的「改了还没调入的页」照样挡得住
+/// （`tests/peer_bundle_macos.rs` 有用例）。为什么要带：无证书构建的 .app 不做整包签名（主程序只有链接器的
+/// ad-hoc 签名），而包主程序的静态代码对象代表整个包，默认参数下报 -67056（`errSecCSResourcesNotFound`），
+/// 客户端连自己的身份都算不出（T04 N5 A1 实测，`t0-findings.md` 7.1）。
+///
+/// 代价（已知缺口，技术设计第 1 节）：握手时**不验对端包里的资源、嵌套程序与 Frameworks 里的库**——这个参数把它们
+/// 一起放过了，换掉嵌套程序或 dylib 照样通过。T04 的安装检查只查后台自己的安装目录，不覆盖对端。
+/// 约束：有证书的包里不放会被加载的 dylib、framework 或影响行为的资源；嵌套程序可以放（如 Contents/MacOS 里的
+/// iwork-daemon），前提是别的进程只经握手校验过的连接和它往来；被信任进程直接起、且不经握手就信其结果的程序同样不放。
+/// 将来要放这类东西时，证书分支改回默认参数
+/// （整包签名的包默认参数能过，T04 N5 B1）。
 fn check_image_file(code: &Cf, requirement: &Cf) -> Result<(), String> {
     let mut image_file: SecRef = ptr::null();
     // SAFETY: code 是有效 SecCode；出参成功时是 +1 引用，交给 Cf。
@@ -255,7 +365,7 @@ fn check_image_file(code: &Cf, requirement: &Cf) -> Result<(), String> {
     let status = unsafe {
         SecStaticCodeCheckValidity(
             image_file.as_ptr(),
-            K_SEC_CS_DEFAULT_FLAGS,
+            K_SEC_CS_DO_NOT_VALIDATE_RESOURCES,
             requirement.as_ptr(),
         )
     };

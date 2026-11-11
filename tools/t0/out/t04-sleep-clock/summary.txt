@@ -1,0 +1,8 @@
+# T04 N2 睡眠与单调钟  2026-11-11 15:43:55
+## macOS 27.2 arm64；rustc 1.99.1 (58cf8f9c3 2026-10-13)
+  wall=1794383037.123 instant=99606.957 UPTIME_RAW=99606.958 MONOTONIC=99610.776 MONOTONIC_RAW=99616.496 instant_matches=UPTIME_RAW slept_since_boot(MONOTONIC_RAW-UPTIME_RAW)=9.538
+  开机于 2026-11-10 12:03:46；电源日志里开机以来的睡眠条目：
+    条数 4；最后一条：2026-11-11 13:41:10 +0800 Sleep               	Entering Sleep state due to 'Maintenance Sleep':TCPKeepAlive=active Using Batt (Charge:56%) 11 secs   
+## Linux（Docker rust:1）
+  Linux 7.0.11-orbstack-00360-gc9bc4d96ac70 aarch64
+  wall=1794383055.240 instant=35.146 MONOTONIC=35.146 MONOTONIC_RAW=35.146 BOOTTIME=35.146 instant_matches=MONOTONIC|MONOTONIC_RAW|BOOTTIME slept_since_boot(BOOTTIME-MONOTONIC)=0.000

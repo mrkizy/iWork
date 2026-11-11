@@ -1,0 +1,13 @@
+2026-11-11T07:10:13.584907Z  INFO iwork.ipc.audit: event="manifest_loaded" path=/w/inst-hs/iwork-manifest.json app_version=0.1.0 entries=1 self_listed=true
+self signer=sha256:828c060d exe_dir=/w/inst-hs manifest=app_version=0.1.0 entries=1
+image=sha256:828c060df2e7096bb264170bb05b13c3435dcdbe4a422a21fd2fc14c1c93eeeb
+2026-11-11T07:10:14.597789Z  INFO iwork.ipc.audit: event="manifest_loaded" path=/w/inst-hs/iwork-manifest.json app_version=0.1.0 entries=1 self_listed=true
+tick=0 image=sha256:828c060df2e7096bb264170bb05b13c3435dcdbe4a422a21fd2fc14c1c93eeeb
+2026-11-11T07:10:15.617510Z  INFO iwork.ipc.audit: event="manifest_loaded" path=/w/inst-hs/iwork-manifest.json app_version=0.1.0 entries=1 self_listed=true
+tick=1 image=sha256:828c060df2e7096bb264170bb05b13c3435dcdbe4a422a21fd2fc14c1c93eeeb
+2026-11-11T07:10:16.636412Z  INFO iwork.ipc.audit: event="manifest_loaded" path=/w/inst-hs/iwork-manifest.json app_version=0.1.0 entries=1 self_listed=true
+tick=2 image=sha256:828c060df2e7096bb264170bb05b13c3435dcdbe4a422a21fd2fc14c1c93eeeb
+2026-11-11T07:10:17.652649Z  INFO iwork.ipc.audit: event="manifest_loaded" path=/w/inst-hs/iwork-manifest.json app_version=0.1.0 entries=1 self_listed=true
+tick=3 image=sha256:828c060df2e7096bb264170bb05b13c3435dcdbe4a422a21fd2fc14c1c93eeeb
+2026-11-11T07:10:18.669553Z  INFO iwork.ipc.audit: event="manifest_loaded" path=/w/inst-hs/iwork-manifest.json app_version=0.1.0 entries=1 self_listed=true
+tick=4 image=sha256:828c060df2e7096bb264170bb05b13c3435dcdbe4a422a21fd2fc14c1c93eeeb

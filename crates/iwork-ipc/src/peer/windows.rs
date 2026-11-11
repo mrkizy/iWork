@@ -55,6 +55,18 @@ pub(crate) fn own_image() -> Result<(SignerIdentity, PathBuf), PeerError> {
     Ok((gate(probe.signer), probe.exe))
 }
 
+/// 本进程运行中映像的身份。映像绑定没有被实测证明（N2），[`own_image`] 经 [`gate`] 只会给出 `Unavailable`，
+/// 所以这里总是错误：Windows M1 不支持。
+pub(crate) fn running_image_id() -> Result<ImageId, PeerError> {
+    match own_image()?.0 {
+        SignerIdentity::Image(id) => Ok(id),
+        other => Err(PeerError::SelfIdentity(format!(
+            "本进程运行映像身份取不到：{}",
+            other.summary()
+        ))),
+    }
+}
+
 /// 按 pid 取对端身份。进程打不开、令牌读不到 → `Err`；映像身份取不到 → `signer = Unavailable`。
 pub(crate) fn identify_process(pid: u32) -> Result<PeerIdentity, PeerError> {
     // SAFETY: OpenProcess 没有指针参数；失败返回空句柄，下面检查。

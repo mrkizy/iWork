@@ -1,0 +1,2 @@
+self signer=certificate:f415695c exe_dir=<work>/D4/cert1/iWork.app/Contents/MacOS manifest=none
+running=cdhash:9b7dd8fc8055994b98d9e4b70fdb2946ea04c61f file=cdhash:9b7dd8fc8055994b98d9e4b70fdb2946ea04c61f equal=true

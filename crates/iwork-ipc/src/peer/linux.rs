@@ -28,6 +28,13 @@ pub(crate) fn own_image() -> Result<(SignerIdentity, PathBuf), PeerError> {
     Ok((SignerIdentity::Image(image), exe))
 }
 
+/// 本进程运行中映像的身份：和 [`own_image`] 同一份 `/proc/self/exe` 的全文哈希。
+pub(crate) fn running_image_id() -> Result<ImageId, PeerError> {
+    running_image(Path::new("/proc/self/exe"))
+        .map(|(image, _)| image)
+        .map_err(PeerError::SelfIdentity)
+}
+
 /// socket 对端的身份：`SO_PEERCRED` 取 uid 与 pid，再按 pid 取运行中映像。
 ///
 /// 取不到凭据返回 `PeerError::Credentials`；凭据有了但映像取不到（对端已退出、`/proc` 不可读），

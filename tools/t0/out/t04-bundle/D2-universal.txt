@@ -1,0 +1,9 @@
+pid=51171 mark=iwork-t04-imgprobe-mark-u
+running=c8a2408d7b471b9082dbfc5383ae4f7511dee67c status=0 path=<work>/D/univ/iWork.app/Contents/MacOS/iwork-daemon
+static=c8a2408d7b471b9082dbfc5383ae4f7511dee67c status=0 equal=yes
+== lipo
+Architectures in the fat file: <work>/D/univ/iWork.app/Contents/MacOS/iwork-daemon are: x86_64 arm64 
+== codesign -dvvv（默认本机架构）
+CDHash=c8a2408d7b471b9082dbfc5383ae4f7511dee67c
+== codesign -dvvv --arch x86_64
+CDHash=cf0de353aeebcbc3c67babec4a93e239520424ba

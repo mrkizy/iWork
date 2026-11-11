@@ -1,0 +1,99 @@
+# T04 N1 macOS SMAppService / launchd 实测  2026-11-11 16:42:07
+macOS 27.2 (26B5086k) arm64
+开始前：没有同名任务；没有同名 plist
+
+## 1–4 SMAppService.agent 的 register / status / unregister（host = 主程序；helper = 包里另一个可执行文件）
+  unsigned/host：register→ <无输出：程序起不来>
+      launchctl print 有任务=no state=无 agent 启动次数=0；status→ 
+      unregister→ ；之后有任务=no；agent 收到 SIGTERM=0
+  unsigned/agent：register→ <无输出：程序起不来>
+      launchctl print 有任务=no state=无 agent 启动次数=0；status→ 
+      unregister→ ；之后有任务=no；agent 收到 SIGTERM=0
+  linker/host：register→ op=register ok=0 status=NotFound error_domain=SMAppServiceErrorDomain error_code=3 error=The operation couldn’t be completed. Codesigning failure loading plist: com.iwork.t04probe.plist code: -67056
+      launchctl print 有任务=no state=无 agent 启动次数=0；status→ op=status ok=1 status=NotFound
+      unregister→ op=unregister ok=0 status=NotFound error_domain=SMAppServiceErrorDomain error_code=22 error=The operation couldn’t be completed. Invalid argument；之后有任务=no；agent 收到 SIGTERM=0
+  linker/agent：register→ op=register ok=0 status=NotFound error_domain=SMAppServiceErrorDomain error_code=3 error=The operation couldn’t be completed. Codesigning failure loading plist: com.iwork.t04probe.plist code: -67056
+      launchctl print 有任务=no state=无 agent 启动次数=0；status→ op=status ok=1 status=NotFound
+      unregister→ op=unregister ok=0 status=NotFound error_domain=SMAppServiceErrorDomain error_code=22 error=The operation couldn’t be completed. Invalid argument；之后有任务=no；agent 收到 SIGTERM=0
+  adhoc/host：register→ op=register ok=1 status=Enabled
+      launchctl print 有任务=yes state=running agent 启动次数=1；status→ op=status ok=1 status=Enabled
+      unregister→ op=unregister ok=1 status=NotRegistered；之后有任务=no；agent 收到 SIGTERM=1
+  adhoc/agent：register→ op=register ok=1 status=Enabled
+      launchctl print 有任务=yes state=running agent 启动次数=1；status→ op=status ok=1 status=Enabled
+      unregister→ op=unregister ok=1 status=NotRegistered；之后有任务=no；agent 收到 SIGTERM=1
+  cert/host：register→ op=register ok=1 status=Enabled
+      launchctl print 有任务=yes state=spawn scheduled agent 启动次数=0；status→ op=status ok=1 status=Enabled
+      unregister→ op=unregister ok=1 status=NotRegistered；之后有任务=no；agent 收到 SIGTERM=0
+  cert/agent：register→ op=register ok=1 status=Enabled
+      launchctl print 有任务=yes state=spawn scheduled agent 启动次数=0；status→ op=status ok=1 status=Enabled
+      unregister→ op=unregister ok=1 status=NotRegistered；之后有任务=no；agent 收到 SIGTERM=0
+  → 主程序调用能注册的第一种形态：adhoc
+
+## 5–7、9 SMAppService（形态 adhoc，plist 在包里，用 BundleProgram）
+  5 [sm] register 后 4 秒内 launchd 起的实例数=2；state=running；launchd 实例在等锁=2；已拿到锁=1
+    kill -9 手动实例（于 1794386592）后：launchd 实例拿到锁于 1794386592.101
+  6 [sm SuccessfulExit=false] exit 0：25 秒内再拉起 0 次；第一次再拉距结束 -s；last exit：0
+  6 [sm SuccessfulExit=false] exit 12：25 秒内再拉起 3 次；第一次再拉距结束 10.1s；last exit：12
+  6 [sm SuccessfulExit=false] exit 20：25 秒内再拉起 3 次；第一次再拉距结束 10.1s；last exit：20
+  6 [sm SuccessfulExit=false] exit 21：25 秒内再拉起 3 次；第一次再拉距结束 10.1s；last exit：21
+  6 [sm SuccessfulExit=false] signal 9：25 秒内再拉起 3 次；第一次再拉距结束 10.0s；last exit：
+  6 [sm SuccessfulExit=false] signal 15：25 秒内再拉起 3 次；第一次再拉距结束 10.1s；last exit：
+  6 [sm SuccessfulExit=false] signal 11：25 秒内再拉起 3 次；第一次再拉距结束 10.1s；last exit：
+  6 [sm SuccessfulExit=false] abort：25 秒内再拉起 3 次；第一次再拉距结束 10.1s；last exit：
+  N3-3 [sm] exec 自己：exec 前 launchctl 的 pid=77019，exec 后=77019，state=running，带 --execd 的启动行=1
+    之后 kill -9 它：14 秒内被 launchd 再拉起=1 次（证明 exec 后仍归这个任务管）
+  7 [sm] 实例自己注销：调用于 1794386883.043；返回：没返回；收到 SIGTERM 于 1794386883.062；最后一行：1794386883.062 got SIGTERM；之后任务还在=no；25 秒内再被拉起=0 次
+  7 [sm] 另一个进程注销：实例 pid 79372 收到 SIGTERM 于 1794386908.591（注销于 1794386908）；之后进程还在=否；任务还在=no
+
+## 9 注册后把 .app 挪个位置
+  挪之前 launchctl： path = (submitted by smd.599); program identifier = Contents/MacOS/agent (mode: 2); PATH => /usr/bin:/bin:/usr/sbin:/sbin;
+  挪之后（从新位置调）status：op=status ok=1 status=Enabled；launchctl： path = (submitted by smd.599); program identifier = Contents/MacOS/agent (mode: 2); PATH => /usr/bin:/bin:/usr/sbin:/sbin;
+  挪之后 kill -9 实例，14 秒内：state=running；最后一行：mode sleep
+  从新位置 unregister：op=unregister ok=1 status=NotRegistered；任务还在=no
+
+## 10 LaunchAgent plist：BundleProgram 还是 Program（T09 通知探针报 BundleProgram + bootstrap 得 rc=5）
+  每格：写 plist → 等 3 秒看系统有没有自己加载 → launchctl bootstrap 的 rc → 5 秒后 state → bootout、删 plist
+  linker / BundleProgram / ~/Library/LaunchAgents：写入前已加载=no；写入后自己加载=yes；bootstrap rc=5（Bootstrap failed: 5: Input/output error Try re-running the command as root for richer errors. ）；state=running；探针启动=1
+  linker / BundleProgram / 临时目录：写入前已加载=no；写入后自己加载=no；bootstrap rc=5（Bootstrap failed: 5: Input/output error Try re-running the command as root for richer errors. ）；state=；探针启动=0
+  linker / Program / ~/Library/LaunchAgents：写入前已加载=no；写入后自己加载=no；bootstrap rc=0；state=running；探针启动=1
+  linker / Program / 临时目录：写入前已加载=no；写入后自己加载=no；bootstrap rc=0；state=running；探针启动=1
+  adhoc / BundleProgram / ~/Library/LaunchAgents：写入前已加载=no；写入后自己加载=no；bootstrap rc=5（Bootstrap failed: 5: Input/output error Try re-running the command as root for richer errors. ）；state=；探针启动=0
+  adhoc / BundleProgram / 临时目录：写入前已加载=no；写入后自己加载=no；bootstrap rc=5（Bootstrap failed: 5: Input/output error Try re-running the command as root for richer errors. ）；state=；探针启动=0
+  adhoc / Program / ~/Library/LaunchAgents：写入前已加载=no；写入后自己加载=no；bootstrap rc=0；state=running；探针启动=1
+  adhoc / Program / 临时目录：写入前已加载=no；写入后自己加载=no；bootstrap rc=0；state=running；探针启动=1
+  cert / BundleProgram / ~/Library/LaunchAgents：写入前已加载=no；写入后自己加载=no；bootstrap rc=5（Bootstrap failed: 5: Input/output error Try re-running the command as root for richer errors. ）；state=；探针启动=0
+  cert / BundleProgram / 临时目录：写入前已加载=no；写入后自己加载=no；bootstrap rc=5（Bootstrap failed: 5: Input/output error Try re-running the command as root for richer errors. ）；state=；探针启动=0
+  cert / Program / ~/Library/LaunchAgents：写入前已加载=no；写入后自己加载=no；bootstrap rc=0；state=running；探针启动=1
+  cert / Program / 临时目录：写入前已加载=no；写入后自己加载=no；bootstrap rc=0；state=running；探针启动=1
+
+## 8 退路：~/Library/LaunchAgents/com.iwork.t04probe.plist + launchctl bootstrap / bootout（Program 指向包里的 agent）
+  [SuccessfulExit] 写入 plist 3 秒后系统自己加载了吗：no
+  5 [launchd] register 后 4 秒内 launchd 起的实例数=1；state=running；launchd 实例在等锁=1；已拿到锁=0
+    kill -9 手动实例（于 1794387071）后：launchd 实例拿到锁于 1794387071.412
+  6 [launchd KeepAlive={SuccessfulExit}] exit 0：25 秒内再拉起 0 次；第一次再拉距结束 -s；last exit：0
+  6 [launchd KeepAlive={SuccessfulExit}] exit 12：25 秒内再拉起 3 次；第一次再拉距结束 10.0s；last exit：12
+  6 [launchd KeepAlive={SuccessfulExit}] exit 20：25 秒内再拉起 3 次；第一次再拉距结束 10.0s；last exit：20
+  6 [launchd KeepAlive={SuccessfulExit}] exit 21：25 秒内再拉起 3 次；第一次再拉距结束 10.0s；last exit：21
+  6 [launchd KeepAlive={SuccessfulExit}] signal 9：25 秒内再拉起 3 次；第一次再拉距结束 10.0s；last exit：
+  6 [launchd KeepAlive={SuccessfulExit}] signal 15：25 秒内再拉起 3 次；第一次再拉距结束 10.0s；last exit：
+  6 [launchd KeepAlive={SuccessfulExit}] signal 11：25 秒内再拉起 3 次；第一次再拉距结束 10.1s；last exit：
+  6 [launchd KeepAlive={SuccessfulExit}] abort：25 秒内再拉起 3 次；第一次再拉距结束 10.5s；last exit：
+  N3-3 [launchd] exec 自己：exec 前 launchctl 的 pid=1289，exec 后=1289，state=running，带 --execd 的启动行=1
+    之后 kill -9 它：14 秒内被 launchd 再拉起=1 次（证明 exec 后仍归这个任务管）
+  7 [launchd] 实例自己注销：调用于 1794387363.309；返回：没返回；收到 SIGTERM 于 1794387363.643；最后一行：1794387363.643 got SIGTERM；之后任务还在=no；25 秒内再被拉起=0 次
+  7 [launchd] 另一个进程注销：实例 pid 3655 收到 SIGTERM 于 1794387391.133（注销于 1794387390）；之后进程还在=否；任务还在=no
+  [Crashed] 写入 plist 3 秒后系统自己加载了吗：no
+  6 [launchd KeepAlive={Crashed}] exit 0：25 秒内再拉起 0 次；第一次再拉距结束 -s；last exit：0
+  6 [launchd KeepAlive={Crashed}] exit 12：25 秒内再拉起 1 次；第一次再拉距结束 -s；last exit：12
+  6 [launchd KeepAlive={Crashed}] exit 20：25 秒内再拉起 1 次；第一次再拉距结束 -s；last exit：20
+  6 [launchd KeepAlive={Crashed}] exit 21：25 秒内再拉起 1 次；第一次再拉距结束 -s；last exit：21
+  6 [launchd KeepAlive={Crashed}] signal 9：25 秒内再拉起 1 次；第一次再拉距结束 -s；last exit：
+  6 [launchd KeepAlive={Crashed}] signal 15：25 秒内再拉起 1 次；第一次再拉距结束 -s；last exit：
+  6 [launchd KeepAlive={Crashed}] signal 11：25 秒内再拉起 3 次；第一次再拉距结束 10.1s；last exit：
+  6 [launchd KeepAlive={Crashed}] abort：25 秒内再拉起 3 次；第一次再拉距结束 10.0s；last exit：
+
+## 清理核对
+  launchctl print com.iwork.t04probe：不存在
+  ~/Library/LaunchAgents/com.iwork.t04probe.plist：不存在
+  探针进程：0 个
+完成。

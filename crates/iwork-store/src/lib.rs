@@ -22,6 +22,7 @@ mod projector;
 mod read_model;
 mod reader;
 mod reply;
+mod signals;
 mod snapshot;
 mod sql;
 mod store;
@@ -38,6 +39,7 @@ pub use projector::SqliteProjector;
 #[doc(hidden)]
 pub use projector::artifact_refs_in;
 pub use read_model::{ReadDefaults, SqliteReadModel};
+pub use signals::{CommitObserver, CommittedBatch, Failed, StoreFailure};
 #[doc(hidden)]
 pub use store::OpenOptions;
 pub use store::{SqliteStore, StoreConfig};
@@ -53,5 +55,7 @@ mod fixtures;
 mod precondition_tests;
 #[cfg(test)]
 mod projection_tests;
+#[cfg(test)]
+mod signal_tests;
 #[cfg(test)]
 mod tests;
