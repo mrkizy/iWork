@@ -28,13 +28,13 @@
 | 卡 | 产物 | worker | 审查任务 / 轮次 | 开着的问题 | 下一步 |
 | --- | --- | --- | --- | --- | --- |
 | T01 / T02 / T03 / T05 / T08 | 已合入（ADR 0001–0012；T05 Windows 偶发修复 `a6a5007`） | — | 已关 | T01 验收 5 截图未补；T03 基准待 T11 空载复测 | — |
-| T05 补丁 | 分支 `cao/e6df3dbe` @ `2d6eb2c`，CI 绿；新事件 TurnSessionBound（oneof 86，PD6 只能向前修） | developer `e6df3dbe`；reviewer `6504698c` | `2026-11-10-m1-t05-dispatch` 第 1 轮审查中 | — | 过了合入；合入后关 T04 1/F-11、1/F-12（fixed，产品负责人「现在单独修」）；T04 方案措辞跟进（Queued 无 ID）已交 architect 3b7032e0 |
+| T05 补丁 | 分支 `cao/e6df3dbe` @ `2d6eb2c`，CI 绿；新事件 TurnSessionBound（oneof 86，PD6 只能向前修） | developer `e6df3dbe`；reviewer `6504698c` | `2026-11-10-m1-t05-dispatch` 第 1 轮不通过：1/F-1（Running→Failed 三条路径缺测试）+ 2 nit | 1/F-1～F-3 | developer 在补；过了合入，合入后关 T04 1/F-11、1/F-12 |
 | T04 | 方案 `docs/plans/T04.md`（未提交，1343 行） | architect `3b7032e0`；reviewer `e4187f1a` | `2026-11-10-m1-t04-plan` **第 3 轮不通过**（已满三轮）：新 3/F-1（重拉函数不全、Usage 旁路）、3/F-2（有证书包监测漏完整性依赖，资源最后到位就永不验签）、3/F-3（旧进程 signer 固定探针，跨包形态升级永不重启）、3/F-4（有证书 SelfIdentity 没有运行中 cdhash） | 2/F-1、2/F-2 原场景已解决可关；1/F-8 按 Q5 记 intentional | **方案定稿 `6721523`**（5/F-1 已核对关闭；只剩 1/F-11、1/F-12 等 T05 补丁合入后关） | T05 补丁合入后开实施：第 0 步 N5 最先做（自签证书 + 临时钥匙串，不用产品负责人的证书）；release 构建占盘大，派活时写明临时产物跑完就删 |
 | T06 | 方案 + `tools/t0/iwork-t0g.py`（未提交） | architect `4f7c1e8b`；reviewer `637a2b18`（Fable 5.2） | `2026-11-10-m1-t06-plan` 第 7 轮核对中（只核 6/F-1～F-4） | 6/F-1～F-4 | 过了定稿；G5 阳性对照在无头模式下可能立不起来，S0 实测时再议 |
-| T07 实施 | 分支 `cao/009e8660` @ `1dbec7a`（E1–E7 做完，未推送）；新事件 ApprovalDelivered（oneof 87） | developer `f8877913`；B 侧 reviewer `b36743db` | `2026-11-10-m1-t07` 第 9 轮（账本最后一个轮次号；再审要换任务 ID）审 B 侧 | B：1/F-13、2/F-1、2/F-2、3/F-3～F-8 | 性能标出：on_permission 开 fullfsync +11%（原因未查清）、engine_fold_startup 10 万事件 1229ms 超 300ms 线，交 T11 在 mac120 复测；engine_sync_wiring_real_observer 归 T10a |
+| T07 实施 | 分支 `cao/009e8660` @ `1dbec7a`（E1–E7） | developer `f8877913`；reviewer `b36743db` | `2026-11-10-m1-t07` 第 9 轮：原 B 侧 9 条全部 fixed；9/F-4 intentional、9/F-7 方案已改（`e3b4457`）；开着 9/F-1（审查结论碰 Busy 丢失）、9/F-2、9/F-3（性质测试覆盖）、9/F-5/6/8 nit | 见左 | developer 在修；复审用新任务 ID `2026-11-10-m1-t07-b`（旧 ID 轮次用完）；启动折叠 1229ms 与 T04 冷启动一起定 |
 | T07 引擎方案 | `docs/plans/T07.md` 6.10 + `docs/plans/T02.md` 状态前提（未提交） | architect `890c712d`；reviewer `099b7f24` | `2026-11-10-m1-t07-engine-plan` **第 4 轮通过，定稿 `b6bf0a6`** | — | developer f8877913 在分支上按 6.10.14 做 E1–E7；真实观察者接线测试归 T10a 合入门槛 |
 | T09 | 方案 `docs/plans/T09.md`（未提交，429 行） | architect `62db2f05`；reviewer `9cbb7f89` | `2026-11-10-m1-t09-plan` 第 2 轮不通过：2/F-1（断线丢在飞的摘要重查）、2/F-2（reload 不释放 Tauri 旧帧暂存）、2/F-3（非时间线大 patch 超 1 MiB 永远发不出，blocking）；1/F-3～F-7 已解决可关，1/F-1、F-2 部分 | 见左 | 第 3 轮不通过（3/F-1 interceptor 守门无效、3/F-2 跨代旧响应覆盖），**方案定稿 `1df7d74`**，实施见下一行；设计窗口 Q9～Q12 待答 |
-| T09 实施 | 第一组 步 0–5 做完：分支 `cao/c0814d74` @ `3530c86`，CI 绿 | developer `c0814d74`（停着等审查）；reviewer `3b36c750` | `2026-11-10-m1-t09` 第 1 轮审查中 | — | 系统通知：产品负责人同意方向「只由后台发」（Notifier 在 iwork-host，客户端只报在看哪、点通知跳转），前提是 macOS 探针通过——c0814d74 在测，architect 62db2f05 写改动稿（T09.md 末尾「通知改由后台发（待定）」）；探针不过就退回两方发送 + 豁免 notify-rust；supervisor 定：时间线上限 5000 行停在最新时也执行；真实 WebView 测试放步 6–8；第二组（步 6–9）等第一组合入 |
+| T09 实施 | 第一组 步 0–5：分支 `cao/c0814d74` @ `3530c86`，CI 绿 | developer `c0814d74`；reviewer `3b36c750` | `2026-11-10-m1-t09` 第 1 轮不通过：7 important（空转、断线后列表空、列表不刷新、无退避×2、缺测试、菜单丢编辑快捷键）+ 3 nit | 1/F-1～F-10 | developer 先返工，再做通知探针（后台发通知，要产品负责人真机点）；architect 62db2f05 写「通知改由后台发」改动稿；第二组等第一组合入 |
 | T10a～T10g、T11 | 未开工；T10 已拆成七张小卡（产品负责人 2026-11-10 同意，见 T10.md） | — | — | — | T10a 等 T04、T06、T07、T09 第一组合入；T10d/e/f 先出方案，可以和 T10a 的实施同时写 |
 
 查开着的问题：`agent-scaffold findings list --task <任务 ID> --open`。记账工具轮次只能 1～9，超过换新任务 ID。
@@ -50,6 +50,8 @@
 - 每个合入单元用新的 developer 和 reviewer；审方案和审 diff 的 reviewer 分开。
 
 ## 5 踩过的坑
+
+- **worker 窗口被缩成 93×7（2026-11-10 夜）**：所有 worker 收件箱卡了 9～12 小时。`agent-scaffold ps` 出现「收件箱有 N 条消息在等待投递」先看 `tmux list-windows -t cao-a46fd0b6 -F '#{window_index} #{window_width}x#{window_height}'`，太小就逐个 `resize-window -x 140 -y 45`。
 
 - **supervisor 收件箱卡住（2026-11-10 11:22–13:30）**：CAO 把 supervisor 窗口认成「在等回答」，14 条消息一直 pending。看 `agent-scaffold ps` 里 supervisor 那行；可以用 `curl -s 'http://127.0.0.1:9895/terminals/f6c88a81/inbox/messages?status=pending&limit=100'` 直接读出来。
 - 磁盘：`target/debug/incremental` 最占地方（T07 分支一个就 26G），空闲 worktree 可以直接删；派 reviewer 时让它复用 developer worktree 的 target，并设 `CARGO_INCREMENTAL=0`。
