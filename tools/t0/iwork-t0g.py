@@ -355,22 +355,53 @@ def base_argv(settings=None, extra_args=(), iso=True, stream_input=False, prompt
     return argv + list(extra_args)
 
 
+def redact_event(o):
+    """去掉事件里的账号信息，别的原样返回。纯函数。
+    initialize 控制请求的响应带登录账号（2.1.322 实测：control_response.response.response.account）。
+    AGENTS.md 安全不变量：邮箱等不落盘、不进日志。所以它在进内存里的事件表和落盘之前就删掉，后面谁都拿不到。"""
+    outer = o.get("response") if o.get("type") == "control_response" else None
+    inner = outer.get("response") if isinstance(outer, dict) else None
+    if not (isinstance(inner, dict) and "account" in inner): return o
+    return {**o, "response": {**outer, "response": {k: v for k, v in inner.items() if k != "account"}}}
+
+
+def redact_line(line):
+    """一行 stream-json 去掉账号信息。不是 JSON 的行原样返回；删了东西才重新序列化，别的行一个字不动。"""
+    try: o = json.loads(line)
+    except Exception: return line
+    if not isinstance(o, dict): return line
+    clean = redact_event(o)
+    return line if clean is o else json.dumps(clean) + ("\n" if line.endswith("\n") else "")
+
+
+def redact_stream(text):
+    return "".join(redact_line(l) for l in text.splitlines(keepends=True))
+
+
+def stream_tool_uses(o):
+    """一个 assistant / user 事件里的 tool_use：[{id, name, input, parent}]。"""
+    content = (o.get("message") or {}).get("content") if o.get("type") in ("assistant", "user") else None
+    if not isinstance(content, list): return []      # user 事件的 content 也可能是字符串（2.1.322 实测，set_model 之后）
+    return [{"id": b.get("id"), "name": b.get("name"), "input": b.get("input") or {}, "parent": o.get("parent_tool_use_id")}
+            for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+
+
 def parse_stream(text):
     """从 stream-json 里取结构化证据：init、result、每个 tool_use、每个 tool_result。"""
     r = {"events": [], "init": None, "result": None, "tool_uses": [], "tool_results": {}}
     for line in text.splitlines():
         try: o = json.loads(line)
         except Exception: continue
+        if not isinstance(o, dict): continue
         r["events"].append(o)
         t = o.get("type")
         if t == "system" and o.get("subtype") == "init": r["init"] = o
         elif t == "result": r["result"] = o
         elif t in ("assistant", "user"):
-            for b in ((o.get("message") or {}).get("content") or []):
-                if not isinstance(b, dict): continue
-                if b.get("type") == "tool_use":
-                    r["tool_uses"].append({"id": b.get("id"), "name": b.get("name"), "input": b.get("input") or {}, "parent": o.get("parent_tool_use_id")})
-                elif b.get("type") == "tool_result":
+            r["tool_uses"] += stream_tool_uses(o)
+            content = (o.get("message") or {}).get("content")
+            for b in (content if isinstance(content, list) else []):
+                if isinstance(b, dict) and b.get("type") == "tool_result":
                     c = b.get("content")
                     text_ = c if isinstance(c, str) else " ".join(x.get("text", "") for x in (c or []) if isinstance(x, dict))
                     r["tool_results"][b.get("tool_use_id")] = {"is_error": bool(b.get("is_error")), "text": text_}
@@ -404,6 +435,7 @@ def claude(name, prompt, settings=None, extra_args=(), iso=True, cwd=None, env=N
     """一次性运行。返回结构化证据 + exit / timed_out / secs。"""
     t0 = time.time()
     out, err, code, timed_out = run_instance(base_argv(settings, extra_args, iso, prompt=prompt), name, cwd, env, timeout)
+    out = redact_stream(out)
     open(os.path.join(R.out, f"{name}-stream.jsonl"), "w").write(scrub(out))
     open(os.path.join(R.out, f"{name}-stderr.txt"), "w").write(scrub(err))
     r = parse_stream(out)
@@ -412,10 +444,11 @@ def claude(name, prompt, settings=None, extra_args=(), iso=True, cwd=None, env=N
 
 
 class Live:
-    """流式输入的常驻会话：自己的进程组与标记，后台线程按到达时间收事件。用完必须 close()。"""
-    def __init__(self, name, settings, extra_args=(), env=None):
+    """流式输入的常驻会话：自己的进程组与标记，后台线程按到达时间收事件。用完必须 close()。
+    argv 只给 selftest 用：换成一个假的会话程序，测收事件与落盘这条路。"""
+    def __init__(self, name, settings, extra_args=(), env=None, argv=None):
         self.name, self.events, self.lock, self.token = name, [], threading.Lock(), new_mark()
-        self.proc = subprocess.Popen(base_argv(settings, extra_args, stream_input=True), cwd=R.work, stdin=subprocess.PIPE,
+        self.proc = subprocess.Popen(argv or base_argv(settings, extra_args, stream_input=True), cwd=R.work, stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                                      env={**os.environ, **(env or {}), MARK: self.token}, start_new_session=True)
         self.raw = []
@@ -423,9 +456,11 @@ class Live:
 
     def _read(self):
         for line in self.proc.stdout:
+            line = redact_line(line)                       # 进内存之前就删掉账号信息：存流、记 summary 都只见得到删过的
             self.raw.append(line)
             try: o = json.loads(line)
             except Exception: continue
+            if not isinstance(o, dict): continue
             with self.lock: self.events.append((time.time(), o))
 
     def send(self, obj):
@@ -1516,6 +1551,18 @@ def g7j_case(ra, cmd_a, obs_a, want_a, rb, cmd_b, obs_b, want_b, rows_b):
     return combine(*parts.values()), parts
 
 
+def g7c_detail(events):
+    """G7c 一行记什么：每个 control_response 里响应体的键名，加上 models。纯函数。
+    响应体里别的值（账号、本机路径、命令清单）不进 summary；账号在收事件时已经删掉（redact_event），这里再只挑这两样。"""
+    out = []
+    for o in events:
+        if o.get("type") != "control_response": continue
+        body = (o.get("response") or {}).get("response")
+        body = body if isinstance(body, dict) else {}
+        out.append({"subtype": (o.get("response") or {}).get("subtype"), "keys": sorted(body), "models": body.get("models")})
+    return json.dumps(out, ensure_ascii=False)
+
+
 def g7():
     # a 多轮；b system/init 的时机；c initialize 控制请求；d 用量与额度字段
     s, logdir = make_settings("g7", "allow", session_start=True)
@@ -1542,7 +1589,7 @@ def g7():
         kinds = sorted({f"{o.get('type')}/{o.get('subtype')}" for o in evs})
         settle("G7a 流式输入多轮：同一进程两个 result", g7_multi_verdict(evs, alive_now), f"result 数={len(res)} 事件种类={kinds}")
         settle("G7a' 有正文增量事件（--include-partial-messages）", g7_partial_verdict(evs, alive_now))
-        record("INFO", "G7c initialize 控制请求的响应（找模型列表，只记录）", json.dumps([o for o in evs if o.get("type") == "control_response"])[:800])
+        record("INFO", "G7c initialize 控制请求的响应（只记键名与模型列表）", g7c_detail(evs))
         record("INFO", "G7d result 的字段与额度事件（只记录）", json.dumps({"result_keys": sorted(res[0].keys()) if res else [], "rate_limit": [o for o in evs if o.get("type") == "rate_limit_event"][:1]})[:900])
         sid = init_session_id(evs)
     finally:
@@ -1768,7 +1815,35 @@ def write_results(parent):
 
 
 # ---------- 自测（不调用 claude）----------
+def selftest_account_not_stored():
+    """S-9：initialize 响应里的账号信息不落盘、不进 summary。走真的 Live（假会话程序）与 G7c 那一行，查落盘的两个文件。"""
+    marker = "acct-" + secrets.token_hex(6) + "@example.invalid"
+    fake = ("import json,sys\n"
+            "for line in sys.stdin:\n"
+            "    m = json.loads(line)\n"
+            "    body = {'models': [{'value': 'm1'}], 'current_permission_mode': 'default', 'account': {'email': sys.argv[1], 'organization': sys.argv[1]}}\n"
+            "    print(json.dumps({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': m['request_id'], 'response': body}}), flush=True)\n")
+    live = Live("selftest-account", None, argv=[sys.executable, "-c", fake, marker])
+    try:
+        live.control("c0", {"subtype": "initialize"})
+        got = live.wait(lambda o: o.get("type") == "control_response", 10)
+        assert got is not None, "假会话没回 initialize 响应"
+        evs, _ = live.snapshot()
+        record("INFO", "selftest G7c", g7c_detail(evs))
+    finally:
+        live.close()
+    stored = open(os.path.join(R.out, "selftest-account-stream.jsonl")).read()
+    summary = open(os.path.join(R.out, "summary.txt")).read()
+    assert marker not in stored and marker not in summary, "账号信息落盘了"
+    assert '"current_permission_mode"' in stored and "m1" in summary and "current_permission_mode" in summary, "对照：响应里别的键照样留着"
+    assert '"account"' not in stored and "'account'" not in summary and '"account"' not in summary, "连键名也不留"
+    # redact_event 只动那一个位置，别的事件原样返回（同一个对象）
+    plain = {"type": "assistant", "message": {"content": [{"type": "text", "text": "account"}]}}
+    assert redact_event(plain) is plain and redact_line("not json\n") == "not json\n"
+
+
 def selftest():
+    selftest_account_not_stored()
     # 语料：真实导出格式读得进；旧的、错的格式被拒
     good = [{"command": "git pull", "excluded_commands": [{"program": "git", "subcommand": "pull"}, {"program": "gh", "subcommand": None}], "ours": "outside", "claude": None}]
     p = R.p("cfg", "corpus-good.json"); json.dump(good, open(p, "w"))
