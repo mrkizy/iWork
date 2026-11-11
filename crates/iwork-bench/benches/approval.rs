@@ -92,6 +92,7 @@ fn main() {
             raw_input: RawToolInput(serde_json::json!({ "command": cmd }).to_string()),
             bypass_sandbox: false,
             updates_before: 0,
+            cwd: None,
         };
         let mut samples = Vec::with_capacity(2000);
         let (mut t_norm, mut t_eval) = (0u128, 0u128);
