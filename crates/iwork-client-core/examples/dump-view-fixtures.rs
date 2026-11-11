@@ -187,6 +187,13 @@ mod unix {
             .is_ok()
     }
 
+    fn connection_state(patch: &pb::ViewPatch) -> Option<pb::ConnectionState> {
+        patch.changes.iter().rev().find_map(|c| match &c.change {
+            Some(pb::view_change::Change::Connection(p)) => p.view.as_ref().map(|v| v.state()),
+            _ => None,
+        })
+    }
+
     fn has_rows(patch: &pb::ViewPatch, conversation: &str) -> bool {
         patch.changes.iter().any(|c| {
             matches!(&c.change, Some(pb::view_change::Change::Conversation(p))
@@ -271,6 +278,9 @@ mod unix {
         let mut focused = s.focus.is_none();
         // focus 对话的行到了没有：声明打开后快照可能还没到，安静了也要等它（CI 上慢）。
         let mut arrived = s.focus.is_none();
+        // 最新的连接状态是不是 Live：没连上之前「安静」只说明还没数据（CI 上场景跑完时客户端可能还在拨号，
+        // 录下来的只有空侧栏，run 43002098127）。
+        let mut live = false;
         let run = daemon.run_scenario(s.name);
         tokio::pin!(run);
         let mut done = false;
@@ -297,10 +307,13 @@ mod unix {
                     let patch = pb::ViewPatch::decode(bytes.as_slice())
                         .map_err(|e| format!("帧解不开：{e}"))?;
                     arrived |= s.focus.is_some_and(|c| has_rows(&patch, c));
+                    if let Some(state) = connection_state(&patch) {
+                        live = state == pb::ConnectionState::Live;
+                    }
                     frames.push(bytes);
                 }
                 Pulled::Partial => {}
-                Pulled::Quiet if done && focused && arrived => break,
+                Pulled::Quiet if done && focused && arrived && live => break,
                 Pulled::Quiet if done && !focused => {
                     return Err(format!(
                         "场景跑完了，假后台里一直没有 focus 对话 {:?}",

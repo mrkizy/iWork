@@ -97,7 +97,13 @@ async fn fold_and_full(s: &scenario::Scenario) -> (WebState, WebState) {
         let arrived = s.focus.is_none_or(|c| {
             web.state.conversation_id.as_deref() == Some(c) && !web.state.rows.is_empty()
         });
-        if !got && done && focused && arrived {
+        // 没连上之前的安静不算：CI 上场景跑完时客户端可能还在拨号
+        let live = web
+            .state
+            .connection
+            .as_ref()
+            .is_some_and(|c| c.state == pb::ConnectionState::Live as i32);
+        if !got && done && focused && arrived && live {
             break;
         }
     }
