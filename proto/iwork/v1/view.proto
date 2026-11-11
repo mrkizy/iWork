@@ -107,6 +107,8 @@ message SidebarView {
   repeated QuotaCell quota = 4;
   // 「待你处理」计数（不含已作废）；0 时不设。
   CountBadge pending_badge = 5;
+  // 对话标题最多几个字符（按码点算）：就地重命名时截到这么长，Rust 提交时再校验一次。
+  uint32 title_max_chars = 6;
 }
 
 // 数字徽标（ui-m1.md 第 2 节第 4 条）：超过 99 写「99+」，侧栏徽标、「待你处理」与 Dock 角标同一个规则。

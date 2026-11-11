@@ -65,6 +65,11 @@ describe.skipIf(noFixtures)("侧栏", () => {
     fireEvent.input(input, { target: { value: "别的标题" } });
     fireEvent.keyDown(input, { key: "Escape" });
     expect(userActs(acts)).toEqual([]);
+    // 上限由 Rust 给（SidebarView.titleMaxChars）
+    input = await rename();
+    fireEvent.input(input, { target: { value: "字".repeat(60) } });
+    expect(Array.from(input.value)).toHaveLength(50);
+    fireEvent.keyDown(input, { key: "Escape" });
     input = await rename();
     fireEvent.input(input, { target: { value: " 新标题 " } });
     fireEvent.keyDown(input, { key: "Enter" });

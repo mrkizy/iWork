@@ -31,6 +31,7 @@ pub fn sidebar(store: &Store, ctx: Ctx) -> pb::SidebarView {
             .map(|a| assistant_row(store, a))
             .collect(),
         quota: quota_cells(store, ctx),
+        title_max_chars: u32::try_from(crate::intent::TITLE_MAX_CHARS).unwrap_or(u32::MAX),
     }
 }
 

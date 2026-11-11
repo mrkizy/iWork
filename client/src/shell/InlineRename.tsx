@@ -3,7 +3,13 @@
 import { createSignal, onMount } from "solid-js";
 import { clampTitle, renameOutcome } from "./rename";
 
-export function InlineRename(props: { original: string; onSubmit: (title: string) => void; onDone: (byKeyboard: boolean) => void }) {
+export function InlineRename(props: {
+  original: string;
+  /** 标题上限（字符数），由 Rust 给。 */
+  maxChars: number;
+  onSubmit: (title: string) => void;
+  onDone: (byKeyboard: boolean) => void;
+}) {
   let input!: HTMLInputElement;
   const [value, setValue] = createSignal(props.original);
   let composing = false;
@@ -12,7 +18,7 @@ export function InlineRename(props: { original: string; onSubmit: (title: string
     if (finished) return;
     finished = true;
     if (commit) {
-      const r = renameOutcome(props.original, value());
+      const r = renameOutcome(props.original, value(), props.maxChars);
       if (r.kind === "submit") props.onSubmit(r.title);
     }
     props.onDone(byKeyboard);
@@ -30,12 +36,12 @@ export function InlineRename(props: { original: string; onSubmit: (title: string
       onCompositionStart={() => (composing = true)}
       onCompositionEnd={(e) => {
         composing = false;
-        const v = clampTitle(e.currentTarget.value);
+        const v = clampTitle(e.currentTarget.value, props.maxChars);
         e.currentTarget.value = v;
         setValue(v);
       }}
       onInput={(e) => {
-        const v = composing ? e.currentTarget.value : clampTitle(e.currentTarget.value);
+        const v = composing ? e.currentTarget.value : clampTitle(e.currentTarget.value, props.maxChars);
         if (v !== e.currentTarget.value) e.currentTarget.value = v;
         setValue(v);
       }}

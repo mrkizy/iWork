@@ -125,6 +125,7 @@ export function Sidebar(props: { router: Router }) {
                           <Dot state={c.dot} label={c.dotLabel} />
                           <InlineRename
                             original={c.title}
+                            maxChars={view()?.titleMaxChars ?? Number.MAX_SAFE_INTEGER}
                             onSubmit={(title) => void host.act({ case: "renameConversation", value: { conversationId: c.conversationId, title } })}
                             onDone={(byKeyboard) => {
                               setRenaming(undefined);
