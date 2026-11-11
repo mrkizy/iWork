@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use iwork_core::turn::{SessionLine, StubDecider, TurnPlan, TurnPorts};
+use iwork_core::turn::{SessionLine, StubDecider, TurnEntry, TurnPlan, TurnPorts};
 use iwork_domain::common::{ModelId, ModelSelection, Timestamp, ToolGroups};
 use iwork_domain::id::{AssistantId, ConversationId, MessageId, RawUlid, RuntimeId, Seq, TurnId};
 use iwork_domain::session::{AllowWrite, NetworkPolicy, SessionConstraints, SessionToolSet};
@@ -187,6 +187,7 @@ fn plan(n: u128) -> TurnPlan {
         effort: None,
     };
     TurnPlan {
+        entry: TurnEntry::New,
         turn: Turn {
             id: TurnId::from_raw(id),
             conversation_id: ConversationId::from_raw(id),

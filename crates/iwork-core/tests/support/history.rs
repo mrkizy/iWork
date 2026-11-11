@@ -18,6 +18,8 @@ use iwork_ports::store::StorageError;
 #[derive(Default)]
 pub struct FakeHistory {
     source: Mutex<Option<SummarySource>>,
+    /// 下一次读报这个错（之后照常）
+    fail_next: Mutex<Option<StorageError>>,
     /// 每次读的参数：回合、会话线、条数上限
     pub calls: Mutex<Vec<(TurnId, Option<ProjectId>, u32)>>,
 }
@@ -26,6 +28,11 @@ impl FakeHistory {
     /// 给出续接摘要的原料；之后被读到才不 panic。
     pub fn set(&self, source: SummarySource) {
         *self.source.lock().unwrap() = Some(source);
+    }
+
+    /// 下一次读报 `error`。
+    pub fn fail_once(&self, error: StorageError) {
+        *self.fail_next.lock().unwrap() = Some(error);
     }
 
     pub fn calls(&self) -> Vec<(TurnId, Option<ProjectId>, u32)> {
@@ -43,6 +50,9 @@ impl ReadModelPort for FakeHistory {
         recent_limit: u32,
     ) -> Result<SummarySource, StorageError> {
         self.calls.lock().unwrap().push((turn, line, recent_limit));
+        if let Some(error) = self.fail_next.lock().unwrap().take() {
+            return Err(error);
+        }
         Ok(self
             .source
             .lock()

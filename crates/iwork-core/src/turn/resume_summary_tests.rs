@@ -35,7 +35,6 @@ fn summary_snapshot() {
         // 从最新往前
         earlier: vec![stored, with_file, bot("改好了，跑过 npm test")],
         unfetched: 0,
-        request: Some(user("再加一个按钮")),
     };
     assert_eq!(
         resume_summary(&source, SummaryLimits::DEFAULT).unwrap(),
@@ -47,33 +46,10 @@ fn summary_snapshot() {
     );
 }
 
-/// 这一轮的请求不进摘要正文；续接时单独给，原文照给。
-#[test]
-fn request_is_not_in_summary() {
-    let source = SummarySource {
-        first_user: Some(user("第一句")),
-        earlier: vec![bot("好的")],
-        unfetched: 0,
-        request: Some(user("这一轮的请求ZZZ")),
-    };
-    let summary = resume_summary(&source, SummaryLimits::DEFAULT).unwrap();
-    assert!(!summary.contains("ZZZ"), "{summary}");
-    assert!(summary.contains("第一句"), "对照：摘要确实有内容");
-    let long = "长".repeat(5_000);
-    assert_eq!(
-        request_reminder(&user(&long)),
-        format!("[iWork] 这一轮用户的请求是：{long}"),
-        "请求原文不截断"
-    );
-}
-
 /// 此前什么都没有 → 不发摘要；只有第一条用户消息也算有上文。
 #[test]
 fn empty_line_gives_none() {
-    let empty = SummarySource {
-        request: Some(user("第一句就是这一轮")),
-        ..SummarySource::default()
-    };
+    let empty = SummarySource::default();
     assert_eq!(resume_summary(&empty, SummaryLimits::DEFAULT), None);
     let only_first = SummarySource {
         first_user: Some(user("上一轮没回上")),
@@ -94,7 +70,6 @@ fn truncates_from_the_middle() {
         first_user: Some(user(&"首".repeat(300))),
         earlier,
         unfetched: 7,
-        request: None,
     };
     let out = resume_summary(&source, limits).unwrap();
     assert!(out.chars().count() <= 400, "{}", out.chars().count());
@@ -120,7 +95,6 @@ fn no_omission_line_when_nothing_skipped() {
         first_user: Some(user("a")),
         earlier: vec![bot("b")],
         unfetched: 0,
-        request: None,
     };
     let out = resume_summary(&source, SummaryLimits::DEFAULT).unwrap();
     assert!(!out.contains("省略"), "{out}");
@@ -171,7 +145,7 @@ proptest! {
         earlier in prop::collection::vec(arb_line(), 0..30),
         unfetched in 0u32..1000,
     ) {
-        let source = SummarySource { first_user: first.clone(), earlier: earlier.clone(), unfetched, request: None };
+        let source = SummarySource { first_user: first.clone(), earlier: earlier.clone(), unfetched };
         let limits = SummaryLimits::DEFAULT;
         match resume_summary(&source, limits) {
             None => prop_assert!(first.is_none() && earlier.is_empty()),

@@ -532,9 +532,10 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
 
 /// 续接摘要的原料（T06 方案 5.2a）。一个读连接里取完：
 /// 1. 回合所在的对话；
-/// 2. 「这一轮的请求」= 和这个回合的 `TurnQueued` 同一次提交写下的用户消息（`TurnQueued` 是回合流上的第一条事件，
-///    它所在命令的 seq 区间里追加的用户消息）。消息和回合之间没有别的关联字段，不按时间或位置猜；
-/// 3. 请求之前、这条会话线上（`context_project_id == line`）的用户消息与助手回复，按 id 升序扫一遍。
+/// 2. 上界 = 排这个回合的那次提交（`TurnQueued` 是回合流上的第一条事件）的起始 seq。这一轮的请求和
+///    `TurnQueued` 同一次提交写下，自然在界外；这一轮之后追加的（被中断那一轮的半截回复、之后别的回合）也在界外。
+///    不是由用户消息触发的回合（系统回合）同样有这个界，不靠认出请求；
+/// 3. 界内、这条会话线上（`context_project_id == line`）的用户消息与助手回复，按 id 升序扫一遍。
 ///    这条路只在续接失败时走一次，全扫一个对话的消息可以接受；系统消息与正文为空的不取。
 fn summary_source<C: EventCodec + ?Sized>(
     conn: &Connection,
@@ -552,23 +553,13 @@ fn summary_source<C: EventCodec + ?Sized>(
             entity: "turn",
             id: turn_key.clone(),
         })?;
-    let request = request_message(conn, codec, &turn_key, &conversation)?;
-
-    let mut stmt = conn
-        .prepare_cached(
-            "SELECT snapshot FROM messages WHERE conversation_id = ?1 AND author_kind <> ?2 \
-             AND (?3 IS NULL OR id < ?3) ORDER BY id",
-        )
-        .map_err(sql_err)?;
-    let bound = request.as_ref().map(|m| m.id.to_string());
-    let snapshots: Vec<Vec<u8>> = stmt
-        .query_map(
-            params![conversation, author_kind(&Author::System), bound],
-            |r| r.get(0),
-        )
-        .map_err(sql_err)?
-        .collect::<Result<_, _>>()
-        .map_err(sql_err)?;
+    let bound = queued_commit_start(conn, codec, &turn_key)?;
+    let snapshots = blobs(
+        conn,
+        "SELECT snapshot FROM messages WHERE conversation_id = ?1 AND author_kind <> ?2 \
+         AND appended_seq < ?3 ORDER BY id",
+        params![conversation, author_kind(&Author::System), bound],
+    )?;
     let mut first_user = None;
     let mut after_first = Vec::new();
     for s in snapshots {
@@ -590,40 +581,38 @@ fn summary_source<C: EventCodec + ?Sized>(
     let keep = after_first.len().min(recent_limit as usize);
     let unfetched = u32::try_from(after_first.len() - keep).unwrap_or(u32::MAX);
     let earlier = after_first.into_iter().rev().take(keep).collect();
-    let request = match request {
-        Some(m) => summary_line(conn, &m)?,
-        None => None,
-    };
     Ok(SummarySource {
         first_user,
         earlier,
         unfetched,
-        request,
     })
 }
 
-/// 和回合的 `TurnQueued` 同一次提交写下的用户消息；这一轮不是由用户消息触发的就没有。
-fn request_message<C: EventCodec + ?Sized>(
+/// 排这个回合的那次提交的起始 seq。回合流上的第一条事件必须是 `TurnQueued`，不是就报错点名。
+fn queued_commit_start<C: EventCodec + ?Sized>(
     conn: &Connection,
     codec: &C,
     turn_key: &str,
-    conversation: &str,
-) -> Result<Option<Message>, StorageError> {
-    let first: Option<(String, Vec<u8>, i64, i64)> = conn
+) -> Result<i64, StorageError> {
+    let first: Option<(String, Vec<u8>, i64)> = conn
         .prepare_cached(
-            "SELECT e.type, e.payload, c.first_seq, c.last_seq FROM events e \
+            "SELECT e.type, e.payload, c.first_seq FROM events e \
              JOIN commands c ON c.command_id = e.command_id \
              WHERE e.stream_kind = ?1 AND e.stream_id = ?2 ORDER BY e.seq LIMIT 1",
         )
         .and_then(|mut s| {
             s.query_row(params![StreamKind::Turn.to_text(), turn_key], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })
             .optional()
         })
         .map_err(sql_err)?;
-    let Some((kind, payload, first_seq, last_seq)) = first else {
-        return Ok(None);
+    let Some((kind, payload, first_seq)) = first else {
+        return Err(crate::sql::bad_column(
+            "events",
+            "stream_id",
+            format!("回合 {turn_key} 在投影里、事件日志里却没有它的流"),
+        ));
     };
     if !matches!(codec.decode(&kind, &payload)?, DomainEvent::TurnQueued(_)) {
         return Err(crate::sql::bad_column(
@@ -632,29 +621,7 @@ fn request_message<C: EventCodec + ?Sized>(
             format!("回合 {turn_key} 流上的第一条事件是 {kind}，不是 turn_queued"),
         ));
     }
-    let snapshots = blobs(
-        conn,
-        "SELECT snapshot FROM messages WHERE conversation_id = ?1 AND author_kind = ?2 \
-         AND appended_seq BETWEEN ?3 AND ?4 ORDER BY id",
-        params![
-            conversation,
-            author_kind(&Author::User),
-            first_seq,
-            last_seq
-        ],
-    )?;
-    match snapshots.as_slice() {
-        [] => Ok(None),
-        [one] => Ok(Some(decode_message(codec, one)?)),
-        _ => Err(crate::sql::bad_column(
-            "messages",
-            "appended_seq",
-            format!(
-                "回合 {turn_key} 的那次提交里有 {} 条用户消息",
-                snapshots.len()
-            ),
-        )),
-    }
+    Ok(first_seq)
 }
 
 /// 一条消息在摘要原料里的样子；系统消息与正文、附件都为空的返回 `None`。附件只取文件名。

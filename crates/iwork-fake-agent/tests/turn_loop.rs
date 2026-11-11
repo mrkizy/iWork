@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 use history::FakeHistory;
 use iwork_agent_acp::AcpRuntime;
-use iwork_core::turn::{STUB_DENY_MESSAGE, SessionLine, StubDecider, TurnPlan, TurnPorts};
+use iwork_core::turn::{
+    STUB_DENY_MESSAGE, SessionLine, StubDecider, TurnEntry, TurnPlan, TurnPorts,
+};
 use iwork_domain::turn::TurnState;
 use serde_json::json;
 use support::*;
@@ -74,6 +76,7 @@ impl Harness {
 
     fn plan(&self, cwd: &std::path::Path, prompt: &str) -> TurnPlan {
         TurnPlan {
+            entry: TurnEntry::New,
             turn: queued_turn(&self.ids),
             assistant_name: "小助手".into(),
             context_project_id: None,

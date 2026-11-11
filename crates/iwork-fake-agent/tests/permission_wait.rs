@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use history::FakeHistory;
 use iwork_agent_acp::AcpRuntime;
 use iwork_core::turn::{
-    Decided, PermissionDecider, SessionLine, TurnPlan, TurnPorts, VoidPlanError,
+    Decided, PermissionDecider, SessionLine, TurnEntry, TurnPlan, TurnPorts, VoidPlanError,
 };
 use iwork_domain::approval::VoidReason;
 use iwork_domain::event::{ApprovalVoided, DomainEvent};
@@ -113,6 +113,7 @@ fn start(fake: &Fake) -> Run {
     let canceller = line.canceller();
     let runtime = AcpRuntime::new(fake.launch.clone());
     let plan = TurnPlan {
+        entry: TurnEntry::New,
         turn: queued_turn(&h.ids),
         assistant_name: "小助手".into(),
         context_project_id: None,

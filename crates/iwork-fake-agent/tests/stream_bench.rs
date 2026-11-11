@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use history::FakeHistory;
 use iwork_agent_acp::AcpRuntime;
-use iwork_core::turn::{SessionLine, StubDecider, TurnPlan, TurnPorts};
+use iwork_core::turn::{SessionLine, StubDecider, TurnEntry, TurnPlan, TurnPorts};
 use iwork_domain::turn::TurnState;
 use iwork_ports::live::{LivePublisher, MessageDelta};
 use serde_json::json;
@@ -106,6 +106,7 @@ async fn run_scenario(members: usize, secs: u64) -> Report {
                 history: &history,
             };
             let plan = TurnPlan {
+                entry: TurnEntry::New,
                 turn: queued_turn(&ids),
                 assistant_name: "压测".into(),
                 context_project_id: None,

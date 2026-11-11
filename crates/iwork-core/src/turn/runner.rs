@@ -12,12 +12,15 @@
 //!
 //! **续接失败**（T06 方案 5.2a；需求第 12 章 v1.78）：带着旧会话 id 开会话、运行时回 `SessionLost`（记录不在、
 //! 坏了、版本不认）时，放下旧 id、用同一份 spec 新开一次，只试这一次；开成了就用 iWork 存的对话拼摘要，接在这一轮
-//! 第一条输入的前面，`TurnSessionBound.replaced` 记下旧编号与原因。新开也失败才判回合失败。开会话的两处
-//! （回合开头、沿用的进程已退出后重开）都经 [`SessionLine::open_session`] 这一个函数。
+//! 第一条输入的前面（续接的回合再接上调用方给的请求原文），`TurnSessionBound.replaced` 记下旧编号与原因。新开也
+//! 失败、或续接回合的请求取不全，才判回合失败。开会话的两处（回合开头、沿用的进程已退出后重开）都经
+//! [`SessionLine::open_session`] 这一个函数。新编号在首条 prompt 送达之前不算数：中间任何一步失败（读摘要、
+//! 提交绑定、发 prompt），新会话照 `retire` 的规矩丢掉、会话线退回旧编号，下一回合重新走一遍恢复，不会不带上文
+//! 接着用新会话。
 //!
-//! **续接**（T06 方案 2.6 第 4 条）：`TurnPlan.turn` 处于 `Interrupted` 时，第一步用 `Resume` 而不是
+//! **续接**（T06 方案 2.6 第 4 条）：`TurnPlan.entry` 是 [`TurnEntry::Resume`] 时，第一步用 `Resume` 而不是
 //! `Started`，另起一条助手消息（同一个回合）；说明文字由调用方用 [`super::resume_note`] 生成放进 `blocks`。
-//! 入口完全由回合状态决定，不另设字段。
+//! 入口和回合状态对不上（如给 `Queued` 的回合填了 `Resume`）时，第一步报表外转换。
 //!
 //! 回合状态只在 [`SessionLine::run_turn`] 的循环里写。它同时等几路输入，优先次序：
 //! 1. **取消**：最先处理，更新再多也不会被饿死；回合结束前还会再看一眼有没有已收到的取消；
@@ -76,7 +79,7 @@ use super::binding::{Rebind, mismatch_reason, rebind};
 use super::permission::{
     AcceptedAt, PermissionDecider, PermissionGate, Ticket, TurnSlot, VoidPlanError,
 };
-use super::resume_summary::{SummaryLimits, request_reminder, resume_summary};
+use super::resume_summary::{SummaryLimits, resume_summary};
 use super::scheduler::{Input, Scheduler};
 
 /// 回合编排写入的事件以它为 actor：这些事件由后台服务按运行时的输出产生，不是用户的命令。
@@ -140,17 +143,41 @@ pub struct TurnPorts<'a, S, C, I, L, T, H> {
 }
 
 /// 一个回合要做什么。`turn` 处于 `Queued`（新回合，`TurnQueued` 已由受理命令的一方写入）或
-/// `Interrupted`（续接）。
+/// `Interrupted`（续接），和 `entry` 对应。
 #[derive(Debug, Clone)]
 pub struct TurnPlan {
     pub turn: Turn,
+    pub entry: TurnEntry,
     /// 助手当时的名字，写进助手消息的作者快照
     pub assistant_name: String,
     pub context_project_id: Option<ProjectId>,
     /// 开会话用；`resume` 由会话线自己填（它记着上一条运行时会话 id）
     pub spec: SessionSpec,
+    /// 新回合是用户的请求；续接的回合是续接说明
     pub blocks: Vec<ContentBlock>,
 }
+
+/// 回合从哪儿进。
+#[derive(Debug, Clone)]
+pub enum TurnEntry {
+    /// 新回合（`Queued`）：请求就在 `blocks` 里
+    New,
+    /// 中断后续接（`Interrupted`）。`request` 只在会话记录用不了、用摘要新开时才用（T06 方案 5.2a）：
+    /// 新会话里没有这一轮的请求，要原样再给一次
+    Resume { request: ResumeRequest },
+}
+
+/// 续接回合的请求，由调用方用和新回合同一个「消息 → 输入块」的函数转好。
+#[derive(Debug, Clone)]
+pub enum ResumeRequest {
+    /// 和新回合会收到的一样：正文全文，附件照新回合的方式附上
+    Ready(Vec<ContentBlock>),
+    /// 取不全（制品读不到、附件没了）：原因。真要用到它时回合失败，不发残缺的请求
+    Unavailable(String),
+}
+
+/// 续接回合用摘要新开会话时，请求前面那一句。
+pub const REQUEST_HEADER: &str = "[iWork] 这一轮用户的请求是：";
 
 /// 编排失败：写不进存储，或碰到转换表外的转换（程序缺陷）。回合本身的失败不在这里，
 /// 而是回合以 `Failed` 等状态正常收尾。出这种错时会话已被丢掉。
@@ -194,6 +221,9 @@ pub struct SessionLine<A: AgentPort, D> {
     bound: Option<SessionSpec>,
     /// 丢掉会话时进程树没能确认清空：原因。有它时 `session` 还留着，开新会话前先再清一次
     unclean: Option<String>,
+    /// 用摘要新开了会话、首条 prompt 还没送达：被换掉的旧编号。送达才清掉；回合结束时还在，就丢掉新会话、
+    /// 退回旧编号（见模块文档「续接失败」）
+    unconfirmed: Option<String>,
     slot: Arc<TurnSlot>,
     decider: Arc<D>,
 }
@@ -231,6 +261,7 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             resume,
             bound: None,
             unclean: None,
+            unconfirmed: None,
             slot: Arc::new(TurnSlot::default()),
             decider,
         }
@@ -273,6 +304,11 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             // 清不掉的记在 unclean 里，下一次开会话前再清；这里交回的是原始错误
             let _ = self.retire().await;
         }
+        if let Some(old) = self.unconfirmed.take() {
+            // 摘要没送到新会话：不能接着用它（它不带上文）。清不掉的照常记在 unclean 里
+            let _ = self.retire().await;
+            self.resume = Some(old);
+        }
         result
     }
 
@@ -292,22 +328,23 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
     {
         let TurnPlan {
             turn,
+            entry,
             assistant_name,
             context_project_id,
             spec,
             blocks,
         } = plan;
-        let first = match turn.state {
-            TurnState::Interrupted { .. } => TurnTrigger::Resume,
-            // Queued 之外的状态在第一步里报表外转换
-            _ => TurnTrigger::Started,
+        // 和回合状态对不上的在第一步里报表外转换
+        let (first, request) = match entry {
+            TurnEntry::New => (TurnTrigger::Started, None),
+            TurnEntry::Resume { request } => (TurnTrigger::Resume, Some(request)),
         };
         let mut cancels = self.slot.open(turn.id);
         let slot = self.slot.clone();
         let _guard = SlotGuard(&slot);
         let decider = self.decider.clone();
         let timer = ports.timer;
-        let mut run = TurnRun::new(turn, ports, &*decider, &slot, context_project_id);
+        let mut run = TurnRun::new(turn, ports, &*decider, &slot, context_project_id, request);
 
         let (reused, replaced) = match self.ensure_session(agent, &spec).await {
             Ok(Ensured::Reused) => (true, None),
@@ -317,14 +354,24 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
                 return Ok(run.turn.state);
             }
         };
-        let blocks = match replaced {
-            Some(_) => run.with_summary(blocks).await?,
+        let blocks = match &replaced {
             None => blocks,
+            Some(r) => match run.with_summary(blocks, r.reason).await? {
+                Ok(blocks) => blocks,
+                Err(reason) => {
+                    run.fail_before_start(reason).await?;
+                    return Ok(run.turn.state);
+                }
+            },
         };
         run.started(first, self.resume.clone(), replaced, assistant_name)
             .await?;
         let mut updates = match self.prompt(agent, spec, blocks, reused, &mut run).await? {
-            Ok(updates) => updates,
+            Ok(updates) => {
+                // 摘要已送到新会话：新编号从此算数
+                self.unconfirmed = None;
+                updates
+            }
             Err(end) => {
                 let process_gone = matches!(end, End::Failed(AgentError::ProcessExited { .. }));
                 run.finish(end).await?;
@@ -462,10 +509,13 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             return Err(OpenError::Agent(AgentError::SessionLost { reason: lost }));
         };
         match self.open_with(agent, spec, None).await {
-            Ok(()) => Ok(Some(SessionReplaced {
-                old_runtime_session_id: old,
-                reason: lost,
-            })),
+            Ok(()) => {
+                self.unconfirmed = Some(old.clone());
+                Ok(Some(SessionReplaced {
+                    old_runtime_session_id: old,
+                    reason: lost,
+                }))
+            }
             Err(error) => Err(OpenError::Unrecovered { lost, error }),
         }
     }
@@ -523,9 +573,12 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             Ok(replaced) => replaced,
             Err(e) => return Ok(Err(e.into())),
         };
-        let blocks = match replaced {
-            Some(_) => run.with_summary(blocks).await?,
+        let blocks = match &replaced {
             None => blocks,
+            Some(r) => match run.with_summary(blocks, r.reason).await? {
+                Ok(blocks) => blocks,
+                Err(reason) => return Ok(Err(End::Unrecovered(reason))),
+            },
         };
         run.bind_session(self.resume.clone(), replaced).await?;
         let session = self.session.as_ref().expect("刚开好会话");
@@ -587,7 +640,7 @@ fn lost_label(reason: SessionLostReason) -> &'static str {
 enum End {
     Finished(TurnOutcome),
     Failed(AgentError),
-    /// 用摘要新开会话也没成：原因两段都在这句话里
+    /// 会话记录用不了，新开会话或补齐请求没成：原因两段都在这句话里
     Unrecovered(String),
 }
 
@@ -597,8 +650,8 @@ struct TurnRun<'a, S, C, I, L, T, H, D> {
     ports: TurnPorts<'a, S, C, I, L, T, H>,
     /// 这条会话线的项目（助手私聊里按「助手 × 项目」分线）：写进助手消息，读摘要时按它筛
     line: Option<ProjectId>,
-    /// 这一轮是中断后续接的（入口是 `Resume`）
-    resuming: bool,
+    /// 续接回合的请求（入口是 `Resume` 时才有）；只在用摘要新开会话时用
+    request: Option<ResumeRequest>,
     decider: &'a D,
     /// 这个回合的交接表：在途的权限请求只记在这里
     slot: &'a TurnSlot,
@@ -625,9 +678,10 @@ where
         decider: &'a D,
         slot: &'a TurnSlot,
         line: Option<ProjectId>,
+        request: Option<ResumeRequest>,
     ) -> Self {
         Self {
-            resuming: matches!(turn.state, TurnState::Interrupted { .. }),
+            request,
             turn,
             ports,
             line,
@@ -776,12 +830,24 @@ where
         )
     }
 
-    /// 续接失败、用摘要新开了会话：这一轮的第一条输入前面接上摘要；续接的回合再接上这一轮用户的请求
-    /// （它不在摘要里，原来的 `blocks` 只有续接说明）。顺序固定：摘要、请求、原来的 `blocks`。
+    /// 续接失败、用摘要新开了会话：这一轮的第一条输入前面接上摘要；续接的回合再接上调用方给的请求原文
+    /// （新会话里没有它，原来的 `blocks` 只有续接说明）。顺序固定：摘要、请求、原来的 `blocks`。
+    /// 内层 `Err` 是回合失败的原因：续接回合的请求取不全，不发残缺的请求。
     async fn with_summary(
         &self,
         blocks: Vec<ContentBlock>,
-    ) -> Result<Vec<ContentBlock>, TurnRunError> {
+        lost: SessionLostReason,
+    ) -> Result<Result<Vec<ContentBlock>, String>, TurnRunError> {
+        let request = match &self.request {
+            None => None,
+            Some(ResumeRequest::Ready(request)) => Some(request),
+            Some(ResumeRequest::Unavailable(why)) => {
+                return Ok(Err(format!(
+                    "续接失败（{}），这一轮的请求取不全：{why}",
+                    lost_label(lost)
+                )));
+            }
+        };
         let source = self
             .ports
             .history
@@ -791,13 +857,12 @@ where
             .map(ContentBlock::Text)
             .into_iter()
             .collect();
-        if self.resuming
-            && let Some(request) = &source.request
-        {
-            first.push(ContentBlock::Text(request_reminder(request)));
+        if let Some(request) = request {
+            first.push(ContentBlock::Text(REQUEST_HEADER.to_owned()));
+            first.extend(request.iter().cloned());
         }
         first.extend(blocks);
-        Ok(first)
+        Ok(Ok(first))
     }
 
     /// 回合换了会话（续接时运行时给了新 ID）：发 prompt 之前单独落盘。

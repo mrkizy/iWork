@@ -12,9 +12,9 @@ pub use permission::{
     VoidPlanError,
 };
 pub use resume_note::{ResumeReason, resume_note};
-pub use resume_summary::{SUMMARY_HEADER, SummaryLimits, request_reminder, resume_summary};
+pub use resume_summary::{SUMMARY_HEADER, SummaryLimits, resume_summary};
 pub use runner::{
-    CHECKPOINT_INTERVAL, FAIR_BURST, LIMIT_CHECK_INTERVAL, ORCHESTRATOR_ACTOR,
-    SUMMARY_RECENT_LIMIT, SessionLine, TREE_NOT_CLEARED, TurnCanceller, TurnPlan, TurnPorts,
-    TurnRunError,
+    CHECKPOINT_INTERVAL, FAIR_BURST, LIMIT_CHECK_INTERVAL, ORCHESTRATOR_ACTOR, REQUEST_HEADER,
+    ResumeRequest, SUMMARY_RECENT_LIMIT, SessionLine, TREE_NOT_CLEARED, TurnCanceller, TurnEntry,
+    TurnPlan, TurnPorts, TurnRunError,
 };

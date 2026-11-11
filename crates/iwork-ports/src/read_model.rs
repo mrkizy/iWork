@@ -102,8 +102,6 @@ pub struct SummarySource {
     pub earlier: Vec<SummaryLine>,
     /// `first_user` 与 `earlier` 之间还有多少条没取（超出 `recent_limit` 的那些）
     pub unfetched: u32,
-    /// 这一轮用户的请求；认不出（这一轮不是由用户消息触发的）时为 `None`
-    pub request: Option<SummaryLine>,
 }
 
 /// 摘要里的一条消息。
@@ -160,8 +158,9 @@ pub trait ReadModelPort: Send + Sync {
     /// 上次运行没收尾的回合、流式消息与卡片。各自按 id 升序。
     fn unsettled(&self) -> impl Future<Output = Result<Unsettled, StorageError>> + Send;
     /// 续接失败、用摘要新开会话时取这一轮之前的对话（T06 方案 5.2a）。只取回合 `turn` 所在对话里
-    /// `context_project_id == line` 的消息（助手私聊按「助手 × 项目」各是一条会话线）。「这一轮的请求」是
-    /// 和这个回合的 `TurnQueued` 同一次提交写下的那条用户消息。回合不存在时报 `NotFound`。
+    /// `context_project_id == line` 的消息（助手私聊按「助手 × 项目」各是一条会话线），并且只取排这个回合
+    /// （`TurnQueued`）的那次提交**之前**写下的：这一轮的请求和它同一次提交，不在里面；这一轮之后的也不在。
+    /// 回合不存在时报 `NotFound`。
     fn summary_source(
         &self,
         turn: TurnId,

@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use iwork_app::codec::ProtoEventCodec;
 use iwork_core::turn::{
-    Decided, PermissionDecider, SessionLine, TurnPlan, TurnPorts, VoidPlanError,
+    Decided, PermissionDecider, SessionLine, TurnEntry, TurnPlan, TurnPorts, VoidPlanError,
 };
 use iwork_domain::approval::VoidReason;
 use iwork_domain::common::{ModelId, ModelSelection, Timestamp, ToolGroups};
@@ -275,6 +275,7 @@ fn model() -> ModelSelection {
 
 fn plan(turn: Turn) -> TurnPlan {
     TurnPlan {
+        entry: TurnEntry::New,
         turn,
         assistant_name: "小助手".into(),
         context_project_id: None,

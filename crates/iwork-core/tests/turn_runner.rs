@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use iwork_core::turn::{
-    Decided, PermissionDecider, SessionLine, TURN_GONE_MESSAGE, TurnCanceller, TurnPlan, TurnPorts,
-    TurnRunError, VoidPlanError,
+    Decided, PermissionDecider, SessionLine, TURN_GONE_MESSAGE, TurnCanceller, TurnEntry, TurnPlan,
+    TurnPorts, TurnRunError, VoidPlanError,
 };
 use iwork_domain::action::ToolRef;
 use iwork_domain::approval::VoidReason;
@@ -524,6 +524,7 @@ impl Bench {
     fn plan(&self) -> TurnPlan {
         let id = |n| RawUlid::from_u128(self.ids.0.fetch_add(1, Ordering::SeqCst) as u128 + n);
         TurnPlan {
+            entry: TurnEntry::New,
             turn: Turn {
                 id: TurnId::from_raw(id(1)),
                 conversation_id: ConversationId::from_raw(id(1)),

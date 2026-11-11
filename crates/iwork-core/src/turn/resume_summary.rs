@@ -2,7 +2,7 @@
 //! 对话拼一段上文，放在新会话的第一条输入里。纯函数，不调用 AI，不碰 I/O。
 //!
 //! 摘要只盖这一轮请求**之前**的消息：这一轮的请求要是进了摘要，就会被开头那句「都已完成，不要重做」盖住。
-//! 续接的回合另用 [`request_reminder`] 把请求单独交给模型。
+//! 续接的回合由编排把调用方给的请求原文单独交给模型（`TurnEntry::Resume`），不经这里。
 
 use iwork_ports::read_model::{SummaryLine, SummarySource, SummaryText, SummaryWho};
 
@@ -85,11 +85,6 @@ pub fn resume_summary(source: &SummarySource, limits: SummaryLimits) -> Option<S
     }
     parts.extend(recent.into_iter().rev());
     Some(parts.join(SEPARATOR))
-}
-
-/// 续接的回合要把这一轮用户的请求重新交给模型（它不在摘要里）。请求原文照给，不截断。
-pub fn request_reminder(request: &SummaryLine) -> String {
-    format!("[iWork] 这一轮用户的请求是：{}", body(request))
 }
 
 /// 一条消息在摘要里的样子：「谁：正文（附件：…）」，超出单条上限截尾加标记。

@@ -611,7 +611,7 @@ fn answered(text: &str) -> SummaryLine {
 }
 
 #[test]
-fn summary_source_finds_first_user_and_request() {
+fn summary_source_takes_first_user_and_recent_before_the_request() {
     let (_env, store) = setup();
     block(store.commit(send(2, user_message(101, 10, "第一句"), 21, 10))).unwrap();
     block(store.commit(cmd(3, reply(102, 10, 21, "回复一", None)))).unwrap();
@@ -654,7 +654,6 @@ fn summary_source_finds_first_user_and_request() {
             first_user: Some(said("第一句")),
             earlier: vec![answered("回复二"), second.clone(), answered("回复一")],
             unfetched: 0,
-            request: Some(said("这一轮")),
         }
     );
     // 条数上限：只取最新的，余下的记数
@@ -688,7 +687,6 @@ fn summary_source_filters_by_session_line() {
     let got = block(rm.summary_source(tid(34), Some(pid(1)), 100)).unwrap();
     assert_eq!(got.first_user, Some(said("项目一第一句")));
     assert_eq!(got.earlier, vec![answered("项目一回复")]);
-    assert_eq!(got.request, Some(said("项目一这一轮")));
     // 对照：私聊段那条线上只有它自己
     let dm_line = block(rm.summary_source(tid(34), None, 100)).unwrap();
     assert_eq!(dm_line.first_user, Some(said("私聊段")));
@@ -703,20 +701,40 @@ fn summary_source_of_first_turn_is_empty() {
     let rm = read_model(&store);
     assert_eq!(
         block(rm.summary_source(tid(41), None, 100)).unwrap(),
-        SummarySource {
-            request: Some(said("第一句")),
-            ..SummarySource::default()
-        }
-    );
-    // 不是由用户消息触发的回合（setup 里单独排的那个）：认不出请求
-    assert_eq!(
-        block(rm.summary_source(tid(20), None, 100))
-            .unwrap()
-            .request,
-        None
+        SummarySource::default(),
+        "这一轮的请求和排回合同一次提交，在界外"
     );
     assert!(matches!(
         block(rm.summary_source(tid(99), None, 100)),
         Err(iwork_ports::store::StorageError::NotFound { entity: "turn", .. })
     ));
+}
+
+/// 不是由用户消息触发的回合（系统回合）也有上界：排它的那次提交之后写下的消息不取（审查 1/F-5）。
+#[test]
+fn summary_source_of_system_turn_stops_at_its_queue_commit() {
+    let (_env, store) = setup();
+    block(store.commit(send(2, user_message(401, 10, "之前的话"), 51, 10))).unwrap();
+    block(store.commit(cmd(3, reply(402, 10, 51, "之前的回复", None)))).unwrap();
+    // 系统回合：同一次提交里没有用户消息
+    block(store.commit(cmd(4, vec![TurnQueued { turn: turn(52, 10) }.into()]))).unwrap();
+    block(store.commit(cmd(5, reply(403, 10, 52, "系统回合自己的回复", None)))).unwrap();
+    block(store.commit(send(6, user_message(404, 10, "之后的话"), 53, 10))).unwrap();
+
+    let rm = read_model(&store);
+    assert_eq!(
+        block(rm.summary_source(tid(52), None, 100)).unwrap(),
+        SummarySource {
+            first_user: Some(said("之前的话")),
+            earlier: vec![answered("之前的回复")],
+            unfetched: 0,
+        }
+    );
+    // 对照：后面那个回合看得到系统回合的回复
+    assert_eq!(
+        block(rm.summary_source(tid(53), None, 100))
+            .unwrap()
+            .earlier,
+        vec![answered("系统回合自己的回复"), answered("之前的回复")]
+    );
 }

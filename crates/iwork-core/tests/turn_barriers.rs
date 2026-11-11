@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iwork_core::turn::{
-    ResumeReason, SUMMARY_HEADER, SUMMARY_RECENT_LIMIT, SessionLine, TREE_NOT_CLEARED,
-    TURN_GONE_MESSAGE, TurnPlan, TurnPorts, TurnRunError, resume_note,
+    REQUEST_HEADER, ResumeReason, ResumeRequest, SUMMARY_HEADER, SUMMARY_RECENT_LIMIT, SessionLine,
+    TREE_NOT_CLEARED, TURN_GONE_MESSAGE, TurnEntry, TurnPlan, TurnPorts, TurnRunError, resume_note,
 };
 use iwork_domain::action::ToolRef;
 use iwork_domain::approval::ApprovalState;
@@ -325,11 +325,23 @@ impl<J: Judge> W<J> {
 
     fn plan(&self, turn: Turn) -> TurnPlan {
         TurnPlan {
+            entry: TurnEntry::New,
             turn,
             assistant_name: "小助手".into(),
             context_project_id: None,
             spec: session_spec("/work".into()),
             blocks: vec![ContentBlock::Text("hi".into())],
+        }
+    }
+
+    /// 续接回合的 plan：请求是 [`request_blocks`]，`blocks` 是续接说明。
+    fn resume_plan(&self, turn: Turn) -> TurnPlan {
+        TurnPlan {
+            entry: TurnEntry::Resume {
+                request: ResumeRequest::Ready(request_blocks()),
+            },
+            blocks: vec![ContentBlock::Text(resume_note(&ResumeReason::Interrupted))],
+            ..self.plan(turn)
         }
     }
 
@@ -449,6 +461,7 @@ both!(
     w4_cleanup_failure_fails_turn_and_blocks_reopen,
     wait_limit_keeps_approvals,
     wait_limit_counts_sleep_time,
+    recovery_keeps_denial_memory_and_grants,
 );
 
 // ---------- W1–W4 ----------
@@ -772,7 +785,7 @@ async fn w4_complete_first_still_confirms_tree<J: Judge>() {
     *w.ctl.terminate.lock().unwrap() = Terminate::Ok;
     let mut resumed = turn;
     resumed.state = wait_limit();
-    let mut plan = w.plan(resumed);
+    let mut plan = w.resume_plan(resumed);
     plan.blocks = vec![ContentBlock::Text(resume_note(&ResumeReason::Approved {
         tool: "Bash",
         summary: "npm test",
@@ -961,7 +974,8 @@ async fn resume_entry_starts_from_interrupted() {
     turn.state = TurnState::Interrupted {
         reason: InterruptReason::Crash,
     };
-    let task = w.running(turn).await;
+    let task = w.spawn(w.line(), w.resume_plan(turn));
+    wait_until("prompt", || w.ctl.prompts.load(Ordering::SeqCst) == 1).await;
     w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
     assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Completed);
     assert_eq!(
@@ -1020,7 +1034,7 @@ async fn resume_failure_fails_interrupted_turn() {
         assert_eq!(result.unwrap(), TurnState::Failed);
         line
     };
-    let (result, _) = w.spawn(line, w.plan(turn)).await.unwrap();
+    let (result, _) = w.spawn(line, w.resume_plan(turn)).await.unwrap();
     assert_eq!(result.unwrap(), TurnState::Failed);
     let why = trail(&w.store, t);
     assert!(
@@ -1055,8 +1069,23 @@ fn history() -> SummarySource {
             attachments: Vec::new(),
         }],
         unfetched: 0,
-        request: Some(user_line("这一轮的请求")),
     }
+}
+
+/// 调用方给的续接回合请求：正文全文加一个附件块，照新回合的样子。
+fn request_blocks() -> Vec<ContentBlock> {
+    vec![
+        ContentBlock::Text("这一轮的请求".into()),
+        ContentBlock::Attachment {
+            artifact: iwork_domain::common::ArtifactRef {
+                sha256: iwork_domain::common::Sha256([7; 32]),
+                area: iwork_domain::common::ArtifactArea::Attachments,
+                size: 3,
+            },
+            mime: "text/plain".into(),
+            name: "spec.txt".into(),
+        },
+    ]
 }
 
 fn lost(reason: SessionLostReason) -> AgentError {
@@ -1199,9 +1228,8 @@ async fn lost_session_on_resume_recovers_interrupted_turn() {
         .unwrap()
         .push_back(lost(SessionLostReason::NotFound));
     w.ctl.fresh_ids.lock().unwrap().push_back(NEW_ID.into());
-    let mut plan = w.plan(turn);
+    let plan = w.resume_plan(turn);
     let note = resume_note(&ResumeReason::Interrupted);
-    plan.blocks = vec![ContentBlock::Text(note.clone())];
     let task = w.spawn(
         SessionLine::new(w.decider.clone(), Some(OLD_ID.into())),
         plan,
@@ -1220,10 +1248,11 @@ async fn lost_session_on_resume_recovers_interrupted_turn() {
         ]
     );
     let first = w.ctl.inputs.lock().unwrap()[0].clone();
-    assert_eq!(first.len(), 3, "{first:?}");
-    assert!(text(&first[0]).starts_with(SUMMARY_HEADER));
-    assert_eq!(text(&first[1]), "[iWork] 这一轮用户的请求是：这一轮的请求");
-    assert_eq!(text(&first[2]), note);
+    assert!(text(&first[0]).starts_with(SUMMARY_HEADER), "{first:?}");
+    assert_eq!(text(&first[1]), REQUEST_HEADER);
+    // 请求照调用方给的原样转交，附件块也在
+    assert_eq!(first[2..4], request_blocks()[..]);
+    assert_eq!(first[4..], [ContentBlock::Text(note)]);
     assert_eq!(bindings(&w.store, t)[0].runtime_session_id, NEW_ID);
 }
 
@@ -1243,7 +1272,7 @@ async fn recovery_fails_once_then_turn_fails() {
     let (result, line) = w
         .spawn(
             SessionLine::new(w.decider.clone(), Some(OLD_ID.into())),
-            w.plan(turn),
+            w.resume_plan(turn),
         )
         .await
         .unwrap();
@@ -1352,6 +1381,394 @@ async fn lost_session_after_process_exit_recovers() {
     let input = w.ctl.inputs.lock().unwrap()[1].clone();
     assert!(text(&input[0]).starts_with(SUMMARY_HEADER));
     assert_eq!(text(&input[1]), "hi");
+}
+
+/// 新会话开成、摘要还没送到：这一步失败后重跑，要重新走「新开 + 摘要 + replaced」（审查 1/F-1）。
+/// `break_once` 让第一次在某一步失败，返回第一次 `run_turn` 的结果。
+async fn rerun_after_broken_recovery(
+    break_once: impl FnOnce(&W<Reference>),
+) -> (Result<TurnState, TurnRunError>, Arc<W<Reference>>, TurnId) {
+    let turn = queued_turn(1);
+    let t = turn.id;
+    let w = W::<Reference>::new(&turn).await;
+    w.history.set(history());
+    w.ctl
+        .open_errors
+        .lock()
+        .unwrap()
+        .push_back(lost(SessionLostReason::NotFound));
+    w.ctl.fresh_ids.lock().unwrap().push_back(NEW_ID.into());
+    break_once(&w);
+    let (first, line) = w
+        .spawn(
+            SessionLine::new(w.decider.clone(), Some(OLD_ID.into())),
+            w.plan(turn.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(line.resume_id(), Some(OLD_ID), "新编号没算数，退回旧编号");
+    assert!(line.session().is_none(), "没带上文的新会话已丢掉");
+    assert_eq!(w.ctl.terminates.load(Ordering::SeqCst), 1);
+
+    // 重跑：记录照样用不了，重新新开、重新发摘要、重新记 replaced
+    w.ctl
+        .open_errors
+        .lock()
+        .unwrap()
+        .push_back(lost(SessionLostReason::NotFound));
+    w.ctl.fresh_ids.lock().unwrap().push_back("new-2".into());
+    assert_eq!(w.state(t), None, "第一次失败后回合没离开 Queued");
+    let task = w.spawn(line, w.plan(turn));
+    wait_until("prompt", || w.ctl.prompts.load(Ordering::SeqCst) == 1).await;
+    w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+    let (result, line) = task.await.unwrap();
+    assert_eq!(result.unwrap(), TurnState::Completed);
+    assert_eq!(line.resume_id(), Some("new-2"));
+    let resumes: Vec<_> = w
+        .ctl
+        .specs
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.resume.clone())
+        .collect();
+    assert_eq!(
+        resumes,
+        [Some(OLD_ID.into()), None, Some(OLD_ID.into()), None]
+    );
+    let input = w.ctl.inputs.lock().unwrap()[0].clone();
+    assert!(text(&input[0]).starts_with(SUMMARY_HEADER), "{input:?}");
+    assert_eq!(
+        bindings(&w.store, t).last().unwrap(),
+        &TurnSessionBound {
+            turn_id: t,
+            runtime_session_id: "new-2".into(),
+            replaced: Some(SessionReplaced {
+                old_runtime_session_id: OLD_ID.into(),
+                reason: SessionLostReason::NotFound,
+            }),
+        }
+    );
+    (first, w, t)
+}
+
+/// 读历史失败一次：编排出错，会话线退回旧编号，重跑重新恢复。
+#[tokio::test(flavor = "current_thread")]
+async fn summary_read_failure_keeps_old_id() {
+    let (first, w, _) = rerun_after_broken_recovery(|w| {
+        w.history.fail_once(iwork_ports::store::StorageError::Busy)
+    })
+    .await;
+    assert!(
+        matches!(
+            first,
+            Err(TurnRunError::Storage(
+                iwork_ports::store::StorageError::Busy
+            ))
+        ),
+        "{first:?}"
+    );
+    assert_eq!(w.history.calls().len(), 2);
+}
+
+/// 绑定（与进 Running 同一笔）提交失败一次：同上。
+#[tokio::test(flavor = "current_thread")]
+async fn binding_commit_failure_keeps_old_id() {
+    let (first, _, _) =
+        rerun_after_broken_recovery(|w| w.store.fail_next.store(true, Ordering::SeqCst)).await;
+    assert!(
+        matches!(
+            first,
+            Err(TurnRunError::Storage(
+                iwork_ports::store::StorageError::Busy
+            ))
+        ),
+        "{first:?}"
+    );
+}
+
+/// 新会话开成、绑定也落了盘，首条 prompt 却发不出去：回合 Failed，新会话丢掉、退回旧编号，下一回合重新恢复。
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_failure_after_recovery_keeps_old_id() {
+    let turn = queued_turn(1);
+    let w = W::<Reference>::new(&turn).await;
+    w.history.set(history());
+    w.ctl
+        .open_errors
+        .lock()
+        .unwrap()
+        .push_back(lost(SessionLostReason::NotFound));
+    w.ctl.fresh_ids.lock().unwrap().push_back(NEW_ID.into());
+    w.ctl
+        .prompt_errors
+        .lock()
+        .unwrap()
+        .push_back(AgentError::Protocol {
+            message: "发不出去".into(),
+        });
+    let (result, line) = w
+        .spawn(
+            SessionLine::new(w.decider.clone(), Some(OLD_ID.into())),
+            w.plan(turn),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.unwrap(), TurnState::Failed);
+    assert_eq!(line.resume_id(), Some(OLD_ID));
+    assert!(line.session().is_none());
+    assert_eq!(w.ctl.terminates.load(Ordering::SeqCst), 1);
+
+    let next = queued_turn_seeded(&w, 2);
+    w.ctl
+        .open_errors
+        .lock()
+        .unwrap()
+        .push_back(lost(SessionLostReason::NotFound));
+    w.ctl.fresh_ids.lock().unwrap().push_back("new-2".into());
+    let task = w.spawn(line, w.plan(next.clone()));
+    wait_until("prompt", || w.ctl.prompts.load(Ordering::SeqCst) == 1).await;
+    w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+    assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Completed);
+    assert_eq!(
+        bindings(&w.store, next.id)[0].replaced,
+        Some(SessionReplaced {
+            old_runtime_session_id: OLD_ID.into(),
+            reason: SessionLostReason::NotFound,
+        })
+    );
+    assert!(text(&w.ctl.inputs.lock().unwrap()[0][0]).starts_with(SUMMARY_HEADER));
+}
+
+/// 续接回合的请求取不全：回合 Failed、写明原因，不发 prompt，已开的新会话照 retire 收尾，退回旧编号
+/// （审查 1/F-3）。
+#[tokio::test(flavor = "current_thread")]
+async fn unavailable_request_fails_resumed_turn() {
+    let turn = queued_turn(1);
+    let t = turn.id;
+    let w = W::<Reference>::new(&turn).await;
+    let turn = interrupted_turn(&w, turn);
+    w.ctl
+        .open_errors
+        .lock()
+        .unwrap()
+        .push_back(lost(SessionLostReason::NotFound));
+    w.ctl.fresh_ids.lock().unwrap().push_back(NEW_ID.into());
+    let plan = TurnPlan {
+        entry: TurnEntry::Resume {
+            request: ResumeRequest::Unavailable("附件 spec.txt 不在了".into()),
+        },
+        ..w.resume_plan(turn)
+    };
+    let (result, line) = w
+        .spawn(
+            SessionLine::new(w.decider.clone(), Some(OLD_ID.into())),
+            plan,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.unwrap(), TurnState::Failed);
+    assert_eq!(
+        trail(&w.store, t)[2..],
+        [
+            "Interrupted { reason: Crash } -> Failed (续接失败（会话记录不存在），这一轮的请求取不全：附件 spec.txt 不在了)",
+            "finished Failed",
+        ]
+    );
+    assert_eq!(w.ctl.prompts.load(Ordering::SeqCst), 0, "不发残缺的请求");
+    assert_eq!(w.ctl.opens.load(Ordering::SeqCst), 2, "新会话开成了");
+    assert_eq!(
+        w.ctl.terminates.load(Ordering::SeqCst),
+        1,
+        "新会话照 retire 收尾"
+    );
+    assert!(line.session().is_none());
+    assert_eq!(line.resume_id(), Some(OLD_ID));
+    assert!(bindings(&w.store, t).is_empty());
+
+    // 对照：记录还在（续接成功）时用不到请求，Unavailable 也照常跑
+    let other = queued_turn_seeded(&w, 2);
+    let other = interrupted_turn(&w, other);
+    let plan = TurnPlan {
+        entry: TurnEntry::Resume {
+            request: ResumeRequest::Unavailable("用不到".into()),
+        },
+        ..w.resume_plan(other)
+    };
+    let task = w.spawn(line, plan);
+    wait_until("prompt", || w.ctl.prompts.load(Ordering::SeqCst) == 1).await;
+    w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+    assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Completed);
+    assert_eq!(
+        w.ctl.inputs.lock().unwrap()[0],
+        [ContentBlock::Text(resume_note(&ResumeReason::Interrupted))]
+    );
+}
+
+/// 入口填错（给 Queued 的回合填 Resume）：第一步报表外转换，不开会话。
+#[tokio::test(flavor = "current_thread")]
+async fn entry_must_match_turn_state() {
+    let turn = queued_turn(1);
+    let w = W::<Reference>::new(&turn).await;
+    let (result, _) = w.spawn(w.line(), w.resume_plan(turn)).await.unwrap();
+    assert!(
+        matches!(result, Err(TurnRunError::Illegal(_))),
+        "{result:?}"
+    );
+}
+
+/// 审批类与执行类事件（换会话本身不该产生任何一条）。
+fn approval_trail(store: &MemStore) -> Vec<String> {
+    store
+        .all()
+        .into_iter()
+        .filter_map(|e| match e {
+            DomainEvent::ApprovalRequested(r) => Some(format!("requested {}", r.approval.id)),
+            DomainEvent::ApprovalDecided(d) => Some(format!("decided {}", d.approval_id)),
+            DomainEvent::ApprovalDelivered(d) => Some(format!("delivered {}", d.approval_id)),
+            DomainEvent::ApprovalVoided(v) => Some(format!("voided {}", v.approval_id)),
+            DomainEvent::ToolCallStarted(c) => Some(format!("tool {}", c.tool_call_id.0)),
+            DomainEvent::UserActionProposed(_) => Some("user action".into()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 换了会话之后，之前被拒的同一动作仍被自动拒绝；一次性授权没有因为换会话多出来或被用掉（方案 15.3；
+/// AC05 点名「换运行时」是绕过的入口）。拒绝记忆只有真实引擎有，参照判定方只核授权。
+async fn recovery_keeps_denial_memory_and_grants<J: Judge>() {
+    let turn = queued_turn(1);
+    let t = turn.id;
+    let w = W::<J>::new(&turn).await;
+    let task = w.running(turn.clone()).await;
+    // 用户拒绝一次
+    let a = w.ctl.ask("A", "rm -rf build");
+    let denied = w.approval("rm -rf build").await;
+    w.judge.user(denied, false).await;
+    assert!(
+        matches!(a.await.unwrap(), PermissionDecision::Deny { .. }),
+        "{}",
+        J::NAME
+    );
+    w.tick_until("回到 Running", || w.state(t) == Some(TurnState::Running))
+        .await;
+    // 批准了、还没交付就到时：留下一次性授权（同 W1）
+    let gate = w.decider.gate("npm test");
+    let b = w.ctl.ask("B", "npm test");
+    let granted = w.approval("npm test").await;
+    w.judge.user(granted, true).await;
+    wait_until("结论停在闸门前", || {
+        gate.reached.load(Ordering::SeqCst)
+    })
+    .await;
+    w.clock.advance_mono(LIMIT);
+    w.interrupted(t).await;
+    assert_eq!(b.await.unwrap(), gone(), "{}", J::NAME);
+    gate.open();
+    let (result, line) = task.await.unwrap();
+    assert_eq!(result.unwrap(), wait_limit());
+    assert!(w.judge.has_grant(granted).await, "{}", J::NAME);
+    let before = approval_trail(&w.store);
+
+    // 续接：记录用不了，用摘要新开
+    w.history.set(history());
+    w.ctl
+        .open_errors
+        .lock()
+        .unwrap()
+        .push_back(lost(SessionLostReason::NotFound));
+    w.ctl.fresh_ids.lock().unwrap().push_back(NEW_ID.into());
+    let mut resumed = turn;
+    resumed.state = wait_limit();
+    let task = w.spawn(line, w.resume_plan(resumed));
+    wait_until("续接后 prompt", || {
+        w.ctl.prompts.load(Ordering::SeqCst) == 2
+    })
+    .await;
+    assert!(bindings(&w.store, t).last().unwrap().replaced.is_some());
+    assert_eq!(
+        approval_trail(&w.store),
+        before,
+        "{}：换会话本身不动审批",
+        J::NAME
+    );
+    assert!(
+        w.judge.has_grant(granted).await,
+        "{}：授权没被换会话用掉",
+        J::NAME
+    );
+    if J::DENIAL_MEMORY {
+        let c = w.ctl.ask("C", "rm -rf build");
+        assert!(
+            matches!(c.await.unwrap(), PermissionDecision::Deny { .. }),
+            "新会话里同一动作仍被拒"
+        );
+        let asked = w
+            .store
+            .all()
+            .iter()
+            .filter(|e| {
+                matches!(e, DomainEvent::ApprovalRequested(r)
+                if r.approval.action.raw_summary.contains("rm -rf build"))
+            })
+            .count();
+        assert_eq!(asked, 1, "自动拒绝，没有再问用户");
+    }
+    w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+    assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Completed);
+    assert!(
+        !approval_trail(&w.store).contains(&format!("delivered {granted}")),
+        "{}：授权没被交付出去",
+        J::NAME
+    );
+}
+
+/// 换会话不重放：新会话只收到文字；iWork 不发起任何工具调用、不答任何权限请求；没有新的审批或执行类事件。
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_does_not_replay() {
+    let first = queued_turn(1);
+    let w = W::<Reference>::new(&first).await;
+    let task = w.running(first).await;
+    w.ctl.send(AgentUpdate::ToolCallStarted {
+        tool_call_id: iwork_domain::event::ToolCallId("c1".into()),
+        tool: ToolRef("Bash".into()),
+        raw_input: RawToolInput(r#"{"command":"npm test"}"#.into()),
+    });
+    let a = w.ctl.ask("A", "npm test");
+    let id = w.approval("npm test").await;
+    w.judge.user(id, true).await;
+    assert_eq!(a.await.unwrap(), PermissionDecision::Allow);
+    w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+    let (_, line) = task.await.unwrap();
+    let wire = w.ctl.wire();
+    let before = approval_trail(&w.store);
+    assert!(!before.is_empty(), "对照：第一轮确实有审批与工具调用");
+
+    let second = queued_turn_seeded(&w, 2);
+    w.history.set(history());
+    w.ctl
+        .prompt_errors
+        .lock()
+        .unwrap()
+        .push_back(AgentError::ProcessExited {
+            message: "退出了".into(),
+        });
+    w.ctl
+        .open_errors
+        .lock()
+        .unwrap()
+        .push_back(lost(SessionLostReason::NotFound));
+    w.ctl.fresh_ids.lock().unwrap().push_back(NEW_ID.into());
+    let task = w.spawn(line, w.plan(second));
+    wait_until("prompt", || w.ctl.prompts.load(Ordering::SeqCst) == 2).await;
+    w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+    assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Completed);
+    let input = w.ctl.inputs.lock().unwrap()[1].clone();
+    assert!(
+        input.iter().all(|b| matches!(b, ContentBlock::Text(_))),
+        "{input:?}"
+    );
+    assert_eq!(w.ctl.wire(), wire, "没有答过任何权限请求");
+    assert_eq!(approval_trail(&w.store), before, "没有新的审批或执行类事件");
 }
 
 /// 布景里再排一个回合。
