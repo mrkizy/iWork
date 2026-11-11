@@ -45,7 +45,7 @@ async fn failed_denial_can_be_retried_and_is_recorded() {
 }
 
 #[tokio::test]
-async fn legacy_approval_resumes_without_grant_once() {
+async fn legacy_approval_neither_grants_nor_resumes() {
     let b = Bench::new(Some(Manual)).await;
     let h = b.ask(&b.decider(), turn(101), write_req("src/a.rs"));
     let id = b.approval(0).await;

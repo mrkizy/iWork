@@ -1043,7 +1043,7 @@ async fn remember_creates_rule() {
 }
 
 /// E1、E4：后台服务崩溃后从事件重建：待审批（detached）、调用记录无损；进行中的审查放弃、转问用户；
-/// 允许后发一次性放行；没有调用记录的旧审批只续接、不发放行。
+/// 允许后发一次性放行（没有调用记录的旧审批既不发放行、也不续接，见 legacy_approval_neither_grants_nor_resumes）。
 #[tokio::test]
 async fn engine_recovers_pending_from_events() {
     let b = Bench::new(Some(Auto)).await;

@@ -432,7 +432,9 @@ pub struct Approval {
     pub kind: ApprovalKind,
     /// 代表动作，给卡片展示
     pub action: Action,
-    /// 被审批调用的完整记录（T07 Q8）。旧事件没有：拒绝记忆退化为只记 `action`，恢复后不发一次性放行
+    /// 被审批调用的完整记录（T07 Q8）。旧事件没有：拒绝记忆退化为只记 `action`；批准后不发一次性放行，
+    /// 也不要求续接（放行只能由调用记录生成，续接以「有放行可用」为准，T07 方案 6.2 E1、6.10.6 第 2 条），
+    /// 回合停在中断，由用户点「继续」
     /// 装箱：记录有几百字节，审批常被整条放进集合与枚举
     pub call: Option<Box<ApprovalCallRecord>>,
     pub matched_rules: Vec<RuleId>,
