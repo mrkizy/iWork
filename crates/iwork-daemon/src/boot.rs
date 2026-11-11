@@ -397,14 +397,18 @@ pub trait StartupParticipant: Send + Sync {
 
 /// 当前的参与方。T04 交付时没有；开发构建可经环境变量加一个假的（证明这个位置上的提交在 `bind` 之前落盘、
 /// 且不被重复发布）。
+#[cfg(not(feature = "dev"))]
 pub fn startup_participants() -> Vec<Box<dyn StartupParticipant>> {
-    #[allow(unused_mut)]
-    let mut v: Vec<Box<dyn StartupParticipant>> = Vec::new();
-    #[cfg(feature = "dev")]
+    Vec::new()
+}
+
+#[cfg(feature = "dev")]
+pub fn startup_participants() -> Vec<Box<dyn StartupParticipant>> {
     if std::env::var(dev_participant::ENV).is_ok() {
-        v.push(Box::new(dev_participant::CommitOne));
+        vec![Box::new(dev_participant::CommitOne)]
+    } else {
+        Vec::new()
     }
-    v
 }
 
 #[cfg(feature = "dev")]

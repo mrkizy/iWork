@@ -11,6 +11,10 @@ use iwork_ipc::server::{ChunkRefused, ConnectionContext, RequestHandler};
 use iwork_proto::pb;
 
 use crate::logging;
+use crate::stop::StopSwitch;
+use crate::work::RunningWork;
+
+pub mod lifecycle;
 
 /// 关门与在途计数。停机第 1 步：关门后新请求一律回「不可用、可重试」，再等已经进门的回完。
 #[derive(Default)]
@@ -144,20 +148,27 @@ impl RequestHandler for NotWired {
 }
 
 /// 后台的请求入口。
-pub struct DaemonHandler<I> {
+pub struct DaemonHandler<I, W> {
     gate: Arc<Gate>,
     inner: I,
+    work: Arc<W>,
+    stop: StopSwitch,
 }
 
-impl<I: RequestHandler> DaemonHandler<I> {
-    pub fn new(gate: Arc<Gate>, inner: I) -> Self {
-        Self { gate, inner }
+impl<I: RequestHandler, W: RunningWork> DaemonHandler<I, W> {
+    pub fn new(gate: Arc<Gate>, inner: I, work: Arc<W>, stop: StopSwitch) -> Self {
+        Self {
+            gate,
+            inner,
+            work,
+            stop,
+        }
     }
 }
 
 const STOPPING: &str = "后台服务正在停止，请稍后重试";
 
-impl<I: RequestHandler> RequestHandler for DaemonHandler<I> {
+impl<I: RequestHandler, W: RunningWork> RequestHandler for DaemonHandler<I, W> {
     async fn handle(&self, ctx: &ConnectionContext, req: pb::Request) -> pb::Response {
         let request_id = req.request_id;
         let span = match &req.body {
@@ -174,6 +185,14 @@ impl<I: RequestHandler> RequestHandler for DaemonHandler<I> {
         let Some(_ticket) = self.gate.enter() else {
             return error_response(request_id, pb::ErrorCode::Unavailable, STOPPING, true);
         };
+        if let Some(pb::request::Body::Command(pb::Command {
+            kind: Some(pb::command::Kind::ShutdownDaemon(cmd)),
+            ..
+        })) = &req.body
+        {
+            let _e = span.enter();
+            return lifecycle::shutdown(ctx, request_id, cmd, self.work.as_ref(), &self.stop);
+        }
         tracing::Instrument::instrument(self.inner.handle(ctx, req), span).await
     }
 
@@ -222,6 +241,137 @@ mod tests {
         assert!(!drain.is_finished(), "在途的还没回完");
         drop(t);
         assert_eq!(drain.await.unwrap(), 0);
+    }
+
+    use crate::work::{AbortReport, RunningCount};
+    use iwork_ipc::peer::UserId;
+    use iwork_ipc::rendezvous::StopReason;
+    use iwork_ipc::server::PeerSummary;
+
+    struct Busy(RunningCount);
+    impl RunningWork for Busy {
+        fn running(&self) -> RunningCount {
+            self.0
+        }
+        async fn cancel_all(&self) {}
+        async fn abort_all(&self) -> AbortReport {
+            AbortReport::default()
+        }
+    }
+
+    fn ctx(kind: pb::ClientKind) -> ConnectionContext {
+        ConnectionContext {
+            connection_id: 1,
+            session_id: "s".into(),
+            peer: PeerSummary {
+                pid: 1,
+                user: UserId::Uid(1),
+            },
+            client_kind: kind,
+            signature_checked: true,
+        }
+    }
+
+    fn shutdown_req(cancel_running: bool) -> pb::Request {
+        pb::Request {
+            request_id: 9,
+            body: Some(pb::request::Body::Command(pb::Command {
+                command_id: "c".into(),
+                kind: Some(pb::command::Kind::ShutdownDaemon(pb::ShutdownDaemon {
+                    cancel_running,
+                })),
+            })),
+        }
+    }
+
+    fn handler(running: RunningCount) -> (DaemonHandler<NotWired, Busy>, StopSwitch, Arc<Gate>) {
+        let stop = StopSwitch::new();
+        let gate = Arc::new(Gate::default());
+        (
+            DaemonHandler::new(
+                gate.clone(),
+                NotWired,
+                Arc::new(Busy(running)),
+                stop.clone(),
+            ),
+            stop,
+            gate,
+        )
+    }
+
+    fn error_of(r: &pb::Response) -> &pb::Error {
+        match &r.body {
+            Some(pb::response::Body::Error(e)) => e,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_needs_confirmation_when_running() {
+        let (h, stop, _) = handler(RunningCount { turns: 2, cards: 1 });
+        let r = h
+            .handle(&ctx(pb::ClientKind::Desktop), shutdown_req(false))
+            .await;
+        let e = error_of(&r);
+        assert_eq!(e.code, pb::ErrorCode::PreconditionFailed as i32);
+        assert_eq!(e.details[iwork_app::details::RUNNING_TURNS], "2");
+        assert_eq!(e.details[iwork_app::details::EXECUTING_CARDS], "1");
+        assert_eq!(stop.requested(), None, "没确认就不停");
+
+        let r = h
+            .handle(&ctx(pb::ClientKind::Desktop), shutdown_req(true))
+            .await;
+        assert!(matches!(
+            r.body,
+            Some(pb::response::Body::Accepted(pb::CommandAccepted {
+                first_seq: 0,
+                last_seq: 0,
+                replayed: false
+            }))
+        ));
+        assert_eq!(r.request_id, 9);
+        assert_eq!(stop.requested(), Some(StopReason::UserQuit));
+    }
+
+    #[tokio::test]
+    async fn shutdown_refused_from_non_desktop_client() {
+        let (h, stop, _) = handler(RunningCount::default());
+        let mut refused = vec![pb::ClientKind::Unspecified];
+        if !cfg!(feature = "dev") {
+            refused.push(pb::ClientKind::DevTool);
+        }
+        for kind in refused {
+            let r = h.handle(&ctx(kind), shutdown_req(true)).await;
+            assert_eq!(
+                error_of(&r).code,
+                pb::ErrorCode::PermissionDenied as i32,
+                "{kind:?}"
+            );
+        }
+        assert_eq!(stop.requested(), None);
+        // 对照：桌面客户端、没有在跑的东西 → 直接受理
+        let r = h
+            .handle(&ctx(pb::ClientKind::Desktop), shutdown_req(false))
+            .await;
+        assert!(matches!(r.body, Some(pb::response::Body::Accepted(_))));
+    }
+
+    #[tokio::test]
+    async fn commands_rejected_while_stopping() {
+        let (h, _stop, gate) = handler(RunningCount::default());
+        gate.close_and_drain(Duration::from_millis(10)).await;
+        for req in [
+            shutdown_req(true),
+            pb::Request {
+                request_id: 3,
+                body: Some(pb::request::Body::Query(pb::Query { kind: None })),
+            },
+        ] {
+            let r = h.handle(&ctx(pb::ClientKind::Desktop), req).await;
+            let e = error_of(&r);
+            assert_eq!(e.code, pb::ErrorCode::Unavailable as i32);
+            assert!(e.retryable, "停机期间的拒绝可重试");
+        }
     }
 
     #[tokio::test]

@@ -13,3 +13,7 @@ pub const FIELD: &str = "field";
 pub const CLIENT_MAJOR: &str = iwork_proto::handshake::DETAIL_CLIENT_MAJOR;
 /// 握手失败时后台服务的协议主版本。
 pub const SERVER_MAJOR: &str = iwork_proto::handshake::DETAIL_SERVER_MAJOR;
+/// 完全退出被拒（要确认）时：持有进程的回合数。
+pub const RUNNING_TURNS: &str = "running_turns";
+/// 完全退出被拒（要确认）时：执行中的亲手执行卡片数。
+pub const EXECUTING_CARDS: &str = "executing_cards";

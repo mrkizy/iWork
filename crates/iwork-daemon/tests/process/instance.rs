@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use iwork_ipc::rendezvous::{self, Phase, StopReason};
+use iwork_ipc::rendezvous::{self, Phase};
 
 use crate::support::{Sandbox, alive, code};
 
@@ -80,25 +80,6 @@ fn standby_takes_over_after_kill9() {
     a.kill9();
     sb.wait_ready(b.pid(), START);
     assert!(alive(b.pid()));
-}
-
-/// S11d：用户退出（状态里是 `Stopping{UserQuit}`）后前任没了 → 等锁的托管实例以 0 退出、不接班。
-/// 真的 `ShutdownDaemon` 在第 6 步补；这里手写状态文件模拟。
-#[test]
-fn standby_exits_after_user_quit() {
-    let sb = Sandbox::new();
-    let mut a = sb.spawn(&[], &[]);
-    sb.wait_ready(a.pid(), START);
-    let mut b = sb.spawn(&["--service"], &[]);
-    b.wait_stderr("等锁接班", START);
-    let mut s = sb.status().unwrap();
-    s.phase = Phase::Stopping {
-        reason: StopReason::UserQuit,
-    };
-    rendezvous::write_status(&sb.run_dir(), &s).unwrap();
-    a.kill9();
-    assert_eq!(code(b.wait_exit(START)), Some(0), "{}", b.stderr());
-    assert_eq!(sb.status().unwrap().pid, a.pid(), "没接班：状态还是前任的");
 }
 
 /// S3：前任被存储拒绝（同一个程序）→ 等锁的托管实例不接班、以 0 退出。

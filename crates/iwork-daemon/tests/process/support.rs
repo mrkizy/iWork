@@ -236,6 +236,13 @@ impl Drop for Daemon {
             let _ = c.kill();
             let _ = c.wait();
         }
+        // 后台被 kill -9（或用例中途失败）时，开发构建的假工作起的进程组没人收：在这里收掉，不留进程
+        for pgid in self.dev_pgids() {
+            // SAFETY：只结束本测试的后台起的进程组
+            unsafe {
+                libc::kill(-(pgid as i32), libc::SIGKILL);
+            }
+        }
     }
 }
 
@@ -254,4 +261,50 @@ pub fn rt() -> tokio::runtime::Runtime {
         .enable_all()
         .build()
         .unwrap()
+}
+
+/// 经 ipc 发 `ShutdownDaemon`（开发工具身份；dev 构建认它）。
+pub fn shutdown_daemon(sb: &Sandbox, cancel_running: bool) -> pb::Response {
+    rt().block_on(async {
+        let (client, _incoming) = sb.connect().await.expect("握手");
+        let r = client
+            .request(pb::request::Body::Command(pb::Command {
+                command_id: ulid::Ulid::generate().to_string(),
+                kind: Some(pb::command::Kind::ShutdownDaemon(pb::ShutdownDaemon {
+                    cancel_running,
+                })),
+            }))
+            .await;
+        // 错误响应在客户端那边以 `ClientError::Server` 出来；统一成响应，测试按 body 判
+        match r {
+            Ok(r) => r,
+            Err(iwork_ipc::client::ClientError::Server(e)) => pb::Response {
+                request_id: 0,
+                body: Some(pb::response::Body::Error(e)),
+            },
+            Err(e) => panic!("请求失败：{e:?}"),
+        }
+    })
+}
+
+impl Daemon {
+    /// 开发构建的假工作起的进程组（stderr 里的 `IWORK-DEV-PGID`）。
+    pub fn dev_pgids(&self) -> Vec<u32> {
+        self.stderr()
+            .lines()
+            .filter_map(|l| l.strip_prefix("IWORK-DEV-PGID "))
+            .map(|n| n.trim().parse().unwrap())
+            .collect()
+    }
+}
+
+/// 进程组里还有没有进程。
+pub fn group_alive(pgid: u32) -> bool {
+    // SAFETY：信号 0 只探测
+    unsafe { libc::kill(-(pgid as i32), 0) == 0 }
+}
+
+/// 日志文件的全部内容。
+pub fn log_text(sb: &Sandbox) -> String {
+    std::fs::read_to_string(sb.data_root().join("logs/daemon.log")).unwrap_or_default()
 }

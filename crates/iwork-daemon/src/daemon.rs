@@ -6,6 +6,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use iwork_ipc::rendezvous::{ExeStamp, ExitCode, LockInfo, Phase, StopReason};
@@ -13,22 +14,29 @@ use iwork_ipc::server::{Server, ServerConfig};
 use iwork_ipc::{LocalEndpoint, LocalListener};
 use iwork_ports::store::StoragePort;
 use iwork_store::{DataDir, FsArtifactStore};
+use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::args::DaemonArgs;
 use crate::boot::{
-    self, BootError, Identity, PAUSE_BEFORE_EXIT, Step, StorePorts, VERSION, report, starting,
-    status_of,
+    self, BootError, Identity, PAUSE_BEFORE_EXIT, Step, Store, StorePorts, VERSION, report,
+    starting, status_of,
 };
 use crate::dev;
-use crate::exit::{exited, process_status, stop_code};
+use crate::exit::{exited, process_status};
 use crate::handler::{DaemonHandler, Gate, NotWired};
 use crate::instance::{self, LockOutcome, StandbyAction};
-use crate::logging::{self, LogGuard};
+use crate::logging::{self, AuditSignal, LogGuard};
 use crate::publish::{PublishObserver, PublishState};
 use crate::source::{SnapshotNotWired, StoreSource};
 use crate::status::{StatusBoard, StatusIdentity};
+use crate::stop::{self, StopHooks, StopStep, StopSwitch};
+use crate::supervisor::{RestartPolicy, Supervisor, TaskSpec};
+use crate::tasks::outbox::{self, OutboxRoute};
+use crate::tasks::signals::{self, Signals};
+use crate::tasks::{maintenance, publish_check, sleep_watch, store_health};
 use crate::time::{MonotonicIds, SystemClock};
+use crate::work::{NoWork, RunningWork};
 
 /// 第 2 步的结果。
 pub struct Places {
@@ -110,12 +118,22 @@ pub fn run_identified(
         starting(Step::StatusLog),
     );
     let log = logging::init(&places.data.logs());
-    let phase = run_locked(args, raw, id, places, board.clone(), &log);
+    let exe = id.exe.clone();
+    let phase = run_locked(args, raw.clone(), id, places, board.clone(), &log);
     tracing::info!(phase = ?phase, "后台服务退出");
     // 测试用：状态已写定、锁还在手里时停住，好让等锁的实例在「前任刚退出」的那一刻接手
     dev::pause_at(PAUSE_BEFORE_EXIT);
     drop(log);
     drop(lock);
+    // 停机表第 8 步「升级」一列：原地换成磁盘上的程序（锁、socket 随 CLOEXEC 关掉），新程序从启动表第 1 步来
+    if let Phase::Exited {
+        reason: Some(StopReason::Upgrade),
+        ..
+    } = phase
+    {
+        let err = exec_self(&exe, &raw);
+        eprintln!("iwork-daemon：自行重启时 exec 失败：{err}");
+    }
     status_of(process_status(&phase, managed))
 }
 
@@ -166,7 +184,7 @@ fn run_locked(
     id: Identity,
     places: Places,
     board: StatusBoard,
-    _log: &LogGuard,
+    log: &LogGuard,
 ) -> Phase {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -184,7 +202,13 @@ fn run_locked(
             );
         }
     };
-    let phase = runtime.block_on(boot_and_serve(args, id, places, board.clone()));
+    let phase = runtime.block_on(boot_and_serve(
+        args,
+        id,
+        places,
+        board.clone(),
+        log.audit.clone(),
+    ));
     // 停机第 7 步的硬上限归停机流程；这里只给运行时里残留的任务一点时间
     runtime.shutdown_timeout(Duration::from_secs(1));
     phase
@@ -213,6 +237,7 @@ async fn boot_and_serve(
     id: Identity,
     places: Places,
     board: StatusBoard,
+    audit: broadcast::Sender<AuditSignal>,
 ) -> Phase {
     let t0 = Instant::now();
     let clock = Arc::new(SystemClock::new());
@@ -248,17 +273,155 @@ async fn boot_and_serve(
         Err(e) => return fail(&board, e),
     };
 
-    // 第 9 步：组装 ipc
+    // 第 9 步起：回合宿主（`RunningWork`）在这一步构造。T04 交付时没有在跑的东西；开发构建可装假的
+    #[cfg(feature = "dev")]
+    if let Some(work) = crate::dev_parts::DevWork::from_env() {
+        return serve_with(
+            Arc::new(work),
+            args,
+            id,
+            places,
+            board,
+            store,
+            artifacts_of(ports),
+            audit,
+            t0,
+            interrupted.len(),
+        )
+        .await;
+    }
+    serve_with(
+        Arc::new(NoWork),
+        args,
+        id,
+        places,
+        board,
+        store,
+        artifacts_of(ports),
+        audit,
+        t0,
+        interrupted.len(),
+    )
+    .await
+}
+
+fn artifacts_of(ports: StorePorts) -> boot::Artifacts {
+    ports.artifacts
+}
+
+/// 观察者核对用的 head。
+struct StoreHead(Arc<Store>);
+
+impl publish_check::HeadSource for StoreHead {
+    async fn head(&self) -> Result<u64, iwork_ports::store::StorageError> {
+        self.0.head_seq().await.map(|s| s.0)
+    }
+}
+
+/// 停机第 4–6 步要动的东西。
+struct DaemonStop<'a> {
+    supervisor: &'a mut Supervisor,
+    serve_token: CancellationToken,
+    store: Option<Arc<Store>>,
+}
+
+impl StopHooks for DaemonStop<'_> {
+    async fn stop_tasks(&mut self) {
+        self.supervisor
+            .stop_all_except(TASK_SERVE, StopStep::StopTasks.limit())
+            .await;
+    }
+
+    async fn stop_ipc(&mut self) {
+        self.serve_token.cancel();
+        if !self
+            .supervisor
+            .wait_for(TASK_SERVE, StopStep::StopIpc.limit())
+            .await
+        {
+            tracing::warn!("ipc 到点没停完");
+        }
+    }
+
+    async fn close_store(&mut self) -> Result<(), iwork_ports::store::StorageError> {
+        let Some(store) = self.store.take() else {
+            return Ok(());
+        };
+        match store.maintenance().await {
+            Ok(()) | Err(iwork_ports::store::StorageError::Busy) => {}
+            Err(e) => tracing::warn!(error = %e, "停机时 WAL 合回主库失败"),
+        }
+        // 别的持有者（已停的任务、ipc）此时都放手了；放不掉的由最后一个持有者丢弃时关闭
+        match Arc::try_unwrap(store) {
+            Ok(store) => tokio::task::spawn_blocking(move || store.close())
+                .await
+                .unwrap_or_else(|e| {
+                    Err(iwork_ports::store::StorageError::Io {
+                        message: format!("关存储的线程异常：{e}"),
+                    })
+                }),
+            Err(_) => {
+                tracing::warn!("存储还有别的持有者，交给最后一个持有者关闭");
+                Ok(())
+            }
+        }
+    }
+}
+
+const TASK_SERVE: &str = "ipc-serve";
+
+#[cfg(not(feature = "dev"))]
+fn outbox_routes() -> Vec<OutboxRoute> {
+    Vec::new()
+}
+
+#[cfg(feature = "dev")]
+fn outbox_routes() -> Vec<OutboxRoute> {
+    crate::dev_parts::outbox_routes()
+}
+
+#[cfg(not(feature = "dev"))]
+fn dev_tasks(_stop: &StopSwitch) -> Vec<TaskSpec> {
+    Vec::new()
+}
+
+/// 开发构建的停机触发器（`IWORK_DEV_STOP_ON`）。
+#[cfg(feature = "dev")]
+fn dev_tasks(stop: &StopSwitch) -> Vec<TaskSpec> {
+    let Some((file, reason)) = crate::dev_parts::stop_trigger() else {
+        return Vec::new();
+    };
+    let stop = stop.clone();
+    vec![TaskSpec::restartable("dev-stop", move || {
+        crate::dev_parts::stop_on(file.clone(), reason, stop.clone())
+    })]
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_with<W: RunningWork>(
+    work: Arc<W>,
+    args: DaemonArgs,
+    id: Identity,
+    places: Places,
+    board: StatusBoard,
+    store: Arc<Store>,
+    artifacts: boot::Artifacts,
+    audit: broadcast::Sender<AuditSignal>,
+    t0: Instant,
+    interrupted: usize,
+) -> Phase {
+    // 第 9 步：组装 ipc、装提交观察者、各参与方恢复
     if !enter(&board, Step::Server) {
         return fail(&board, boot::injected(Step::Server));
     }
     let gate = Arc::new(Gate::default());
+    let stop_switch = StopSwitch::new();
     let mut cfg = ServerConfig::new(VERSION);
     cfg.trust = args.trust;
     let (server, publisher) = Server::new(
         cfg,
         id.own.clone(),
-        DaemonHandler::new(gate.clone(), NotWired),
+        DaemonHandler::new(gate.clone(), NotWired, work.clone(), stop_switch.clone()),
         StoreSource::new(store.clone(), SnapshotNotWired),
     );
     let publishing = PublishState::new();
@@ -287,46 +450,109 @@ async fn boot_and_serve(
         Err(e) => return fail(&board, e),
     };
 
-    // 第 12 步：就绪
-    let shutdown = CancellationToken::new();
-    let serve = tokio::spawn(server.serve(listener, shutdown.clone()));
-    // 信号处理装在写 `Ready` 之前：之后到的 SIGTERM 一定走停机流程，不会把进程直接结束
+    // 第 11 步：按任务登记表起全部任务
+    if !enter(&board, Step::Tasks) {
+        return fail(&board, boot::injected(Step::Tasks));
+    }
+    let tasks_failed = |message: String| BootError::Fatal {
+        step: Step::Tasks,
+        message,
+    };
+    // T04 交付时登记表是空的（T10 登记真实去向）；开发构建可加假去向
+    let routes = outbox_routes();
+    if let Err(e) = outbox::validate(&routes) {
+        return fail(&board, tasks_failed(e));
+    }
+    let routes = Arc::new(routes);
+    // 信号处理登记在写 `Ready` 之前：之后到的 SIGTERM 一定走停机流程
     let signals = match Signals::register() {
         Ok(s) => s,
-        Err(e) => {
-            return fail(
-                &board,
-                BootError::Fatal {
-                    step: Step::Tasks,
-                    message: format!("登记信号处理失败：{e}"),
-                },
-            );
-        }
+        Err(e) => return fail(&board, tasks_failed(format!("登记信号处理失败：{e}"))),
     };
+    match store.head_seq().await {
+        Ok(h) => publishing.set_baseline(h.0),
+        Err(e) => return fail(&board, tasks_failed(format!("读 head 失败：{e}"))),
+    }
+    let serve_token = CancellationToken::new();
+    let store_failed = Arc::new(AtomicBool::new(false));
+    let woke = Arc::new(Notify::new());
+    let clock = Arc::new(SystemClock::new());
+    let mut specs = dev_tasks(&stop_switch);
+    specs.extend([
+        TaskSpec::fatal(TASK_SERVE, server.serve(listener, serve_token.clone())),
+        TaskSpec::fatal(
+            "store-health",
+            store_health::run(store.failed(), store_failed.clone()),
+        ),
+        TaskSpec::fatal("publish-check", {
+            let p = publishing.clone();
+            let b = board.clone();
+            publish_check::run(
+                audit.subscribe(),
+                StoreHead(store.clone()),
+                move || p.watermark(),
+                move || b.add_ipc_fault(),
+                publish_check::SETTLE,
+            )
+        }),
+        TaskSpec::restartable("signals", {
+            let stop = stop_switch.clone();
+            let mut pre = Some(signals);
+            move || signals::run(pre.take(), stop.clone())
+        }),
+        TaskSpec::restartable("outbox", {
+            let (store, routes, wake) = (store.clone(), routes.clone(), publishing.outbox.clone());
+            move || outbox::run(store.clone(), routes.clone(), wake.clone())
+        }),
+        TaskSpec::restartable("maintenance", {
+            let (store, artifacts) = (store.clone(), artifacts.clone());
+            move || maintenance::run(store.clone(), artifacts.clone())
+        }),
+        TaskSpec::restartable("sleep-watch", {
+            let (clock, woke) = (clock.clone(), woke.clone());
+            move || sleep_watch::run(clock.clone(), woke.clone(), sleep_watch::INTERVAL)
+        }),
+    ]);
+    let mut supervisor = Supervisor::start(specs, RestartPolicy::default());
+
+    // 第 12 步：就绪
     board.set_phase(Phase::Ready);
     let head = store.head_seq().await.map(|s| s.0).unwrap_or_default();
     tracing::info!(
         version = VERSION,
         protocol_major = iwork_proto::PROTOCOL_MAJOR,
         head,
-        interrupted = interrupted.len(),
+        interrupted,
         boot_ms = t0.elapsed().as_millis() as u64,
         since_start_ms = id.started.elapsed().as_millis() as u64,
         "后台服务就绪"
     );
 
-    let reason = signals.wait().await;
-    board.set_phase(Phase::Stopping { reason });
-    gate.close_and_drain(Duration::from_secs(1)).await;
-    shutdown.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(2), serve).await;
-    drop(store);
-    let phase = Phase::Exited {
-        code: stop_code(reason),
-        reason: Some(reason),
-        message: None,
+    // 运行：等停机请求，或监督器报出要整体退出的故障
+    let reason = tokio::select! {
+        r = stop_switch.wait() => r,
+        fault = supervisor.watch() => {
+            tracing::error!(task = fault.task(), ?fault, "整体退出");
+            stop_switch.request(StopReason::Fatal);
+            StopReason::Fatal
+        }
     };
-    board.set_phase(phase.clone());
+    stop::arm_hard_deadline(reason, args.service, stop::HARD_LIMIT);
+    let mut hooks = DaemonStop {
+        supervisor: &mut supervisor,
+        serve_token,
+        store: Some(store),
+    };
+    let phase = stop::stop(
+        reason,
+        store_failed.load(Ordering::SeqCst),
+        &board,
+        &gate,
+        work.as_ref(),
+        &mut hooks,
+    )
+    .await;
+    supervisor.abort_all();
     phase
 }
 
@@ -336,31 +562,4 @@ fn bind(places: &Places) -> Result<LocalListener, BootError> {
     }
     LocalListener::bind(&places.socket_path)
         .map_err(|e| BootError::Bind(format!("绑定 {} 失败：{e}", places.socket_path.display())))
-}
-
-/// SIGTERM、SIGINT、SIGHUP：用户绕开客户端停后台的办法，也是系统关机、注销时收到的（方案 2.8「信号」一列）。
-struct Signals {
-    term: tokio::signal::unix::Signal,
-    int: tokio::signal::unix::Signal,
-    hup: tokio::signal::unix::Signal,
-}
-
-impl Signals {
-    fn register() -> std::io::Result<Self> {
-        use tokio::signal::unix::{SignalKind, signal};
-        Ok(Self {
-            term: signal(SignalKind::terminate())?,
-            int: signal(SignalKind::interrupt())?,
-            hup: signal(SignalKind::hangup())?,
-        })
-    }
-
-    async fn wait(mut self) -> StopReason {
-        tokio::select! {
-            _ = self.term.recv() => {}
-            _ = self.int.recv() => {}
-            _ = self.hup.recv() => {}
-        }
-        StopReason::Signal
-    }
 }

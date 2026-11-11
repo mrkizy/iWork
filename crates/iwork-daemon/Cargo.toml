@@ -19,6 +19,7 @@ iwork-host.workspace = true
 iwork-ipc.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tokio-util.workspace = true
+futures.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["registry"] }
 serde_json.workspace = true

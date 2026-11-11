@@ -74,6 +74,8 @@ impl MessageRoutes {
 pub struct PublishState {
     /// 观察者交给发布方的最高 seq。
     pub last_published: Arc<AtomicU64>,
+    /// `serve` 起来之前库里的 head：ipc 把它当发布水位的基线（这之前的事件靠补发）。
+    pub baseline: Arc<AtomicU64>,
     pub routes: Arc<MessageRoutes>,
     /// 每有一批新写入的 outbox 条目就加一（各条道各持一个接收端，取到取不到为止后等它变）。
     pub outbox: watch::Sender<u64>,
@@ -83,6 +85,7 @@ impl PublishState {
     pub fn new() -> Self {
         Self {
             last_published: Arc::new(AtomicU64::new(0)),
+            baseline: Arc::new(AtomicU64::new(0)),
             routes: Arc::new(MessageRoutes::default()),
             outbox: watch::Sender::new(0),
         }
@@ -90,6 +93,16 @@ impl PublishState {
 
     pub fn last_published(&self) -> u64 {
         self.last_published.load(Ordering::SeqCst)
+    }
+
+    pub fn set_baseline(&self, head: u64) {
+        self.baseline.store(head, Ordering::SeqCst);
+    }
+
+    /// 发布水位：已发布的最高 seq 与基线中较大的那个（发布核对拿它和库里的 head 比）。
+    pub fn watermark(&self) -> u64 {
+        self.last_published()
+            .max(self.baseline.load(Ordering::SeqCst))
     }
 }
 

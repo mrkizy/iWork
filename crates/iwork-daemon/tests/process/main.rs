@@ -13,4 +13,6 @@ mod seed;
 
 mod boot;
 mod instance;
+mod outbox;
 mod recovery;
+mod stop;

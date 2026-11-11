@@ -7,6 +7,8 @@ pub mod boot;
 #[cfg(unix)]
 mod daemon;
 pub mod dev;
+#[cfg(all(unix, feature = "dev"))]
+mod dev_parts;
 pub mod exit;
 pub mod handler;
 pub mod instance;
@@ -15,7 +17,11 @@ pub mod publish;
 pub mod recovery;
 pub mod source;
 pub mod status;
+pub mod stop;
+pub mod supervisor;
+pub mod tasks;
 pub mod time;
+pub mod work;
 
 pub use boot::run;
 
