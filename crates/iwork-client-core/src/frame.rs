@@ -221,13 +221,10 @@ impl FrameEngine {
                         C::ConversationList(pb::ConversationListPatch { view: Some(view) })
                     }),
                 ViewKey::Conversation => self.conversation(store, &dirty).map(C::Conversation),
-                ViewKey::Navigate => store.navigate.as_ref().map(|(seq, c, r)| {
-                    C::Navigate(pb::NavigatePatch {
-                        seq: *seq,
-                        conversation_id: c.clone(),
-                        row_key: r.clone(),
-                    })
-                }),
+                ViewKey::Navigate => store.navigate.clone().map(C::Navigate),
+                ViewKey::Home if v.home.is_some() => Some(C::Home(pb::HomePatch {
+                    view: Some(derive::conversation::home(store)),
+                })),
                 _ => None,
             };
             if let Some(change) = change {

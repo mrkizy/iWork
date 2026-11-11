@@ -9,6 +9,7 @@
 pub mod dial;
 mod models;
 pub mod reconnect;
+mod start;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -105,6 +106,8 @@ enum Internal {
 struct InFlight {
     command: pb::Command,
     reply: Option<oneshot::Sender<pb::IntentAck>>,
+    /// 首页「新建并发出」的一步（session::start）。
+    start_step: Option<start::StartStep>,
 }
 
 struct Waiter {
@@ -160,6 +163,8 @@ pub struct Session<D: Dialer> {
     conn_epoch: u64,
     /// 视图查询失败后的退避，按用途种类（审查 1/F-5）。
     query_backoff: HashMap<&'static str, (Instant, Backoff)>,
+    /// 首页「新建并发出」新对话配上后还没发的步骤（session::start）；None 表示还没排。
+    start_steps: Option<std::collections::VecDeque<pb::command::Kind>>,
     /// 「已重新连接，回到最新」提示到时撤掉的时刻（Q9）。
     back_to_latest_until: Option<Instant>,
     /// 时钟（方案 2.4 第 10 条：注入）。一轮循环只读一次，service 与 next_deadline 用同一个时刻（审查 2/F-1）。
@@ -226,6 +231,7 @@ impl<D: Dialer> Session<D> {
             stats_tx: None,
             conn_epoch: 0,
             query_backoff: HashMap::new(),
+            start_steps: None,
             back_to_latest_until: None,
             clock,
         }
@@ -366,6 +372,7 @@ impl<D: Dialer> Session<D> {
             }
             self.wanted_queries();
             self.want_models(now);
+            self.advance_start();
             self.mark_read(now);
         }
         if self.store.take_back_to_latest_started() {
@@ -506,6 +513,10 @@ impl<D: Dialer> Session<D> {
                 let _ = self.effects.send(e);
                 let _ = tx.send(ok);
             }
+            Action::Start { project_id, text } => {
+                let error = self.start(project_id, text);
+                let _ = tx.send(pb::IntentAck { error });
+            }
             Action::Local(l) => {
                 self.on_local(l);
                 let _ = tx.send(ok);
@@ -571,6 +582,8 @@ impl<D: Dialer> Session<D> {
                     }
                 }
             }
+            Local::HomeModel(m) => self.store.set_home_choice(|h| h.model = Some(m)),
+            Local::HomeMode(m) => self.store.set_home_choice(|h| h.mode = Some(m)),
             Local::Retry => {
                 // 拨号器不在（拨号任务异常结束带走了它）时点重试没有用，也不登记截止时间（审查 1/F-1）。
                 if self.client.is_none() && self.dialer.is_some() {
@@ -638,11 +651,7 @@ impl<D: Dialer> Session<D> {
             // 断线期间不接新命令（D8：发送禁用，草稿留在网页本地）。
             if let Some(tx) = reply {
                 let _ = tx.send(pb::IntentAck {
-                    error: Some(pb::IntentError {
-                        code: "offline".into(),
-                        message: "正在重新连接，连上后再试".into(),
-                        retryable: true,
-                    }),
+                    error: Some(offline_error()),
                 });
             }
             return;
@@ -657,6 +666,7 @@ impl<D: Dialer> Session<D> {
             InFlight {
                 command: command.clone(),
                 reply,
+                start_step: None,
             },
         );
         self.dispatch(command);
@@ -767,11 +777,19 @@ impl<D: Dialer> Session<D> {
                     Ok(r) => response_error(&r),
                 };
                 if let Some(f) = self.outbox.remove(&command_id) {
-                    if let (Some(pb::command::Kind::CreateConversation(_)), Some((first, last))) =
-                        (&f.command.kind, accepted)
+                    if let Some(step) = f.start_step {
+                        self.on_start_step(step, accepted, ack.clone());
+                    } else if let (
+                        Some(pb::command::Kind::CreateConversation(_)),
+                        Some((first, last)),
+                    ) = (&f.command.kind, accepted)
                     {
                         // 新建对话：事件里带对话 id，配上受理的 seq 范围就打开它（store::created）。
-                        self.store.create_accepted(first, last);
+                        self.store.create_accepted(
+                            first,
+                            last,
+                            crate::store::created::Purpose::Open,
+                        );
                     }
                     if ack.is_none()
                         && matches!(f.command.kind, Some(pb::command::Kind::RevokeRule(_)))
@@ -1336,6 +1354,15 @@ async fn sleep_until(deadline: Option<Instant>) {
 }
 
 /// 视图查询用途的种类：退避按种类记（同一种用途的不同参数共用一个退避）。
+/// 断线期间不接新命令（D8：发送禁用，草稿留在网页本地）。
+fn offline_error() -> pb::IntentError {
+    pb::IntentError {
+        code: "offline".into(),
+        message: "正在重新连接，连上后再试".into(),
+        retryable: true,
+    }
+}
+
 fn purpose_kind(p: &QueryPurpose) -> &'static str {
     match p {
         QueryPurpose::Summary { .. } => "summary",

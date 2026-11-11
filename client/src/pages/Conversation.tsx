@@ -78,7 +78,7 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
         </Show>
       </Show>
       <Composer
-        conversationId={props.id}
+        target={{ kind: "conversation", id: props.id }}
         composer={conv()?.composer}
         draftKey={props.id}
         // 「查看详情」去设置 › 运行时；「重新定位」要系统的文件夹选择框，还没接（按钮置灰）

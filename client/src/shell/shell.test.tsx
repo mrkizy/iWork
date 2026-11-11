@@ -113,6 +113,30 @@ describe.skipIf(noFixtures)("对话页", () => {
   });
 });
 
+describe.skipIf(noFixtures)("首页", () => {
+  it("输入框和对话里一样带「运行时 · 模型」与档位；选的值交给 Rust（首页专用操作）", async () => {
+    const { acts } = renderScenario("empty");
+    expect(document.querySelector(".iw-hero__project"), "项目由 Rust 挑").toHaveTextContent("demo");
+    fireEvent.click(screen.getByRole("button", { name: /Claude Code · fake-large/ }));
+    fireEvent.click(within(await screen.findByRole("menu", { name: "运行时与模型" })).getByRole("menuitem", { name: /Fake Small/ }));
+    fireEvent.click(screen.getByRole("button", { name: "审批方式：手动" }));
+    fireEvent.click(within(await screen.findByRole("menu", { name: "审批方式" })).getByRole("menuitem", { name: /自动/ }));
+    expect(userActs(acts).map((a) => a.case)).toEqual(["setHomeModel", "setHomeApprovalMode"]);
+  });
+
+  it("发出交给 Rust 一次 startConversation；受理后草稿还在，等跳转收尾才清", async () => {
+    const { acts } = renderScenario("empty");
+    const box = screen.getByRole("textbox", { name: "消息" }) as HTMLTextAreaElement;
+    fireEvent.input(box, { target: { value: "首页的第一条" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await Promise.resolve();
+    expect(userActs(acts)).toEqual([
+      expect.objectContaining({ case: "startConversation", value: expect.objectContaining({ projectId: "p-demo", text: "首页的第一条" }) }),
+    ]);
+    expect(box.value).toBe("首页的第一条");
+  });
+});
+
 describe.skipIf(noFixtures)("不可信内容（R7 的 DOM 一侧；真实 WebView 的取证见 tests/e2e）", () => {
   it("正文、标题、文件名、工具输出里的脚本与链接都不变成可执行节点", () => {
     const { container } = renderScenario("xss-corpus");

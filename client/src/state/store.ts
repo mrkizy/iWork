@@ -13,6 +13,7 @@ import type {
   ConversationHeader,
   ConversationListView,
   ConversationPatch,
+  HomeView,
   NavigatePatch,
   PendingView,
   RowView,
@@ -45,6 +46,7 @@ export interface ViewState {
   connection?: ConnectionView;
   conversationList?: ConversationListView;
   conversation?: ConversationState;
+  home?: HomeView;
   navigate?: NavigatePatch;
   /** 传输层故障：设了就显示固定诊断页（不依赖帧）。 */
   transportFailure?: TransportFailure;
@@ -90,6 +92,9 @@ export function createViewStore(): ViewStore {
         case "conversationList":
           replace(setState, "conversationList", change.value.view);
           break;
+        case "home":
+          replace(setState, "home", change.value.view);
+          break;
         case "navigate":
           setState("navigate", change.value);
           break;
@@ -117,7 +122,7 @@ export function createViewStore(): ViewStore {
   };
 }
 
-type WholeKey = "sidebar" | "pending" | "settings" | "assistant" | "addProject" | "connection" | "conversationList";
+type WholeKey = "sidebar" | "pending" | "settings" | "assistant" | "addProject" | "connection" | "conversationList" | "home";
 
 function replace<K extends WholeKey>(set: SetStoreFunction<ViewState>, key: K, view: ViewState[K]) {
   // 按位置合并：数组里同一位置的对象保留身份，界面上的节点（悬停、动画）不因整份重发而重建。

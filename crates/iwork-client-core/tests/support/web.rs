@@ -24,6 +24,7 @@ pub struct WebState {
     pub notice: Option<String>,
     pub rows: BTreeMap<String, pb::RowView>,
     pub navigate: Option<pb::NavigatePatch>,
+    pub home: Option<pb::HomeView>,
 }
 
 #[derive(Debug, Default)]
@@ -90,6 +91,7 @@ impl Web {
                 C::Connection(p) => s.connection.clone_from(&p.view),
                 C::ConversationList(p) => s.list.clone_from(&p.view),
                 C::Navigate(p) => s.navigate = Some(p.clone()),
+                C::Home(p) => s.home.clone_from(&p.view),
                 C::Conversation(p) => {
                     if p.reset || s.conversation_id.as_deref() != Some(p.conversation_id.as_str()) {
                         s.rows.clear();

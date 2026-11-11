@@ -6,9 +6,10 @@ import { useHost } from "../host";
 import { Spinner } from "../ui/Badge";
 import { Icon } from "../ui/Icon";
 import { Menu, MenuItem, MenuSeparator, MenuTitle, type MenuAnchor } from "../ui/Menu";
+import { modelIntent, type ComposerTarget } from "./target";
 import "./Composer.css";
 
-export function ModelMenu(props: { conversationId: string; menu: ModelMenuView; anchor: MenuAnchor; onClose: () => void }) {
+export function ModelMenu(props: { target: ComposerTarget; menu: ModelMenuView; anchor: MenuAnchor; onClose: () => void }) {
   const host = useHost();
   const [typing, setTyping] = createSignal(false);
   const [modelId, setModelId] = createSignal("");
@@ -16,7 +17,7 @@ export function ModelMenu(props: { conversationId: string; menu: ModelMenuView; 
   const currentEffort = () => props.menu.efforts.find((e) => e.selected)?.value;
   const setModel = (model: string, effort: string | undefined) => {
     props.onClose();
-    void host.act({ case: "setModel", value: { conversationId: props.conversationId, modelId: model, effort } });
+    void host.act(modelIntent(props.target, model, effort));
   };
   return (
     <Menu anchor={props.anchor} onClose={props.onClose} label="运行时与模型">

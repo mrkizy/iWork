@@ -58,6 +58,34 @@ pub fn decide(
                 &c.project_id,
             ));
         }
+        C::SetConversationModel(m) => {
+            let conv = active_conversation(tables, &m.conversation_id)?;
+            d.events.push(ev(E::ConversationModelChanged(
+                pb::ConversationModelChanged {
+                    conversation_id: conv.id.clone(),
+                    model: m.model.clone(),
+                },
+            )));
+        }
+        // 只做对话级（首页新建对话时带上档位）；项目默认档位归 T10。
+        C::SetApprovalMode(m) => {
+            let Some(pb::approval_mode_target::Kind::ConversationId(id)) =
+                m.target.as_ref().and_then(|t| t.kind.as_ref())
+            else {
+                return Err(error(
+                    pb::ErrorCode::Unavailable,
+                    "假后台只支持对话级档位",
+                    false,
+                ));
+            };
+            active_conversation(tables, id)?;
+            d.events
+                .push(ev(E::ApprovalModeChanged(pb::ApprovalModeChanged {
+                    target: m.target.clone(),
+                    mode: Some(m.mode),
+                    cause: pb::ApprovalModeChangeCause::User.into(),
+                })));
+        }
         C::DecideApproval(a) => {
             let approval = tables
                 .approvals

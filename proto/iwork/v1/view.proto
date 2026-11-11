@@ -37,6 +37,8 @@ message ViewChange {
     ConversationListPatch conversation_list = 17;
     // 请网页跳到某个对话（点击系统通知后）。
     NavigatePatch navigate = 18;
+    // 首页（还没有对话时的输入框）。
+    HomePatch home = 19;
   }
 }
 
@@ -46,6 +48,8 @@ message NavigatePatch {
   string conversation_id = 2;
   // 跳到对话里的这一行；空表示停在最新。
   string row_key = 3;
+  // 这次跳转是首页「新建对话并发出首条消息」的收尾：网页清掉这个项目首页的草稿。
+  optional string started_project_id = 4;
 }
 
 // ---------- 通用小件 ----------
@@ -448,6 +452,23 @@ message NoteRow {
 
 // ---------- 全部对话 ----------
 
+message HomePatch {
+  optional HomeView view = 1;
+}
+
+// 首页（画布 01）：对着哪个项目、输入框（和对话里的一样有「运行时 · 模型」与审批档位，值记在 Rust，
+// 发出首条消息时随新对话一起设上）。
+message HomeView {
+  // 首页对着的项目：网页声明了就用它，没声明（或已不在）由 Rust 取侧栏里的第一个；没有项目时为空。
+  string project_id = 1;
+  string project_name = 2;
+  ComposerView composer = 3;
+  // 正在新建对话并发出首条消息：发送按钮转圈。
+  bool starting = 4;
+  // 上一次没能发出去的原因（草稿还在输入框里）；下一次发出时清掉。
+  optional string start_error = 5;
+}
+
 message ConversationListPatch {
   optional ConversationListView view = 1;
 }
@@ -711,6 +732,11 @@ message UiIntent {
     SetModelIntent set_model = 27;
     SwitchDmProjectIntent switch_dm_project = 28;
     SetApprovalModeIntent set_approval_mode = 29;
+    // 首页：新建对话并发出首条消息（建好、设上首页选的模型与档位、发出后跳过去）。
+    StartConversationIntent start_conversation = 30;
+    // 首页的「运行时 · 模型」与档位：记在 Rust，新建对话时带上。
+    HomeModelIntent set_home_model = 31;
+    HomeApprovalModeIntent set_home_approval_mode = 32;
 
     // 卡片
     DecideApprovalIntent decide_approval = 40;
@@ -758,6 +784,13 @@ message SetVisible {
   bool add_project = 6;
   // 「全部对话」列表页：项目与筛选文字。
   optional ConversationListQuery conversation_list = 7;
+  // 首页。
+  optional HomeQuery home = 8;
+}
+
+message HomeQuery {
+  // 路由里带的项目；空表示由 Rust 挑（HomeView.project_id）。
+  string project_id = 1;
 }
 
 message ConversationListQuery {
@@ -825,6 +858,21 @@ message SwitchDmProjectIntent {
   string conversation_id = 1;
   // 空表示切回纯私聊。
   string project_id = 2;
+}
+
+message StartConversationIntent {
+  string project_id = 1;
+  string text = 2;
+}
+
+message HomeModelIntent {
+  string model_id = 1;
+  optional string effort = 2;
+}
+
+message HomeApprovalModeIntent {
+  // ApprovalModeView.options 里的 value。
+  int32 mode = 1;
 }
 
 message SetApprovalModeIntent {

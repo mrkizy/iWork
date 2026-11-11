@@ -26,6 +26,8 @@ export function visibleFor(route: Route) {
     conversationId: route.page === "conversation" ? route.id : undefined,
     assistantId: route.page === "assistant" ? route.id : undefined,
     conversationList: route.page === "allConversations" ? { projectId: route.projectId, filter: "" } : undefined,
+    // 首页对着哪个项目：路由里带了就用，没带由 Rust 挑。
+    home: route.page === "home" ? { projectId: route.projectId ?? "" } : undefined,
   };
 }
 

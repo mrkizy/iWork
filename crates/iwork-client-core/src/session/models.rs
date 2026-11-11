@@ -6,7 +6,7 @@ use iwork_proto::pb;
 use tokio::time::Instant;
 
 use super::{Internal, Session};
-use crate::derive::conversation::open_runtime;
+use crate::derive::conversation::menu_runtime;
 use crate::session::dial::Dialer;
 
 /// 退避表里这种用途的名字。
@@ -17,7 +17,7 @@ impl<D: Dialer> Session<D> {
         if !self.live() || self.backed_off(PURPOSE, now) {
             return;
         }
-        let Some(runtime_id) = open_runtime(&self.store).map(str::to_owned) else {
+        let Some(runtime_id) = menu_runtime(&self.store).map(str::to_owned) else {
             return;
         };
         if !self.store.models.wants(&runtime_id) {

@@ -23,7 +23,7 @@ function setup() {
   const [conv, setConv] = createSignal("c-a");
   render(() => (
     <HostProvider value={host}>
-      <Composer conversationId={conv()} draftKey={conv()} composer={create(ComposerViewSchema, { canSend: true })} />
+      <Composer target={{ kind: "conversation", id: conv() }} draftKey={conv()} composer={create(ComposerViewSchema, { canSend: true })} />
     </HostProvider>
   ));
   const box = () => screen.getByRole("textbox", { name: "消息" }) as HTMLTextAreaElement;

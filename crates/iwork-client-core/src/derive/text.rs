@@ -401,3 +401,13 @@ pub fn full_access_confirm(who: &str) -> pb::ConfirmView {
         for_value: 0,
     }
 }
+
+/// 首页「新建对话并发出首条消息」没成（草稿还在输入框里）。
+pub fn start_error(e: &crate::store::home::StartError) -> String {
+    use crate::store::home::StartError as E;
+    match e {
+        E::Create(why) => format!("没能新建对话：{why}"),
+        E::Send(why) => format!("新对话建好了，但消息没发出去：{why}。可以在侧栏打开它再发"),
+        E::Lost => "重新连接后认不出刚建的对话，消息没发出去。可以在侧栏打开它再发".into(),
+    }
+}

@@ -1,6 +1,6 @@
 // 输入框一带（画布 01、04、10）：发不了时上方一行说明、附件托盘、正文、工具栏（附件、运行时 · 模型、审批档位、发送 / 停止）。
 // 可否发送、说明文字、按钮上的字都来自 ComposerView；这里只有草稿、菜单开合与输入法状态这些本地状态。
-// 首页（还没有对话）没有 ComposerView：只有正文与发送，发出时先新建对话（shell/starter）。
+// 首页和对话里是同一个输入框（ui-m1.md 第 2 节第 9、14 条），只是对着的目标不同（composer/target）。
 import { createEffect, createSignal, For, on, Show } from "solid-js";
 import { BlockAction, Tone, type ComposerView } from "../gen/iwork/v1/view_pb";
 import { useHost } from "../host";
@@ -10,6 +10,7 @@ import { anchorAbove, type MenuAnchor } from "../ui/Menu";
 import { ApprovalModeMenu } from "./ApprovalModeMenu";
 import { getDraft, setDraft } from "./drafts";
 import { ModelMenu } from "./ModelMenu";
+import { sendIntent, type ComposerTarget } from "./target";
 import "./Composer.css";
 import "../rows/rows.css";
 
@@ -17,13 +18,12 @@ import "../rows/rows.css";
 const PICKER_PENDING = "选择文件要接系统的文件选择框，还没接；可以拖入或粘贴";
 
 export interface ComposerProps {
-  /** 没有对话（首页）时为空。 */
-  conversationId?: string;
+  target: ComposerTarget;
   composer?: ComposerView;
-  /** 首页：发出时由调用方新建对话。 */
-  onStart?: (text: string) => void;
-  /** 首页：正在新建对话，发送按钮转圈。 */
+  /** 首页：正在新建对话并发出，发送按钮转圈。 */
   starting?: boolean;
+  /** 首页：上一次没能发出去的原因（草稿还在）。 */
+  startError?: string;
   draftKey: string;
   placeholder?: string;
   /** 输入框上方那一行的出口（「查看详情」「重新定位」）；返回假表示这个出口现在用不了，按钮置灰。 */
@@ -44,21 +44,15 @@ export function Composer(props: ComposerProps) {
 
   const c = () => props.composer;
   const exit = () => props.blockAction?.(c()?.blockAction ?? BlockAction.UNSPECIFIED);
-  const canSend = () => text().trim() !== "" && (c()?.canSend ?? !props.starting);
+  const canSend = () => text().trim() !== "" && (c()?.canSend ?? false) && !props.starting;
   const send = async () => {
     if (!canSend()) return;
     const body = text();
-    if (props.conversationId === undefined) {
-      props.onStart?.(body);
-      edit("");
-      return;
-    }
-    // 受理要等一会儿，期间可能换了对话或接着打字：只清发出的那个对话、且草稿还是发出的那段时才清
     const key = props.draftKey;
-    const ack = await host.act({
-      case: "sendMessage",
-      value: { conversationId: props.conversationId, text: body, attachmentIds: (c()?.tray ?? []).map((a) => a.attachmentId) },
-    });
+    const ack = await host.act(sendIntent(props.target, body, (c()?.tray ?? []).map((a) => a.attachmentId)));
+    // 首页的草稿等 Rust 发出首条消息、跳过去时再清（App 按 NavigatePatch.startedProjectId），没发出去就留着。
+    if (props.target.kind === "home") return;
+    // 受理要等一会儿，期间可能换了对话或接着打字：只清发出的那个对话、且草稿还是发出的那段时才清
     if (ack.error || getDraft(key) !== body) return;
     setDraft(key, "");
     if (props.draftKey === key) setText("");
@@ -69,8 +63,9 @@ export function Composer(props: ComposerProps) {
   };
   const onPaste = async (e: ClipboardEvent) => {
     const files = [...(e.clipboardData?.files ?? [])];
-    const id = props.conversationId;
-    if (files.length === 0 || id === undefined) return;
+    const t = props.target;
+    if (files.length === 0 || t.kind !== "conversation") return;
+    const id = t.id;
     e.preventDefault();
     // 大小检查在 Rust 侧（attach.rs，20MB），超限时输入框上方显示原因
     for (const f of files) {
@@ -101,6 +96,14 @@ export function Composer(props: ComposerProps) {
                 </button>
               )}
             </Show>
+          </div>
+        )}
+      </Show>
+      <Show when={props.startError}>
+        {(err) => (
+          <div class="iw-composer__block iw-composer__block--warning" role="alert">
+            <Icon name="alert" size={14} />
+            <span>{err()}</span>
           </div>
         )}
       </Show>
@@ -146,7 +149,7 @@ export function Composer(props: ComposerProps) {
           <button type="button" class="iw-pill" disabled aria-label="添加附件" data-tip={PICKER_PENDING} data-tip-side="top">
             <Icon name="paperclip" />
           </button>
-          <Show when={props.conversationId !== undefined && c()}>
+          <Show when={c()}>
             {(view) => (
               <>
                 <button
@@ -198,11 +201,11 @@ export function Composer(props: ComposerProps) {
           </Show>
         </div>
       </div>
-      <Show when={menu()?.kind === "model" && props.conversationId !== undefined && c()?.modelMenu}>
-        {(m) => <ModelMenu conversationId={props.conversationId ?? ""} menu={m()} anchor={menu()?.at ?? { x: 0, y: 0 }} onClose={() => setMenu(undefined)} />}
+      <Show when={menu()?.kind === "model" && c()?.modelMenu}>
+        {(m) => <ModelMenu target={props.target} menu={m()} anchor={menu()?.at ?? { x: 0, y: 0 }} onClose={() => setMenu(undefined)} />}
       </Show>
-      <Show when={menu()?.kind === "mode" && props.conversationId !== undefined && c()?.approvalMode}>
-        {(m) => <ApprovalModeMenu conversationId={props.conversationId ?? ""} mode={m()} anchor={menu()?.at ?? { x: 0, y: 0 }} onClose={() => setMenu(undefined)} />}
+      <Show when={menu()?.kind === "mode" && c()?.approvalMode}>
+        {(m) => <ApprovalModeMenu target={props.target} mode={m()} anchor={menu()?.at ?? { x: 0, y: 0 }} onClose={() => setMenu(undefined)} />}
       </Show>
     </div>
   );

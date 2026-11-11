@@ -4,6 +4,7 @@
 //! `set_*` 写入。两者都只往 [`DirtySet`] 记「哪块脏了」，帧在网页来取时才由 `derive` 从当前状态算（方案 2.4）。
 
 pub mod created;
+pub mod home;
 pub mod models;
 pub mod summary;
 pub mod timeline;
@@ -133,11 +134,12 @@ pub enum ViewKey {
     ConversationList,
     Conversation,
     Navigate,
+    Home,
 }
 
 impl ViewKey {
     /// 「全部视图」不含跳转：跳转只在请求时发一次，attach、SetVisible 不重发（审查 1/F-10）。
-    pub const ALL: [ViewKey; 8] = [
+    pub const ALL: [ViewKey; 9] = [
         ViewKey::Sidebar,
         ViewKey::Pending,
         ViewKey::Settings,
@@ -146,6 +148,7 @@ impl ViewKey {
         ViewKey::Connection,
         ViewKey::ConversationList,
         ViewKey::Conversation,
+        ViewKey::Home,
     ];
 }
 
@@ -185,6 +188,8 @@ pub struct Visible {
     pub assistant_id: Option<String>,
     pub add_project: bool,
     pub conversation_list: Option<ListQuery>,
+    /// 首页：路由里带的项目（空串表示由 Rust 挑）。
+    pub home: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -254,8 +259,10 @@ pub struct Store {
     pub quit_requested: bool,
     /// 上一次添加附件被拒的原因（拖入时没有回包可带，放在输入框上方）。
     pub attach_error: Option<String>,
-    /// 最近一次跳转请求（点击系统通知、新建对话后）：(seq, 对话, 行)。
-    pub navigate: Option<(u64, String, String)>,
+    /// 最近一次跳转请求（点击系统通知、新建对话后）。
+    pub navigate: Option<pb::NavigatePatch>,
+    /// 首页：选过的模型与档位、正在进行的「新建并发出」（见 home 模块）。
+    pub home: home::Home,
     /// 本客户端新建的对话：建好就打开（见 created 模块）。
     pub created: created::CreatedWatch,
     /// 各运行时的模型清单（ListModels 附带查询的结果，见 models 模块）。
@@ -352,8 +359,7 @@ impl Store {
     /// 模型清单取到了：输入框的菜单要重算。
     pub fn set_models(&mut self, runtime_id: &str, result: pb::ListModelsResult) {
         self.models.loaded(runtime_id, result);
-        self.dirty.mark(ViewKey::Conversation);
-        self.dirty.conversation.header = true;
+        self.mark_header();
     }
 
     // ---------- 本地视图状态 ----------
@@ -403,8 +409,7 @@ impl Store {
             self.connection = c;
             self.dirty.mark(ViewKey::Connection);
             // 「会发命令的按钮」随连接状态变：输入框在标题栏一带，卡片按钮在行里（derive::row 的 live）。
-            self.dirty.mark(ViewKey::Conversation);
-            self.dirty.conversation.header = true;
+            self.mark_header();
             self.mark_rows(|r| matches!(r, Row::Approval(_) | Row::UserAction(_) | Row::Resume(_)));
         }
     }
@@ -435,15 +440,62 @@ impl Store {
     pub fn set_attach_error(&mut self, e: Option<String>) {
         if self.attach_error != e {
             self.attach_error = e;
-            self.dirty.mark(ViewKey::Conversation);
-            self.dirty.conversation.header = true;
+            self.mark_header();
         }
     }
 
     pub fn request_navigate(&mut self, conversation_id: String, row_key: String) {
-        let seq = self.navigate.as_ref().map_or(1, |n| n.0 + 1);
-        self.navigate = Some((seq, conversation_id, row_key));
+        self.navigate_to(conversation_id, row_key, None);
+    }
+
+    fn navigate_to(&mut self, conversation_id: String, row_key: String, started: Option<String>) {
+        let seq = self.navigate.as_ref().map_or(1, |n| n.seq + 1);
+        self.navigate = Some(pb::NavigatePatch {
+            seq,
+            conversation_id,
+            row_key,
+            started_project_id: started,
+        });
         self.dirty.mark(ViewKey::Navigate);
+    }
+
+    /// 首页的选择（模型、档位）改了。
+    pub fn set_home_choice(&mut self, f: impl FnOnce(&mut home::Home)) {
+        f(&mut self.home);
+        self.dirty.mark(ViewKey::Home);
+    }
+
+    /// 首页开始「新建并发出」。
+    pub fn start_begin(&mut self, project_id: String, text: String) {
+        self.home.begin(project_id, text);
+        self.dirty.mark(ViewKey::Home);
+    }
+
+    /// 首条消息受理了：跳过去，网页据 started_project_id 清掉首页草稿。
+    pub fn start_finished(&mut self) {
+        if let Some(s) = self.home.finish()
+            && let Some(id) = s.conversation_id
+        {
+            self.navigate_to(id, String::new(), Some(s.project_id));
+        }
+        self.dirty.mark(ViewKey::Home);
+    }
+
+    pub fn start_failed(&mut self, why: home::StartError) {
+        self.home.fail(why);
+        self.dirty.mark(ViewKey::Home);
+    }
+
+    /// 新建的对话配上了受理范围：侧栏「新对话」直接打开；首页的记下对话，等会话层发首条消息。
+    fn created_matched(&mut self, conversation_id: String, purpose: created::Purpose) {
+        match purpose {
+            created::Purpose::Open => self.request_navigate(conversation_id, String::new()),
+            created::Purpose::Start => {
+                if let Some(s) = self.home.start.as_mut() {
+                    s.conversation_id = Some(conversation_id);
+                }
+            }
+        }
     }
 
     /// 刚挂上「回到最新」提示：返回真一次，会话层据此开始计时。
@@ -453,15 +505,14 @@ impl Store {
 
     pub fn clear_back_to_latest(&mut self) {
         if self.back_to_latest.take().is_some() {
-            self.dirty.mark(ViewKey::Conversation);
-            self.dirty.conversation.header = true;
+            self.mark_header();
         }
     }
 
     /// 本客户端的 CreateConversation 受理了（seq 范围来自 CommandAccepted）。
-    pub fn create_accepted(&mut self, first: u64, last: u64) {
-        if let Some(id) = self.created.accepted(first, last) {
-            self.request_navigate(id, String::new());
+    pub fn create_accepted(&mut self, first: u64, last: u64, purpose: created::Purpose) {
+        if let Some((id, purpose)) = self.created.accepted(first, last, purpose) {
+            self.created_matched(id, purpose);
         }
     }
 
@@ -533,8 +584,7 @@ impl Store {
                 if let Some(r) = &e.runtime {
                     self.runtimes.insert(r.runtime_id.clone(), r.clone());
                     self.dirty.mark(ViewKey::Settings);
-                    self.dirty.mark(ViewKey::Conversation);
-                    self.dirty.conversation.header = true;
+                    self.mark_header();
                 }
             }
             E::QuotaObserved(e) => {
@@ -580,7 +630,7 @@ impl Store {
                     .as_ref()
                     .and_then(|c| self.created.created(seq, &c.id))
                 {
-                    self.request_navigate(id, String::new());
+                    self.created_matched(id.0, id.1);
                 }
             }
             E::ConversationDeleted(e)
@@ -681,6 +731,13 @@ impl Store {
         if let Some(snapshot) = s.snapshot {
             applied.had_seq = true;
             self.cursor = self.cursor.max(s.snapshot_seq);
+            // 快照盖过的新建：建出它的事件不会再逐条来了，配不上。侧栏「新对话」就不跳（对话在侧栏里）；
+            // 首页那次停下来报原因，不猜哪个是新对话（猜错会把首条消息发进别的对话）。
+            for purpose in self.created.covered_by_snapshot(s.snapshot_seq) {
+                if purpose == created::Purpose::Start && self.home.start.is_some() {
+                    self.start_failed(home::StartError::Lost);
+                }
+            }
             self.snapshot_tables.extend(
                 snapshot
                     .results
@@ -749,8 +806,7 @@ impl Store {
             (_, K::ListConversations(l)) => {
                 self.summary.conversations = l.conversations;
                 self.mark_summary_views();
-                self.dirty.mark(ViewKey::Conversation);
-                self.dirty.conversation.header = true;
+                self.mark_header();
             }
             (_, K::ListAssistants(l)) => {
                 // 助手头像进了消息行（derive::avatar）。
@@ -821,8 +877,7 @@ impl Store {
                     .map(|r| (r.runtime_id.clone(), r))
                     .collect();
                 self.dirty.mark(ViewKey::Settings);
-                self.dirty.mark(ViewKey::Conversation);
-                self.dirty.conversation.header = true;
+                self.mark_header();
             }
             (_, K::GetSettings(s)) => {
                 self.settings = s.global;
@@ -847,7 +902,15 @@ impl Store {
         }
     }
 
+    /// 标题栏与输入框一带要重算。首页的输入框用的是同一组输入（运行时、模型清单、连接、项目、助手），一起标。
+    fn mark_header(&mut self) {
+        self.dirty.mark(ViewKey::Conversation);
+        self.dirty.conversation.header = true;
+        self.dirty.mark(ViewKey::Home);
+    }
+
     fn mark_summary_views(&mut self) {
+        self.dirty.mark(ViewKey::Home);
         self.dirty.mark(ViewKey::Sidebar);
         self.dirty.mark(ViewKey::Pending);
         self.dirty.mark(ViewKey::Assistant);

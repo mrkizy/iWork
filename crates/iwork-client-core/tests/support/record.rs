@@ -76,20 +76,26 @@ impl Puller {
     }
 }
 
-fn visible(conversation: Option<&str>) -> pb::UiIntent {
+/// `home`：这份录像停在首页（场景没有 focus）。有 focus 的录像连上时也不声明首页，免得折叠结果里留着一份
+/// 打开对话后就不再更新的首页视图。
+fn visible(conversation: Option<&str>, home: bool) -> pb::UiIntent {
     pb::UiIntent {
         kind: Some(pb::ui_intent::Kind::SetVisible(pb::SetVisible {
             sidebar: true,
             pending: true,
             settings: true,
             conversation_id: conversation.map(Into::into),
+            // 没有 focus 的录像停在首页（预览页与组件测试的首页靠它）
+            home: home.then(|| pb::HomeQuery {
+                project_id: String::new(),
+            }),
             ..Default::default()
         })),
     }
 }
 
-async fn declare(app: &App, conversation: Option<&str>) -> Result<(), String> {
-    match app.intent(visible(conversation)).await.error {
+async fn declare(app: &App, conversation: Option<&str>, home: bool) -> Result<(), String> {
+    match app.intent(visible(conversation, home)).await.error {
         None => Ok(()),
         Some(e) => Err(format!("SetVisible 被拒：{} {}", e.code, e.message)),
     }
@@ -198,7 +204,7 @@ pub async fn record(s: &Scenario, opts: Options) -> Result<Recording, String> {
         opts,
     );
     let epoch = app.attach().await.map_err(|e| format!("attach：{e:?}"))?;
-    declare(&app, None).await?;
+    declare(&app, None, s.focus.is_none()).await?;
     let mut pump = Pump {
         app: &app,
         puller: Puller::new(epoch),
@@ -212,7 +218,7 @@ pub async fn record(s: &Scenario, opts: Options) -> Result<Recording, String> {
     // 建出 focus 对话，打开它，等它的快照到
     if let Some(focus) = s.focus {
         pump.run(&daemon, before, |_| true).await?;
-        declare(&app, Some(focus)).await?;
+        declare(&app, Some(focus), false).await?;
         pump.run(&daemon, Vec::new(), |seen| seen.conversation_opened)
             .await?;
     }

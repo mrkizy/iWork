@@ -155,3 +155,234 @@ async fn model_catalog_failure_notice_clears_once_it_loads() {
     .await;
     until(&app, &mut web, "提示清掉", |s| notice(s).is_none()).await;
 }
+
+// ---------- 首页：新建对话并发出首条消息（审查 2a 1/F-3、F-9） ----------
+
+async fn home(app: &App, project: &str) {
+    let ack = app
+        .intent(pb::UiIntent {
+            kind: Some(I::SetVisible(pb::SetVisible {
+                sidebar: true,
+                home: Some(pb::HomeQuery {
+                    project_id: project.into(),
+                }),
+                ..Default::default()
+            })),
+        })
+        .await;
+    assert_eq!(ack.error, None);
+}
+
+async fn act(app: &App, kind: I) -> pb::IntentAck {
+    app.intent(pb::UiIntent { kind: Some(kind) }).await
+}
+
+fn start_intent(text: &str) -> I {
+    I::StartConversation(pb::StartConversationIntent {
+        project_id: iwork_fake_daemon::scenario::PROJECT.into(),
+        text: text.into(),
+    })
+}
+
+/// 假后台里每个对话收到的用户消息正文。
+fn messages_by_conversation(d: &FakeDaemon) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    d.mutate_tables(|t| {
+        out = t
+            .conversations
+            .iter()
+            .map(|(id, row)| {
+                let texts = row
+                    .messages
+                    .iter()
+                    .filter_map(|m| match m.body.as_ref()?.content.as_ref()? {
+                        pb::message_body::Content::InlineText(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                (id.clone(), texts)
+            })
+            .filter(|(_, v): &(String, Vec<String>)| !v.is_empty())
+            .collect();
+    });
+    out
+}
+
+async fn live(app: &App, web: &mut Web) {
+    until(app, web, "连上", |s| {
+        s.connection
+            .as_ref()
+            .is_some_and(|c| c.state == pb::ConnectionState::Live as i32)
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn home_start_creates_sets_choices_sends_and_navigates() {
+    let (d, app, mut web, _dir) = start("empty").await;
+    home(&app, "").await;
+    live(&app, &mut web).await;
+    // 没声明项目：Rust 挑侧栏第一个；首页的输入框有模型菜单与档位
+    until(&app, &mut web, "首页带输入框与模型清单", |s| {
+        s.home.as_ref().is_some_and(|h| {
+            h.composer
+                .as_ref()
+                .and_then(|c| c.model_menu.as_ref())
+                .is_some_and(|m| !m.models.is_empty())
+        })
+    })
+    .await;
+    let h = web.state.home.clone().unwrap();
+    assert_eq!(h.project_id, iwork_fake_daemon::scenario::PROJECT);
+    assert_eq!(h.project_name, "demo");
+    let c = h.composer.unwrap();
+    assert!(c.can_send && !c.runtime_locked);
+    assert_eq!(
+        c.approval_mode.unwrap().current,
+        pb::ApprovalMode::Manual as i32,
+        "没选过：项目默认"
+    );
+
+    // 首页选模型与档位：记在 Rust，视图跟着变
+    let ack = act(
+        &app,
+        I::SetHomeModel(pb::HomeModelIntent {
+            model_id: "fake-small".into(),
+            effort: None,
+        }),
+    )
+    .await;
+    assert_eq!(ack.error, None);
+    let ack = act(
+        &app,
+        I::SetHomeApprovalMode(pb::HomeApprovalModeIntent {
+            mode: pb::ApprovalMode::Auto as i32,
+        }),
+    )
+    .await;
+    assert_eq!(ack.error, None);
+    until(&app, &mut web, "首页显示选过的值", |s| {
+        s.home
+            .as_ref()
+            .and_then(|h| h.composer.as_ref())
+            .is_some_and(|c| {
+                c.runtime_model_label.contains("Fake Small")
+                    || c.runtime_model_label.contains("fake-small")
+            })
+    })
+    .await;
+
+    assert_eq!(act(&app, start_intent("第一条")).await.error, None);
+    until(&app, &mut web, "发出后跳过去", |s| {
+        s.navigate
+            .as_ref()
+            .is_some_and(|n| n.started_project_id.is_some())
+    })
+    .await;
+    let nav = web.state.navigate.clone().unwrap();
+    assert_eq!(
+        nav.started_project_id.as_deref(),
+        Some(iwork_fake_daemon::scenario::PROJECT)
+    );
+    assert_eq!(
+        messages_by_conversation(&d),
+        vec![(nav.conversation_id.clone(), vec!["第一条".to_owned()])],
+        "首条消息发进了新建的对话"
+    );
+    let mut conv = None;
+    d.mutate_tables(|t| conv = t.conversations.get(&nav.conversation_id).cloned());
+    let conv = conv.unwrap().conversation;
+    assert_eq!(
+        conv.model_override.map(|m| m.model_id).as_deref(),
+        Some("fake-small")
+    );
+    assert_eq!(conv.approval_mode, Some(pb::ApprovalMode::Auto as i32));
+    until(&app, &mut web, "首页回到默认、不再转圈", |s| {
+        s.home.as_ref().is_some_and(|h| {
+            !h.starting
+                && h.composer
+                    .as_ref()
+                    .and_then(|c| c.approval_mode.as_ref())
+                    .is_some_and(|m| m.current == pb::ApprovalMode::Manual as i32)
+        })
+    })
+    .await;
+}
+
+/// 原来由网页编排时，任何跳转都会把草稿发出去。现在只有配上这次受理范围的对话才收到首条消息。
+#[tokio::test(flavor = "multi_thread")]
+async fn home_start_ignores_other_navigation() {
+    let (d, app, mut web, _dir) = start("empty").await;
+    home(&app, "").await;
+    live(&app, &mut web).await;
+    // 侧栏「新对话」与首页发出同时进行：前者先跳
+    let open = act(
+        &app,
+        I::CreateConversation(pb::CreateConversationIntent {
+            project_id: iwork_fake_daemon::scenario::PROJECT.into(),
+        }),
+    );
+    let started = act(&app, start_intent("只发给新建的那个"));
+    let (a, b) = tokio::join!(open, started);
+    assert_eq!((a.error, b.error), (None, None));
+    until(&app, &mut web, "首页那次收尾", |s| {
+        s.navigate
+            .as_ref()
+            .is_some_and(|n| n.started_project_id.is_some())
+    })
+    .await;
+    let target = web.state.navigate.clone().unwrap().conversation_id;
+    let mut all = Vec::new();
+    d.mutate_tables(|t| all = t.conversations.keys().cloned().collect());
+    let created: Vec<_> = all
+        .iter()
+        .filter(|id| **id != iwork_fake_daemon::scenario::IWORK_DM)
+        .collect();
+    assert_eq!(created.len(), 2, "对照：确实建了两个对话");
+    assert_eq!(
+        messages_by_conversation(&d),
+        vec![(target, vec!["只发给新建的那个".to_owned()])]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn home_start_rejected_keeps_draft_and_reports() {
+    let (d, app, mut web, _dir) = start("empty").await;
+    home(&app, "").await;
+    live(&app, &mut web).await;
+    until(&app, &mut web, "首页", |s| {
+        s.home.as_ref().is_some_and(|h| !h.project_id.is_empty())
+    })
+    .await;
+    // 客户端还认这个项目，后台已经没有了：新建被拒
+    d.mutate_tables(|t| {
+        t.projects.clear();
+    });
+    assert_eq!(act(&app, start_intent("发不出去")).await.error, None);
+    until(&app, &mut web, "报出原因、不再转圈", |s| {
+        s.home
+            .as_ref()
+            .is_some_and(|h| !h.starting && h.start_error.is_some())
+    })
+    .await;
+    assert!(
+        web.state
+            .home
+            .as_ref()
+            .unwrap()
+            .start_error
+            .as_deref()
+            .unwrap()
+            .starts_with("没能新建对话")
+    );
+    assert!(
+        web.state
+            .navigate
+            .as_ref()
+            .is_none_or(|n| n.started_project_id.is_none()),
+        "没有收尾跳转：网页不清草稿"
+    );
+    assert_eq!(messages_by_conversation(&d), vec![]);
+    // 一次只能有一个在发：失败之后可以再发
+    assert_eq!(act(&app, start_intent("再试")).await.error, None);
+}

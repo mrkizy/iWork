@@ -7,9 +7,10 @@ import { useHost } from "../host";
 import { ConfirmDialog } from "../ui/Dialog";
 import { Icon } from "../ui/Icon";
 import { Menu, MenuItem, MenuTitle, type MenuAnchor } from "../ui/Menu";
+import { modeIntent, type ComposerTarget } from "./target";
 import "./Composer.css";
 
-export function ApprovalModeMenu(props: { conversationId: string; mode: ApprovalModeView; anchor: MenuAnchor; onClose: () => void }) {
+export function ApprovalModeMenu(props: { target: ComposerTarget; mode: ApprovalModeView; anchor: MenuAnchor; onClose: () => void }) {
   const host = useHost();
   const [confirming, setConfirming] = createSignal<{ value: number; confirm: ConfirmView }>();
   const choose = (value: number) => {
@@ -17,7 +18,7 @@ export function ApprovalModeMenu(props: { conversationId: string; mode: Approval
     const c = props.mode.fullAccessConfirm;
     if (c !== undefined && c.forValue === value) return setConfirming({ value, confirm: c });
     props.onClose();
-    void host.act({ case: "setApprovalMode", value: { conversationId: props.conversationId, mode: value } });
+    void host.act(modeIntent(props.target, value));
   };
   return (
     <Show
@@ -59,7 +60,7 @@ export function ApprovalModeMenu(props: { conversationId: string; mode: Approval
             const value = c().value;
             setConfirming(undefined);
             props.onClose();
-            void host.act({ case: "setApprovalMode", value: { conversationId: props.conversationId, mode: value } });
+            void host.act(modeIntent(props.target, value));
           }}
         >
           <p class="iw-mode-confirm__body">{c().confirm.body}</p>
