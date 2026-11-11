@@ -228,7 +228,7 @@
 
 ### 7.2 N1 macOS 登录自启：SMAppService 与 LaunchAgent 退路
 
-脚本 `tools/t0/iwork-t04-macos-smappservice.sh` + `iwork-t04-smprobe.m`（一个二进制两种用法：host 调 register/unregister/status，agent 被 launchd 起）。探针在 sleep 模式下每 0.2 秒重读模式文件，模式一变就由正在跑的实例自己结束，不用 `kickstart -k` 换实例。所以「再拉」只数 launchd 的重启。输出 `tools/t0/out/t04-smappservice/`。
+当时的脚本是 `iwork-t04-macos-smappservice.sh` + `iwork-t04-smprobe.m`（一个二进制两种用法：host 调 register/unregister/status，agent 被 launchd 起），本表是它的结果。产品负责人 2026-11-11 定 macOS 只走 LaunchAgent 之后，SMAppService 的实测部分已从脚本里删掉，脚本改名为 `iwork-t04-macos-launchagent.sh` + `iwork-t04-launchprobe.m`，只测 LaunchAgent，用固定的 label 与包路径（重跑复用同一条后台项目记录），输出在 `tools/t0/out/t04-launchagent/`，结果见本节末尾。探针在 sleep 模式下每 0.2 秒重读模式文件，模式一变就由正在跑的实例自己结束，不用 `kickstart -k` 换实例。所以「再拉」只数 launchd 的重启。当时的输出在 `tools/t0/out/t04-smappservice/`。
 
 | 项 | 结果 |
 | --- | --- |
@@ -241,6 +241,8 @@
 | 9 挪动 .app | `launchctl print` 显示的是包内相对路径（`program identifier = Contents/MacOS/agent`）。挪了位置后，`status` 仍是 `Enabled`，kill 之后照样被拉起（smd 跟着包走）；从新位置 `unregister` 正常 |
 | 10 BundleProgram 与 Program | plist 用 `BundleProgram`、`launchctl bootstrap gui/<uid>`：不管 plist 放在 `~/Library/LaunchAgents` 还是临时目录，链接器签名、ad-hoc 签名、自签证书签名，**都报 rc=5（Input/output error）**。只把这个键换成 `Program`（包内程序的绝对路径），每一格都 rc=0、能起来。结论：`BundleProgram` 只在 plist 放在包里、经 SMAppService 注册时才认（T09 通知探针的观察成立）。例外是链接器签名 + `~/Library/LaunchAgents` 那一格，两轮都报「写入后自己加载=yes」：刚被 SMAppService 注销的同名任务又被 smd 提交了一次，所以 bootstrap 报 5，这一格不算数 |
 | 退路写入 plist | 写进 `~/Library/LaunchAgents` 后系统不会自己加载，要 `bootstrap`。用 `Program` 时三种签名都能起来（自签证书的包走这条路也正常，只有经 SMAppService 时停在 `spawn scheduled`） |
+
+**删掉 SMAppService 之后的复测**（`iwork-t04-macos-launchagent.sh`，固定 label 与包路径，输出 `tools/t0/out/t04-launchagent/`，全程无弹框）：第 10 节三种签名 × 两处 plist 位置，`BundleProgram` 一律 rc=5、`Program` 一律起得来，这一轮没有「写入后自己加载」的格子（上表那一格确是 SMAppService 的残留）；第 5–7 步与 N3 第 3 项结果同上表（`SuccessfulExit=false` 下 exit 0 不拉，其余在 10.0–10.2 秒后再拉；`Crashed=true` 只拉 SIGSEGV、abort；实例自己 bootout 不返回、随即收到 SIGTERM；别的进程 bootout 后实例结束，这一轮日志里没记到 SIGTERM 那一行）。
 
 结论：**无证书的包（M1 实际的发布形态）上 SMAppService 用不了**，按 Q3 走退路：`~/Library/LaunchAgents/<label>.plist` + `launchctl bootstrap` / `bootout`，plist 用 `Program = <包内 iwork-daemon 的绝对路径>`，不能用 `BundleProgram`。方案 2.12 关于注册、注销的假设（注册立刻起实例、注销结束正在跑的实例）两条路都成立，对齐表不用改。
 
@@ -286,5 +288,5 @@
 
 两种操作会在用户的屏幕上弹框，无人值守的脚本里都不能出现：
 
-- **临时钥匙串自动上锁**：`security create-keychain` 建的钥匙串默认 `lock-on-sleep timeout=300s`。脚本开头解锁后，几分钟后才签名的话，codesign 会弹框找人要钥匙串密码。现在的做法是：建好后 `security set-keychain-settings "$KC"`（不带 `-l`、`-t`，实测变成 `no-timeout`），每次签名前再 `security unlock-keychain`，签名都带 `--keychain`。所有签名脚本也加了 `trap 'exit 143' TERM INT`：被 timeout 掐断时也走 cleanup、删掉钥匙串。
+- **临时钥匙串自动上锁**：`security create-keychain` 建的钥匙串默认 `lock-on-sleep timeout=300s`。脚本开头解锁后，几分钟后才签名的话，codesign 会弹框找人要钥匙串密码。现在的做法是：建好后 `security set-keychain-settings "$KC"`（不带 `-l`、`-t`，实测变成 `no-timeout`），每次签名前再 `security unlock-keychain`，签名都带 `--keychain`。被 timeout 掐断时照样走 cleanup 删掉钥匙串（bash 3.2 收到 TERM、INT 也会跑 EXIT trap，实测）。
 - **`sfltool dumpbtm`**：读后台项目数据库要管理员授权，会弹 SecurityAgent 授权框（用 CGWindowList 抓到了屏幕上的对话框）。脚本里不再调用。

@@ -20,9 +20,7 @@ cleanup() {
   security delete-keychain "$KC" 2>/dev/null || true
   rm -rf "$WORK"
 }
-trap cleanup EXIT
-# 被 timeout 或 Ctrl-C 结束时也走 EXIT，删掉临时钥匙串
-trap 'exit 143' TERM INT
+trap cleanup EXIT  # bash 3.2 收到 TERM、INT 也会跑 EXIT trap（实测），被 timeout 掐断时照样清理
 rm -rf "$OUT"; mkdir -p "$OUT"
 SUMMARY="$OUT/summary.txt"
 note() { echo "$*" | tee -a "$SUMMARY"; }

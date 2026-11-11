@@ -1,19 +1,16 @@
-// iWork T04 N1（方案第 8 节）的 SMAppService / launchd 探针。由 iwork-t04-macos-smappservice.sh 编译，
-// 同一个二进制在包里放两份：host（调 register / unregister / status）与 agent（被 launchd 起的那个）。
+// iWork T04 N1（方案第 8 节）的 launchd 探针。由 iwork-t04-macos-launchagent.sh 编译，放在测试包的 Contents/MacOS/agent。
+// （SMAppService 那部分的实测已删掉：macOS 只走 LaunchAgent，当时的结论在 t0-findings 7.2。）
 //
-//   smprobe host register|unregister|status <plistName>
-//   smprobe agent --service          launchd 起的实例。每次启动往 $T04_LOG 追加一行「start pid 参数 时间」，
+//   launchprobe --service             launchd 起的实例。每次启动往 $T04_LOG 追加一行「start pid 参数 时间」，
 //                                    再按 $T04_MODE 文件第一行决定做什么；sleep 期间每 0.2 秒重读，变了就照新模式做：
 //     sleep             一直睡；收到 SIGTERM 记一行再按默认动作结束
 //     exit N            以 N 退出
 //     signal N          对自己发信号 N（9 KILL、15 TERM、11 SEGV）
 //     abort             abort()
 //     lock PATH         对 PATH 阻塞 flock，拿到后记一行，接着轮询
-//     unregister NAME   自己调 SMAppService unregister，记返回与之后每 0.2 秒的存活
 //     cmd SHELL...      system(SHELL)，记返回与之后每 0.2 秒的存活（退路的 launchctl bootout 用）
 //     exec              exec 自己一次（参数加 --execd），新映像照常读 mode（N3 第 3 项）
 #import <Foundation/Foundation.h>
-#import <ServiceManagement/ServiceManagement.h>
 #include <fcntl.h>
 #include <mach-o/dyld.h>
 #include <signal.h>
@@ -49,29 +46,6 @@ static void on_term(int sig) {
   raise(sig);
 }
 
-static const char *status_name(SMAppServiceStatus s) {
-  switch (s) {
-    case SMAppServiceStatusNotRegistered: return "NotRegistered";
-    case SMAppServiceStatusEnabled: return "Enabled";
-    case SMAppServiceStatusRequiresApproval: return "RequiresApproval";
-    case SMAppServiceStatusNotFound: return "NotFound";
-  }
-  return "?";
-}
-
-static int host(const char *op, const char *plist) {
-  SMAppService *svc = [SMAppService agentServiceWithPlistName:[NSString stringWithUTF8String:plist]];
-  NSError *err = nil;
-  BOOL ok = YES;
-  if (!strcmp(op, "register")) ok = [svc registerAndReturnError:&err];
-  else if (!strcmp(op, "unregister")) ok = [svc unregisterAndReturnError:&err];
-  else if (strcmp(op, "status")) return 2;
-  printf("op=%s ok=%d status=%s", op, ok, status_name(svc.status));
-  if (err) printf(" error_domain=%s error_code=%ld error=%s", err.domain.UTF8String, (long)err.code, err.localizedDescription.UTF8String);
-  printf("\n");
-  return ok ? 0 : 1;
-}
-
 static void sleep_forever(void) {
   for (;;) pause();
 }
@@ -99,16 +73,6 @@ static void act(const char *mode) {
     flock(fd, LOCK_EX);
     logline("got lock");
     return; /* 拿到锁后回到轮询，模式再变时照常行动（锁一直握着，进程不退） */
-  }
-  if (sscanf(mode, "unregister %199s", arg) == 1) {
-    logline("calling unregister");
-    SMAppService *svc = [SMAppService agentServiceWithPlistName:[NSString stringWithUTF8String:arg]];
-    NSError *err = nil;
-    BOOL ok = [svc unregisterAndReturnError:&err];
-    char r[400]; snprintf(r, sizeof r, "unregister returned ok=%d code=%ld", ok, (long)err.code); logline(r);
-    for (int i = 0; i < 100; i++) { usleep(200000); char a[64]; snprintf(a, sizeof a, "alive %d", i); logline(a); }
-    logline("exiting 0 after unregister");
-    exit(0);
   }
   if (!strncmp(mode, "cmd ", 4)) {
     logline("calling cmd");
@@ -157,9 +121,8 @@ static int agent(int argc, char **argv) {
 
 int main(int argc, char **argv) {
   @autoreleasepool {
-    if (argc >= 4 && !strcmp(argv[1], "host")) return host(argv[2], argv[3]);
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--service")) return agent(argc, argv);
-    fprintf(stderr, "usage: smprobe host register|unregister|status <plist> | smprobe --service\n");
+    fprintf(stderr, "usage: launchprobe --service\n");
     return 2;
   }
 }

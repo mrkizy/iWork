@@ -36,9 +36,7 @@ cleanup() {
   [ -d "$OUT" ] && find "$OUT" -type f -exec sed -i '' -e "s#$WORK#<work>#g" -e "s#$HOME#<home>#g" {} +
   rm -rf "$WORK"
 }
-trap cleanup EXIT
-# 被 timeout 或 Ctrl-C 结束时也走 EXIT，删掉临时钥匙串
-trap 'exit 143' TERM INT
+trap cleanup EXIT  # bash 3.2 收到 TERM、INT 也会跑 EXIT trap（实测），被 timeout 掐断时照样清理
 
 for f in "$BUILT_APP" "$BUILT_CLIENT" "$BUILT_DAEMON"; do
   [ -e "$f" ] || { echo "缺构建产物：${f}（先跑文件头里的构建命令）" >&2; exit 2; }
