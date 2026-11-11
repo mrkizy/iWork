@@ -10,7 +10,7 @@
 - **推送**：main 推送已获同意（最近一次推到 `9cfb4ae`，之后的本地提交未推）；任务分支推送跑 CI 已获同意。gh 已登录，CI 日志 `gh run view <id> --repo mrkizy/iWork --log-failed`。
 - **重测试排队**：`lockf /tmp/iwork-heavy-test.lock <命令>`（AGENTS.md）。本机先 `export PATH=$HOME/.cargo/bin:$PATH`（Homebrew 的旧 cargo 在前）。派活消息里写明。
 - **性能验收**：mac120（`ssh mac120`，Apple M1 8 核，rustup 1.99.1，仓库 `~/work/iWork`）夜间空闲时段测；Kaspersky 不排除、作客观因素记录（T11 卡）。开发机基准只作粗筛。
-- **UI/UX 问题**：按 AGENTS.md 问「设计窗口」；产品负责人负责转问——把问题列给他。设计窗口答复写在 `docs/design/ui-m1.md` 第 2a 节等，只留工作区不提交。
+- **UI/UX 问题**：按 AGENTS.md 问「设计窗口」；产品负责人负责转问——把问题列给他。设计窗口答复写在 `docs/design/ui-m1.md` 第 2a 节、画布、`design-system/`，改完由 supervisor 核对后提交（产品负责人 2026-11-11 改定；第一批 `8f5844a`）。
 - **使用范围**：M1–M9 只有产品负责人本人使用（技术设计第 1 节）。
 - 产品负责人工作区里未提交的改动：需求 v1.75（FR18 对话标题）、AGENTS.md（设计窗口一节、v1.75）、`docs/design/ui-m1.md`、`docs/design/ui/*`。技术设计 9.0a 已随 `182f71b` 提交（已告知，他没要求拆）。
 
