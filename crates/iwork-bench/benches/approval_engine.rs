@@ -91,6 +91,15 @@ impl AgentSession for NoSession {
     fn runtime_session_id(&self) -> Option<&str> {
         None
     }
+    fn permission_wait_limit(&self) -> Option<Duration> {
+        None
+    }
+    fn sandbox(&self) -> iwork_ports::agent::SandboxStatus {
+        iwork_ports::agent::SandboxStatus::Enforced
+    }
+    async fn terminate(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
     async fn prompt(&self, _b: Vec<ContentBlock>) -> Result<NoUpdates, AgentError> {
         unimplemented!()
     }
@@ -441,6 +450,7 @@ fn req(cmd: &str) -> PermissionRequest {
         raw_input: RawToolInput(serde_json::json!({ "command": cmd }).to_string()),
         bypass_sandbox: false,
         updates_before: 0,
+        cwd: None,
     }
 }
 

@@ -102,6 +102,8 @@ pub fn spec(cwd: &Path) -> SessionSpec {
             enabled_groups: BTreeSet::from([ToolGroup::ReadAndSearch, ToolGroup::RunCommands]),
             include_always_on: true,
         },
+        disabled_tools: Vec::new(),
+        plugin_dirs: Vec::new(),
         resume: None,
         kind: TurnKind::Assistant,
     }

@@ -2814,6 +2814,7 @@ dependencies = [
  "iwork-proto",
  "libc",
  "prost",
+ "prost-types",
  "serde_json",
  "sysinfo",
  "tokio",
@@ -2863,6 +2864,12 @@ dependencies = [
 [[package]]
 name = "iwork-claude-hook"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "iwork-client"
@@ -2934,11 +2941,15 @@ name = "iwork-fake-agent"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "base64 0.22.1",
  "futures",
  "iwork-agent-acp",
  "iwork-core",
  "iwork-domain",
  "iwork-ports",
+ "iwork-proto",
+ "prost",
+ "prost-types",
  "serde",
  "serde_json",
  "sysinfo",

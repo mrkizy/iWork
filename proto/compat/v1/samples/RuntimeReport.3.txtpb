@@ -1,0 +1,17 @@
+quota {
+  windows: [{
+    window: "five_hour"
+    used_pct: 42
+    resets_at {
+      seconds: 1731300000
+      nanos: 123000000
+    }
+  }, {
+    window: "seven_day"
+    used_pct: 7
+    resets_at {
+      seconds: 1731800000
+      nanos: 123000000
+    }
+  }]
+}

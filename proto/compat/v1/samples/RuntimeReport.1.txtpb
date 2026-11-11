@@ -1,0 +1,4 @@
+model {
+  model_id: "claude-opus-4-1"
+  effort: "max"
+}

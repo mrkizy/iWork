@@ -168,7 +168,8 @@ def main():
         s = json.loads(st.stdout)
         log(f"V3: auth status 退出码={st.returncode} loggedIn={s.get('loggedIn')} authMethod={s.get('authMethod')}（其余字段不记录）")
     except Exception:
-        log(f"V3: auth status 退出码={st.returncode}，输出不是 JSON：{scrub(st.stdout[:200])!r} {scrub(st.stderr[:200])!r}")
+        # 原文可能带邮箱等账号信息，不得落盘：只记长度（AGENTS.md 安全不变量）
+        log(f"V3: auth status 退出码={st.returncode}，输出不是 JSON（stdout {len(st.stdout)} 字节、stderr {len(st.stderr)} 字节，内容不记录）")
     v3 = run("V3", ["--settings", settings], env={"CLAUDE_CONFIG_DIR": cfg}, cwd=work); describe("V3", v3)
     log(f"V3: 临时配置目录里生成的文件：{sorted(os.listdir(cfg))[:20]}")
     shutil.rmtree(cfg, ignore_errors=True)

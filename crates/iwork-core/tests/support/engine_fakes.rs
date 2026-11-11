@@ -350,6 +350,15 @@ impl AgentSession for FakeReviewSession {
     fn runtime_session_id(&self) -> Option<&str> {
         None
     }
+    fn permission_wait_limit(&self) -> Option<Duration> {
+        None
+    }
+    fn sandbox(&self) -> iwork_ports::agent::SandboxStatus {
+        iwork_ports::agent::SandboxStatus::Enforced
+    }
+    async fn terminate(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
     async fn prompt(&self, b: Vec<ContentBlock>) -> Result<FakeReviewUpdates, AgentError> {
         self.1.lock().unwrap().push(b);
         self.2.lock().unwrap().push("prompt");

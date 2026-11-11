@@ -1,0 +1,16 @@
+{
+  "quota": {
+    "windows": [
+      {
+        "window": "five_hour",
+        "usedPct": 42,
+        "resetsAt": "2024-11-11T04:40:00.123Z"
+      },
+      {
+        "window": "seven_day",
+        "usedPct": 7,
+        "resetsAt": "2024-11-16T23:33:20.123Z"
+      }
+    ]
+  }
+}
