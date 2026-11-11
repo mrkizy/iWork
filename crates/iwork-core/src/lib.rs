@@ -7,4 +7,5 @@
 
 pub mod approval;
 pub mod project_identity;
+pub mod recovery;
 pub mod turn;

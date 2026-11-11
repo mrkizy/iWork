@@ -1,0 +1,3 @@
+2026-11-11T07:10:07.556085Z  INFO iwork.ipc.audit: event="manifest_loaded" path=/w/inst-hs/iwork-manifest.json app_version=0.1.0 entries=1 self_listed=true
+self signer=sha256:828c060d exe_dir=/w/inst-hs manifest=app_version=0.1.0 entries=1
+listening

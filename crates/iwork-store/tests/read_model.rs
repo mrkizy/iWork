@@ -422,3 +422,135 @@ fn conversations_filter_and_order_by_update() {
     );
     assert_eq!(ids(None).len(), 3);
 }
+
+/// T04 方案 2.5：上次运行没收尾的东西。各状态各放一条，只返回该返回的；流式消息的正文是检查点内容。
+#[test]
+fn unsettled_returns_only_in_flight() {
+    use iwork_domain::approval::VoidReason;
+    use iwork_domain::user_action::ExitStatus;
+
+    let (_env, store) = setup(); // 回合 20 是 Queued
+    let turn_in = |n: u128, state: TurnState| {
+        let mut t = turn(n, 10);
+        t.state = state;
+        t
+    };
+    let card_in = |n: u128, state: UserActionState| {
+        let mut c = card(n, 20, 10);
+        c.state = state;
+        c
+    };
+    let mut done_msg = assistant_message(32, 10, 21);
+    done_msg.status = MessageStatus::Completed;
+    let mut events: Vec<DomainEvent> = vec![
+        TurnQueued {
+            turn: turn_in(21, TurnState::Running),
+        }
+        .into(),
+        TurnQueued {
+            turn: turn_in(22, TurnState::WaitingApproval),
+        }
+        .into(),
+        TurnQueued {
+            turn: turn_in(23, TurnState::Cancelling),
+        }
+        .into(),
+        TurnQueued {
+            turn: turn_in(
+                24,
+                TurnState::Interrupted {
+                    reason: InterruptReason::Crash,
+                },
+            ),
+        }
+        .into(),
+        TurnQueued {
+            turn: turn_in(25, TurnState::Completed),
+        }
+        .into(),
+        TurnQueued {
+            turn: turn_in(26, TurnState::Cancelled),
+        }
+        .into(),
+        TurnQueued {
+            turn: turn_in(27, TurnState::Failed),
+        }
+        .into(),
+        // 回合 21 名下一条在流的、一条已结束的；已结束回合 25 名下一条（数据不一致也不算）
+        MessageAppended {
+            message: assistant_message(30, 10, 21),
+        }
+        .into(),
+        MessageAppended { message: done_msg }.into(),
+        MessageAppended {
+            message: assistant_message(31, 10, 25),
+        }
+        .into(),
+        MessageAppended {
+            message: assistant_message(33, 10, 22),
+        }
+        .into(),
+    ];
+    let cards = [
+        card_in(50, UserActionState::Pending),
+        card_in(51, UserActionState::Starting),
+        card_in(52, UserActionState::Executing),
+        card_in(53, UserActionState::Stopping),
+        card_in(
+            54,
+            UserActionState::Done {
+                exit: ExitStatus::Code(0),
+            },
+        ),
+        card_in(55, UserActionState::Failed { error: "e".into() }),
+        card_in(56, UserActionState::Unknown { error: "u".into() }),
+        card_in(57, UserActionState::Ended),
+        card_in(58, UserActionState::Dismissed),
+        card_in(
+            59,
+            UserActionState::Voided {
+                reason: VoidReason::TurnCancelled,
+            },
+        ),
+    ];
+    events.extend(
+        cards
+            .iter()
+            .map(|c| UserActionProposed { card: c.clone() }.into()),
+    );
+    block(store.commit(cmd(2, events))).unwrap();
+    block(store.checkpoint_message(mid(30), 7, "partial")).unwrap();
+
+    let u = block(read_model(&store).unsettled()).unwrap();
+    let turn_ids: Vec<_> = u.turns.iter().map(|t| t.id).collect();
+    assert_eq!(
+        turn_ids,
+        vec![tid(21), tid(22), tid(23)],
+        "只有持有进程的三种"
+    );
+    let msg_ids: Vec<_> = u.streaming.iter().map(|m| m.id).collect();
+    assert_eq!(msg_ids, vec![mid(30), mid(33)], "这些回合名下还在流的");
+    assert_eq!(u.streaming[0].body, MessageBody::Inline("partial".into()));
+    assert_eq!(
+        u.streaming[1].body,
+        MessageBody::Inline(String::new()),
+        "没有检查点：空串"
+    );
+    let card_ids: Vec<_> = u.cards.iter().map(|c| c.id).collect();
+    assert_eq!(
+        card_ids,
+        vec![uaid(51), uaid(52), uaid(53)],
+        "启动中、执行中、停止中"
+    );
+}
+
+/// 对照：什么都没收尾时是空的。
+#[test]
+fn unsettled_is_empty_when_nothing_in_flight() {
+    let (_env, store) = setup();
+    let u = block(read_model(&store).unsettled()).unwrap();
+    assert!(
+        u.turns.is_empty() && u.streaming.is_empty() && u.cards.is_empty(),
+        "{u:?}"
+    );
+}

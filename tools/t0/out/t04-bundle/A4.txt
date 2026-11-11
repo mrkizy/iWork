@@ -1,0 +1,8 @@
+== codesign --verify --deep --strict A
+<work>/A/iWork.app: code has no resources but signature indicates they must be present
+== spctl --assess --type exec A
+<work>/A/iWork.app: code has no resources but signature indicates they must be present
+== 带隔离标记：spctl --assess --type exec
+<work>/Aq.app: code has no resources but signature indicates they must be present
+== 带隔离标记：命令行直接起主程序（不经 LaunchServices）
+alive

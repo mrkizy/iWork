@@ -1,0 +1,19 @@
+# T04 N4 systemd 用户单元  2026-11-11 08:04:35
+Linux 7.0.11-orbstack-00360-gc9bc4d96ac70 aarch64；systemd 255 (255.4-1ubuntu8.18)
+## enable --now
+  2 秒内起的实例数：1；状态：active
+  exit 0：14 秒内启动 1 次（含 restart 那一次）；再拉=否；结束到再拉 -s；Result=success ExecMainCode=1 ExecMainStatus=0 
+  exit 12：14 秒内启动 2 次（含 restart 那一次）；再拉=是；结束到再拉 10.3s；Result=exit-code ExecMainCode=1 ExecMainStatus=12 
+  exit 20：14 秒内启动 2 次（含 restart 那一次）；再拉=是；结束到再拉 10.1s；Result=exit-code ExecMainCode=1 ExecMainStatus=20 
+  exit 21：14 秒内启动 2 次（含 restart 那一次）；再拉=是；结束到再拉 10.3s；Result=exit-code ExecMainCode=1 ExecMainStatus=21 
+  signal 9：14 秒内启动 2 次（含 restart 那一次）；再拉=是；结束到再拉 10.1s；Result=signal ExecMainCode=2 ExecMainStatus=9 
+  signal 15：14 秒内启动 1 次（含 restart 那一次）；再拉=否；结束到再拉 -s；Result=success ExecMainCode=2 ExecMainStatus=15 
+  signal 11：14 秒内启动 2 次（含 restart 那一次）；再拉=是；结束到再拉 10.2s；Result=signal ExecMainCode=2 ExecMainStatus=11 
+  signal 6：14 秒内启动 2 次（含 restart 那一次）；再拉=是；结束到再拉 10.1s；Result=signal ExecMainCode=2 ExecMainStatus=6 
+## exec 自己（N3 第 3 项）
+  exec 前 pid=826，exec 后 MainPID=826，状态 active，带 --execd 的启动行：1
+  kill -9 exec 后的进程：12 秒内再拉 2 次
+## disable --now
+  正在跑的实例（pid 910）收到 SIGTERM：1；进程还在：否；状态：inactive；is-enabled：disabled
+## 启动次数上限（StartLimitBurst=10 / 300s）
+  一直以 20 退出，125 秒内启动 9 次；状态：failed；Result：exit-code

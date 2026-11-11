@@ -81,6 +81,17 @@ pub struct RuntimeQuota {
     pub observed_at: Timestamp,
 }
 
+/// 上次运行没收尾的东西（T04 方案 2.5）。一个读事务里取，交给崩溃恢复的纯函数。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Unsettled {
+    /// 持有运行时进程的回合（`TurnState::holds_process`）。`Queued` 的回合一定没发过 prompt，不在这里。
+    pub turns: Vec<Turn>,
+    /// 这些回合名下还在流式的助手消息；正文已用检查点填好。
+    pub streaming: Vec<Message>,
+    /// 执行到一半的亲手执行卡片（转换表里能接 `ProcessLost` 的状态：启动中、执行中、停止中）。
+    pub cards: Vec<UserActionCard>,
+}
+
 /// 查询模型。
 pub trait ReadModelPort: Send + Sync {
     fn conversation(
@@ -105,6 +116,8 @@ pub trait ReadModelPort: Send + Sync {
     /// 内置看 `RuleEntry::is_builtin()`；不另存清单视图。
     fn security_lists(&self) -> impl Future<Output = Result<Vec<RuleEntry>, StorageError>> + Send;
     fn settings(&self) -> impl Future<Output = Result<GlobalSettings, StorageError>> + Send;
+    /// 上次运行没收尾的回合、流式消息与卡片。各自按 id 升序。
+    fn unsettled(&self) -> impl Future<Output = Result<Unsettled, StorageError>> + Send;
     /// `ReadArtifact` 的范围校验：引用是否被某条消息、工具调用、附件或卡片引用。
     fn artifact_is_referenced(
         &self,

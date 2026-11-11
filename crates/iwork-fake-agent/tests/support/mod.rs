@@ -287,6 +287,19 @@ impl StoragePort for MemStore {
         unimplemented!("回合编排不读 outbox")
     }
 
+    async fn outbox_requeue_dispatched(
+        &self,
+        _redeliver_prefixes: Vec<String>,
+    ) -> Result<iwork_ports::store::RequeueReport, StorageError> {
+        unimplemented!("回合编排不读 outbox")
+    }
+    async fn outbox_pending_where(
+        &self,
+        _selector: iwork_ports::store::OutboxSelector,
+        _limit: usize,
+    ) -> Result<Vec<OutboxItem>, StorageError> {
+        unimplemented!("回合编排不读 outbox")
+    }
     async fn outbox_mark(&self, _id: OutboxId, _state: DeliveryState) -> Result<(), StorageError> {
         unimplemented!("回合编排不读 outbox")
     }

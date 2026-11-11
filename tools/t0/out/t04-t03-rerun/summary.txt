@@ -1,0 +1,120 @@
+# 2026-11-11 T04 修法（check_image_file 带 kSecCSDoNotValidateResources）之后，用 tools/t0/iwork-t03-macos-codesign.sh 原样重跑一遍的结论。
+# 对照 tools/t0/out/t03-macos/summary.txt（T03 当时的记录，未改）：去掉哈希、pid、临时路径后逐行相同，只差 T03 那次记录里两行「对端已退出时 getsockopt 报 os error 57」（收尾时序，与判定无关）；（b）原地改字节、（b-late）改还没调入的页仍是 -67061 Unavailable。
+
+# T03 N1 macOS 实测  2026-11-11 15:27:35
+macOS 27.2 (26B5086k) arm64
+leaf A sha256=147fdcfb911c8a0d3ebc39da43725fc782ee840242574f8085a523776b2a3aea
+leaf B sha256=d089190bea2c62487dcba3fb3ca7e5dc92267f7aeaa712cd4e1552012dd57d55
+
+## ②③④⑤ 各种签名的对端（每秒重算一次）
+期望：signedA/A2 = certificate:147fdcfb911c8a0d3ebc39da43725fc782ee840242574f8085a523776b2a3aea；signedB = certificate:d089190bea2c62487dcba3fb3ca7e5dc92267f7aeaa712cd4e1552012dd57d55；adhoc/linker = cdhash
+linker
+    cdhash:d3244fe47c533cef03e380e394e457e5e68ed5bd
+    -- action: true
+    cdhash:d3244fe47c533cef03e380e394e457e5e68ed5bd
+    -- client exit=143
+adhoc
+    cdhash:d539c09b658c236214cbeb89f2ef8b7de61fc0ad
+    -- action: true
+    cdhash:d539c09b658c236214cbeb89f2ef8b7de61fc0ad
+    -- client exit=143
+signedA
+    certificate:147fdcfb911c8a0d3ebc39da43725fc782ee840242574f8085a523776b2a3aea
+    -- action: true
+    certificate:147fdcfb911c8a0d3ebc39da43725fc782ee840242574f8085a523776b2a3aea
+    -- client exit=143
+    error=取对端凭据失败：getsockopt(LOCAL_PEERPID)：Socket is not connected (os error 57)
+signedA2
+    certificate:147fdcfb911c8a0d3ebc39da43725fc782ee840242574f8085a523776b2a3aea
+    -- action: true
+    certificate:147fdcfb911c8a0d3ebc39da43725fc782ee840242574f8085a523776b2a3aea
+    -- client exit=143
+signedB
+    certificate:d089190bea2c62487dcba3fb3ca7e5dc92267f7aeaa712cd4e1552012dd57d55
+    -- action: true
+    certificate:d089190bea2c62487dcba3fb3ca7e5dc92267f7aeaa712cd4e1552012dd57d55
+    -- client exit=143
+unsigned
+    -- action: true
+    -- client exit=137
+tampered
+    unavailable:SecStaticCodeCheckValidity 失败（OSStatus -67061）
+    -- action: true
+    unavailable:SecStaticCodeCheckValidity 失败（OSStatus -67061）
+    -- client exit=143
+unsigned_x86
+    unavailable:未签名：签名信息里既没有证书也没有 cdhash
+    -- action: true
+    unavailable:未签名：签名信息里既没有证书也没有 cdhash
+    -- client exit=143
+
+## ⑥ 换文件反例（对端连着时动它的可执行文件）
+（a）诚实对端 A，mv 走再放 B 到原路径：期望始终是 A
+a-mv-honest
+    certificate:147fdcfb911c8a0d3ebc39da43725fc782ee840242574f8085a523776b2a3aea
+    -- action: mv live live.old && cp <work>/bin/signedB live
+    certificate:147fdcfb911c8a0d3ebc39da43725fc782ee840242574f8085a523776b2a3aea
+    -- client exit=143
+（a'）诚实对端 A，rm 再放 B 到原路径：期望 A 或 unavailable，不得是 B
+a-rm-honest
+    certificate:147fdcfb911c8a0d3ebc39da43725fc782ee840242574f8085a523776b2a3aea
+    -- action: rm live && cp <work>/bin/signedB live
+    unavailable:SecCodeCheckValidity 失败（OSStatus -67034）
+    -- client exit=143
+（a''）攻击：对端跑 B，mv 走再放 A 到原路径：期望 B 或 unavailable，不得是 A
+a-mv-attack
+    certificate:d089190bea2c62487dcba3fb3ca7e5dc92267f7aeaa712cd4e1552012dd57d55
+    -- action: mv live live.old && cp <work>/bin/signedA live
+    certificate:d089190bea2c62487dcba3fb3ca7e5dc92267f7aeaa712cd4e1552012dd57d55
+    -- client exit=143
+（a'''）攻击：对端跑 B，rm 再放 A 到原路径：期望 B 或 unavailable，不得是 A
+a-rm-attack
+    certificate:d089190bea2c62487dcba3fb3ca7e5dc92267f7aeaa712cd4e1552012dd57d55
+    -- action: rm live && cp <work>/bin/signedA live
+    unavailable:SecCodeCheckValidity 失败（OSStatus -67034）
+    -- client exit=143
+（b）原地 dd 覆盖 A 中部一字节：期望 unavailable
+b-dd-inplace
+    certificate:147fdcfb911c8a0d3ebc39da43725fc782ee840242574f8085a523776b2a3aea
+    -- action: printf "\x00" | dd of=live bs=1 seek=$(( $(stat -f%z live) / 2 )) conv=notrunc
+    unavailable:SecStaticCodeCheckValidity 失败（OSStatus -67061）
+    -- client exit=143
+（b-late）A 对端运行中，原地改一个还没调入的代码页（__late，偏移 16384），2 秒后让它执行那一页：期望改完即 unavailable（对端打印 late=7 = 执行的是原始指令；被改的指令算不出 7）
+b-late-page
+    certificate:147fdcfb911c8a0d3ebc39da43725fc782ee840242574f8085a523776b2a3aea
+    -- action: printf "\xff" | dd of=live bs=1 seek=16384 conv=notrunc 2>/dev/null; echo "-- tampered"; sleep 2; kill -USR1 $(cat live.pid); echo "-- SIGUSR1 sent"; sleep 1; sed "s/^/-- peer: /" "$OUT/run-b-late-page.client.txt"
+    -- tampered
+    unavailable:SecStaticCodeCheckValidity 失败（OSStatus -67061）
+    -- SIGUSR1 sent
+    unavailable:SecStaticCodeCheckValidity 失败（OSStatus -67061）
+    -- peer: connected pid=98159
+    -- peer: late=7
+    unavailable:SecStaticCodeCheckValidity 失败（OSStatus -67061）
+    -- client exit=143
+（b'）攻击：对端跑 B，原地整份覆盖成 A（同一 inode）：期望 B 或 unavailable，不得是 A
+b-overwrite-attack
+    certificate:d089190bea2c62487dcba3fb3ca7e5dc92267f7aeaa712cd4e1552012dd57d55
+    -- action: cat <work>/bin/signedA > live
+    unavailable:SecCodeCheckValidity 失败（OSStatus -67034）
+    -- client exit=143
+（b''）ad-hoc 对端原地整份覆盖成另一个 ad-hoc：期望原 cdhash 或 unavailable
+b-overwrite-adhoc
+    cdhash:d539c09b658c236214cbeb89f2ef8b7de61fc0ad
+    -- action: cat <work>/bin/linker > live
+    unavailable:SecCodeCheckValidity 失败（OSStatus -67034）
+    -- client exit=143
+
+## ①（c）两步之间换文件
+pin：macos.rs 的顺序。期望：攻击方向 SecCodeCheckValidity(pinned) 只会对运行中的真实身份返回 0
+c-pin-honest-mv              getsockopt(LOCAL_PEERTOKEN) rc=0 len=32 (sizeof audit_token_t=32) claim certificate:147fdcfb911c8a0d3ebc39da43725fc782ee840242574f8085a523776b2a3aea -- action: mv live live.old && cp <work>/bin/signedB live SecCodeCheckValidity(pinned)=0 
+c-pin-attack-mv              getsockopt(LOCAL_PEERTOKEN) rc=0 len=32 (sizeof audit_token_t=32) claim certificate:d089190bea2c62487dcba3fb3ca7e5dc92267f7aeaa712cd4e1552012dd57d55 -- action: mv live live.old && cp <work>/bin/signedA live SecCodeCheckValidity(pinned)=0 
+c-pin-attack-rm              getsockopt(LOCAL_PEERTOKEN) rc=0 len=32 (sizeof audit_token_t=32) claim certificate:d089190bea2c62487dcba3fb3ca7e5dc92267f7aeaa712cd4e1552012dd57d55 -- action: rm live && cp <work>/bin/signedA live SecCodeCheckValidity(pinned)=0 
+c-pin-attack-cat             getsockopt(LOCAL_PEERTOKEN) rc=0 len=32 (sizeof audit_token_t=32) claim certificate:d089190bea2c62487dcba3fb3ca7e5dc92267f7aeaa712cd4e1552012dd57d55 -- action: cat <work>/bin/signedA > live SecCodeCheckValidity(pinned)=0 
+naive：草案顺序（先验后读）。看读到的身份会不会变成换上去的文件
+c-naive-attack-mv            getsockopt(LOCAL_PEERTOKEN) rc=0 len=32 (sizeof audit_token_t=32) SecCodeCheckValidity(no requirement)=0 -- action: mv live live.old && cp <work>/bin/signedA live claim certificate:d089190bea2c62487dcba3fb3ca7e5dc92267f7aeaa712cd4e1552012dd57d55 
+c-naive-attack-rm            getsockopt(LOCAL_PEERTOKEN) rc=0 len=32 (sizeof audit_token_t=32) SecCodeCheckValidity(no requirement)=0 -- action: rm live && cp <work>/bin/signedA live claim certificate:d089190bea2c62487dcba3fb3ca7e5dc92267f7aeaa712cd4e1552012dd57d55 
+c-naive-attack-cat           getsockopt(LOCAL_PEERTOKEN) rc=0 len=32 (sizeof audit_token_t=32) SecCodeCheckValidity(no requirement)=0 -- action: cat <work>/bin/signedA > live claim certificate:d089190bea2c62487dcba3fb3ca7e5dc92267f7aeaa712cd4e1552012dd57d55 
+watch：改还没调入的页 → 让它执行。看动态校验、全量静态校验、对端进程各自的反应
+c-watch-late-page            getsockopt(LOCAL_PEERTOKEN) rc=0 len=32 (sizeof audit_token_t=32) dyn=0 static=0 -- action: printf "\xff" | dd of=live bs=1 seek=16384 conv=notrunc 2>/dev/null; echo "-- tampered"; sleep 3; kill -USR1 $(cat live.pid); echo "-- SIGUSR1 sent"; sleep 1; sed "s/^/-- peer: /" client.out; kill -0 $(cat live.pid) 2>/dev/null && echo "-- peer alive" || echo "-- peer dead" -- tampered dyn=0 static=-67061 -- SIGUSR1 sent dyn=0 static=-67061 -- peer: connected pid=99880 -- peer: late=7 -- peer alive dyn=0 static=-67061 
+
+完成。原始输出在 <home>/LiWork/iWork/.cao/worktrees/226429ec/tools/t0/out/t03-macos
