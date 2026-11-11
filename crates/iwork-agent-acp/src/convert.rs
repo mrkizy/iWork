@@ -56,9 +56,14 @@ pub const REPORT_KEY: &str = "report";
 /// `session/request_permission` 请求：这次调用的工作目录。
 pub const CWD_KEY: &str = "cwd";
 
-/// 取 `_meta["iwork"][key]`。
-fn iwork_value<'a>(meta: Option<&'a Meta>, key: &str) -> Option<&'a Value> {
-    meta?.get(META_KEY)?.get(key)
+/// 取 `_meta["iwork"][key]`。没有 `_meta` 或没有 `iwork` 是「没报」；`iwork` 在而不是对象是错误：
+/// 约定项一个都读不出来，不能当成一个都没报。
+fn iwork_value<'a>(meta: Option<&'a Meta>, key: &str) -> Result<Option<&'a Value>, String> {
+    match meta.and_then(|m| m.get(META_KEY)) {
+        None => Ok(None),
+        Some(Value::Object(iwork)) => Ok(iwork.get(key)),
+        Some(_) => Err(format!("_meta.{META_KEY} 须是对象")),
+    }
 }
 
 // ---------- 下行 ----------
@@ -270,10 +275,13 @@ pub fn outcome_of(stop: StopReason) -> TurnOutcome {
 ///
 /// `bypass_sandbox`：运行时在原始输入里声明要绕过沙箱（agy 的 `rawInput.BypassSandbox`，
 /// AGENTS.md 安全不变量），按「越界」交给审批判定。
+///
+/// `_meta.iwork` 不是对象、`cwd` 不是绝对路径字符串时返回错误（点名键）：判定方会拿 `cwd` 解析
+/// 相对路径，读错了比没有更糟。调用方按拒绝答复运行时，不交给处理方。
 pub fn permission_request(
     req: &RequestPermissionRequest,
     updates_before: u64,
-) -> PermissionRequest {
+) -> Result<PermissionRequest, String> {
     let fields = &req.tool_call.fields;
     let tool = fields
         .name
@@ -286,17 +294,21 @@ pub fn permission_request(
         .and_then(|v| v.get("BypassSandbox"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    // 不是字符串就当运行时没给：它只帮判定方解析相对路径，缺了判定方用会话目录
-    let cwd = iwork_value(req.meta.as_ref(), CWD_KEY)
-        .and_then(Value::as_str)
-        .map(PathBuf::from);
-    PermissionRequest {
+    // 没给是「运行时没报」，判定方用会话目录；给了就必须是绝对路径
+    let cwd = match iwork_value(req.meta.as_ref(), CWD_KEY)? {
+        None => None,
+        Some(v) => match v.as_str().map(PathBuf::from) {
+            Some(p) if p.is_absolute() => Some(p),
+            _ => return Err(format!("_meta.{META_KEY}.{CWD_KEY} 须是绝对路径字符串")),
+        },
+    };
+    Ok(PermissionRequest {
         tool: ToolRef(tool),
         raw_input: raw_input(fields.raw_input.as_ref()),
         bypass_sandbox,
         updates_before,
         cwd,
-    }
+    })
 }
 
 /// 端口的判定 → ACP 权限响应。按选项的 `kind` 选，不按位置或名字。
@@ -356,14 +368,14 @@ pub struct InitMeta {
 /// 报错只点名键，不回显收到的值。
 pub fn init_meta(meta: Option<&Meta>) -> Result<InitMeta, String> {
     let bad = |key: &str, want: &str| format!("_meta.{META_KEY}.{key} 须是{want}");
-    let permission_wait_limit = match iwork_value(meta, PERMISSION_WAIT_LIMIT_KEY) {
+    let permission_wait_limit = match iwork_value(meta, PERMISSION_WAIT_LIMIT_KEY)? {
         None => None,
         Some(v) => match v.as_u64() {
             Some(secs) if secs > 0 => Some(Duration::from_secs(secs)),
             _ => return Err(bad(PERMISSION_WAIT_LIMIT_KEY, "正整数")),
         },
     };
-    let sandbox_platform = match iwork_value(meta, SANDBOX_PLATFORM_KEY) {
+    let sandbox_platform = match iwork_value(meta, SANDBOX_PLATFORM_KEY)? {
         None => SandboxPlatform::Unsupported,
         Some(v) => match v.as_str() {
             Some("supported") => SandboxPlatform::Supported,
@@ -376,7 +388,7 @@ pub fn init_meta(meta: Option<&Meta>) -> Result<InitMeta, String> {
             }
         },
     };
-    let effort_levels = match iwork_value(meta, EFFORT_LEVELS_KEY) {
+    let effort_levels = match iwork_value(meta, EFFORT_LEVELS_KEY)? {
         None => Vec::new(),
         Some(v) => non_empty_strings(v)
             .ok_or_else(|| bad(EFFORT_LEVELS_KEY, "非空字符串数组"))?
@@ -384,7 +396,7 @@ pub fn init_meta(meta: Option<&Meta>) -> Result<InitMeta, String> {
             .map(EffortLevel)
             .collect(),
     };
-    let model_options = match iwork_value(meta, MODELS_KEY) {
+    let model_options = match iwork_value(meta, MODELS_KEY)? {
         None => Vec::new(),
         Some(v) => model_options(v).ok_or_else(|| bad(MODELS_KEY, " [{id, label}] 数组"))?,
     };
@@ -427,7 +439,7 @@ pub struct SessionMeta {
 
 /// 解析开会话响应的 `_meta["iwork"]`。没报沙箱按「没起来」：静态的平台能力不冒充会话的实际状态。
 pub fn session_meta(meta: Option<&Meta>) -> Result<SessionMeta, String> {
-    let sandbox = match iwork_value(meta, SANDBOX_KEY) {
+    let sandbox = match iwork_value(meta, SANDBOX_KEY)? {
         None => SandboxStatus::Unavailable,
         Some(v) => match v.as_str() {
             Some("enforced") => SandboxStatus::Enforced,
@@ -439,7 +451,7 @@ pub fn session_meta(meta: Option<&Meta>) -> Result<SessionMeta, String> {
             }
         },
     };
-    let cli_session_id = match iwork_value(meta, CLI_SESSION_ID_KEY) {
+    let cli_session_id = match iwork_value(meta, CLI_SESSION_ID_KEY)? {
         None => None,
         Some(v) => match v.as_str() {
             Some(id) if !id.is_empty() => Some(id.to_owned()),
@@ -458,8 +470,11 @@ pub fn session_meta(meta: Option<&Meta>) -> Result<SessionMeta, String> {
 
 /// 一条 `session/update` 通知带的上报。没有上报返回 `None`；有而解不出来返回错误（调用方记诊断、丢弃）。
 pub fn report_of(meta: Option<&Meta>) -> Option<Result<AgentUpdate, String>> {
-    let encoded = iwork_value(meta, REPORT_KEY)?;
-    Some(decode_report(encoded))
+    match iwork_value(meta, REPORT_KEY) {
+        Err(e) => Some(Err(e)),
+        Ok(None) => None,
+        Ok(Some(encoded)) => Some(decode_report(encoded)),
+    }
 }
 
 fn decode_report(encoded: &Value) -> Result<AgentUpdate, String> {
@@ -934,13 +949,53 @@ mod tests {
             r.meta = meta;
             r
         };
-        let with_cwd = req(Some(iwork_meta(json!({ CWD_KEY: "/work/sub" }))));
+        let abs = std::env::temp_dir().join("sub");
+        let with_cwd = req(Some(iwork_meta(json!({ CWD_KEY: abs.to_str().unwrap() }))));
+        assert_eq!(permission_request(&with_cwd, 3).unwrap().cwd, Some(abs));
+        assert_eq!(permission_request(&req(None), 3).unwrap().cwd, None);
         assert_eq!(
-            permission_request(&with_cwd, 3).cwd,
-            Some(PathBuf::from("/work/sub"))
+            permission_request(&req(Some(iwork_meta(json!({})))), 3)
+                .unwrap()
+                .cwd,
+            None
         );
-        assert_eq!(permission_request(&req(None), 3).cwd, None);
-        let not_string = req(Some(iwork_meta(json!({ CWD_KEY: 5 }))));
-        assert_eq!(permission_request(&not_string, 3).cwd, None);
+    }
+
+    /// 1/F-5：`cwd` 不是字符串、是相对路径，`_meta.iwork` 不是对象：拒绝并点名键，不按「没报」放过。
+    #[test]
+    fn malformed_permission_meta_is_rejected_by_key() {
+        use agent_client_protocol::v1::schema::ToolCallUpdate as Upd;
+        let req = |meta: Meta| {
+            let mut r = RequestPermissionRequest::new(
+                "s",
+                Upd::new("t1", ToolCallUpdateFields::new().name("Bash".to_string())),
+                options(),
+            );
+            r.meta = Some(meta);
+            r
+        };
+        for bad in [json!({ CWD_KEY: 5 }), json!({ CWD_KEY: "sub/dir" })] {
+            let err = permission_request(&req(iwork_meta(bad.clone())), 0).unwrap_err();
+            assert!(err.contains("_meta.iwork.cwd"), "{bad}: {err}");
+        }
+        let err = permission_request(&req(iwork_meta(json!("cwd=/x"))), 0).unwrap_err();
+        assert!(err.contains("_meta.iwork 须是对象"), "{err}");
+    }
+
+    /// 1/F-5：`_meta.iwork` 不是对象时，initialize、开会话、上报都报错，不当成「没报」。
+    #[test]
+    fn non_object_iwork_meta_is_an_error_everywhere() {
+        let m = iwork_meta(json!(["sandbox", "enforced"]));
+        assert!(
+            init_meta(Some(&m))
+                .unwrap_err()
+                .contains("_meta.iwork 须是对象")
+        );
+        assert!(
+            session_meta(Some(&m))
+                .unwrap_err()
+                .contains("_meta.iwork 须是对象")
+        );
+        assert!(report_of(Some(&m)).unwrap().is_err());
     }
 }

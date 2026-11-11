@@ -98,7 +98,7 @@ iwork-fake-agent --script <脚本.json> [--record <记录.jsonl>]
 | `crash` | `exit_code`（默认 101） | 等 200ms 让已发出的消息写完，然后退出进程，不回任何响应（模拟输出到一半时崩溃） |
 | `hang` | 无 | 永不结束，也不理会取消，只能被结束进程（测试取消的 3 秒强制结束） |
 | `spawn_child` | `program`、`args` | 启动子进程且不等它，进程号写进记录文件（测试结束进程树后无孤儿进程） |
-| `report_model` | `model_id`、`effort`（可选） | 上报实际模型：一条空的 `session_info_update` 通知，`_meta.iwork.report` 是 base64 编码的 `RuntimeReport`（`agent.proto`） |
+| `report_model` | `model_id`、`effort`（可选）、`on_text`（可选） | 上报实际模型：一条空的 `session_info_update` 通知，`_meta.iwork.report` 是 base64 编码的 `RuntimeReport`（`agent.proto`）；给了 `on_text` 就改挂在一条带这段正文的 `agent_message_chunk` 上（不合约定的挂法，测两样都不丢） |
 | `report_usage` | `input_tokens`、`output_tokens`、`cache_read_tokens`、`cache_write_tokens`（后两个默认 0）、`cost_usd`（可选） | 上报一个回合的用量，挂法同上 |
 | `report_quota` | `windows`：`[{window, used_pct, resets_at_secs?}]` | 上报额度窗口，挂法同上；不带观测时间 |
 | `report_raw` | `value`（任意 JSON） | 把 `value` 原样放进 `_meta.iwork.report`（造解不出来的上报） |

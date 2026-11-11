@@ -341,11 +341,20 @@ impl Ctx<'_> {
 
     /// 上报挂在一条空的 `session_info_update` 通知的 `_meta.iwork.report` 上。
     fn report(&self, value: Value) -> Result<(), agent_client_protocol::Error> {
-        let n = SessionNotification::new(
-            self.session.clone(),
+        self.report_on(
             SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new()),
+            value,
         )
-        .meta(iwork_meta(json!({ "report": value })));
+    }
+
+    /// 上报挂在给定的更新上。
+    fn report_on(
+        &self,
+        update: SessionUpdate,
+        value: Value,
+    ) -> Result<(), agent_client_protocol::Error> {
+        let n = SessionNotification::new(self.session.clone(), update)
+            .meta(iwork_meta(json!({ "report": value })));
         self.cx.send_notification(n)
     }
 
@@ -536,13 +545,24 @@ impl Ctx<'_> {
                     .write(json!({ "spawned_child": child.id() }));
                 Ok(Flow::Done)
             }
-            Step::ReportModel { model_id, effort } => {
-                self.report(encode_report(pb::runtime_report::Kind::Model(
-                    pb::ModelSelection {
-                        model_id: model_id.clone(),
-                        effort: effort.clone(),
-                    },
-                )))?;
+            Step::ReportModel {
+                model_id,
+                effort,
+                on_text,
+            } => {
+                let report = encode_report(pb::runtime_report::Kind::Model(pb::ModelSelection {
+                    model_id: model_id.clone(),
+                    effort: effort.clone(),
+                }));
+                match on_text {
+                    None => self.report(report)?,
+                    Some(text) => self.report_on(
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new(text.clone()),
+                        ))),
+                        report,
+                    )?,
+                }
                 Ok(Flow::Done)
             }
             Step::ReportUsage {

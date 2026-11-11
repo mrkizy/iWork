@@ -167,6 +167,9 @@ pub enum Step {
         model_id: String,
         #[serde(default)]
         effort: Option<String>,
+        /// 给了就把上报挂在一条带这段正文的 `agent_message_chunk` 上（违反约定的挂法，测上报与更新都不丢）
+        #[serde(default)]
+        on_text: Option<String>,
     },
     /// 上报一个回合的用量
     ReportUsage {

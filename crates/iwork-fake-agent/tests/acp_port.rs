@@ -420,9 +420,12 @@ impl PermissionHandler for Recording {
 /// 运行时给的这次调用的工作目录随权限请求到达处理方（X1）；没给的是 `None`。
 #[tokio::test(flavor = "multi_thread")]
 async fn permission_request_carries_runtime_cwd() {
+    // 各平台的绝对路径写法不同：用临时目录
+    let abs = std::env::temp_dir().join("sub");
+    let cwd = abs.to_str().unwrap();
     let fake = Fake::new(&json!({ "turns": [{ "steps": [
         { "type": "tool_call", "id": "t1", "name": "Bash", "input": { "command": "rm -rf build" } },
-        { "type": "permission", "tool_call_id": "t1", "cwd": "/work/sub" },
+        { "type": "permission", "tool_call_id": "t1", "cwd": cwd },
         { "type": "tool_call", "id": "t2", "name": "Bash", "input": { "command": "ls" } },
         { "type": "permission", "tool_call_id": "t2" }
     ] }] }));
@@ -439,7 +442,7 @@ async fn permission_request_carries_runtime_cwd() {
         .iter()
         .map(|r| r.cwd.clone())
         .collect();
-    assert_eq!(cwds, [Some(PathBuf::from("/work/sub")), None]);
+    assert_eq!(cwds, [Some(abs.clone()), None]);
     session.close().await.unwrap();
 }
 
@@ -533,4 +536,75 @@ async fn terminate_confirms_tree_empty() {
 unsafe extern "C" {
     #[link_name = "kill"]
     fn libc_kill(pid: i32, sig: i32) -> i32;
+}
+
+/// 1/F-5：运行时给的 `cwd` 不是绝对路径：不交给处理方，按拒绝答复运行时，拒绝理由点名键。
+#[tokio::test(flavor = "multi_thread")]
+async fn relative_cwd_is_denied_without_asking_handler() {
+    let fake = Fake::new(&json!({ "turns": [{ "steps": [
+        { "type": "tool_call", "id": "t1", "name": "Bash", "input": { "command": "rm -rf build" } },
+        { "type": "permission", "tool_call_id": "t1", "cwd": "sub/dir",
+          "allowed": [{ "type": "text", "text": "执行了" }],
+          "denied": [{ "type": "text", "text": "没执行" }] }
+    ] }] }));
+    let handler = Recording::default();
+    let session = AcpRuntime::new(fake.launch.clone())
+        .open_session(spec(fake.dir.path()), handler.clone())
+        .await
+        .unwrap();
+    let got = drain(session.prompt(text("hi")).await.unwrap()).await;
+    assert!(handler.0.lock().unwrap().is_empty(), "处理方没被问到");
+    assert!(
+        got.iter()
+            .any(|u| matches!(u, AgentUpdate::Text { text, .. } if text == "没执行")),
+        "{got:?}"
+    );
+    let resp = fake
+        .records()
+        .into_iter()
+        .find_map(|r| r.get("permission_response").cloned())
+        .expect("运行时收到了答复");
+    assert_eq!(resp["outcome"]["optionId"], "reject-once", "{resp}");
+    assert!(
+        resp["_meta"]["iwork"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("_meta.iwork.cwd"),
+        "{resp}"
+    );
+    assert!(
+        session
+            .raw_log()
+            .iter()
+            .any(|l| l.contains("bad_permission_meta"))
+    );
+    session.close().await.unwrap();
+}
+
+/// 1/F-7：上报挂在一条带正文的更新上（不合约定）：正文和上报都到，不丢一样。
+#[tokio::test(flavor = "multi_thread")]
+async fn report_on_a_text_update_keeps_both() {
+    let fake = Fake::new(&json!({ "turns": [{ "steps": [
+        { "type": "report_model", "model_id": "claude-opus", "on_text": "好" }
+    ] }] }));
+    let session = AcpRuntime::new(fake.launch.clone())
+        .open_session(spec(fake.dir.path()), AllowAll)
+        .await
+        .unwrap();
+    let got = drain(session.prompt(text("hi")).await.unwrap()).await;
+    assert_eq!(
+        got,
+        [
+            AgentUpdate::Text {
+                offset: 0,
+                text: "好".into()
+            },
+            AgentUpdate::ModelReported(ModelSelection {
+                model_id: ModelId("claude-opus".into()),
+                effort: None,
+            }),
+            AgentUpdate::Finished(TurnOutcome::Completed),
+        ]
+    );
+    session.close().await.unwrap();
 }

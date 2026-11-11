@@ -500,11 +500,15 @@ async fn start_connection<H: PermissionHandler + 'static>(
         .name("iwork")
         .on_receive_notification(
             async move |n: SessionNotification, _cx| {
-                match convert::report_of(n.meta.as_ref()) {
+                let report = convert::report_of(n.meta.as_ref());
+                // 先送通知本身的更新（上报照约定挂在空的 session_info_update 上，转换后什么都不产生；
+                // 挂在别的更新上也不丢那条更新），再送上报
+                on_update.turns.on_update(n.update);
+                match report {
                     Some(Ok(report)) => on_update.turns.on_report(report),
                     // 解不出来的上报只记一笔诊断：它不改变回合的走向，不值得中断会话
                     Some(Err(_)) => on_update.raw.record_bad_report(),
-                    None => on_update.turns.on_update(n.update),
+                    None => {}
                 }
                 Ok(())
             },
@@ -521,9 +525,19 @@ async fn start_connection<H: PermissionHandler + 'static>(
                 epoch.mark_unchanged();
                 // 在派发循环里取：此前到达的更新都已进了队列，这个数就是它们的条数
                 let updates_before = on_request.turns.emitted();
+                let shared = on_request.clone();
                 // 不在派发循环里等审批：等待期间其他消息要照常处理
                 cx.spawn(async move {
-                    let request = convert::permission_request(&req, updates_before);
+                    let request = match convert::permission_request(&req, updates_before) {
+                        Ok(request) => request,
+                        // 约定项读不懂：不交给处理方，按拒绝答复运行时（失败即关闭）
+                        Err(message) => {
+                            shared.raw.record_bad_permission_meta();
+                            let deny = iwork_ports::agent::PermissionDecision::Deny { message };
+                            return responder
+                                .respond(convert::permission_response(&req.options, &deny));
+                        }
+                    };
                     let decision = tokio::select! {
                         d = handler.on_permission(request) => Some(d),
                         _ = epoch.changed() => None,
