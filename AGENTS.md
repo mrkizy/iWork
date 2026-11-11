@@ -27,7 +27,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 - 协议：Protobuf，Rust 侧用 prost 生成，TypeScript 侧用 protobuf-es 生成；生成代码不手改、不入库（构建时生成）。
 - 存储：SQLite（rusqlite，WAL）。版本控制读操作用 gitoxide（`gix`），写操作调本机 `git`。
 
-工具链：Rust 版本由根目录 `rust-toolchain.toml` 固定（经 rustup 自动安装，不用系统自带或 Homebrew 的 rustc）；pnpm 版本由 `client/package.json` 的 `packageManager` 固定；脚本需要 bash 与 jq。CI 是 `.github/workflows/ci.yml`，三平台跑下面除基准外的全部检查。CI 的运行状态不登录也能查（`curl https://api.github.com/repos/mrkizy/iWork/actions/runs?branch=<分支>`），失败日志要登录 GitHub 后用 `gh run view <run-id> --log-failed` 看；Windows 行为本机验证不了，以 CI 为准，拿不到日志时交 supervisor 请产品负责人登录 `gh`，不要只凭推断改。Windows 上用 PowerShell 5.1 跑的 `.ps1` 脚本含中文时必须存成带 BOM 的 UTF-8，否则按 ANSI 读、整个脚本解析失败（T03 实测）。
+工具链：Rust 版本由根目录 `rust-toolchain.toml` 固定（经 rustup 自动安装，不用系统自带或 Homebrew 的 rustc）；pnpm 版本由 `client/package.json` 的 `packageManager` 固定；脚本需要 bash 与 jq。CI 是 `.github/workflows/ci.yml`，三平台跑下面除基准外的全部检查。CI 的运行状态不登录也能查（`curl https://api.github.com/repos/mrkizy/iWork/actions/runs?branch=<分支>`），失败日志要登录 GitHub 后用 `gh run view <run-id> --log-failed` 看；Windows 行为本机验证不了，以 CI 为准，拿不到日志时交 supervisor 请产品负责人登录 `gh`，不要只凭推断改。Windows 上用 PowerShell 5.1 跑的 `.ps1` 脚本含中文时必须存成带 BOM 的 UTF-8，否则按 ANSI 读、整个脚本解析失败（T03 实测）。M1 不支持 Windows（T03）：只在 Windows CI 上冒出来的路径写法问题（`\\?\` 前缀、反斜杠、CRLF），在测试里统一写法，或把跟真实文件系统对拍的测试限定 `#[cfg(unix)]` 并注明原因；不为它改产品代码（T07 实测）。
 
 命令（T01 建立后以此为准；改动须同步本节）：
 
