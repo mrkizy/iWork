@@ -146,6 +146,10 @@ pub enum Step {
         #[serde(default)]
         denied: Vec<Step>,
     },
+    /// 同时为几次工具调用请求权限（并行调用、子代理），全部有了答复再往下走；答复照常记进记录文件
+    ParallelPermissions {
+        tool_call_ids: Vec<String>,
+    },
     Sleep {
         ms: u64,
     },

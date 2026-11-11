@@ -1,24 +1,35 @@
 //! 权限请求的接缝：运行时问「能不能做」，由谁来答。
 //!
-//! - [`PermissionDecider`] 是判定方。T07 的审批引擎实现它；在那之前用 [`StubDecider`]（全部放行 /
+//! - [`PermissionDecider`] 是判定方。T07 的审批引擎实现它；测试与过渡期用 [`StubDecider`]（全部放行 /
 //!   全部拒绝，可切换）。
-//! - [`PermissionGate`] 是交给适配器的 `PermissionHandler`：它先告诉回合编排「开始等审批」并领一张
-//!   票，再问判定方，最后凭票告诉编排「审批有结果了」，编排认可后才把结果交回运行时。
-//!   写回合状态的只有编排一处。
+//! - [`PermissionGate`] 是交给适配器的 `PermissionHandler`：它在回合的交接表里登记、等编排受理，再问判定方，
+//!   最后把结论交回交接表、等编排的回执。回执 `true` 才把结论交回运行时。写回合状态的只有编排一处。
 //!
-//! **审批结果绑定回合**：每个回合有自己的信箱（[`TurnSlot`]），回合结束即撤掉。领票时记下回合 id，
-//! 交结果时回合已换了、信箱已撤、票不在待处理集合里、或回合已不在等审批，一律按拒绝答复运行时，
-//! 不改任何计数。迟到的放行因此不会落到别的回合头上。
+//! **请求交接是一把锁护着的一张表**（T06 方案 2.6 第 3 条）。处理方（别的线程）与编排只在
+//! [`TurnSlot`] 的锁里读写 [`Handoff`]，锁里没有 `await`。「看还受不受理」与「写表」在同一个
+//! `&mut Handoff` 方法体里，中间放不了锁；`&mut Handoff` 只能从锁守卫里借出来，所以「同一段锁」由类型保证。
+//! 编排停止受理（[`Handoff::stop_accepting`]）在锁里关标志、取走整张表，然后逐格回绝：这一刻每个在等编排的
+//! 请求都拿到结论，之后才来的在 `register` / `submit` 里当场被拒。一张票的结局只有三种：被采纳（回执
+//! `true`）、被停止取走、停止之后才来。
+//!
+//! **审批结果绑定回合**：每个回合一张表，回合结束即撤掉。交结论时回合换了、受理已停、票不在「等判定方」，
+//! 一律按拒绝答复运行时。迟到的放行因此不会落到别的回合头上。
 
-use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeMap;
+use std::future::{Future, poll_fn};
+use std::pin::pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use futures_channel::{mpsc, oneshot};
 use iwork_domain::approval::VoidReason;
+use iwork_domain::common::Timestamp;
 use iwork_domain::event::DomainEvent;
 use iwork_domain::id::{ApprovalId, TurnId};
 use iwork_ports::agent::{PermissionDecision, PermissionHandler, PermissionRequest};
+use iwork_ports::clock::MonotonicInstant;
 use iwork_ports::store::StorageError;
 
 /// 一次判定的结论和它对应的审批（T06 方案 2.6 第 3 条）。`approval`：规则直接放行或拒绝、没有审批实体时
@@ -47,7 +58,7 @@ pub trait PermissionDecider: Send + Sync + 'static {
     /// 作废计划交出期间占着的东西，丢弃即释放。桩用 `()`。
     type VoidHold: Send;
 
-    /// 判定一次请求。可以一直不返回（等用户），调用方不设超时。
+    /// 判定一次请求。可以一直不返回（等用户），调用方不设超时；回合停下时调用方丢掉这个 future。
     fn decide(
         &self,
         turn_id: TurnId,
@@ -69,7 +80,7 @@ pub trait PermissionDecider: Send + Sync + 'static {
     }
 }
 
-/// 审批桩：全部放行或全部拒绝，运行中可切换。T07 完成后由审批引擎替换。
+/// 审批桩：全部放行或全部拒绝，运行中可切换。
 #[derive(Debug)]
 pub struct StubDecider {
     allow: AtomicBool,
@@ -124,75 +135,424 @@ impl PermissionDecider for StubDecider {
     }
 }
 
-/// 一张审批票。进程内全局递增、永不重复：迟到的结果即使混进了别的回合的信箱，也对不上那个
-/// 回合的任何一张票。
+/// 一张审批票，在一张交接表里唯一。
 pub(crate) type Ticket = u64;
 
-static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
-
-pub(crate) fn new_ticket() -> Ticket {
-    NEXT_TICKET.fetch_add(1, Ordering::Relaxed)
+/// 受理那一刻的两种时钟读数；等待上限按经过时间较大的那种算（睡眠期间单调时钟可能不走）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AcceptedAt {
+    pub mono: MonotonicInstant,
+    pub wall: Timestamp,
 }
 
-/// 回合编排从权限处理方收到的信号。都带回执：编排把状态变化写进存储之后才回，
-/// 运行时因此不会在状态落盘前继续。
+impl AcceptedAt {
+    /// 从受理到 `now` 经过了多久：两种时钟各自经过的时间取大；墙钟往回拨时按 0 算，单调时钟兜底。
+    pub fn elapsed(self, now: AcceptedAt) -> Duration {
+        let mono = Duration::from_nanos(now.mono.0.saturating_sub(self.mono.0));
+        let wall = Duration::from_millis(now.wall.0.saturating_sub(self.wall.0).max(0) as u64);
+        mono.max(wall)
+    }
+}
+
+/// 处理方在等受理时拿到的：`Some` 是撤销信号的接收端（受理了），`None` 是不受理。
+type Admission = Option<oneshot::Receiver<()>>;
+
+/// 一格里放的，正是处理方此刻在等的那个 oneshot 的发送端。
 #[derive(Debug)]
-pub(crate) enum Signal {
-    /// 回执是票；`None` 表示现在不受理审批（如正在取消）。`after`：编排要先处理完本回合
-    /// 这么多条更新才受理（前序边界，见 `PermissionRequest::updates_before`）
-    PermissionAsked {
-        reply: oneshot::Sender<Option<Ticket>>,
+enum Stage {
+    /// 等受理；`after`：编排要先处理完本回合这么多条更新才受理（前序边界）
+    Asked {
         after: u64,
+        reply: oneshot::Sender<Admission>,
     },
-    /// 回执 `true` 表示结果被采纳。`approval`：结果出自哪条审批；有值时编排采纳时提交 `ApprovalDelivered`
-    PermissionDecided {
-        ticket: Ticket,
+    /// 已受理，等判定方；编排停止受理时经 `revoke` 撤票
+    Deciding {
+        accepted: AcceptedAt,
+        revoke: oneshot::Sender<()>,
+    },
+    /// 有结论，等编排的回执
+    Decided {
         approval: Option<ApprovalId>,
         ack: oneshot::Sender<bool>,
     },
 }
 
-/// 当前回合的信箱。会话线、权限处理方、取消句柄共用；回合结束时清空。
-#[derive(Debug, Default)]
-pub(crate) struct TurnSlot(Mutex<Option<TurnInbox>>);
+impl Stage {
+    /// 照所在的阶段回绝：不受理、撤票、回执 `false`。处理方收到后都答「回合已结束」。
+    fn refuse(self) {
+        match self {
+            Stage::Asked { reply, .. } => {
+                let _ = reply.send(None);
+            }
+            Stage::Deciding { revoke, .. } => {
+                let _ = revoke.send(());
+            }
+            Stage::Decided { ack, .. } => {
+                let _ = ack.send(false);
+            }
+        }
+    }
 
-#[derive(Debug, Clone)]
-pub(crate) struct TurnInbox {
-    pub turn_id: TurnId,
-    pub signals: mpsc::UnboundedSender<Signal>,
-    pub cancel: mpsc::UnboundedSender<()>,
+    fn awaits_approval(&self) -> bool {
+        matches!(self, Stage::Deciding { .. } | Stage::Decided { .. })
+    }
 }
 
+/// 一个在途请求：从登记到有结论，恰好占一格。
+#[derive(Debug)]
+struct InFlight {
+    /// 轮到编排处理的先后：登记时、交结论时各取一次
+    seq: u64,
+    stage: Stage,
+}
+
+/// 停止受理时取走的格子；放锁之后再逐格回绝。
+#[derive(Debug)]
+#[must_use = "取走的格子要回绝，否则处理方一直等"]
+pub(crate) struct Refusals(Vec<Stage>);
+
+impl Refusals {
+    pub fn deliver(self) {
+        for stage in self.0 {
+            stage.refuse();
+        }
+    }
+}
+
+/// 回合已停止受理（或不是这个回合、票不在该在的阶段）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Stopped;
+
+/// 登记成功：回合、票，以及等受理的接收端。
+#[derive(Debug)]
+pub(crate) struct Registered {
+    pub turn_id: TurnId,
+    pub ticket: Ticket,
+    pub asked: oneshot::Receiver<Admission>,
+}
+
+/// 编排这一刻该做什么（[`Handoff::poll_work`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Work {
+    /// 采纳这张票的结论
+    Adopt(Ticket),
+    /// 受理这张票
+    Admit(Ticket),
+    /// 排在最前的请求的前序边界还没到：先处理更新
+    UpdatesFirst,
+    /// 没有要处理的
+    Idle,
+}
+
+/// 一个回合的交接表。只能经 [`TurnSlot`] 的锁守卫拿到 `&mut`，所以下面每个方法都在锁里跑完。
+#[derive(Debug)]
+pub(crate) struct Handoff {
+    turn_id: TurnId,
+    /// 还在受理
+    accepting: bool,
+    in_flight: BTreeMap<Ticket, InFlight>,
+    next_ticket: Ticket,
+    next_seq: u64,
+    /// 编排没活干时留下的唤醒器
+    runner: Option<Waker>,
+    /// 取消请求：不带回执，没有人等它
+    cancel: mpsc::UnboundedSender<()>,
+}
+
+impl Handoff {
+    fn new(turn_id: TurnId, cancel: mpsc::UnboundedSender<()>) -> Self {
+        Self {
+            turn_id,
+            accepting: true,
+            in_flight: BTreeMap::new(),
+            next_ticket: 1,
+            next_seq: 0,
+            runner: None,
+            cancel,
+        }
+    }
+
+    fn seq(&mut self) -> u64 {
+        self.next_seq += 1;
+        self.next_seq
+    }
+
+    /// 处理方登记一个请求。返回值里的唤醒器要在放锁之后唤醒。
+    pub fn register(&mut self, after: u64) -> Result<(Registered, Option<Waker>), Stopped> {
+        if !self.accepting {
+            return Err(Stopped);
+        }
+        let ticket = self.next_ticket;
+        self.next_ticket += 1;
+        let (reply, asked) = oneshot::channel();
+        let seq = self.seq();
+        self.in_flight.insert(
+            ticket,
+            InFlight {
+                seq,
+                stage: Stage::Asked { after, reply },
+            },
+        );
+        let registered = Registered {
+            turn_id: self.turn_id,
+            ticket,
+            asked,
+        };
+        Ok((registered, self.runner.take()))
+    }
+
+    /// 处理方交结论：只有这个回合、还在受理、票在「等判定方」时才收。返回回执的接收端与要唤醒的编排。
+    ///
+    /// 票号每张表从 1 起，不跨回合。不同回合靠 `turn_id` 分开；同一个回合续接时 `turn_id` 相同，旧处理方
+    /// 摸不到新表靠的是另一条约定：续接只发生在中断之后，而中断的回合在 `run_turn` 返回前必须
+    /// `retire()` 成功（`terminate()` 先停连接任务，旧处理方随之没了），清不掉就改记 `Failed`、不能续接
+    /// （`runner.rs`）。放宽 retire（比如清树失败也允许续接）之前，要先让票号跨回合唯一。
+    pub fn submit(
+        &mut self,
+        turn_id: TurnId,
+        ticket: Ticket,
+        approval: Option<ApprovalId>,
+    ) -> Result<(oneshot::Receiver<bool>, Option<Waker>), Stopped> {
+        if turn_id != self.turn_id || !self.accepting {
+            return Err(Stopped);
+        }
+        let seq = self.seq();
+        let Some(cell) = self.in_flight.get_mut(&ticket) else {
+            return Err(Stopped);
+        };
+        if !matches!(cell.stage, Stage::Deciding { .. }) {
+            return Err(Stopped);
+        }
+        let (ack, acked) = oneshot::channel();
+        // 旧的 revoke 随之丢掉：处理方此后不再听撤销信号
+        cell.stage = Stage::Decided { approval, ack };
+        cell.seq = seq;
+        Ok((acked, self.runner.take()))
+    }
+
+    /// 编排看下一件事：`seq` 最小的、在「等受理」或「有结论」的那一格。没活干（或要先处理更新）时记下唤醒器。
+    /// 只返回票号，格子留在表里。
+    pub fn poll_work(&mut self, consumed: u64, cx: &Context<'_>) -> Work {
+        let head = self
+            .in_flight
+            .iter()
+            .filter(|(_, cell)| !matches!(cell.stage, Stage::Deciding { .. }))
+            .min_by_key(|(_, cell)| cell.seq);
+        let work = match head {
+            Some((&ticket, cell)) => match &cell.stage {
+                Stage::Decided { .. } => return Work::Adopt(ticket),
+                Stage::Asked { after, .. } if *after <= consumed => return Work::Admit(ticket),
+                Stage::Asked { .. } => Work::UpdatesFirst,
+                Stage::Deciding { .. } => unreachable!("上面已滤掉"),
+            },
+            None => Work::Idle,
+        };
+        self.runner = Some(cx.waker().clone());
+        work
+    }
+
+    /// 受理：「等受理」→「等判定方」。先把 `revoke` 写进格子，再把撤销信号的接收端交给处理方。
+    pub fn admit(&mut self, ticket: Ticket, accepted: AcceptedAt) {
+        let Some(cell) = self.in_flight.get_mut(&ticket) else {
+            return;
+        };
+        let (revoke, revoked) = oneshot::channel();
+        match std::mem::replace(&mut cell.stage, Stage::Deciding { accepted, revoke }) {
+            Stage::Asked { reply, .. } => {
+                // 处理方已经不在（连接任务结束）：格子留到回合结束由 close() 清走，无害
+                let _ = reply.send(Some(revoked));
+            }
+            other => {
+                debug_assert!(false, "受理的票不在等受理：{other:?}");
+                cell.stage = other;
+            }
+        }
+    }
+
+    /// 采纳：取走「有结论」的那一格，返回它的审批与回执的发送端（放锁后回 `true`）。不在这个阶段返回 `None`。
+    pub fn adopt(&mut self, ticket: Ticket) -> Option<(Option<ApprovalId>, oneshot::Sender<bool>)> {
+        if !matches!(
+            self.in_flight.get(&ticket).map(|c| &c.stage),
+            Some(Stage::Decided { .. })
+        ) {
+            return None;
+        }
+        match self.in_flight.remove(&ticket).map(|c| c.stage) {
+            Some(Stage::Decided { approval, ack }) => Some((approval, ack)),
+            _ => unreachable!("刚检查过"),
+        }
+    }
+
+    /// 取走那一格，交给调用方放锁后回绝。
+    pub fn refuse(&mut self, ticket: Ticket) -> Refusals {
+        Refusals(
+            self.in_flight
+                .remove(&ticket)
+                .map(|c| c.stage)
+                .into_iter()
+                .collect(),
+        )
+    }
+
+    /// 停止受理：关标志、取走整张表。之后 `register`、`submit` 当场返回 [`Stopped`]。
+    pub fn stop_accepting(&mut self) -> Refusals {
+        self.accepting = false;
+        Refusals(
+            std::mem::take(&mut self.in_flight)
+                .into_values()
+                .map(|c| c.stage)
+                .collect(),
+        )
+    }
+
+    /// 这张票在「有结论」时，它的审批。
+    pub fn decided(&self, ticket: Ticket) -> Option<Option<ApprovalId>> {
+        match self.in_flight.get(&ticket).map(|c| &c.stage) {
+            Some(Stage::Decided { approval, .. }) => Some(*approval),
+            _ => None,
+        }
+    }
+
+    /// 那张票之外，还有没有在等审批（等判定方或有结论）的票。
+    pub fn others_await_approval(&self, ticket: Ticket) -> bool {
+        self.in_flight
+            .iter()
+            .any(|(t, c)| *t != ticket && c.stage.awaits_approval())
+    }
+
+    pub fn has_deciding(&self) -> bool {
+        self.in_flight
+            .values()
+            .any(|c| matches!(c.stage, Stage::Deciding { .. }))
+    }
+
+    /// 有没有一张「等判定方」的票从受理到 `now` 已经满了 `limit`。
+    pub fn deciding_overdue(&self, limit: Duration, now: AcceptedAt) -> bool {
+        self.in_flight.values().any(|c| match c.stage {
+            Stage::Deciding { accepted, .. } => accepted.elapsed(now) >= limit,
+            _ => false,
+        })
+    }
+
+    /// 表里任意一张「有结论」的票（不看 `seq`）。
+    pub fn any_decided(&self) -> Option<Ticket> {
+        self.in_flight
+            .iter()
+            .find(|(_, c)| matches!(c.stage, Stage::Decided { .. }))
+            .map(|(t, _)| *t)
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.in_flight.is_empty()
+    }
+}
+
+/// 当前回合的交接表。会话线、权限处理方、取消句柄共用；回合结束时撤掉。
+#[derive(Debug, Default)]
+pub(crate) struct TurnSlot(Mutex<Option<Handoff>>);
+
 impl TurnSlot {
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<TurnInbox>> {
+    pub fn lock(&self) -> MutexGuard<'_, Option<Handoff>> {
         self.0.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    pub fn open(&self, inbox: TurnInbox) {
-        *self.lock() = Some(inbox);
+    /// 拿锁、对当前回合的表做一件事、放锁。没有回合时返回 `None`。
+    fn with<R>(&self, f: impl FnOnce(&mut Handoff) -> R) -> Option<R> {
+        self.lock().as_mut().map(f)
     }
 
+    /// 开一个回合的表，返回取消请求的接收端。
+    pub fn open(&self, turn_id: TurnId) -> mpsc::UnboundedReceiver<()> {
+        let (cancel, cancels) = mpsc::unbounded();
+        let old = self.lock().replace(Handoff::new(turn_id, cancel));
+        debug_assert!(old.is_none(), "上一个回合的表没有撤掉");
+        cancels
+    }
+
+    /// 停止受理，再把回合撤掉。
     pub fn close(&self) {
-        *self.lock() = None;
+        let refusals = self.lock().take().map(|mut h| h.stop_accepting());
+        if let Some(refusals) = refusals {
+            refusals.deliver();
+        }
     }
 
-    /// 当前回合的信箱；`turn_id` 给了就必须是这个回合。
-    pub fn current(&self, turn_id: Option<TurnId>) -> Option<TurnInbox> {
-        self.lock()
-            .as_ref()
-            .filter(|inbox| turn_id.is_none_or(|id| inbox.turn_id == id))
-            .cloned()
+    pub fn register(&self, after: u64) -> Result<Registered, Stopped> {
+        let (registered, waker) = self.with(|h| h.register(after)).ok_or(Stopped)??;
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Ok(registered)
+    }
+
+    pub fn submit(
+        &self,
+        turn_id: TurnId,
+        ticket: Ticket,
+        approval: Option<ApprovalId>,
+    ) -> Result<oneshot::Receiver<bool>, Stopped> {
+        let (acked, waker) = self
+            .with(|h| h.submit(turn_id, ticket, approval))
+            .ok_or(Stopped)??;
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Ok(acked)
+    }
+
+    pub fn poll_work(&self, consumed: u64, cx: &Context<'_>) -> Work {
+        self.with(|h| h.poll_work(consumed, cx))
+            .unwrap_or(Work::Idle)
+    }
+
+    pub fn admit(&self, ticket: Ticket, accepted: AcceptedAt) {
+        self.with(|h| h.admit(ticket, accepted));
+    }
+
+    /// 采纳并回执 `true`。返回这一格的审批；票不在「有结论」时返回 `None`、什么都不做。
+    pub fn adopt(&self, ticket: Ticket) -> Option<Option<ApprovalId>> {
+        let (approval, ack) = self.with(|h| h.adopt(ticket)).flatten()?;
+        let _ = ack.send(true);
+        Some(approval)
+    }
+
+    pub fn refuse(&self, ticket: Ticket) {
+        if let Some(refusals) = self.with(|h| h.refuse(ticket)) {
+            refusals.deliver();
+        }
+    }
+
+    pub fn stop_accepting(&self) {
+        if let Some(refusals) = self.with(Handoff::stop_accepting) {
+            refusals.deliver();
+        }
+    }
+
+    /// 只读地看一眼当前回合的表。
+    pub fn inspect<R>(&self, f: impl FnOnce(&Handoff) -> R) -> Option<R> {
+        self.lock().as_ref().map(f)
+    }
+
+    /// 请求取消某个回合；回合已经结束或换了就什么都不做。
+    pub fn cancel(&self, turn_id: TurnId) {
+        if let Some(handoff) = self.lock().as_ref()
+            && handoff.turn_id == turn_id
+        {
+            let _ = handoff.cancel.unbounded_send(());
+        }
     }
 }
 
-/// 交给适配器的权限处理方。任何一步对不上号（回合已结束、已换、正在取消）都答拒绝：失败即关闭。
+/// 交给适配器的权限处理方。任何一步对不上号（回合已结束、已换、已停止受理）都答拒绝：失败即关闭。
+/// 回合停下时它名下没有结论的请求都返回拒绝（`PermissionHandler` 的约定）：编排停止受理时逐格回绝。
 #[derive(Debug)]
 pub struct PermissionGate<D> {
     pub(crate) slot: Arc<TurnSlot>,
     pub(crate) decider: Arc<D>,
 }
 
-/// 回合已不在、或已不接受审批结果时的拒绝理由。
+/// 回合已不在、已停止、或已不接受审批结果时的拒绝理由。
 pub const TURN_GONE_MESSAGE: &str = "回合已结束，权限请求作废";
 
 fn turn_gone() -> PermissionDecision {
@@ -201,45 +561,73 @@ fn turn_gone() -> PermissionDecision {
     }
 }
 
-impl<D: PermissionDecider> PermissionHandler for PermissionGate<D> {
-    async fn on_permission(&self, req: PermissionRequest) -> PermissionDecision {
-        let Some(inbox) = self.slot.current(None) else {
+impl<D: PermissionDecider> PermissionGate<D> {
+    /// 登记之后的一段：等受理 → 问判定方（同时听撤销信号）→ 交结论。分段是为了让每次拿锁之后的那一段
+    /// 都有名字：屏障测试自己拿着锁调 `Handoff::register` / `submit`，放锁后接着跑这里，走的是同一段代码。
+    pub(crate) async fn after_register(
+        &self,
+        registered: Registered,
+        req: &PermissionRequest,
+    ) -> PermissionDecision {
+        let Registered {
+            turn_id,
+            ticket,
+            asked,
+        } = registered;
+        let Ok(Some(revoked)) = asked.await else {
             return turn_gone();
         };
-        let (reply, asked) = oneshot::channel();
-        if inbox
-            .signals
-            .unbounded_send(Signal::PermissionAsked {
-                reply,
-                after: req.updates_before,
-            })
-            .is_err()
-        {
-            return turn_gone();
-        }
-        let Ok(Some(ticket)) = asked.await else {
+        let Some(decided) = first_unless_revoked(self.decider.decide(turn_id, req), revoked).await
+        else {
+            // 编排先撤了票：回合停了，这个请求没有结论
             return turn_gone();
         };
-        let Decided { decision, approval } = self.decider.decide(inbox.turn_id, &req).await;
-        // 判定期间回合可能已经结束、换成别的回合：只把结果交给领票时的那个回合
-        let Some(inbox) = self.slot.current(Some(inbox.turn_id)) else {
+        // 从这里起不再看撤销信号。结论交给编排，只认它的回执
+        let Ok(acked) = self.slot.submit(turn_id, ticket, decided.approval) else {
             return turn_gone();
         };
-        let (ack, acked) = oneshot::channel();
-        if inbox
-            .signals
-            .unbounded_send(Signal::PermissionDecided {
-                ticket,
-                approval,
-                ack,
-            })
-            .is_err()
-        {
-            return turn_gone();
-        }
-        match acked.await {
-            Ok(true) => decision,
-            _ => turn_gone(),
-        }
+        after_submit(decided.decision, acked).await
     }
 }
+
+/// 交结论之后的一段：回执 `true` 就是交接点，之后没有任何 `await`，没有别的信号能改返回值。
+pub(crate) async fn after_submit(
+    decision: PermissionDecision,
+    acked: oneshot::Receiver<bool>,
+) -> PermissionDecision {
+    match acked.await {
+        Ok(true) => decision,
+        _ => turn_gone(),
+    }
+}
+
+/// 等 `fut`；撤销信号先到（或撤销的发送端没了）就丢掉 `fut`、返回 `None`。两者同时就绪时 `fut` 优先。
+async fn first_unless_revoked<F: Future>(
+    fut: F,
+    mut revoked: oneshot::Receiver<()>,
+) -> Option<F::Output> {
+    let mut fut = pin!(fut);
+    poll_fn(|cx| {
+        if let Poll::Ready(out) = fut.as_mut().poll(cx) {
+            return Poll::Ready(Some(out));
+        }
+        if std::pin::Pin::new(&mut revoked).poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+impl<D: PermissionDecider> PermissionHandler for PermissionGate<D> {
+    async fn on_permission(&self, req: PermissionRequest) -> PermissionDecision {
+        let Ok(registered) = self.slot.register(req.updates_before) else {
+            return turn_gone();
+        };
+        self.after_register(registered, &req).await
+    }
+}
+
+#[cfg(test)]
+#[path = "permission_tests.rs"]
+mod tests;

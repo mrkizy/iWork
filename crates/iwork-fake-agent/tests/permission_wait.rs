@@ -229,10 +229,11 @@ async fn process_death_while_waiting_fails_turn_and_voids_approval() {
     );
 }
 
-/// 等审批时用户取消：回合 WaitingApproval → Cancelling，审批以 TurnCancelled 作废，
-/// 运行时收到「已取消」答复后以 cancelled 结束。
+/// 等审批时用户取消：回合 WaitingApproval → Cancelling，审批以 TurnCancelled 作废。
+/// 挂着的权限请求由编排停止受理时回绝，适配器原样转发：运行时收到的是拒绝（不是适配器自己选的
+/// 「已取消」），而且排在 `session/cancel` 之前（T06 方案 2.6 第 3、5 条）。
 #[tokio::test(flavor = "multi_thread")]
-async fn cancel_while_waiting_voids_approval_and_answers_cancelled() {
+async fn cancel_while_waiting_voids_approval_and_answers_reject_before_cancel() {
     let fake = Fake::new(&waiting_script());
     let run = start(&fake);
     wait_until(Duration::from_secs(10), || {
@@ -248,21 +249,34 @@ async fn cancel_while_waiting_voids_approval_and_answers_cancelled() {
         [(run.turn_id, VoidReason::TurnCancelled)]
     );
     let snapshot = run.h.store.snapshot();
+    let tail = &snapshot[snapshot.len() - 5..];
     assert_eq!(
-        &snapshot[snapshot.len() - 5..],
+        [&tail[..3], &tail[4..]].concat(),
         [
             "turn WaitingApproval -> Cancelling",
             "approval_voided",
             "turn Cancelling -> Cancelled",
-            "message Interrupted \"\"",
             "turn finished Cancelled",
         ]
     );
+    // 拒绝之后假运行时走 denied 分支，「不删」可能赶在取消之前写进正文
+    assert!(tail[3].starts_with("message Interrupted"), "{tail:?}");
     let answers: Vec<_> = fake
         .records()
         .into_iter()
         .filter_map(|r| r.get("permission_response").cloned())
         .collect();
     assert_eq!(answers.len(), 1);
-    assert_eq!(answers[0]["outcome"]["outcome"], "cancelled");
+    assert_eq!(answers[0]["outcome"]["outcome"], "selected");
+    assert_eq!(answers[0]["outcome"]["optionId"], "reject-once");
+    let arrivals = fake.arrivals();
+    let answered = arrivals
+        .iter()
+        .position(|a| a == "permission_response t1 reject-once")
+        .expect("拒绝到了运行时");
+    let cancelled = arrivals
+        .iter()
+        .position(|a| a == "session/cancel")
+        .expect("取消到了运行时");
+    assert!(answered < cancelled, "{arrivals:?}");
 }

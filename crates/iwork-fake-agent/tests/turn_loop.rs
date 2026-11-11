@@ -277,99 +277,106 @@ async fn cancel_kills_whole_process_tree_when_runtime_ignores_it() {
 /// 回合 Cancelled 时子进程已不在；会话随之失效，同一条会话线下一回合按会话 id 续接。
 #[tokio::test(flavor = "multi_thread")]
 async fn cooperative_cancel_still_clears_children_and_next_turn_resumes() {
-    let fake = Fake::new(&json!({ "turns": [{ "steps": [
-        child_step(),
-        { "type": "text", "text": "开始" },
-        { "type": "sleep", "ms": 60000 }
-    ]}]}));
-    let healthy =
-        Fake::new(&json!({ "turns": [{ "steps": [{ "type": "text", "text": "续上了" }] }] }));
-    let runtime = AcpRuntime::new(fake.launch.clone());
-    let h = Arc::new(Harness::new());
-    let mut line = SessionLine::new(Arc::new(StubDecider::allow_all()), None);
-    let canceller = line.canceller();
-    let plan = h.plan(fake.dir.path(), "跑");
-    let turn_id = plan.turn.id;
-    let task = {
-        let h = h.clone();
-        tokio::spawn(async move {
-            let state = line.run_turn(&runtime, h.ports(), plan).await.unwrap();
-            (state, line)
-        })
-    };
-    wait_until(Duration::from_secs(10), || !h.live.all().is_empty()).await;
-    let child = fake
-        .records()
-        .iter()
-        .find_map(|r| r["spawned_child"].as_u64())
-        .expect("假运行时启动了子进程") as u32;
-    let cancelled_at = Instant::now();
-    canceller.cancel(turn_id);
-    let (state, mut line) = task.await.unwrap();
+    bounded(async {
+        let fake = Fake::new(&json!({ "turns": [{ "steps": [
+            child_step(),
+            { "type": "text", "text": "开始" },
+            { "type": "sleep", "ms": 60000 }
+        ]}]}));
+        let healthy =
+            Fake::new(&json!({ "turns": [{ "steps": [{ "type": "text", "text": "续上了" }] }] }));
+        let runtime = AcpRuntime::new(fake.launch.clone());
+        let h = Arc::new(Harness::new());
+        let mut line = SessionLine::new(Arc::new(StubDecider::allow_all()), None);
+        let canceller = line.canceller();
+        let plan = h.plan(fake.dir.path(), "跑");
+        let turn_id = plan.turn.id;
+        let task = {
+            let h = h.clone();
+            tokio::spawn(async move {
+                let state = line.run_turn(&runtime, h.ports(), plan).await.unwrap();
+                (state, line)
+            })
+        };
+        wait_until(Duration::from_secs(10), || !h.live.all().is_empty()).await;
+        let child = fake
+            .records()
+            .iter()
+            .find_map(|r| r["spawned_child"].as_u64())
+            .expect("假运行时启动了子进程") as u32;
+        let cancelled_at = Instant::now();
+        canceller.cancel(turn_id);
+        let (state, mut line) = task.await.unwrap();
 
-    assert_eq!(state, TurnState::Cancelled);
-    assert!(
-        cancelled_at.elapsed() < Duration::from_secs(2),
-        "配合取消不用等满 3 秒"
-    );
-    // 回合标为 Cancelled 时子进程已被结束；Windows 上它从 tasklist 消失有延迟，等它消失。
-    wait_until(Duration::from_secs(5), || !process_exists(child)).await;
-    let session = line.session().expect("会话对象还在");
-    assert!(session.process_tree_is_empty().unwrap());
+        assert_eq!(state, TurnState::Cancelled);
+        assert!(
+            cancelled_at.elapsed() < Duration::from_secs(2),
+            "配合取消不用等满 3 秒"
+        );
+        // 回合标为 Cancelled 时子进程已被结束；Windows 上它从 tasklist 消失有延迟，等它消失。
+        wait_until(Duration::from_secs(5), || !process_exists(child)).await;
+        let session = line.session().expect("会话对象还在");
+        assert!(session.process_tree_is_empty().unwrap());
 
-    let state = line
-        .run_turn(
-            &AcpRuntime::new(healthy.launch.clone()),
-            h.ports(),
-            h.plan(healthy.dir.path(), "继续"),
-        )
-        .await
-        .unwrap();
-    assert_eq!(state, TurnState::Completed);
-    assert_eq!(
-        healthy.params_of("session/load")[0]["sessionId"],
-        "fake-session-1"
-    );
+        let state = line
+            .run_turn(
+                &AcpRuntime::new(healthy.launch.clone()),
+                h.ports(),
+                // 同一条会话线的工作目录不变（会话绑定项守卫）；换的只是运行时
+                h.plan(fake.dir.path(), "继续"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(state, TurnState::Completed);
+        assert_eq!(
+            healthy.params_of("session/load")[0]["sessionId"],
+            "fake-session-1"
+        );
+    })
+    .await;
 }
 
 /// F-3：运行时崩溃，但它起的子进程继承了 stdout、还拿着管道：读端收不到 EOF，
 /// 也要凭进程退出及时发现，回合 Failed，整棵树清空。
 #[tokio::test(flavor = "multi_thread")]
 async fn crash_with_child_holding_stdout_is_detected() {
-    let fake = Fake::new(&json!({ "turns": [{ "steps": [
-        child_step(),
-        { "type": "text", "text": "写到一半" },
-        { "type": "crash", "exit_code": 7 }
-    ]}]}));
-    let h = Harness::new();
-    let mut line = SessionLine::new(Arc::new(StubDecider::allow_all()), None);
-    let started = Instant::now();
-    let state = tokio::time::timeout(
-        Duration::from_secs(10),
-        line.run_turn(
-            &AcpRuntime::new(fake.launch.clone()),
-            h.ports(),
-            h.plan(fake.dir.path(), "干活"),
-        ),
-    )
-    .await
-    .expect("10 秒内必须发现崩溃")
-    .unwrap();
-    assert_eq!(state, TurnState::Failed);
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "{:?}",
-        started.elapsed()
-    );
-    let snapshot = h.store.snapshot();
-    let failed = &snapshot[snapshot.len() - 3];
-    assert!(failed.contains("运行时进程意外退出"), "{failed}");
-    let child = fake
-        .records()
-        .iter()
-        .find_map(|r| r["spawned_child"].as_u64())
-        .expect("假运行时启动了子进程") as u32;
-    wait_until(Duration::from_secs(2), || !process_exists(child)).await;
+    bounded(async {
+        let fake = Fake::new(&json!({ "turns": [{ "steps": [
+            child_step(),
+            { "type": "text", "text": "写到一半" },
+            { "type": "crash", "exit_code": 7 }
+        ]}]}));
+        let h = Harness::new();
+        let mut line = SessionLine::new(Arc::new(StubDecider::allow_all()), None);
+        let started = Instant::now();
+        let state = tokio::time::timeout(
+            Duration::from_secs(10),
+            line.run_turn(
+                &AcpRuntime::new(fake.launch.clone()),
+                h.ports(),
+                h.plan(fake.dir.path(), "干活"),
+            ),
+        )
+        .await
+        .expect("10 秒内必须发现崩溃")
+        .unwrap();
+        assert_eq!(state, TurnState::Failed);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        let snapshot = h.store.snapshot();
+        let failed = &snapshot[snapshot.len() - 3];
+        assert!(failed.contains("运行时进程意外退出"), "{failed}");
+        let child = fake
+            .records()
+            .iter()
+            .find_map(|r| r["spawned_child"].as_u64())
+            .expect("假运行时启动了子进程") as u32;
+        wait_until(Duration::from_secs(2), || !process_exists(child)).await;
+    })
+    .await;
 }
 
 /// 第 2 轮 F-1：真适配器里，权限请求之前积压了几千段文字，「工具调用开始」照样排在「等待审批」之前。
@@ -408,56 +415,59 @@ async fn tool_start_precedes_waiting_behind_a_real_backlog() {
 /// 第 2 轮 F-3：运行时发来超长行或非 UTF-8 行：报固定原因、回合 Failed、进程树清空。
 #[tokio::test(flavor = "multi_thread")]
 async fn bad_frames_fail_the_turn_with_fixed_reason_and_clear_the_tree() {
-    let cases = [
-        (
-            json!({ "type": "bad_line", "kind": "oversize", "bytes": iwork_agent_acp::MAX_FRAME_BYTES + 1 }),
-            format!(
-                "运行时发来的单条消息超过 {} 字节",
-                iwork_agent_acp::MAX_FRAME_BYTES
+    bounded(async {
+        let cases = [
+            (
+                json!({ "type": "bad_line", "kind": "oversize", "bytes": iwork_agent_acp::MAX_FRAME_BYTES + 1 }),
+                format!(
+                    "运行时发来的单条消息超过 {} 字节",
+                    iwork_agent_acp::MAX_FRAME_BYTES
+                ),
             ),
-        ),
-        (
-            json!({ "type": "bad_line", "kind": "invalid_utf8" }),
-            "运行时发来的消息不是 UTF-8".to_string(),
-        ),
-    ];
-    for (step, reason) in cases {
-        let fake = Fake::new(&json!({ "turns": [{ "steps": [
-            { "type": "text", "text": "前面正常" },
-            step
-        ]}]}));
-        let h = Harness::new();
-        let mut line = SessionLine::new(Arc::new(StubDecider::allow_all()), None);
-        let state = tokio::time::timeout(
-            Duration::from_secs(10),
-            line.run_turn(
-                &AcpRuntime::new(fake.launch.clone()),
-                h.ports(),
-                h.plan(fake.dir.path(), "跑"),
+            (
+                json!({ "type": "bad_line", "kind": "invalid_utf8" }),
+                "运行时发来的消息不是 UTF-8".to_string(),
             ),
-        )
-        .await
-        .expect("10 秒内收尾")
-        .unwrap();
-        assert_eq!(state, TurnState::Failed);
-        let snapshot = h.store.snapshot();
-        assert_eq!(
-            snapshot[snapshot.len() - 3],
-            format!("turn Running -> Failed (与运行时通信出错：{reason})")
-        );
-        let session = line.session().expect("协议错误不丢会话对象");
-        wait_until(Duration::from_secs(3), || {
-            session.process_tree_is_empty().unwrap()
-        })
-        .await;
-        assert!(
-            session
-                .raw_log()
-                .iter()
-                .any(|l| l.contains("\"rejected\":true")),
-            "诊断里记了一条被拒收的消息"
-        );
-    }
+        ];
+        for (step, reason) in cases {
+            let fake = Fake::new(&json!({ "turns": [{ "steps": [
+                { "type": "text", "text": "前面正常" },
+                step
+            ]}]}));
+            let h = Harness::new();
+            let mut line = SessionLine::new(Arc::new(StubDecider::allow_all()), None);
+            let state = tokio::time::timeout(
+                Duration::from_secs(10),
+                line.run_turn(
+                    &AcpRuntime::new(fake.launch.clone()),
+                    h.ports(),
+                    h.plan(fake.dir.path(), "跑"),
+                ),
+            )
+            .await
+            .expect("10 秒内收尾")
+            .unwrap();
+            assert_eq!(state, TurnState::Failed);
+            let snapshot = h.store.snapshot();
+            assert_eq!(
+                snapshot[snapshot.len() - 3],
+                format!("turn Running -> Failed (与运行时通信出错：{reason})")
+            );
+            let session = line.session().expect("协议错误不丢会话对象");
+            wait_until(Duration::from_secs(3), || {
+                session.process_tree_is_empty().unwrap()
+            })
+            .await;
+            assert!(
+                session
+                    .raw_log()
+                    .iter()
+                    .any(|l| l.contains("\"rejected\":true")),
+                "诊断里记了一条被拒收的消息"
+            );
+        }
+    })
+    .await;
 }
 
 /// F-1：真实会话的诊断记录里没有正文、工具输入输出、stderr 内容，只有协议元数据。
@@ -519,51 +529,55 @@ impl iwork_ports::agent::PermissionHandler for AllowAll {
 /// 同一条会话线下一回合按记下的会话 id 续接（`session/load`）并正常完成。
 #[tokio::test(flavor = "multi_thread")]
 async fn crash_mid_turn_fails_the_turn_and_next_turn_resumes() {
-    let crashing = Fake::new(&json!({ "turns": [{ "steps": [
-        { "type": "text", "text": "写到一半" },
-        { "type": "crash", "exit_code": 3 }
-    ]}]}));
-    let healthy = Fake::new(&json!({ "turns": [{ "steps": [
-        { "type": "text", "text": "续上了" }
-    ]}]}));
-    let h = Harness::new();
-    let mut line = SessionLine::new(Arc::new(StubDecider::allow_all()), None);
+    bounded(async {
+        let crashing = Fake::new(&json!({ "turns": [{ "steps": [
+            { "type": "text", "text": "写到一半" },
+            { "type": "crash", "exit_code": 3 }
+        ]}]}));
+        let healthy = Fake::new(&json!({ "turns": [{ "steps": [
+            { "type": "text", "text": "续上了" }
+        ]}]}));
+        let h = Harness::new();
+        let mut line = SessionLine::new(Arc::new(StubDecider::allow_all()), None);
 
-    let state = line
-        .run_turn(
-            &AcpRuntime::new(crashing.launch.clone()),
-            h.ports(),
-            h.plan(crashing.dir.path(), "干活"),
-        )
-        .await
-        .unwrap();
-    assert_eq!(state, TurnState::Failed);
-    let snapshot = h.store.snapshot();
-    let failed = &snapshot[snapshot.len() - 3];
-    assert!(
-        failed.starts_with("turn Running -> Failed (运行时进程意外退出"),
-        "{failed}"
-    );
-    assert!(failed.contains(&exit_code_text(3)), "{failed}");
-    assert_eq!(
-        &snapshot[snapshot.len() - 2..],
-        ["message Failed \"写到一半\"", "turn finished Failed"]
-    );
-    assert!(line.session().is_none(), "进程没了，会话随之丢弃");
+        let state = line
+            .run_turn(
+                &AcpRuntime::new(crashing.launch.clone()),
+                h.ports(),
+                h.plan(crashing.dir.path(), "干活"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(state, TurnState::Failed);
+        let snapshot = h.store.snapshot();
+        let failed = &snapshot[snapshot.len() - 3];
+        assert!(
+            failed.starts_with("turn Running -> Failed (运行时进程意外退出"),
+            "{failed}"
+        );
+        assert!(failed.contains(&exit_code_text(3)), "{failed}");
+        assert_eq!(
+            &snapshot[snapshot.len() - 2..],
+            ["message Failed \"写到一半\"", "turn finished Failed"]
+        );
+        assert!(line.session().is_none(), "进程没了，会话随之丢弃");
 
-    let state = line
-        .run_turn(
-            &AcpRuntime::new(healthy.launch.clone()),
-            h.ports(),
-            h.plan(healthy.dir.path(), "继续"),
-        )
-        .await
-        .unwrap();
-    assert_eq!(state, TurnState::Completed);
-    let loads = healthy.params_of("session/load");
-    assert_eq!(loads.len(), 1);
-    assert_eq!(loads[0]["sessionId"], "fake-session-1");
-    assert!(healthy.params_of("session/new").is_empty());
+        let state = line
+            .run_turn(
+                &AcpRuntime::new(healthy.launch.clone()),
+                h.ports(),
+                // 同一条会话线的工作目录不变（会话绑定项守卫）；换的只是运行时
+                h.plan(crashing.dir.path(), "继续"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(state, TurnState::Completed);
+        let loads = healthy.params_of("session/load");
+        assert_eq!(loads.len(), 1);
+        assert_eq!(loads[0]["sessionId"], "fake-session-1");
+        assert!(healthy.params_of("session/new").is_empty());
+    })
+    .await;
 }
 
 /// 验收 5：已知不兼容的组合在开会话时被阻止，回合以可读原因失败，没有发出任何 prompt。
@@ -593,6 +607,22 @@ async fn incompatible_runtime_fails_turn_with_readable_reason() {
     );
     assert!(fake.params_of("session/new").is_empty());
     assert!(fake.params_of("session/prompt").is_empty());
+}
+
+/// 会走 retire / terminate / close 的用例的整体期限。正常几秒跑完；取消、清树各自的上限加起来也远小于它。
+const CASE_LIMIT: Duration = Duration::from_secs(90);
+
+/// 给用例套一层期限，打开 debug 日志（测试捕获，失败时才打出来）。超时就 panic：
+/// retire、terminate、kill_tree_and_wait、close、shutdown 的入口和出口都记了日志，
+/// 最后一条只有 enter 没有 exit 的就是卡住的那一步（2026-11-11 Windows CI 卡过一次）。
+async fn bounded(case: impl std::future::Future<Output = ()>) {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+    if tokio::time::timeout(CASE_LIMIT, case).await.is_err() {
+        panic!("用例 {CASE_LIMIT:?} 没跑完：看上面日志里最后一条只有 enter、没有 exit 的步骤");
+    }
 }
 
 async fn wait_until(limit: Duration, mut ok: impl FnMut() -> bool) {

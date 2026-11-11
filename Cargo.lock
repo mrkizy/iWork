@@ -2818,6 +2818,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tokio",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -2978,6 +2979,8 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
