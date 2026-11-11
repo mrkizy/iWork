@@ -283,3 +283,32 @@ fn old_tree_may_outlive_restart() {
     // 后台 sleep 不随 stdin 结束退出：由 `Daemon` 丢弃时按 pgid 收掉
     drop(a);
 }
+
+/// 方案 S5 / R10（2/F-1）：真实装配里存储写线程失效 → 真的 `SqliteStore::failed()` → store-health 结束 →
+/// 监督器整体退出 → 停机「故障」列、跳过关存储 → 退出码 20、状态 `Exited{Fatal, Fatal}`。托管实例同样报 20。
+#[test]
+fn store_failure_exits_fatal() {
+    for managed in [false, true] {
+        let sb = Sandbox::new();
+        let trigger = sb.home.join("break-writer");
+        let env = trigger.display().to_string();
+        let args: &[&str] = if managed { &["--service"] } else { &[] };
+        let mut d = sb.spawn(args, &[("IWORK_DEV_BREAK_WRITER_ON", &env)]);
+        sb.wait_ready(d.pid(), START);
+        assert!(d.try_exit().is_none(), "对照：触发之前一直在跑");
+        std::fs::write(&trigger, b"").unwrap();
+        assert_eq!(code(d.wait_exit(START)), Some(20), "{}", d.stderr());
+        assert_eq!(
+            exited(&sb),
+            Phase::Exited {
+                code: ExitCode::Fatal,
+                reason: Some(StopReason::Fatal),
+                message: None
+            }
+        );
+        let log = log_text(&sb);
+        assert!(log.contains("存储不可用，整体退出"), "{log}");
+        assert!(log.contains("存储已失效，跳过关存储"), "{log}");
+        assert!(!log.contains("存储已关闭"), "{log}");
+    }
+}

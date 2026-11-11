@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use iwork_ipc::rendezvous::{ExeStamp, ExitCode, LockInfo, Phase, StopReason};
-use iwork_ipc::server::{Server, ServerConfig};
+use iwork_ipc::server::{Publisher, Server, ServerConfig};
 use iwork_ipc::{LocalEndpoint, LocalListener};
 use iwork_ports::store::StoragePort;
 use iwork_store::{DataDir, FsArtifactStore, StoreFailure};
@@ -417,20 +417,38 @@ fn outbox_routes() -> Vec<OutboxRoute> {
 }
 
 #[cfg(not(feature = "dev"))]
-fn dev_tasks(_stop: &StopSwitch) -> Vec<TaskSpec> {
+fn dev_tasks(_stop: &StopSwitch, _store: &Arc<Store>) -> Vec<TaskSpec> {
     Vec::new()
 }
 
-/// 开发构建的停机触发器（`IWORK_DEV_STOP_ON`）。
+/// 开发构建的触发器：停机（`IWORK_DEV_STOP_ON`）、让写线程失效（`IWORK_DEV_BREAK_WRITER_ON`）。
 #[cfg(feature = "dev")]
-fn dev_tasks(stop: &StopSwitch) -> Vec<TaskSpec> {
-    let Some((file, reason)) = crate::dev_parts::stop_trigger() else {
-        return Vec::new();
-    };
-    let stop = stop.clone();
-    vec![TaskSpec::restartable("dev-stop", move || {
-        crate::dev_parts::stop_on(file.clone(), reason, stop.clone())
-    })]
+fn dev_tasks(stop: &StopSwitch, store: &Arc<Store>) -> Vec<TaskSpec> {
+    let mut v = Vec::new();
+    if let Some((file, reason)) = crate::dev_parts::stop_trigger() {
+        let stop = stop.clone();
+        v.push(TaskSpec::restartable("dev-stop", move || {
+            crate::dev_parts::stop_on(file.clone(), reason, stop.clone())
+        }));
+    }
+    if let Some(file) = crate::dev_parts::break_writer_trigger() {
+        let store = store.clone();
+        v.push(TaskSpec::restartable("dev-break-writer", move || {
+            crate::dev_parts::break_writer_on(file.clone(), store.clone())
+        }));
+    }
+    v
+}
+
+/// 提交观察者。开发构建设了 `IWORK_DEV_BREAK_WRITER_ON` 时外面包一层：见到触发器提交的那批就在写线程上 panic。
+#[cfg(not(feature = "dev"))]
+fn observer(o: PublishObserver<Publisher>) -> Box<dyn iwork_store::CommitObserver> {
+    Box::new(o)
+}
+
+#[cfg(feature = "dev")]
+fn observer(o: PublishObserver<Publisher>) -> Box<dyn iwork_store::CommitObserver> {
+    crate::dev_parts::wrap_observer(o)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -462,7 +480,7 @@ async fn serve_with<W: RunningWork>(
     );
     let publishing = PublishState::new();
     let observer = PublishObserver::new(Arc::new(publisher), publishing.clone());
-    if let Err(e) = store.set_commit_observer(Box::new(observer)).await {
+    if let Err(e) = store.set_commit_observer(self::observer(observer)).await {
         return fail(
             &board,
             BootError::Fatal {
@@ -513,7 +531,7 @@ async fn serve_with<W: RunningWork>(
     let store_failed = Arc::new(AtomicBool::new(false));
     let woke = Arc::new(Notify::new());
     let clock = Arc::new(SystemClock::new());
-    let mut specs = dev_tasks(&stop_switch);
+    let mut specs = dev_tasks(&stop_switch, &store);
     specs.extend(health_tasks(
         store.failed(),
         store_failed.clone(),

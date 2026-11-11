@@ -7,6 +7,9 @@
 //!   投递就是往这个文件追加一行 `<outbox id>`（接收方按 id 去重，由测试做）。
 //! - `IWORK_DEV_STOP_ON=<文件>:<原因>`：就绪后等这个文件出现，删掉它并按原因请求停机
 //!   （`user-quit` / `signal` / `upgrade` / `fatal`）。
+//! - `IWORK_DEV_BREAK_WRITER_ON=<文件>`：就绪后等这个文件出现，删掉它并提交一条主体是 [`BREAK_WRITER_ACTOR`] 的事件；
+//!   包在提交观察者外面的那层见到这一批就在写线程上 panic。写线程因此退出，存储的失效信号（`WriterGone`）
+//!   是真的——之后走的是生产里同一条「存储坏了 → 整体退出」的路。
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -26,6 +29,8 @@ use crate::work::{AbortReport, RunningCount, RunningWork};
 pub const WORK_ENV: &str = "IWORK_DEV_WORK";
 pub const RECEIVER_ENV: &str = "IWORK_DEV_OUTBOX_RECEIVER";
 pub const STOP_ON_ENV: &str = "IWORK_DEV_STOP_ON";
+pub const BREAK_WRITER_ENV: &str = "IWORK_DEV_BREAK_WRITER_ON";
+pub const BREAK_WRITER_ACTOR: &str = "system:dev-break-writer";
 
 /// 假的在跑的东西。
 pub struct DevWork {
@@ -308,5 +313,60 @@ mod tests {
         let opened = late.await.unwrap();
         assert!(opened.is_err(), "封口之后开会话应被拒：{opened:?}");
         assert!(w.procs.lock().unwrap().is_empty());
+    }
+}
+
+/// 让写线程失效的触发器配置。
+pub fn break_writer_trigger() -> Option<PathBuf> {
+    std::env::var(BREAK_WRITER_ENV).ok().map(PathBuf::from)
+}
+
+/// 任务体：等文件出现，删掉，提交一条触发器事件（这次提交会因写线程退出而失败）。
+pub async fn break_writer_on(file: PathBuf, store: std::sync::Arc<crate::boot::Store>) {
+    use iwork_ports::clock::IdGenerator;
+    use iwork_ports::store::StoragePort;
+    loop {
+        if std::fs::remove_file(&file).is_ok() {
+            tracing::warn!("开发触发器：让存储写线程失效");
+            let ids = crate::time::MonotonicIds::new(crate::time::SystemClock::new());
+            let r = store
+                .commit(iwork_ports::store::CommitRequest {
+                    command_id: iwork_domain::id::CommandId::from_raw(ids.next()),
+                    actor: iwork_domain::common::Actor(BREAK_WRITER_ACTOR.into()),
+                    events: vec![
+                        iwork_domain::event::GlobalSettingsChanged {
+                            playful_ui: None,
+                            autostart: None,
+                            projects_root: None,
+                        }
+                        .into(),
+                    ],
+                    outbox: vec![],
+                })
+                .await;
+            tracing::warn!(result = ?r.map(|_| ()), "开发触发器的提交返回");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// 设了 `IWORK_DEV_BREAK_WRITER_ON` 时给观察者包一层；没设原样返回。
+pub fn wrap_observer<O: iwork_store::CommitObserver>(
+    inner: O,
+) -> Box<dyn iwork_store::CommitObserver> {
+    if break_writer_trigger().is_none() {
+        return Box::new(inner);
+    }
+    Box::new(BreakOnTrigger(inner))
+}
+
+struct BreakOnTrigger<O>(O);
+
+impl<O: iwork_store::CommitObserver> iwork_store::CommitObserver for BreakOnTrigger<O> {
+    fn committed(&mut self, batch: iwork_store::CommittedBatch<'_>) {
+        if batch.events.iter().any(|e| e.actor.0 == BREAK_WRITER_ACTOR) {
+            panic!("开发触发器：在写线程上 panic，让存储失效");
+        }
+        self.0.committed(batch);
     }
 }
