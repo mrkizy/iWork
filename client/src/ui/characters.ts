@@ -3,7 +3,7 @@
 // 形象素材：文件名 <形象>-<表情>.svg。设计系统自带的静态素材，不是来自协议的内容，所以可以按 HTML 内联。
 const SVGS = import.meta.glob<string>("@design/characters/*.svg", { query: "?raw", import: "default", eager: true });
 
-export type Mood = "idle" | "work" | "wait" | "done" | "hover" | "angry";
+export type Mood = "idle" | "work" | "wait" | "done" | "hover" | "angry" | "sorry";
 
 export function svgOf(character: string, mood: Mood): string | undefined {
   const suffix = `/characters/${character}-${mood}.svg`;

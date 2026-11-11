@@ -6,13 +6,14 @@ import { Expression, type AvatarView } from "../gen/iwork/v1/view_pb";
 import { CHARACTERS, svgOf, type Mood } from "./characters";
 import "./Avatar.css";
 
-// 表情 → 素材（表情本身由 Rust 侧随状态给）。出错没有专门的素材，先用空闲。
+// 表情 → 素材（表情本身由 Rust 侧随状态给）。出错用 sorry（ui-m1.md 2a 第 13 条）：不浮动、不弹跳，
+// 和其他表情一样不受「轻松元素」开关影响。
 const MOOD: Record<Expression, Mood> = {
   [Expression.UNSPECIFIED]: "idle",
   [Expression.IDLE]: "idle",
   [Expression.WORKING]: "work",
   [Expression.WAITING]: "wait",
-  [Expression.ERROR]: "idle",
+  [Expression.ERROR]: "sorry",
 };
 
 const HEX_COLOR = /^#[0-9a-fA-F]{3,8}$/;
