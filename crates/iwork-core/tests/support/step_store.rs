@@ -136,6 +136,15 @@ impl StepStore {
         self.lock().processed.keys().copied().collect()
     }
 
+    /// 队列里每一笔的事件种类（看某个决定的提交是否已经入队）。
+    pub fn queued_kinds(&self) -> Vec<Vec<&'static str>> {
+        self.lock()
+            .queue
+            .iter()
+            .map(|(_, r)| r.events.iter().map(DomainEvent::kind).collect())
+            .collect()
+    }
+
     pub fn queued(&self) -> usize {
         self.lock().queue.len()
     }

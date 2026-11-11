@@ -200,6 +200,11 @@ enum Op {
         turn: u8,
         race: bool,
     },
+    /// 第 9 轮 9/F-2：用户拒绝一条待审批，拒绝那笔入队后 decide 的 future 被丢弃（提交去向不明），
+    /// 同一回合的同一调用紧跟着到达。下一个决定必须先过屏障再读，不能在旧视图上问或放行
+    DenyDropped {
+        nth: u8,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +244,7 @@ fn op() -> impl Strategy<Value = Op> {
         1 => any::<u8>().prop_map(|nth| Op::Revoke { nth }),
         2 => Just(Op::Sync),
         8 => (t(), any::<bool>()).prop_map(|(turn, race)| Op::Retry { turn, race }),
+        5 => any::<u8>().prop_map(|nth| Op::DenyDropped { nth }),
     ]
 }
 
@@ -673,6 +679,7 @@ impl Run {
                     Out::Other
                 });
             }
+            Op::DenyDropped { nth } => self.deny_dropped(nth),
             Op::Retry { turn, race } => {
                 let Some(from) = self.turn_state(turn) else {
                     return;
@@ -740,6 +747,70 @@ impl Run {
                 }
             }
         }
+    }
+
+    fn deny_dropped(&mut self, nth: u8) {
+        let pending: Vec<(ApprovalId, TurnId, String)> = self
+            .log_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                DomainEvent::ApprovalRequested(r) => Some((
+                    r.approval.id,
+                    r.approval.turn_id,
+                    r.approval.action.raw_summary.clone(),
+                )),
+                _ => None,
+            })
+            .filter(|(id, _, _)| {
+                self.store
+                    .projection()
+                    .approvals
+                    .get(id)
+                    .is_some_and(|(s, _, _, _)| *s == ApprovalState::Pending)
+            })
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        let (id, turn_id, command) = pending[usize::from(nth) % pending.len()].clone();
+        let Some(turn) = (0..4u8).find(|t| tid(*t) == turn_id) else {
+            return;
+        };
+        let engine = self.engine.clone();
+        let decide = self.tasks.spawn(async move {
+            let _ = engine
+                .decide(id, UserDecision::Deny, Actor("user".into()))
+                .await;
+            Out::Other
+        });
+        // 推到拒绝那笔入队为止；它前面要是先排了一笔屏障，就让存储处理掉、送回执
+        for _ in 0..20 {
+            self.tasks.poll(decide);
+            let queued = self.store.queued_kinds();
+            if queued.iter().any(|k| k.contains(&"approval_decided"))
+                || self.tasks.done.contains_key(&decide)
+            {
+                break;
+            }
+            if !queued.is_empty() {
+                self.store.step();
+                for t in self.store.undelivered() {
+                    self.store.deliver(t);
+                }
+            }
+        }
+        self.tasks.drop_task(decide);
+        let keys = Arc::new((*self.keys[&turn]).clone());
+        let k = keys.clone();
+        let engine = self.engine.clone();
+        let i = self.tasks.spawn(async move {
+            let decided = engine
+                .on_permission(&k, tid(turn), &bash_req(&command))
+                .await;
+            Out::Request { turn, decided }
+        });
+        self.tasks.poll(i);
+        self.request_keys.insert(i, (turn, keys));
     }
 
     fn apply(&mut self, c: Choice) {
@@ -945,6 +1016,28 @@ fn check(run: &Run, engine: &Engine, check_bindings: bool) -> Result<(), TestCas
                 ended.insert(f.turn_id);
             }
             DomainEvent::ApprovalEvaluated(a) => {
+                // 4'（9/F-2）：审计落盘那一刻，子动作指纹在拒绝记忆里——自动拒绝相位时结果必须是拒绝，
+                // 强制询问相位时不能是放行。规则放行、全开放行、一次性放行都要过这一关
+                if let Some(conv) = prefix_projection.turns.get(&a.turn_id).map(|(c, _)| *c)
+                    && let Some(memory) = denial.by_conversation.get(&conv)
+                {
+                    for x in &a.sub_actions {
+                        match memory.get(&x.fingerprint()) {
+                            Some(true) => prop_assert!(
+                                matches!(a.verdict, Verdict::Deny(_)),
+                                "AC05：seq {} 的审计越过了自动拒绝：{:?}",
+                                e.seq,
+                                a.verdict
+                            ),
+                            Some(false) => prop_assert!(
+                                a.verdict != Verdict::Allow,
+                                "AC05：seq {} 的审计越过了强制询问",
+                                e.seq
+                            ),
+                            None => {}
+                        }
+                    }
+                }
                 if let Some(g) = a.grant_approval_id {
                     let stale = last_interrupt
                         .get(&a.turn_id)
