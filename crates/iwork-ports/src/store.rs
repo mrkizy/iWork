@@ -200,10 +200,13 @@ pub trait StoragePort: Send + Sync {
         state: DeliveryState,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
     /// 把停在 `Dispatched`（派发了、没来得及记结果）的条目收尾，一个事务：`target` 以 `redeliver_prefixes`
-    /// 里任一前缀开头的改回 `Queued`（接收方按 `OutboxId` 去重，可以重投），其余标 `Failed`。`attempts` 不变。
+    /// 里任一前缀开头的改回 `Queued`（接收方按 `OutboxId` 去重，可以重投）；以 `fail_prefixes` 里任一前缀开头的
+    /// 标 `Failed`（不能幂等，不自动重投）；两边都不沾的原样留在 `Dispatched`，交给认识这个去向的版本按它自己的
+    /// 规则收尾（T04 方案 2.11）。`attempts` 不变。
     fn outbox_requeue_dispatched(
         &self,
         redeliver_prefixes: Vec<String>,
+        fail_prefixes: Vec<String>,
     ) -> impl Future<Output = Result<RequeueReport, StorageError>> + Send;
     /// 符合 `selector`、状态是 `Queued` 的条目，按 id 递增，最多 `limit` 条。筛选在存储里做，
     /// 排在别的去向后面的条目也挑得出来。

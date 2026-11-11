@@ -2,7 +2,8 @@
 //!
 //! - 去向登记表：每个去向一行（前缀、结果不确定时怎么办、单次时限、次数上限、投递实现）。加一种去向 = 加一行。
 //!   T04 交付时登记表是空的，T10 登记真实去向。
-//! - 每次启动先对账：停在 `Dispatched` 的条目，能幂等的改回 `Queued`、不能的标 `Failed`（只重启这个任务时也走这里）。
+//! - 每次启动先对账：停在 `Dispatched` 的条目，能幂等的改回 `Queued`、不能的标 `Failed`、不认识去向的原样留着
+//!   （只重启这个任务时也走这里）。
 //! - 每个去向一条道，互不等待；每条道都「取到取不到为止」，之后才等下一次叫醒（提交观察者在有新 outbox 条目时叫醒）。
 //!   不轮询。超时、panic 后改回排队的那条先于同去向后面的条目再投（保序）。
 //! - 没有去向认领的条目原样留在 `queued`，只报不动（产品负责人 2026-11-11 定，审查 1/F-4）：不标失败、不加次数、
@@ -64,7 +65,6 @@ pub const DEFAULT_MAX_ATTEMPTS: u32 = 8;
 pub const FIRST_BACKOFF: Duration = Duration::from_secs(1);
 pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const LANE_PAGE: usize = 16;
-const UNCLAIMED_PAGE: usize = 64;
 
 /// 开发构建的暂停点：投递已返回、结果还没记（「已派发、未记结果」）。
 pub const PAUSE_AFTER_DISPATCH: &str = "outbox-after-dispatch";
@@ -128,12 +128,21 @@ pub async fn run<St>(
 ) where
     St: StoragePort + Send + Sync + 'static,
 {
-    let redeliver: Vec<String> = routes
-        .iter()
-        .filter(|r| r.on_uncertain == OnUncertain::Redeliver)
-        .map(|r| r.prefix.to_owned())
-        .collect();
-    match store.outbox_requeue_dispatched(redeliver).await {
+    let prefixes_of = |on: OnUncertain| -> Vec<String> {
+        routes
+            .iter()
+            .filter(|r| r.on_uncertain == on)
+            .map(|r| r.prefix.to_owned())
+            .collect()
+    };
+    // 不认识的去向停在 dispatched 的，原样留着：交给认识它的版本按它自己的规则收尾（方案 2.11）
+    match store
+        .outbox_requeue_dispatched(
+            prefixes_of(OnUncertain::Redeliver),
+            prefixes_of(OnUncertain::Fail),
+        )
+        .await
+    {
         Ok(report) => {
             if report.requeued + report.failed > 0 {
                 tracing::info!(
@@ -662,6 +671,43 @@ mod tests {
         })
         .await;
         assert_eq!(*s.lock().unwrap(), w.ids(), "按先后");
+    }
+
+    /// 方案 2.11（1/F-4 的延伸）：不认识去向、停在 dispatched 的条目，启动对账时原样留着；
+    /// 换成登记了它的配置启动后，按它的 on_uncertain 收尾——Redeliver 的被投出，Fail 的标失败。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_dispatched_is_settled_by_the_version_that_knows_it() {
+        let w = World::new();
+        w.add(&["r:1", "f:1"]).await;
+        for id in w.ids() {
+            w.store
+                .outbox_mark(iwork_ports::store::OutboxId(id), DeliveryState::Dispatched)
+                .await
+                .unwrap();
+        }
+        let old = w.start(vec![]);
+        // 给旧配置的对账跑完的时间（对账不产生可观察的报告：dispatched 的不在「无人认领的 queued」里）
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        old.abort();
+        let _ = old.await;
+        assert_eq!(
+            w.states()
+                .iter()
+                .map(|(_, s, _)| s.as_str())
+                .collect::<Vec<_>>(),
+            ["dispatched", "dispatched"],
+            "不认识的不动"
+        );
+        let s = seen();
+        let _new = w.start(vec![
+            route("r:", OnUncertain::Redeliver, Mode::Ok, &s),
+            route("f:", OnUncertain::Fail, Mode::Ok, &s),
+        ]);
+        w.until("按各自的规则收尾", Duration::from_secs(5), |w| {
+            w.count("r:", "accepted_by_runtime") == 1 && w.count("f:", "failed") == 1
+        })
+        .await;
+        assert_eq!(*s.lock().unwrap(), [w.ids()[0]], "只有可重投的那条被投出");
     }
 
     #[test]

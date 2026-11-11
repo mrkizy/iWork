@@ -178,10 +178,10 @@ fn kill9_recovers_seeded_state() {
     a.kill9();
     let mut b = sb.spawn(&[], &[]);
     sb.wait_ready(b.pid(), START);
-    // 投递任务：T04 的去向登记表是空的。`queued` 的三条没人认领，原样留着、只报 error（1/F-4）；
-    // 停在 `dispatched` 的那条按现行对账接口（重投清单以外一律标失败）变 failed——这一行待主管定（见回报）。
+    // 投递任务：T04 的去向登记表是空的。没人认领的条目都原样留着（方案 2.11，1/F-4）：`queued` 的三条只报 error，
+    // 停在 `dispatched` 的那条对账时也不动，交给认识这个去向的版本收尾。
     // 恢复提交本身不碰 outbox（见 unknown_event_kind_with_unsettled_objects_writes_nothing）
-    let want = ["failed", "queued", "queued", "queued"];
+    let want = ["dispatched", "queued", "queued", "queued"];
     let deadline = std::time::Instant::now() + START;
     while outbox_states(&sb) != want || !crate::support::log_text(&sb).contains("没有登记去向")
     {
