@@ -206,6 +206,51 @@ pub fn delta(message_id: &str, offset: u64, t: &str) -> pb::TransientEvent {
     }
 }
 
+/// 工具输出的一段（临时事件）。
+pub fn tool_output(tool_call_id: &str, offset: u64, t: &str) -> pb::TransientEvent {
+    pb::TransientEvent {
+        event: Some(pb::transient_event::Event::ToolOutputDelta(
+            pb::ToolOutputDelta {
+                tool_call_id: tool_call_id.into(),
+                offset,
+                text: t.into(),
+            },
+        )),
+    }
+}
+
+pub fn project_path_status(project_id: &str, status: pb::PathStatus) -> pb::DomainEvent {
+    ev(E::ProjectPathStatusChanged(pb::ProjectPathStatusChanged {
+        project_id: project_id.into(),
+        path_status: status.into(),
+    }))
+}
+
+pub fn project_pinned(project_id: &str, pinned: bool) -> pb::DomainEvent {
+    ev(E::ProjectUpdated(pb::ProjectUpdated {
+        project_id: project_id.into(),
+        name: None,
+        pinned: Some(pinned),
+        last_active_at: None,
+    }))
+}
+
+pub fn attachment(id: &str, conversation_id: &str, name: &str, size: u64) -> pb::DomainEvent {
+    ev(E::AttachmentStored(pb::AttachmentStored {
+        attachment: Some(pb::Attachment {
+            id: id.into(),
+            conversation_id: conversation_id.into(),
+            sha256: "00".repeat(32),
+            size,
+            mime: "application/octet-stream".into(),
+            name: name.into(),
+            origin: None,
+            needs_confirmation: false,
+            created_at: Some(ts(0)),
+        }),
+    }))
+}
+
 pub fn turn_queued(id: &str, conversation_id: &str, assistant_id: &str) -> pb::DomainEvent {
     ev(E::TurnQueued(pb::TurnQueued {
         turn: Some(pb::Turn {

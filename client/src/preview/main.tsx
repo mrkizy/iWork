@@ -1,7 +1,8 @@
 /* @refresh reload */
 // 录像播放页（方案 2.6、第 8 节）：吃 client-core 对着假后台跑出的 ViewPatch 录像，用和正式入口同一套组件画出来。
 // 只在开发服务器上（preview.html 不是发布入口）。地址：/preview.html 列出全部场景；
-// #/<场景>?theme=light|dark 打开一个场景；&play=1 按 16ms 一帧回放第一代的帧，否则直接应用全量。
+// #/<场景>?theme=light|dark 打开一个场景；&play=1 按 16ms 一帧回放第一代的帧，否则直接应用全量；
+// &frame=N 回放到第 N 帧停住（流式中间帧要截图时用）。回放时右上角有控制条：暂停 / 继续、下一帧、帧号。
 // 操作不发给任何后台：只在右下角显示最后一次操作，并回「受理」。
 import { create } from "@bufbuild/protobuf";
 import { createSignal, For, Show } from "solid-js";
@@ -29,15 +30,62 @@ async function fetchBytes(path: string): Promise<Uint8Array> {
   return new Uint8Array(await r.arrayBuffer());
 }
 
-function parseHash(): { name?: string; theme: "light" | "dark" | "system"; play: boolean } {
+function parseHash(): { name?: string; theme: "light" | "dark" | "system"; play: boolean; stopAt?: number } {
   const [path, query = ""] = location.hash.replace(/^#\/?/, "").split("?");
   const q = new URLSearchParams(query);
   const t = q.get("theme");
-  return { name: path || undefined, theme: t === "light" || t === "dark" ? t : "system", play: q.get("play") === "1" };
+  const f = q.get("frame");
+  const stopAt = f !== null && /^\d+$/.test(f) ? Number(f) : undefined;
+  return {
+    name: path || undefined,
+    theme: t === "light" || t === "dark" ? t : "system",
+    play: q.get("play") === "1" || stopAt !== undefined,
+    stopAt,
+  };
+}
+
+/** 逐帧回放：16ms 一帧，可暂停、单步；到 stopAt 自动停。 */
+function createPlayer(frames: ReturnType<typeof decodeFrames>, apply: (i: number) => void, stopAt?: number) {
+  const [at, setAt] = createSignal(0);
+  const [paused, setPaused] = createSignal(false);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const end = () => Math.min(stopAt ?? frames.length, frames.length);
+  const step = () => {
+    if (at() >= frames.length) return;
+    apply(at());
+    setAt(at() + 1);
+  };
+  const tick = () => {
+    timer = undefined;
+    if (paused()) return;
+    if (at() >= end()) {
+      setPaused(stopAt !== undefined && at() < frames.length);
+      return;
+    }
+    step();
+    timer = setTimeout(tick, FRAME_MS);
+  };
+  return {
+    at,
+    total: frames.length,
+    paused,
+    start: tick,
+    toggle() {
+      setPaused(!paused());
+      if (!paused() && timer === undefined) {
+        stopAt = undefined;
+        tick();
+      }
+    },
+    next() {
+      setPaused(true);
+      step();
+    },
+  };
 }
 
 async function main() {
-  const { name, theme, play } = parseHash();
+  const { name, theme, play, stopAt } = parseHash();
   applyTheme(theme);
   const index = JSON.parse(new TextDecoder().decode(await fetchBytes(`${FIXTURES}index.json`))) as FixtureEntry[];
   if (name === undefined) {
@@ -58,16 +106,11 @@ async function main() {
       return create(IntentAckSchema, {});
     },
   };
+  let player: ReturnType<typeof createPlayer> | undefined;
   if (play) {
     const frames = decodeFrames(await fetchBytes(`${FIXTURES}${name}.frames.binpb`));
-    let i = 0;
-    const tick = () => {
-      if (i < frames.length) {
-        store.applyPatch(frames[i++]);
-        setTimeout(tick, FRAME_MS);
-      }
-    };
-    tick();
+    player = createPlayer(frames, (i) => store.applyPatch(frames[i]), stopAt);
+    player.start();
   } else {
     for (const p of decodeFrames(await fetchBytes(`${FIXTURES}${name}.full.binpb`))) store.applyPatch(p);
   }
@@ -82,6 +125,21 @@ async function main() {
         <Show when={last()}>
           <div class="iw-preview-log">{last()}</div>
         </Show>
+        <Show when={player}>
+          {(p) => (
+            <div class="iw-preview-player" role="toolbar" aria-label="回放">
+              <button type="button" onClick={() => p().toggle()}>
+                {p().paused() ? "继续" : "暂停"}
+              </button>
+              <button type="button" onClick={() => p().next()} disabled={p().at() >= p().total}>
+                下一帧
+              </button>
+              <span>
+                帧 {p().at()} / {p().total}
+              </span>
+            </div>
+          )}
+        </Show>
       </>
     ),
     root!,
@@ -92,7 +150,7 @@ function Index(props: { entries: FixtureEntry[] }) {
   return (
     <main class="iw-preview-index">
       <h1>iWork 录像播放</h1>
-      <p>每个场景是 client-core 对着假后台跑出的录像。浅色、深色各一个链接；加 &play=1 按帧回放。</p>
+      <p>每个场景是 client-core 对着假后台跑出的录像。浅色、深色各一个链接；加 &play=1 按帧回放，&frame=N 回放到第 N 帧停住。</p>
       <table>
         <tbody>
           <For each={props.entries}>

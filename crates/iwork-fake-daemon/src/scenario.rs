@@ -21,6 +21,13 @@ pub enum Step {
     Sleep(Duration),
     /// 关掉全部连接（模拟后台重启），日志与表保留。
     DisconnectAll,
+    /// 关掉全部连接，之后重连一律给快照、不重放（模拟断得太久：落后超过重放上限）。
+    DisconnectForSnapshot,
+    /// 停止监听：客户端连不上，一直在重连（「断线」状态）。之后的 DisconnectAll 恢复监听。
+    StopListening,
+    /// 只在录像里有意义：客户端在这里打开 focus 对话（并做场景的 `client` 动作），之后的步骤是增量。
+    /// 没有这个标记时切点由 [`Scenario::split_at_focus`] 推算。跑场景时跳过。
+    OpenHere,
     /// 只给测试场景用：直接改折叠表，不产生事件。
     Mutate(Box<dyn FnOnce(&mut Tables) + Send>),
 }
@@ -36,7 +43,23 @@ pub struct Scenario {
     /// 只给录像与预览：助手 id → 形象 id（client-core `Options::characters`）。
     /// M1 没有选形象的入口，正式运行时内置 iWork 画标志、其余一律圆团子；阿森、林岚、老周只在这里出现。
     pub characters: &'static [(&'static str, &'static str)],
+    /// 只给录像与预览：打开对话之后、跑剩下的事件之前，客户端要做的事。有些状态要用户先动一下才出现
+    /// （往上翻、停在旧消息、拖入超大文件），假后台的事件造不出来。
+    pub client: &'static [ClientAct],
+    /// 只给录像与预览：客户端时间线行数上限（调小才翻得出「回到最新（N）」）；None 用默认。
+    pub timeline_cap: Option<usize>,
     build: fn() -> Vec<Step>,
+}
+
+/// 录像时客户端的动作（见 [`Scenario::client`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientAct {
+    /// 往上翻一页（LoadOlder）。
+    LoadOlder,
+    /// 可见窗口停在最老的几行上（在看旧消息）。
+    ReadOldest,
+    /// 拖入一个超过 20MB 的文件（输入框上方出现原因）。
+    DropOversized,
 }
 
 impl Scenario {
@@ -50,6 +73,11 @@ impl Scenario {
     /// （history-100k 若十万条都在打开后实时推，对拍要跑好几分钟，增量也不需要那么多）。
     pub fn split_at_focus(&self) -> (Vec<Step>, Vec<Step>) {
         let mut steps = self.steps();
+        if let Some(at) = steps.iter().position(|s| matches!(s, Step::OpenHere)) {
+            let mut rest = steps.split_off(at);
+            rest.remove(0);
+            return (steps, rest);
+        }
         let Some(focus) = self.focus else {
             return (Vec::new(), steps);
         };
@@ -80,6 +108,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: empty,
         focus: None,
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "conversation-basic",
@@ -87,6 +117,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: conversation_basic,
         focus: Some("c-basic"),
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "streaming",
@@ -94,6 +126,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: streaming,
         focus: Some("c-stream"),
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "approval-states",
@@ -101,6 +135,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: approval_states,
         focus: Some("c-approval"),
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "user-action-states",
@@ -108,6 +144,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: user_action_states,
         focus: Some("c-user-action"),
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "user-action-unknown-deleting",
@@ -115,6 +153,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: user_action_unknown_deleting,
         focus: Some("c-ua-deleting"),
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "turn-end",
@@ -122,6 +162,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: turn_end,
         focus: Some("c-turn-end"),
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "turn-failed",
@@ -129,6 +171,8 @@ pub const REGISTRY: &[Scenario] = &[
         focus: Some("c-turn-failed"),
         build: turn_failed,
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "resume-card",
@@ -136,6 +180,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: resume_card,
         focus: Some("c-resume"),
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "sidebar-dots",
@@ -143,6 +189,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: sidebar_dots,
         focus: None,
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "assistants-20",
@@ -150,6 +198,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: assistants_20,
         focus: None,
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "quota-missing",
@@ -157,6 +207,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: quota_missing,
         focus: None,
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "stream-16x100",
@@ -164,6 +216,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: stream_16x100,
         focus: Some("c-s00"),
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "history-100k",
@@ -171,6 +225,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: history_100k,
         focus: Some("c-history"),
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "xss-corpus",
@@ -178,6 +234,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: xss_corpus,
         focus: Some("c-xss"),
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "reconnect-basic",
@@ -185,6 +243,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: reconnect_basic,
         focus: Some("c-reconnect"),
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "dm-project-switch",
@@ -192,6 +252,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: dm_project_switch,
         focus: Some(IWORK_DM),
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "characters-preview-only",
@@ -203,6 +265,107 @@ pub const REGISTRY: &[Scenario] = &[
             ("as-linlan", "linlan"),
             ("as-laozhou", "laozhou"),
         ],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "back-to-latest-notice",
+        about: "Q9：停在旧消息上时断线、重连给的是快照：回到最新并提示「已重新连接，回到最新」",
+        build: back_to_latest_notice,
+        focus: Some("c-q9"),
+        characters: &[],
+        client: &[ClientAct::ReadOldest],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "new-below-count",
+        about: "往上翻到超出时间线上限后来了新消息：「回到最新（N）」",
+        build: new_below_count,
+        focus: Some("c-scrolled"),
+        characters: &[],
+        client: &[ClientAct::LoadOlder],
+        timeline_cap: Some(40),
+    },
+    Scenario {
+        name: "composer-path-missing",
+        about: "输入框上方：项目找不到路径（警示色 +「重新定位」）",
+        build: composer_path_missing,
+        focus: Some("c-block"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "composer-verifying",
+        about: "输入框上方：运行时验证中（转圈，发送禁用）",
+        build: composer_verifying,
+        focus: Some("c-block"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "composer-incompatible",
+        about: "输入框上方：运行时验证未通过（警示色 +「查看详情」）",
+        build: composer_incompatible,
+        focus: Some("c-block"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "composer-not-installed",
+        about: "输入框上方：运行时未安装（「查看详情」）",
+        build: composer_not_installed,
+        focus: Some("c-block"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "composer-not-logged-in",
+        about: "输入框上方：运行时未登录（「查看详情」）",
+        build: composer_not_logged_in,
+        focus: Some("c-block"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "composer-offline",
+        about: "输入框上方：后台连不上（断线，发送禁用）",
+        build: composer_offline,
+        focus: Some("c-block"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "attachments-tray",
+        about: "附件托盘两个文件；拖入超过 20MB 的文件，输入框上方说明原因",
+        build: attachments_tray,
+        focus: Some("c-attach"),
+        characters: &[],
+        client: &[ClientAct::DropOversized],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "projects-sidebar",
+        about: "侧栏项目：置顶、找不到路径、未读超过 99（「99+」）；右键项目看菜单",
+        build: projects_sidebar,
+        focus: None,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "tool-output",
+        about: "工具行：输出分段到达，点开看输出（当文字显示）",
+        build: tool_output,
+        focus: Some("c-tool"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "rename-via-summary-refresh-until-t10",
@@ -210,6 +373,8 @@ pub const REGISTRY: &[Scenario] = &[
         build: rename_via_summary_refresh_until_t10,
         focus: Some("c-rename"),
         characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
 ];
 
@@ -870,6 +1035,142 @@ fn characters_preview_only() -> Vec<Step> {
         pb::MessageStatus::Failed,
     )));
     s.push(a(f::turn_finished("t-laozhou", T::Failed, false, None)));
+    s
+}
+
+/// 一段对话历史：n 轮一问一答（都已结束）。
+fn history(c: &str, tag: &str, n: usize) -> Vec<Step> {
+    let mut s = Vec::new();
+    for i in 0..n {
+        let id = format!("{tag}{i}");
+        s.extend(exchange(
+            c,
+            &id,
+            &format!("第 {i} 问"),
+            &format!("第 {i} 答"),
+        ));
+        s.push(a(f::turn_finished(
+            &format!("t-{id}"),
+            T::Completed,
+            false,
+            None,
+        )));
+    }
+    s
+}
+
+fn back_to_latest_notice() -> Vec<Step> {
+    let c = "c-q9";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(history(c, "q9-", 30));
+    s.push(Step::OpenHere);
+    // 客户端停在最老的几行上（场景的 client 动作），这时断线、重连拿到的是快照
+    s.push(Step::DisconnectForSnapshot);
+    s.extend(history(c, "q9-new-", 1));
+    s
+}
+
+fn new_below_count() -> Vec<Step> {
+    let c = "c-scrolled";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(history(c, "nb-", 40));
+    s.push(Step::OpenHere);
+    // 客户端往上翻了一页、超出上限，不再接着最新：新消息只计数
+    s.extend(history(c, "nb-new-", 2));
+    s
+}
+
+/// 输入框被挡住的几种情形：先有一轮对话，打开后再变。
+fn composer_block(change: Step) -> Vec<Step> {
+    let c = "c-block";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(history(c, "blk-", 1));
+    s.push(Step::OpenHere);
+    s.push(change);
+    s
+}
+
+fn composer_path_missing() -> Vec<Step> {
+    composer_block(a(f::project_path_status(PROJECT, pb::PathStatus::Missing)))
+}
+
+fn composer_verifying() -> Vec<Step> {
+    composer_block(a(f::runtime(pb::RuntimeState::ReadyUnverified)))
+}
+
+fn composer_incompatible() -> Vec<Step> {
+    composer_block(a(f::runtime(pb::RuntimeState::Incompatible)))
+}
+
+fn composer_not_installed() -> Vec<Step> {
+    composer_block(a(f::runtime(pb::RuntimeState::Missing)))
+}
+
+fn composer_not_logged_in() -> Vec<Step> {
+    composer_block(a(f::runtime(pb::RuntimeState::NotLoggedIn)))
+}
+
+fn composer_offline() -> Vec<Step> {
+    composer_block(Step::StopListening)
+}
+
+fn attachments_tray() -> Vec<Step> {
+    let c = "c-attach";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(history(c, "att-", 1));
+    s.push(Step::OpenHere);
+    s.push(a(f::attachment("att-1", c, "设计稿.png", 345_678)));
+    s.push(a(f::attachment("att-2", c, "接口说明.pdf", 2_345_678)));
+    s
+}
+
+/// 侧栏项目三种样子：置顶、找不到路径、未读多（超过 99 写「99+」）。停在首页。
+fn projects_sidebar() -> Vec<Step> {
+    let mut s = base();
+    s.push(a(f::project("p-legacy", "legacy-app", "~/work/legacy")));
+    s.push(a(f::project("p-busy", "busy-service", "~/work/busy")));
+    s.push(a(f::project_pinned(PROJECT, true)));
+    s.push(a(f::project_path_status(
+        "p-legacy",
+        pb::PathStatus::Missing,
+    )));
+    let c = "c-busy";
+    s.push(a(f::project_conversation(c, "p-busy")));
+    s.push(a(f::turn_queued("t-busy", c, IWORK)));
+    s.push(a(f::turn_state("t-busy", T::Queued, T::Running, None)));
+    for i in 0..120 {
+        let m = format!("m-busy-{i}");
+        s.push(a(f::assistant_message(&m, c, "t-busy", IWORK, "iWork")));
+        s.push(a(f::message_completed(c, &m, &format!("进度 {i}"))));
+    }
+    s.push(a(f::turn_finished("t-busy", T::Completed, false, None)));
+    s
+}
+
+fn tool_output() -> Vec<Step> {
+    let c = "c-tool";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(exchange(c, "tool", "跑一下测试", "好，我来跑。"));
+    s.push(a(f::tool_started("t-tool", "tc-out", "Bash", "cargo test")));
+    s.push(Step::OpenHere);
+    let lines = [
+        "   Compiling iwork v0.1.0\n",
+        "    Finished test profile in 3.2s\n",
+        "running 12 tests\n",
+        "test result: ok. 12 passed; 0 failed\n",
+    ];
+    let mut offset = 0;
+    for l in lines {
+        s.push(Step::Transient(f::tool_output("tc-out", offset, l)));
+        offset += l.len() as u64;
+    }
+    s.push(a(f::tool_finished("t-tool", "tc-out", true)));
+    s.push(a(f::turn_finished("t-tool", T::Completed, false, None)));
     s
 }
 

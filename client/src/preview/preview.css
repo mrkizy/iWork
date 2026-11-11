@@ -38,3 +38,27 @@
   opacity: 0.85;
   pointer-events: none;
 }
+/* 回放控制条：只在预览页，放右下角，不挡侧栏与输入框的主要部分 */
+.iw-preview-player {
+  position: fixed;
+  right: 8px;
+  bottom: 8px;
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-sm);
+  background: var(--surf);
+  color: var(--tx2);
+  font-size: var(--fs-xs);
+  box-shadow: var(--shadow-tip);
+}
+.iw-preview-player button {
+  padding: 2px 8px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--tx);
+}

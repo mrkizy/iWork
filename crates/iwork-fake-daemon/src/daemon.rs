@@ -36,6 +36,8 @@ struct Shared {
     pace: std::sync::atomic::AtomicU32,
     /// 只给测试用：命中的查询一律回错误（模拟查询受理出错）。
     failing_queries: Mutex<Option<QueryFilter>>,
+    /// 重连时最多重放多少个 seq，再多给快照（ipc `ServerConfig::replay_limit`）；下一次重启监听时生效。
+    replay_limit: std::sync::atomic::AtomicU64,
 }
 
 /// 哪些查询要回错误。
@@ -337,6 +339,9 @@ impl FakeDaemon {
             auto_reply: AtomicBool::new(false),
             pace: std::sync::atomic::AtomicU32::new(1),
             failing_queries: Mutex::new(None),
+            replay_limit: std::sync::atomic::AtomicU64::new(
+                ServerConfig::new("iwork-fake-daemon").replay_limit,
+            ),
         });
         let running = spawn_server(&shared, &socket_path, own.clone(), NORMAL_TRUST)?;
         Ok(FakeDaemon {
@@ -418,6 +423,14 @@ impl FakeDaemon {
         }
     }
 
+    /// 停止监听（客户端连不上）；`disconnect_all` 恢复。
+    pub async fn stop_listening(&self) {
+        if let Some(r) = self.running.lock().await.take() {
+            r.token.cancel();
+            let _ = r.task.await;
+        }
+    }
+
     async fn restart(&self, trust: TrustPolicy, own: SelfIdentity) {
         let mut running = self.running.lock().await;
         if let Some(r) = running.take() {
@@ -447,6 +460,12 @@ impl FakeDaemon {
                     tokio::time::sleep(d * self.shared.pace.load(Ordering::Relaxed)).await;
                 }
                 Step::DisconnectAll => self.disconnect_all().await,
+                Step::DisconnectForSnapshot => {
+                    self.shared.replay_limit.store(0, Ordering::Relaxed);
+                    self.disconnect_all().await;
+                }
+                Step::StopListening => self.stop_listening().await,
+                Step::OpenHere => {}
                 Step::Mutate(f) => self.mutate_tables(f),
             }
         }
@@ -470,6 +489,7 @@ fn spawn_server(
     let listener = LocalListener::bind(path)?;
     let mut cfg = ServerConfig::new("iwork-fake-daemon");
     cfg.trust = trust;
+    cfg.replay_limit = shared.replay_limit.load(Ordering::Relaxed);
     cfg.shutdown_flush = Duration::from_millis(100);
     let (server, publisher) = Server::new(
         cfg,
