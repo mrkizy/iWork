@@ -215,8 +215,8 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 | --- | --- | --- | --- | --- | --- |
 | 1 | 日常账号 | `python3 tools/t0/iwork-t0g.py --selftest` | 15 秒 | 0 | 最后一行 `selftest ok`；跑完家目录下没有 `iwork-t0g-*` 残留 |
 | 2 | 日常账号 | `python3 tools/t0/iwork-t0g.py --only G2 --quick` | 1～2 小时 | 不超过 129：探查 1 + 8 个候选配置 ×（外层保护预检 5 + 普通 Bash 一行 11） | `外层保护 [...]` 那 8 行：哪几样保护在这台机器上成立。`G2 硬前提` 这一行一定是 `INCONCLUSIVE`（`--quick` 不许进已验证表），正常 |
-| 3 | 日常账号 | `python3 tools/t0/iwork-t0g.py`（全量，不带 `--disposable-env`） | 半天（G2 占大头） | 约 170～780，见下面的细账 | G1、G3、G4、G6、G7、G8、G9a～c 的结论；G2 的格子哪些因为外层保护没成立而没跑；G5、G9d 一定是 `INCONCLUSIVE`（要一次性环境），正常 |
-| 4 | 一次性环境 | `python3 tools/t0/iwork-t0g.py --only G2,G5,G9 --disposable-env` | 3～8 小时 | G2 最多 616（8 × 77），被淘汰的候选只跑 11；G5 7 个；G9 2 个 | `G2 硬前提` 一行 `PASS` 且没有 `INCONCLUSIVE` 的格子；`G5 A --setting-sources 空值` 一行 `PASS`；`G9d` 一行 `PASS` |
+| 3 | 日常账号 | `python3 tools/t0/iwork-t0g.py`（全量，不带 `--disposable-env`） | 半天（G2 占大头） | 约 170～780，见下面的细账 | G1、G3、G4、G6、G7、G8、G9a～c 的结论；G2 的格子哪些因为外层保护没成立而没跑；G5、G9d 一定是 `INCONCLUSIVE`（要一次性环境），正常；G2 的「沙箱外重试」11 格和 `G2 硬前提` 总行也一定是 `INCONCLUSIVE`（这一种只在一次性环境跑，不起实例），正常 |
+| 4 | 一次性环境 | `python3 tools/t0/iwork-t0g.py --only G2,G5,G9 --disposable-env` | 3.5～9 小时 | G2 最多 704（8 × 88），被淘汰的候选只跑 11；G5 7 个；G9 2 个 | `G2 硬前提` 一行 `PASS` 且没有 `INCONCLUSIVE` 的格子（88 格，含「沙箱外重试」11 格，其中「允许」一格要看到工作区外的哨兵）；`G5 A --setting-sources 空值` 一行 `PASS`；`G9d` 一行 `PASS`。**G2 的 PASS 只有这一步拿得到** |
 | 5 | 日常账号，人在旁边 | `python3 tools/t0/iwork-t0g.py --only G3 --long` | 30～45 分钟 | 13（探查 1 + 预检 5 + 六个取值 6 + 睡眠时钟 1） | 前面六个取值各睡 90 秒，要先跑完（十几分钟）才出提示；看到「看到这行后 30 秒内合盖」就合盖，睡满 5 分钟再打开；看 `G3 睡眠后命令没执行` 一行和它的墙钟用时。步 2 里外层保护的 Bash 两项没成立的话，这一步整组不跑（运行门），改到一次性环境里加 `--disposable-env` 跑 |
 | 6 | 日常账号 | 16.2 第 2 项（没有终端时的登录）：照方案里那一行命令跑 | 1 分钟 | 0（只起 `claude auth login`，用空的配置目录，不动现有登录） | 有没有打印登录网址、有没有自己开浏览器、有没有因为没终端报错退出 |
 | 7 | Linux | `bwrap` 临时改名后：`--only G4`，再 `--only G4 --no-fail-if-unavailable` | 各 20～30 分钟 | 各约 27 | 第一次：CLI 起不来、G4 全是 `INCONCLUSIVE`，记下 stderr 的退出码与文字；第二次：`G4 ①b 写工作区外` 那一行，和 `g4-1b-stream.jsonl` 里 `system/init` 有没有沙箱状态字段。跑完把 `bwrap` 改回来 |
@@ -232,7 +232,7 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 | --- | --- | --- |
 | 开头的探查 | 1～2 | `--setting-sources ""` 跑不通才多一次 |
 | G1 | 10 | 9 种工具探针各 1，cd 之后的 cwd 1 |
-| G2 | 8 × 5 = 40 次预检，加格子 | 候选配置 = `--modes` 里的模式（默认 `default,dontAsk`）× 4 种（`+block`、`+block+prompts-none`、`+block+denyInsteadOfPrompting`、不设 onFailure 的对照）= 8 个。每个先跑普通 Bash 一行 11 格，11 格全 `PASS` 才跑剩下的 66 格。日常账号下外层保护没成立的格子不起实例 |
+| G2 | 8 × 5 = 40 次预检，加格子 | 候选配置 = `--modes` 里的模式（默认 `default,dontAsk`）× 4 种（`+block`、`+block+prompts-none`、`+block+denyInsteadOfPrompting`、不设 onFailure 的对照）= 8 个。每个先跑普通 Bash 一行 11 格，11 格全 `PASS` 才跑剩下的 77 格（含排在最后的「沙箱外重试」11 格；每个留下的候选因此比原来多 11 次短调用）。日常账号下外层保护没成立的格子不起实例，「沙箱外重试」11 格在日常账号下一律不起实例 |
 | G3 | 11 | 预检 5 + 六个 timeout 取值，每个 hook 睡 90 秒 |
 | G4 | 26 + 语料行数 | 基础 15、最小构建 3（`--skip-builds` 就没有）、⑥ 重试 5、⑨ 全开档 3 |
 | G5 | 7 | 只在 `--disposable-env` 下跑 |
@@ -261,6 +261,7 @@ macOS 上：`sudo sysadminctl -addUser t0gtmp -password -`（按提示输密码�
 | --- | --- |
 | 「外层保护没验证过（[...]），这个格子不在这台机器上跑」 | 运行门没过：日常账号下这几样保护不成立，故障格子不许跑。去一次性环境加 `--disposable-env` 跑（步 4）。同时把 `外层保护 [...]` 那几行原样记下来：产品里的本机验证就靠这几样 |
 | 「只在一次性环境……里加 --disposable-env 跑」 | G5、G9d 在日常账号下本来就不跑，去步 4 |
+| G2「bash-沙箱外重试」那 11 格「外层保护没验证过（['unsandboxed']）」 | 这一种没有预检，日常账号下本来就不跑，去步 4。G2 总行因此在日常账号下恒为 `INCONCLUSIVE` |
 | 「缺正面证据：……」「运行无效（没有 init、超时或退出码不对）」「没有归属对得上的目标调用，或不止一次」「目标调用没有按 id 对上的结果」「探针没有在这次调用上被调起的记录」 | 这次运行本身不算数：模型没按要求发调用、发了两次、超时，或 CLI 没起来。先看这个用例的 `<名>-stream.jsonl` 和 `<名>-stderr.txt`；偶发的（模型没照做、网络抖）就用 `--only <组>` 单独重跑这一组；每次都这样的，交 supervisor |
 | 「权限模式没生效：init 报 ...」 | 设置文件没被 CLI 收下（`-p` 模式下设置文件校验不过会被整个静默忽略）。看 `<名>-stderr.txt` 有没有设置校验的告警，交 supervisor，别重跑 |
 | 对照没成立（`G5 阳性对照`、`G8 MCP 阳性对照`、G9b 对照变量看不到、外层保护里要成功的那一笔没成功） | 测的办法在这台机器上不灵，负向结论说明不了问题。看对照那次的 stream 和 stderr，交 supervisor |
@@ -279,4 +280,5 @@ macOS 上：`sudo sysadminctl -addUser t0gtmp -password -`（按提示输密码�
 - G4 ②：`allowedDomains: ["*"]` 能不能放行全部，文档只写了 `*.example.com` 这种通配，要实测。
 - G4 ⑦a `security list-keychains` 只有 macOS 有；在 Linux 上跑 G4（步 7）这一行一定是 `FAIL`，不算问题。
 - 16.2 第 1 项说「再用 G2 选定配置重复一次」：`--only G3` 用的是 `--modes` 第一个模式加 `onFailure: block`，表达不了 `--permission-prompts none` 或 `denyInsteadOfPrompting` 这两种候选。G2 选出来的要是这两种之一，第二次睡眠时钟要改脚本才能跑，交 developer。
+- G2「沙箱外重试」：提示里要求模型给 Bash 带上 `dangerouslyDisableSandbox: true`，模型照不照做没实测过。不照做时目标调用（命令逐字相同且带这个参数）对不上，这一行记 `INCONCLUSIVE`，不会误判成 `PASS` 或 `FAIL`。在步 4 里大量出现时，看这些格子的 `<名>-stream.jsonl` 里 Bash 调用带没带这个参数，交 supervisor（可能要换提示或换模型）。
 - `iwork-t0.sh` 按 `--help` 文字查参数在不在：2.1.322 的 `--help` 里没有 `--permission-prompt-tool`，日志会写 `flag --permission-prompt-tool: no`，但打包代码里这个参数还在（只是不在帮助里列出）；`iwork-t0f.py` 用的 `--max-turns` 也一样。不是退化。
