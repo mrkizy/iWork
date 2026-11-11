@@ -65,7 +65,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 
 ## 安全不变量（任何改动都不能破坏；违反即 blocking）
 
-- 不修改厂商 CLI，不禁用其登录方式；登录走厂商自己的流程。**不读取、不保存、不转发任何凭据或 token。** `claude auth status` 只取 `loggedIn`、`authMethod`、`subscriptionType`、`loginExpiresAt`，邮箱等不落盘、不进日志。
+- 不修改厂商 CLI，不禁用其登录方式；登录走厂商自己的流程。例外：删除对话、删除助手时，由适配层按 iWork 记录的会话编号删除对应的运行时会话记录文件（需求 v1.78；定位规则见 T06 方案 5.5：只删名字恰好是「编号.jsonl」的普通文件，不读内容、不碰别处），不动 CLI 的程序、设置与登录。**不读取、不保存、不转发任何凭据或 token。** `claude auth status` 只取 `loggedIn`、`authMethod`、`subscriptionType`、`loginExpiresAt`，邮箱等不落盘、不进日志。
 - iWork 的审批判定优先于厂商 CLI 自身的权限模式与放行规则，不能被它们放宽。
 - 成员会话与用户自己的厂商 CLI 全局配置隔离：不运行用户的 hook、不沿用用户的权限模式、不加载未经导入的 MCP、技能与插件（需求 8.4、FR20）。仓库内的 `.claude/settings.json`、`settings.local.json` 也一律不加载（v1.63），不得为了让仓库自带 hook 生效而放开。
 - Claude Code 的 PreToolUse hook：连不上桥接一律 deny（失败即关闭）；**绝不让 hook 自然超时**（实测超时即放行），桥接必须在到时前主动中断回合并以拒绝返回。
@@ -93,5 +93,5 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 
 ## 语言与风格
 
-- 文档、提交说明、任务汇报用中文；代码标识符、日志字段、协议字段用英文。
+- 文档、任务汇报用中文；git 提交信息（标题与正文）用英文（产品负责人 2026-11-11 定）；代码标识符、日志字段、协议字段用英文。
 - 错误不得静默吞掉；对外错误统一 `{code, message, retryable, details}`，错误码定义在 Protobuf 里。
