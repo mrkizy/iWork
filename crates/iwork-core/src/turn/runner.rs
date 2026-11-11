@@ -14,9 +14,11 @@
 //! 坏了、版本不认）时，放下旧 id、用同一份 spec 新开一次，只试这一次；开成了就用 iWork 存的对话拼摘要，接在这一轮
 //! 第一条输入的前面（续接的回合再接上调用方给的请求原文），`TurnSessionBound.replaced` 记下旧编号与原因。新开也
 //! 失败、或续接回合的请求取不全，才判回合失败。开会话的两处（回合开头、沿用的进程已退出后重开）都经
-//! [`SessionLine::open_session`] 这一个函数。新编号在首条 prompt 送达之前不算数：中间任何一步失败（读摘要、
-//! 提交绑定、发 prompt），新会话照 `retire` 的规矩丢掉、会话线退回旧编号，下一回合重新走一遍恢复，不会不带上文
-//! 接着用新会话。
+//! [`SessionLine::open_session`] 这一个函数。新编号在首条 prompt 被收下之前不算数：中间任何一步失败（读摘要、
+//! 提交绑定、发 prompt），或者 `run_turn` 的 future 半路被丢掉、panic，新会话照 `retire` 的规矩丢掉、会话线退回
+//! 旧编号；已经给回合落盘了新编号的，补一条 `TurnSessionBound` 记回旧编号（重启后从回合上取到的也是旧编号）。
+//! 下一回合重新走一遍恢复，不会不带上文接着用新会话。这件事在 `run_turn` 的入口和收尾各查一次（
+//! [`SessionLine::settle_unconfirmed`]）：收尾管正常返回，入口管 future 被丢掉、panic 被接住之后接着用这条线。
 //!
 //! **续接**（T06 方案 2.6 第 4 条）：`TurnPlan.entry` 是 [`TurnEntry::Resume`] 时，第一步用 `Resume` 而不是
 //! `Started`，另起一条助手消息（同一个回合）；说明文字由调用方用 [`super::resume_note`] 生成放进 `blocks`。
@@ -142,6 +144,14 @@ pub struct TurnPorts<'a, S, C, I, L, T, H> {
     pub history: &'a H,
 }
 
+// 全是引用，可以复制；手写是为了不给端口类型加 Clone 约束（derive 会加）
+impl<S, C, I, L, T, H> Clone for TurnPorts<'_, S, C, I, L, T, H> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<S, C, I, L, T, H> Copy for TurnPorts<'_, S, C, I, L, T, H> {}
+
 /// 一个回合要做什么。`turn` 处于 `Queued`（新回合，`TurnQueued` 已由受理命令的一方写入）或
 /// `Interrupted`（续接），和 `entry` 对应。
 #[derive(Debug, Clone)]
@@ -221,9 +231,9 @@ pub struct SessionLine<A: AgentPort, D> {
     bound: Option<SessionSpec>,
     /// 丢掉会话时进程树没能确认清空：原因。有它时 `session` 还留着，开新会话前先再清一次
     unclean: Option<String>,
-    /// 用摘要新开了会话、首条 prompt 还没送达：被换掉的旧编号。送达才清掉；回合结束时还在，就丢掉新会话、
+    /// 用摘要新开了会话、首条 prompt 还没被收下。被收下才清掉；`run_turn` 收尾或下一次入口时还在，就丢掉新会话、
     /// 退回旧编号（见模块文档「续接失败」）
-    unconfirmed: Option<String>,
+    unconfirmed: Option<Unconfirmed>,
     slot: Arc<TurnSlot>,
     decider: Arc<D>,
 }
@@ -298,18 +308,56 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         T: Timer,
         H: ReadModelPort,
     {
+        // 上一次 run_turn 半路被丢掉或 panic 了：收尾没跑到，在这里补上
+        self.settle_unconfirmed(ports).await?;
         let result = self.run_turn_inner(agent, ports, plan).await;
         if result.is_err() {
             // 交接表已随 run_turn_inner 返回撤掉；结束运行时，免得它在无人记录时继续动手。
             // 清不掉的记在 unclean 里，下一次开会话前再清；这里交回的是原始错误
             let _ = self.retire().await;
         }
-        if let Some(old) = self.unconfirmed.take() {
-            // 摘要没送到新会话：不能接着用它（它不带上文）。清不掉的照常记在 unclean 里
+        let settled = self.settle_unconfirmed(ports).await;
+        let state = result?;
+        settled?;
+        Ok(state)
+    }
+
+    /// 用摘要新开的会话没收下首条 prompt：丢掉它（清不掉的照常记在 unclean 里）、会话线退回旧编号；已给回合落盘了
+    /// 新编号的，补提交一条 `TurnSessionBound` 记回旧编号。补提交失败是编排自己的错误（同读历史失败）：
+    /// `unconfirmed` 留着，下一次入口再补，丢会话、退编号这两步不会重做。
+    async fn settle_unconfirmed<S, C, I, L, T, H>(
+        &mut self,
+        ports: TurnPorts<'_, S, C, I, L, T, H>,
+    ) -> Result<(), TurnRunError>
+    where
+        S: StoragePort,
+        I: IdGenerator,
+    {
+        let Some((old, bound)) = self.unconfirmed.as_ref().map(|p| (p.old.clone(), p.bound)) else {
+            return Ok(());
+        };
+        if self.resume.as_deref() != Some(old.as_str()) {
             let _ = self.retire().await;
-            self.resume = Some(old);
+            self.resume = Some(old.clone());
         }
-        result
+        if let Some(turn_id) = bound {
+            let event = TurnSessionBound {
+                turn_id,
+                runtime_session_id: old,
+                replaced: None,
+            };
+            ports
+                .store
+                .commit(CommitRequest {
+                    command_id: CommandId::from_raw(ports.ids.next()),
+                    actor: Actor(ORCHESTRATOR_ACTOR.into()),
+                    events: vec![event.into()],
+                    outbox: Vec::new(),
+                })
+                .await?;
+        }
+        self.unconfirmed = None;
+        Ok(())
     }
 
     async fn run_turn_inner<S, C, I, L, T, H>(
@@ -364,8 +412,12 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
                 }
             },
         };
+        let recovered = replaced.is_some();
         run.started(first, self.resume.clone(), replaced, assistant_name)
             .await?;
+        if recovered {
+            self.mark_bound(run.turn.id);
+        }
         let mut updates = match self.prompt(agent, spec, blocks, reused, &mut run).await? {
             Ok(updates) => {
                 // 摘要已送到新会话：新编号从此算数
@@ -441,6 +493,15 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         Ok(run.turn.state)
     }
 
+    /// 用摘要新开的会话的编号已经提交到回合上（新会话报得出编号时才有那条绑定）。
+    fn mark_bound(&mut self, turn_id: TurnId) {
+        if self.resume.is_some()
+            && let Some(pending) = self.unconfirmed.as_mut()
+        {
+            pending.bound = Some(turn_id);
+        }
+    }
+
     /// 丢掉当前会话：确认整棵进程树清空才放掉。清不掉时会话留着、记下原因，返回错误。
     async fn retire(&mut self) -> Result<(), AgentError> {
         let Some(session) = self.session.as_ref() else {
@@ -510,7 +571,10 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         };
         match self.open_with(agent, spec, None).await {
             Ok(()) => {
-                self.unconfirmed = Some(old.clone());
+                self.unconfirmed = Some(Unconfirmed {
+                    old: old.clone(),
+                    bound: None,
+                });
                 Ok(Some(SessionReplaced {
                     old_runtime_session_id: old,
                     reason: lost,
@@ -580,10 +644,22 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
                 Err(reason) => return Ok(Err(End::Unrecovered(reason))),
             },
         };
+        let recovered = replaced.is_some();
         run.bind_session(self.resume.clone(), replaced).await?;
+        if recovered {
+            self.mark_bound(run.turn.id);
+        }
         let session = self.session.as_ref().expect("刚开好会话");
         Ok(session.prompt(blocks).await.map_err(End::Failed))
     }
+}
+
+/// 用摘要新开、首条 prompt 还没被收下的会话。
+struct Unconfirmed {
+    /// 被换掉的旧编号
+    old: String,
+    /// 新编号已经落盘到这个回合上（`TurnSessionBound`）
+    bound: Option<TurnId>,
 }
 
 /// `ensure_session` 的结果。

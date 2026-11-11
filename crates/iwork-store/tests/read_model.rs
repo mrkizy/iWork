@@ -717,7 +717,9 @@ fn summary_source_of_system_turn_stops_at_its_queue_commit() {
     block(store.commit(send(2, user_message(401, 10, "之前的话"), 51, 10))).unwrap();
     block(store.commit(cmd(3, reply(402, 10, 51, "之前的回复", None)))).unwrap();
     // 系统回合：同一次提交里没有用户消息
-    block(store.commit(cmd(4, vec![TurnQueued { turn: turn(52, 10) }.into()]))).unwrap();
+    let mut system = turn(52, 10);
+    system.kind = iwork_domain::turn::TurnKind::SystemAgentsMdDraft;
+    block(store.commit(cmd(4, vec![TurnQueued { turn: system }.into()]))).unwrap();
     block(store.commit(cmd(5, reply(403, 10, 52, "系统回合自己的回复", None)))).unwrap();
     block(store.commit(send(6, user_message(404, 10, "之后的话"), 53, 10))).unwrap();
 
@@ -737,4 +739,22 @@ fn summary_source_of_system_turn_stops_at_its_queue_commit() {
             .earlier,
         vec![answered("系统回合自己的回复"), answered("之前的回复")]
     );
+}
+
+/// 用户消息触发的回合，请求和排回合分两次提交：前提不成立，报错点名回合，不把请求收进摘要（审查 2/F-3）。
+#[test]
+fn summary_source_rejects_request_outside_queue_commit() {
+    let (_env, store) = setup();
+    block(store.commit(cmd(
+        2,
+        vec![MessageAppended { message: user_message(501, 10, "请求") }.into()],
+    )))
+    .unwrap();
+    block(store.commit(cmd(3, vec![TurnQueued { turn: turn(61, 10) }.into()]))).unwrap();
+    let rm = read_model(&store);
+    let err = block(rm.summary_source(tid(61), None, 100)).unwrap_err();
+    assert!(err.to_string().contains(&tid(61).to_string()), "{err}");
+    // 对照：同一次提交的照常
+    block(store.commit(send(4, user_message(502, 10, "下一句"), 62, 10))).unwrap();
+    assert!(block(rm.summary_source(tid(62), None, 100)).is_ok());
 }

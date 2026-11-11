@@ -16,7 +16,7 @@ use iwork_domain::message::{Author, Message, MessageBody, MessageStatus};
 use iwork_domain::rule::RuleEntry;
 use iwork_domain::runtime::{QuotaWindow, Runtime};
 use iwork_domain::settings::GlobalSettings;
-use iwork_domain::turn::{Turn, TurnState};
+use iwork_domain::turn::{Turn, TurnKind, TurnState};
 use iwork_domain::user_action::{UserActionStateKind, UserActionTriggerKind, next_kind};
 use iwork_ports::read_model::{
     AgentsMdDraftCard, ConversationSummary, ConversationView, MessagePage, PendingItem,
@@ -553,7 +553,7 @@ fn summary_source<C: EventCodec + ?Sized>(
             entity: "turn",
             id: turn_key.clone(),
         })?;
-    let bound = queued_commit_start(conn, codec, &turn_key)?;
+    let bound = queued_commit_start(conn, codec, &turn_key, &conversation)?;
     let snapshots = blobs(
         conn,
         "SELECT snapshot FROM messages WHERE conversation_id = ?1 AND author_kind <> ?2 \
@@ -589,37 +589,71 @@ fn summary_source<C: EventCodec + ?Sized>(
 }
 
 /// 排这个回合的那次提交的起始 seq。回合流上的第一条事件必须是 `TurnQueued`，不是就报错点名。
+///
+/// 「这一轮的请求落在界外」靠的是请求和 `TurnQueued` 同一次提交写下（受理 `SendMessage` 的形状，T10a 核对）。
+/// 所以用户消息触发的回合（`TurnKind::Assistant`）在这次提交的 seq 区间里必须有这个对话的一条用户消息，
+/// 没有就报错点名回合：分两次提交时请求会落在界内、被当成「已完成」收进摘要，不能悄悄放过。系统回合没有触发
+/// 它的用户消息，不查。
 fn queued_commit_start<C: EventCodec + ?Sized>(
     conn: &Connection,
     codec: &C,
     turn_key: &str,
+    conversation: &str,
 ) -> Result<i64, StorageError> {
-    let first: Option<(String, Vec<u8>, i64)> = conn
+    let first: Option<(String, Vec<u8>, i64, i64)> = conn
         .prepare_cached(
-            "SELECT e.type, e.payload, c.first_seq FROM events e \
+            "SELECT e.type, e.payload, c.first_seq, c.last_seq FROM events e \
              JOIN commands c ON c.command_id = e.command_id \
              WHERE e.stream_kind = ?1 AND e.stream_id = ?2 ORDER BY e.seq LIMIT 1",
         )
         .and_then(|mut s| {
             s.query_row(params![StreamKind::Turn.to_text(), turn_key], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             })
             .optional()
         })
         .map_err(sql_err)?;
-    let Some((kind, payload, first_seq)) = first else {
+    let Some((kind, payload, first_seq, last_seq)) = first else {
         return Err(crate::sql::bad_column(
             "events",
             "stream_id",
             format!("回合 {turn_key} 在投影里、事件日志里却没有它的流"),
         ));
     };
-    if !matches!(codec.decode(&kind, &payload)?, DomainEvent::TurnQueued(_)) {
+    let DomainEvent::TurnQueued(queued) = codec.decode(&kind, &payload)? else {
         return Err(crate::sql::bad_column(
             "events",
             "type",
             format!("回合 {turn_key} 流上的第一条事件是 {kind}，不是 turn_queued"),
         ));
+    };
+    if queued.turn.kind == TurnKind::Assistant {
+        let requests: i64 = conn
+            .prepare_cached(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1 AND author_kind = ?2 \
+                 AND appended_seq BETWEEN ?3 AND ?4",
+            )
+            .and_then(|mut s| {
+                s.query_row(
+                    params![
+                        conversation,
+                        author_kind(&Author::User),
+                        first_seq,
+                        last_seq
+                    ],
+                    |r| r.get(0),
+                )
+            })
+            .map_err(sql_err)?;
+        if requests == 0 {
+            return Err(crate::sql::bad_column(
+                "commands",
+                "first_seq",
+                format!(
+                    "回合 {turn_key} 由用户消息触发，排它的那次提交（seq {first_seq}–{last_seq}）里却没有用户消息"
+                ),
+            ));
+        }
     }
     Ok(first_seq)
 }

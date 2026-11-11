@@ -53,12 +53,9 @@ impl ReadModelPort for FakeHistory {
         if let Some(error) = self.fail_next.lock().unwrap().take() {
             return Err(error);
         }
-        Ok(self
-            .source
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("这条用例不该读历史消息"))
+        // 先放锁再 panic：调用方可能接住 panic 接着用它
+        let source = self.source.lock().unwrap().clone();
+        Ok(source.expect("这条用例不该读历史消息"))
     }
     async fn conversation(
         &self,
