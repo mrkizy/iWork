@@ -25,7 +25,7 @@ pub enum Policy {
 }
 
 enum Make {
-    /// 致命任务只起一次（如 `serve` 消费了 `Server`）。
+    /// 致命任务只起一次（如 `serve` 消费了 `Server`）；停机后丢掉工厂的可重启任务也变成 `Once(None)`。
     Once(Option<TaskFuture>),
     /// 可重启任务：每次重起都新造一个 future。
     Repeat(Box<dyn FnMut() -> TaskFuture + Send>),
@@ -34,6 +34,7 @@ enum Make {
 /// 登记表的一行。
 pub struct TaskSpec {
     pub name: &'static str,
+    policy: Policy,
     make: Make,
 }
 
@@ -41,6 +42,7 @@ impl TaskSpec {
     pub fn fatal(name: &'static str, fut: impl Future<Output = ()> + Send + 'static) -> Self {
         Self {
             name,
+            policy: Policy::Fatal,
             make: Make::Once(Some(Box::pin(fut))),
         }
     }
@@ -52,15 +54,13 @@ impl TaskSpec {
     {
         Self {
             name,
+            policy: Policy::Restartable,
             make: Make::Repeat(Box::new(move || Box::pin(make()))),
         }
     }
 
     pub fn policy(&self) -> Policy {
-        match self.make {
-            Make::Once(_) => Policy::Fatal,
-            Make::Repeat(_) => Policy::Restartable,
-        }
+        self.policy
     }
 }
 
@@ -114,7 +114,6 @@ struct Entry {
     running_since: Instant,
     delay: Duration,
     failures: VecDeque<Instant>,
-    done: bool,
 }
 
 pub struct Supervisor {
@@ -151,7 +150,6 @@ impl Supervisor {
                 running_since: Instant::now(),
                 delay: policy.first_delay,
                 failures: VecDeque::new(),
-                done: false,
             });
             let i = s.entries.len() - 1;
             s.spawn(i, Duration::ZERO);
@@ -190,7 +188,9 @@ impl Supervisor {
                 Err(e) => {
                     let id = e.id();
                     if e.is_cancelled() {
-                        self.ids.remove(&id);
+                        if let Some(i) = self.ids.remove(&id) {
+                            self.entries[i].abort = None;
+                        }
                         continue;
                     }
                     (id, panic_text(e))
@@ -209,9 +209,10 @@ impl Supervisor {
         let policy = self.policy;
         let entry = &mut self.entries[i];
         let name = entry.spec.name;
+        // 结束了的任务不再有句柄：停机时不去等它
+        entry.abort = None;
         match entry.spec.policy() {
             Policy::Fatal => {
-                entry.done = true;
                 tracing::error!(
                     task = name,
                     panic = panic.as_deref(),
@@ -238,7 +239,6 @@ impl Supervisor {
                     entry.failures.pop_front();
                 }
                 if entry.failures.len() >= policy.max_failures {
-                    entry.done = true;
                     tracing::error!(
                         task = name,
                         failures = entry.failures.len(),
@@ -254,13 +254,19 @@ impl Supervisor {
         }
     }
 
-    /// 停机第 4 步：停掉除 `keep` 之外的全部任务，等它们真的结束（最多 `limit`）。
-    pub async fn stop_all_except(&mut self, keep: &str, limit: Duration) {
+    /// 停机第 4 步：停掉除 `keep` 之外的全部任务，等它们真的结束（最多 `limit`）；返回是否都结束了。
+    /// 登记表里的工厂一起丢掉（之后不会再重起），它们捕获的东西（如 `Arc<Store>`）随之放手，第 6 步才关得了存储。
+    pub async fn stop_all_except(&mut self, keep: &str, limit: Duration) -> bool {
         let mut waiting = Vec::new();
         for e in &mut self.entries {
-            if e.spec.name != keep
-                && let Some(a) = e.abort.take()
-            {
+            if e.spec.name == keep {
+                continue;
+            }
+            if let Make::Repeat(_) = e.spec.make {
+                e.spec.make = Make::Once(None);
+            }
+            // 已经结束的任务（如触发这次停机的那个致命任务）没有句柄，不等它
+            if let Some(a) = e.abort.take() {
                 a.abort();
                 waiting.push(a.id());
             }
@@ -274,9 +280,11 @@ impl Supervisor {
                 }
             }
         };
-        if tokio::time::timeout(limit, wait).await.is_err() {
-            tracing::warn!("停可重启任务到点还没全部结束");
+        let done = tokio::time::timeout(limit, wait).await.is_ok();
+        if !done {
+            tracing::warn!("停任务到点还没全部结束");
         }
+        done
     }
 
     /// 停机第 5 步：等名为 `name` 的任务结束（它的停止由调用方触发，如取消 `serve` 的 token），最多 `limit`。
@@ -420,6 +428,48 @@ mod tests {
                 task: "store-health",
                 panic: Some("坏了".into())
             }
+        );
+    }
+
+    /// 1/F-2：停任务时登记表里的工厂闭包一起丢掉，它们捕获的东西（如 `Arc<Store>`）随之放手。
+    #[tokio::test]
+    async fn stop_drops_task_factories() {
+        let held = Arc::new(());
+        let h = held.clone();
+        let mut sup = Supervisor::start(
+            vec![TaskSpec::restartable("a", move || {
+                let _keep = h.clone();
+                std::future::pending::<()>()
+            })],
+            RestartPolicy::default(),
+        );
+        tokio::task::yield_now().await;
+        assert!(Arc::strong_count(&held) > 1, "对照：运行中有人持有");
+        sup.stop_all_except("ipc-serve", Duration::from_secs(1))
+            .await;
+        assert_eq!(Arc::strong_count(&held), 1, "任务与它的工厂都放手了");
+    }
+
+    /// 1/F-5：致命任务自己结束触发的停机，停任务这一步不等那个已经结束的任务。
+    #[tokio::test]
+    async fn stop_after_fatal_end_does_not_wait_for_it() {
+        let mut sup = Supervisor::start(
+            vec![
+                TaskSpec::restartable("other", std::future::pending::<()>),
+                TaskSpec::fatal("store-health", async {}),
+            ],
+            RestartPolicy::default(),
+        );
+        assert_eq!(sup.watch().await.task(), "store-health");
+        let t = std::time::Instant::now();
+        assert!(
+            sup.stop_all_except("ipc-serve", Duration::from_secs(5))
+                .await
+        );
+        assert!(
+            t.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            t.elapsed()
         );
     }
 

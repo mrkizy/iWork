@@ -37,6 +37,13 @@ fn sigterm_stops_gracefully() {
     assert!(pgids.iter().all(|g| !group_alive(*g)), "子进程树为空");
     assert_eq!(seed::events_after(&sb, 0).len(), head, "head 不变");
     assert_eq!(sb.status().unwrap().not_cleared, 0);
+    // 1/F-2：真实装配下第 6 步真的关了存储（没有漏掉的持有者）
+    let log = log_text(&sb);
+    assert!(log.contains("存储已关闭"), "{log}");
+    assert!(
+        !log.contains("关存储出错") && !log.contains("别的持有者"),
+        "{log}"
+    );
 }
 
 /// 用户完全退出：有成员在跑时先要确认；确认后走取消流程再关会话，进程组为空，退出码 0。
@@ -131,6 +138,7 @@ fn stuck_stop_is_forced_at_deadline() {
     );
     assert_eq!(code(status), Some(0));
     assert!(d.stderr().contains("强制退出"));
+    assert!(log_text(&sb).contains("停机超过硬上限"), "强退前排空了日志");
     assert_eq!(
         exited(&sb),
         Phase::Stopping {

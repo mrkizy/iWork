@@ -4,6 +4,7 @@
 #![cfg(unix)]
 
 use std::ffi::OsString;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +14,7 @@ use iwork_ipc::rendezvous::{ExeStamp, ExitCode, LockInfo, Phase, StopReason};
 use iwork_ipc::server::{Server, ServerConfig};
 use iwork_ipc::{LocalEndpoint, LocalListener};
 use iwork_ports::store::StoragePort;
-use iwork_store::{DataDir, FsArtifactStore};
+use iwork_store::{DataDir, FsArtifactStore, StoreFailure};
 use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 
@@ -351,24 +352,59 @@ impl StopHooks for DaemonStop<'_> {
             Ok(()) | Err(iwork_ports::store::StorageError::Busy) => {}
             Err(e) => tracing::warn!(error = %e, "停机时 WAL 合回主库失败"),
         }
-        // 别的持有者（已停的任务、ipc）此时都放手了；放不掉的由最后一个持有者丢弃时关闭
-        match Arc::try_unwrap(store) {
-            Ok(store) => tokio::task::spawn_blocking(move || store.close())
-                .await
-                .unwrap_or_else(|e| {
-                    Err(iwork_ports::store::StorageError::Io {
-                        message: format!("关存储的线程异常：{e}"),
-                    })
-                }),
-            Err(_) => {
-                tracing::warn!("存储还有别的持有者，交给最后一个持有者关闭");
-                Ok(())
-            }
-        }
+        // 第 4、5 步之后任务（连同登记表里的工厂）与 ipc 都放手了，这里应是唯一的持有者。
+        // 不是就说明有持有者漏了：报错，存储改由最后一个持有者丢弃时关（不受这一步的上限管）
+        let store =
+            Arc::try_unwrap(store).map_err(|still| iwork_ports::store::StorageError::Io {
+                message: format!(
+                    "存储还有 {} 个别的持有者，关不了",
+                    Arc::strong_count(&still) - 1
+                ),
+            })?;
+        tokio::task::spawn_blocking(move || store.close())
+            .await
+            .unwrap_or_else(|e| {
+                Err(iwork_ports::store::StorageError::Io {
+                    message: format!("关存储的线程异常：{e}"),
+                })
+            })?;
+        tracing::info!("存储已关闭");
+        Ok(())
     }
 }
 
 const TASK_SERVE: &str = "ipc-serve";
+
+/// 任务登记表里看着存储与发布的两行致命任务（方案 2.10）：存储失效、发布链路断了，任务就结束，
+/// 监督器据此整体退出。真实装配与测试用的是同一个函数。
+fn health_tasks(
+    failed: impl Future<Output = StoreFailure> + Send + 'static,
+    store_failed: Arc<AtomicBool>,
+    audit: broadcast::Receiver<AuditSignal>,
+    head: impl publish_check::HeadSource + 'static,
+    watermark: impl Fn() -> u64 + Send + 'static,
+    count_fault: impl Fn() + Send + 'static,
+) -> [TaskSpec; 2] {
+    [
+        TaskSpec::fatal("store-health", store_health::run(failed, store_failed)),
+        TaskSpec::fatal(
+            "publish-check",
+            publish_check::run(audit, head, watermark, count_fault, publish_check::SETTLE),
+        ),
+    ]
+}
+
+/// 运行：等停机请求，或监督器报出要整体退出的故障（后者按「故障」停机）。
+async fn wait_stop_reason(supervisor: &mut Supervisor, stop: &StopSwitch) -> StopReason {
+    tokio::select! {
+        r = stop.wait() => r,
+        fault = supervisor.watch() => {
+            tracing::error!(task = fault.task(), ?fault, "整体退出");
+            stop.request(StopReason::Fatal);
+            StopReason::Fatal
+        }
+    }
+}
 
 #[cfg(not(feature = "dev"))]
 fn outbox_routes() -> Vec<OutboxRoute> {
@@ -478,23 +514,22 @@ async fn serve_with<W: RunningWork>(
     let woke = Arc::new(Notify::new());
     let clock = Arc::new(SystemClock::new());
     let mut specs = dev_tasks(&stop_switch);
+    specs.extend(health_tasks(
+        store.failed(),
+        store_failed.clone(),
+        audit.subscribe(),
+        StoreHead(store.clone()),
+        {
+            let p = publishing.clone();
+            move || p.watermark()
+        },
+        {
+            let b = board.clone();
+            move || b.add_ipc_fault()
+        },
+    ));
     specs.extend([
         TaskSpec::fatal(TASK_SERVE, server.serve(listener, serve_token.clone())),
-        TaskSpec::fatal(
-            "store-health",
-            store_health::run(store.failed(), store_failed.clone()),
-        ),
-        TaskSpec::fatal("publish-check", {
-            let p = publishing.clone();
-            let b = board.clone();
-            publish_check::run(
-                audit.subscribe(),
-                StoreHead(store.clone()),
-                move || p.watermark(),
-                move || b.add_ipc_fault(),
-                publish_check::SETTLE,
-            )
-        }),
         TaskSpec::restartable("signals", {
             let stop = stop_switch.clone();
             let mut pre = Some(signals);
@@ -529,14 +564,7 @@ async fn serve_with<W: RunningWork>(
     );
 
     // 运行：等停机请求，或监督器报出要整体退出的故障
-    let reason = tokio::select! {
-        r = stop_switch.wait() => r,
-        fault = supervisor.watch() => {
-            tracing::error!(task = fault.task(), ?fault, "整体退出");
-            stop_switch.request(StopReason::Fatal);
-            StopReason::Fatal
-        }
-    };
+    let reason = wait_stop_reason(&mut supervisor, &stop_switch).await;
     stop::arm_hard_deadline(reason, args.service, stop::HARD_LIMIT);
     let mut hooks = DaemonStop {
         supervisor: &mut supervisor,
@@ -562,4 +590,191 @@ fn bind(places: &Places) -> Result<LocalListener, BootError> {
     }
     LocalListener::bind(&places.socket_path)
         .map_err(|e| BootError::Bind(format!("绑定 {} 失败：{e}", places.socket_path.display())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::status::StatusIdentity;
+    use iwork_ipc::rendezvous::ExeStamp;
+    use iwork_ports::store::StorageError;
+    use std::sync::Mutex;
+
+    /// 记录第 4–6 步调用的假实现。
+    #[derive(Default)]
+    struct Recorded(Arc<Mutex<Vec<&'static str>>>);
+
+    impl StopHooks for Recorded {
+        async fn stop_tasks(&mut self) {
+            self.0.lock().unwrap().push("stop_tasks");
+        }
+        async fn stop_ipc(&mut self) {
+            self.0.lock().unwrap().push("stop_ipc");
+        }
+        async fn close_store(&mut self) -> Result<(), StorageError> {
+            self.0.lock().unwrap().push("close_store");
+            Ok(())
+        }
+    }
+
+    struct FixedHead(u64);
+    impl publish_check::HeadSource for FixedHead {
+        async fn head(&self) -> Result<u64, StorageError> {
+            Ok(self.0)
+        }
+    }
+
+    struct Harness {
+        _dir: tempfile::TempDir,
+        board: StatusBoard,
+        store_failed: Arc<AtomicBool>,
+        supervisor: Supervisor,
+        stop: StopSwitch,
+    }
+
+    /// 和 `serve_with` 一样的组装：两行健康任务 + 一个普通的可重启任务，交给监督器。
+    fn harness(
+        failed: tokio::sync::oneshot::Receiver<StoreFailure>,
+        audit: &broadcast::Sender<AuditSignal>,
+        head: u64,
+        watermark: u64,
+    ) -> Harness {
+        let dir = tempfile::tempdir().unwrap();
+        let board = StatusBoard::create(
+            dir.path(),
+            StatusIdentity {
+                version: "t".into(),
+                protocol_major: 1,
+                exe_stamp: ExeStamp {
+                    len: 0,
+                    modified_unix_ns: 0,
+                },
+                log_dir: dir.path().into(),
+            },
+            Phase::Ready,
+        );
+        let store_failed = Arc::new(AtomicBool::new(false));
+        let failed = async move {
+            match failed.await {
+                Ok(f) => f,
+                Err(_) => std::future::pending().await,
+            }
+        };
+        let b = board.clone();
+        let mut specs = vec![TaskSpec::restartable("other", std::future::pending::<()>)];
+        specs.extend(health_tasks(
+            failed,
+            store_failed.clone(),
+            audit.subscribe(),
+            FixedHead(head),
+            move || watermark,
+            move || b.add_ipc_fault(),
+        ));
+        Harness {
+            _dir: dir,
+            board,
+            store_failed,
+            supervisor: Supervisor::start(specs, RestartPolicy::default()),
+            stop: StopSwitch::new(),
+        }
+    }
+
+    /// 一路走到底：等停机原因 → 停机表 → 退出状态。返回（原因、最后的 Phase、第 4–6 步记录）。
+    async fn run_to_exit(mut h: Harness) -> (StopReason, Phase, Vec<&'static str>, Harness) {
+        let reason = tokio::time::timeout(
+            Duration::from_secs(60),
+            wait_stop_reason(&mut h.supervisor, &h.stop),
+        )
+        .await
+        .expect("应整体退出");
+        let rec = Recorded::default();
+        let log = rec.0.clone();
+        let mut hooks = rec;
+        let phase = stop::stop(
+            reason,
+            h.store_failed.load(Ordering::SeqCst),
+            &h.board,
+            &Gate::default(),
+            &NoWork,
+            &mut hooks,
+        )
+        .await;
+        h.supervisor.abort_all();
+        let l = log.lock().unwrap().clone();
+        (reason, phase, l, h)
+    }
+
+    fn assert_fatal_exit(phase: &Phase, board: &StatusBoard) {
+        assert_eq!(
+            *phase,
+            Phase::Exited {
+                code: ExitCode::Fatal,
+                reason: Some(StopReason::Fatal),
+                message: None
+            }
+        );
+        assert_eq!(board.snapshot().phase, *phase, "状态文件写的就是它");
+        assert_eq!(process_status(phase, false), 20);
+        assert_eq!(
+            process_status(phase, true),
+            20,
+            "托管实例也报非零，服务管理器会再拉"
+        );
+    }
+
+    /// 方案 S5：存储失效信号 → store-health 结束 → 监督器整体退出 → 停机「故障」列、跳过关存储 → 20。
+    #[tokio::test(start_paused = true)]
+    async fn store_failure_exits_fatal() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (audit, _) = broadcast::channel(8);
+        let h = harness(rx, &audit, 0, 0);
+        tx.send(StoreFailure::WriterBroken).unwrap();
+        let (reason, phase, steps, h) = run_to_exit(h).await;
+        assert_eq!(reason, StopReason::Fatal);
+        assert!(h.store_failed.load(Ordering::SeqCst));
+        assert_eq!(steps, ["stop_tasks", "stop_ipc"], "跳过关存储");
+        assert_fatal_exit(&phase, &h.board);
+    }
+
+    /// 方案 S6：ipc 报 PublishStalled、核对时库里的 head 仍超过发布水位 → publish-check 结束 → 整体退出 20。
+    /// 存储本身没坏，第 6 步照常关存储。
+    #[tokio::test(start_paused = true)]
+    async fn publish_stall_confirmed_exits() {
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let (audit, _) = broadcast::channel(8);
+        let h = harness(rx, &audit, 10, 7);
+        tokio::task::yield_now().await;
+        audit
+            .send(AuditSignal::ServerFault {
+                cause: "PublishStalled".into(),
+            })
+            .unwrap();
+        let (reason, phase, steps, h) = run_to_exit(h).await;
+        assert_eq!(reason, StopReason::Fatal);
+        assert!(!h.store_failed.load(Ordering::SeqCst));
+        assert_eq!(steps, ["stop_tasks", "stop_ipc", "close_store"]);
+        assert_fatal_exit(&phase, &h.board);
+    }
+
+    /// 对照：发布只是一时没追上（head 等于水位）→ 只记数，不退出。
+    #[tokio::test(start_paused = true)]
+    async fn transient_publish_stall_keeps_running() {
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let (audit, _) = broadcast::channel(8);
+        let mut h = harness(rx, &audit, 10, 10);
+        tokio::task::yield_now().await;
+        audit
+            .send(AuditSignal::ServerFault {
+                cause: "PublishStalled".into(),
+            })
+            .unwrap();
+        let r = tokio::time::timeout(
+            Duration::from_secs(30),
+            wait_stop_reason(&mut h.supervisor, &h.stop),
+        )
+        .await;
+        assert!(r.is_err(), "不该整体退出：{r:?}");
+        assert_eq!(h.board.snapshot().ipc_faults, 1);
+        h.supervisor.abort_all();
+    }
 }

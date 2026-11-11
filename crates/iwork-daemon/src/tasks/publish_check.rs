@@ -1,6 +1,6 @@
 //! 任务 `publish-check`（致命）：ipc 上报的两种后台故障分开处理（方案 2.10、S6）。
 //!
-//! - `PublishStalled`（交接等不到发布水位）：等 2s 后比较库里的 head 与已发布的水位，前者仍然更大说明发布链路断了，
+//! - `PublishStalled`（交接等不到发布水位）：收到时读库里的 head，2s 后它仍超过已发布的水位，说明发布链路断了，
 //!   在线客户端都会漏事件 → 任务结束，监督器整体退出（20），重启后客户端重连续传。两者相等是那条连接上的瞬时情况，
 //!   只把 `ipc_faults` 加一。
 //! - `HandoverTimeout` 等别的后台故障：多半是负载高，重启治不了还会打断回合，只记数。
@@ -64,7 +64,8 @@ pub async fn run(
             count_fault();
             continue;
         }
-        tokio::time::sleep(settle).await;
+        // 先读 head、等 settle、再读水位：那一刻已提交的事件，过了 settle 还没发布才算断了。
+        // 反过来（先等、后读 head 再读水位）时，两次读之间刚提交的一条会被误判
         let head = match head.head().await {
             Ok(h) => h,
             Err(e) => {
@@ -73,6 +74,7 @@ pub async fn run(
                 continue;
             }
         };
+        tokio::time::sleep(settle).await;
         match check(head, published()) {
             Check::Stalled { head, published } => {
                 tracing::error!(
@@ -130,6 +132,33 @@ mod tests {
             .expect("确认断了应结束")
             .unwrap();
         assert_eq!(faults.load(Ordering::SeqCst), 0);
+    }
+
+    /// 1/F-6：收到信号时读的 head 在 settle 期间追上了（之后又有新提交让 head 变大）→ 不算断。
+    #[tokio::test(start_paused = true)]
+    async fn head_is_read_before_settle() {
+        let (tx, rx) = broadcast::channel(8);
+        let head = Arc::new(AtomicU64::new(10));
+        let published = Arc::new(AtomicU64::new(9));
+        let (h2, p2) = (head.clone(), published.clone());
+        let task = tokio::spawn(run(
+            rx,
+            Head(head.clone()),
+            move || p2.load(Ordering::SeqCst),
+            || {},
+            SETTLE,
+        ));
+        tx.send(signal(FailCause::PublishStalled)).unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        // settle 期间：10 发布了，又提交了 11（还没发布）
+        published.store(10, Ordering::SeqCst);
+        h2.store(11, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(
+            !task.is_finished(),
+            "收到信号那一刻的 head 已发布，不该判断了"
+        );
+        task.abort();
     }
 
     /// S6：head 与已发布相等 → 只加计数，不退出；交接超时同样只记数。

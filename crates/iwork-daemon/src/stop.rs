@@ -122,6 +122,8 @@ pub fn arm_hard_deadline(reason: StopReason, managed: bool, limit: Duration) {
         .spawn(move || {
             std::thread::sleep(limit);
             tracing::error!(?reason, status, "停机超过硬上限，强制退出");
+            // exit 不跑析构：先把日志排空，这条 error 才留得下来
+            crate::logging::flush_global();
             eprintln!("iwork-daemon：停机超过 {limit:?}，强制退出（退出状态 {status}）");
             std::process::exit(i32::from(status));
         });

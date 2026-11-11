@@ -481,6 +481,16 @@ impl QueueSink {
     }
 }
 
+/// 全局日志的队列：硬上限强退（`std::process::exit` 不跑析构）之前用它排空日志。
+static GLOBAL_SINK: std::sync::OnceLock<Arc<QueueSink>> = std::sync::OnceLock::new();
+
+/// 把全局日志队列里已有的行写出去（最多等 1s）。没装全局日志时什么都不做。
+pub fn flush_global() {
+    if let Some(sink) = GLOBAL_SINK.get() {
+        sink.flush();
+    }
+}
+
 /// 装好的日志。丢弃时把队列排空、停写线程（停机第 7 步「日志线程排空」）。
 pub struct LogGuard {
     sink: Arc<QueueSink>,
@@ -529,6 +539,8 @@ pub fn init(dir: &Path) -> LogGuard {
         .with(AuditTap::new(audit.clone()));
     if tracing::subscriber::set_global_default(subscriber).is_err() {
         eprintln!("iwork-daemon：全局日志已经装过，这次不再装");
+    } else {
+        let _ = GLOBAL_SINK.set(sink.clone());
     }
     install_panic_hook();
     LogGuard {
