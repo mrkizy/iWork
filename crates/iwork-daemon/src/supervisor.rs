@@ -468,8 +468,9 @@ mod tests {
             sup.stop_all_except("ipc-serve", Duration::from_secs(5))
                 .await
         );
+        // 白等的话要等满上限 5s；没等就远小于它（慢的 CI 机器上也留足余量）
         assert!(
-            t.elapsed() < Duration::from_millis(500),
+            t.elapsed() < Duration::from_millis(2500),
             "{:?}",
             t.elapsed()
         );
