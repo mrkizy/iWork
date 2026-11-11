@@ -41,7 +41,7 @@ export function Sidebar(props: { router: Router }) {
   /** 「当前项目」：正在看的对话所在的项目，或首页选的项目；默认展开（2 节第 3 条）。 */
   const currentProject = () => {
     const r = route();
-    if (r.page === "home") return r.projectId ?? view()?.projects[0]?.projectId;
+    if (r.page === "home") return host.view.home?.projectId;
     if (r.page === "allConversations") return r.projectId;
     return view()?.projects.find((p) => p.recent.some((c) => c.selected))?.projectId;
   };
@@ -53,8 +53,13 @@ export function Sidebar(props: { router: Router }) {
   };
   const openMenu = (e: MouseEvent, m: (at: MenuAnchor) => MenuState) => {
     e.preventDefault();
+    // 右键不移动焦点：先落到被右键的那一项上，菜单关了好回到它
+    (e.currentTarget as HTMLElement).focus();
     setMenu(m({ x: e.clientX, y: e.clientY }));
   };
+  /** 就地重命名用键盘收尾：那一项已经重新画出来了，把焦点放回去。 */
+  const focusConversation = (id: string) =>
+    queueMicrotask(() => root.querySelector<HTMLElement>(`button[data-conversation-id="${CSS.escape(id)}"]`)?.focus());
 
   return (
     <aside ref={root} class="iw-sidebar" aria-label="侧栏">
@@ -121,7 +126,10 @@ export function Sidebar(props: { router: Router }) {
                           <InlineRename
                             original={c.title}
                             onSubmit={(title) => void host.act({ case: "renameConversation", value: { conversationId: c.conversationId, title } })}
-                            onDone={() => setRenaming(undefined)}
+                            onDone={(byKeyboard) => {
+                              setRenaming(undefined);
+                              if (byKeyboard) focusConversation(c.conversationId);
+                            }}
                           />
                         </div>
                       }
@@ -129,6 +137,7 @@ export function Sidebar(props: { router: Router }) {
                       <button
                         type="button"
                         class={`iw-side-item iw-conv${c.selected ? " iw-side-item--selected" : ""}`}
+                        data-conversation-id={c.conversationId}
                         aria-current={c.selected ? "page" : undefined}
                         onClick={() => props.router.go({ page: "conversation", id: c.conversationId })}
                         onContextMenu={(e) => openMenu(e, (at) => ({ kind: "conversation", item: c, at }))}

@@ -1,7 +1,9 @@
 // 弹出菜单：锚在按钮下方或鼠标位置（右键菜单）。点外面、按 Esc 关闭；菜单项用方向键移动焦点。
 // 开合是网页本地的状态（方案 2.5）；菜单项可否点击由调用方按 Rust 给的字段传进来。
+// 关闭后焦点回到打开它的控件（ui/focus）。
 import { onCleanup, onMount, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
+import { rememberFocus } from "./focus";
 import "./Menu.css";
 
 export interface MenuAnchor {
@@ -23,6 +25,7 @@ export function anchorAbove(el: Element): MenuAnchor {
 
 export function Menu(props: { anchor: MenuAnchor; onClose: () => void; label: string; children: JSX.Element; class?: string }) {
   let el!: HTMLDivElement;
+  const restoreFocus = rememberFocus();
   const onDown = (e: PointerEvent) => {
     if (!el.contains(e.target as Node)) props.onClose();
   };
@@ -52,6 +55,7 @@ export function Menu(props: { anchor: MenuAnchor; onClose: () => void; label: st
   onCleanup(() => {
     document.removeEventListener("pointerdown", onDown);
     document.removeEventListener("keydown", onKey, true);
+    restoreFocus(el);
   });
   const style = (): JSX.CSSProperties =>
     props.anchor.above

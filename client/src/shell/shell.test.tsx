@@ -1,5 +1,5 @@
 // 外壳、侧栏、首页与对话页对着录像渲染（方案第 7 节「组件测试」）：可见文字与按钮状态都来自 patch。
-import { fireEvent, screen, within } from "@solidjs/testing-library";
+import { fireEvent, screen, waitFor, within } from "@solidjs/testing-library";
 import { describe, expect, it } from "vitest";
 import { noFixtures, renderScenario, userActs } from "../test-fixtures";
 
@@ -65,6 +65,41 @@ describe.skipIf(noFixtures)("侧栏", () => {
     fireEvent.input(input, { target: { value: " 新标题 " } });
     fireEvent.keyDown(input, { key: "Enter" });
     expect(userActs(acts)).toEqual([expect.objectContaining({ case: "renameConversation", value: expect.objectContaining({ title: "新标题" }) })]);
+  });
+});
+
+describe.skipIf(noFixtures)("关闭弹层后焦点回到触发它的控件（审查 2a F-11）", () => {
+  it("菜单：Esc 关闭后回到按钮", async () => {
+    renderScenario("conversation-basic");
+    const pill = screen.getByRole("button", { name: "审批方式：手动" });
+    pill.focus();
+    fireEvent.click(pill);
+    const menu = await screen.findByRole("menu", { name: "审批方式" });
+    expect(menu.contains(document.activeElement), "打开时焦点进菜单").toBe(true);
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(document.activeElement).toBe(pill);
+  });
+
+  it("右键菜单 → 确认框：取消后回到被右键的那一项", async () => {
+    renderScenario("conversation-basic");
+    const item = conversationItem(/帮我把登录页改成深色/);
+    fireEvent.contextMenu(item);
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "删除" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(document.activeElement).toBe(item);
+  });
+
+  it.each([["Enter"], ["Escape"]])("就地重命名：%s 收尾后回到那一项", async (key) => {
+    renderScenario("conversation-basic");
+    fireEvent.contextMenu(conversationItem(/帮我把登录页改成深色/));
+    fireEvent.click(within(await screen.findByRole("menu")).getByRole("menuitem", { name: "重命名" }));
+    const input = screen.getByRole("textbox", { name: "重命名对话" });
+    expect(document.activeElement).toBe(input);
+    fireEvent.keyDown(input, { key });
+    await waitFor(() => expect(document.activeElement).toBe(conversationItem(/帮我把登录页改成深色/)));
   });
 });
 

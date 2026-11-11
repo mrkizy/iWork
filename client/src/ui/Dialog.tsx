@@ -1,8 +1,9 @@
 // 确认框：标题、说明、取消与确认。Esc 与点遮罩等于取消；打开时焦点落在取消上（确认是有后果的那一个）。
-// 确认框属于安全与严肃类界面，不接任何轻松元素（ui-m1.md 3.4）。
+// 确认框属于安全与严肃类界面，不接任何轻松元素（ui-m1.md 3.4）。关闭后焦点回到打开它的控件（ui/focus）。
 import { onCleanup, onMount, type JSX } from "solid-js";
 import { Portal } from "solid-js/web";
 import { Button, type ButtonVariant } from "./Button";
+import { rememberFocus } from "./focus";
 import "./Dialog.css";
 
 export function ConfirmDialog(props: {
@@ -16,6 +17,8 @@ export function ConfirmDialog(props: {
   onCancel: () => void;
 }) {
   let cancel!: HTMLButtonElement;
+  let box!: HTMLDivElement;
+  const restoreFocus = rememberFocus();
   const onKey = (e: KeyboardEvent) => {
     if (e.key === "Escape") {
       e.stopPropagation();
@@ -26,11 +29,14 @@ export function ConfirmDialog(props: {
     document.addEventListener("keydown", onKey, true);
     cancel.focus();
   });
-  onCleanup(() => document.removeEventListener("keydown", onKey, true));
+  onCleanup(() => {
+    document.removeEventListener("keydown", onKey, true);
+    restoreFocus(box);
+  });
   return (
     <Portal>
       <div class="iw-dialog-scrim" onClick={(e) => e.target === e.currentTarget && props.onCancel()}>
-        <div class="iw-dialog" role="alertdialog" aria-modal="true" aria-label={props.title}>
+        <div ref={box} class="iw-dialog" role="alertdialog" aria-modal="true" aria-label={props.title}>
           <h2 class="iw-dialog__title">{props.title}</h2>
           <div class="iw-dialog__body">{props.children}</div>
           <div class="iw-dialog__actions">
