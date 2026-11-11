@@ -37,13 +37,13 @@ use iwork_ports::exec::{
 use iwork_ports::notify::{Notifier, NotifyError, SystemNotification};
 use iwork_ports::read_model::{
     ConversationSummary, ConversationView, MessagePage, PendingItem, ProjectSummary, ReadModelPort,
-    RuntimeQuota,
+    RuntimeQuota, Unsettled,
 };
 use iwork_ports::secret::{SecretError, SecretName, SecretStore, SecretValue};
 use iwork_ports::store::{
     CodecError, CommitReceipt, CommitRequest, DeliveryState, EncodedEvent, EventCodec, EventFilter,
-    NewOutboxItem, OutboxId, OutboxItem, Projector, RebuildReport, StorageError, StoragePort,
-    StoredEvent,
+    NewOutboxItem, OutboxId, OutboxItem, OutboxSelector, Projector, RebuildReport, RequeueReport,
+    StorageError, StoragePort, StoredEvent,
 };
 use iwork_ports::vcs::{
     BaselineRef, Detection, Diff, DiffRange, ProgressSink, RepoRoot, VcsCapabilities, VcsError,
@@ -378,6 +378,46 @@ impl<C: EventCodec, P: Projector<Tx = InMemoryTables>> StoragePort for InMemoryS
         async move { result }
     }
 
+    fn outbox_requeue_dispatched(
+        &self,
+        redeliver_prefixes: Vec<String>,
+    ) -> impl Future<Output = Result<RequeueReport, StorageError>> + Send {
+        let redeliver = OutboxSelector::NoneOf(redeliver_prefixes);
+        let mut report = RequeueReport::default();
+        for item in &mut self.state.lock().unwrap().outbox {
+            if item.state != DeliveryState::Dispatched {
+                continue;
+            }
+            // NoneOf 命中 = 不以任何可重投前缀开头
+            if redeliver.matches(&item.target) {
+                item.state = DeliveryState::Failed;
+                report.failed += 1;
+            } else {
+                item.state = DeliveryState::Queued;
+                report.requeued += 1;
+            }
+        }
+        async move { Ok(report) }
+    }
+
+    fn outbox_pending_where(
+        &self,
+        selector: OutboxSelector,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<OutboxItem>, StorageError>> + Send {
+        let items: Vec<_> = self
+            .state
+            .lock()
+            .unwrap()
+            .outbox
+            .iter()
+            .filter(|i| i.state == DeliveryState::Queued && selector.matches(&i.target))
+            .take(limit)
+            .cloned()
+            .collect();
+        async move { Ok(items) }
+    }
+
     fn rebuild_projections(
         &self,
     ) -> impl Future<Output = Result<RebuildReport, StorageError>> + Send {
@@ -694,6 +734,9 @@ impl ReadModelPort for FakeReadModel {
             autostart: false,
             projects_root: PathBuf::from("/work"),
         })
+    }
+    async fn unsettled(&self) -> Result<Unsettled, StorageError> {
+        Ok(Unsettled::default())
     }
     async fn artifact_is_referenced(&self, _r: &ArtifactRef) -> Result<bool, StorageError> {
         Ok(false)

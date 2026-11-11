@@ -16,9 +16,10 @@ use iwork_domain::rule::RuleEntry;
 use iwork_domain::runtime::{QuotaWindow, Runtime};
 use iwork_domain::settings::GlobalSettings;
 use iwork_domain::turn::{Turn, TurnState};
+use iwork_domain::user_action::{UserActionStateKind, UserActionTriggerKind, next_kind};
 use iwork_ports::read_model::{
     AgentsMdDraftCard, ConversationSummary, ConversationView, MessagePage, PendingItem,
-    ProjectSummary, ReadModelPort, ResumeCard, RuntimeQuota,
+    ProjectSummary, ReadModelPort, ResumeCard, RuntimeQuota, Unsettled,
 };
 use iwork_ports::store::{EventCodec, StorageError};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
@@ -115,16 +116,33 @@ fn message_page<C: EventCodec + ?Sized>(
     let mut out = Vec::with_capacity(snapshots.len());
     for s in snapshots.iter().rev() {
         let mut m = decode_message(codec, s)?;
-        if m.status == MessageStatus::Streaming {
-            let text: Option<String> = conn
-                .prepare_cached("SELECT text FROM message_checkpoints WHERE message_id = ?1")
-                .and_then(|mut st| st.query_row([m.id.to_string()], |r| r.get(0)).optional())
-                .map_err(sql_err)?;
-            m.body = MessageBody::Inline(text.unwrap_or_default());
-        }
+        fill_streaming_body(conn, &mut m)?;
         out.push(m);
     }
     Ok(out)
+}
+
+/// 流式中的消息正文用检查点填，没有检查点就是空串；别的消息不动。
+fn fill_streaming_body(conn: &Connection, m: &mut Message) -> Result<(), StorageError> {
+    if m.status == MessageStatus::Streaming {
+        let text: Option<String> = conn
+            .prepare_cached("SELECT text FROM message_checkpoints WHERE message_id = ?1")
+            .and_then(|mut st| st.query_row([m.id.to_string()], |r| r.get(0)).optional())
+            .map_err(sql_err)?;
+        m.body = MessageBody::Inline(text.unwrap_or_default());
+    }
+    Ok(())
+}
+
+/// 列值 `IN (…)` 的占位符与参数：从登记表里挑出满足领域谓词的变体，不在 SQL 里手写状态名。
+fn kinds_where<K: ColumnText>(keep: impl Fn(K) -> bool) -> (String, Vec<&'static str>) {
+    let texts: Vec<&'static str> = K::ALL
+        .iter()
+        .copied()
+        .filter(|k| keep(*k))
+        .map(ColumnText::to_text)
+        .collect();
+    (vec!["?"; texts.len()].join(", "), texts)
 }
 
 /// 这一页消息涉及的回合，加上该对话还没结束的回合，按 id 升序。
@@ -329,6 +347,58 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
                 }));
             }
             Ok(out)
+        })
+    }
+
+    fn unsettled(&self) -> impl Future<Output = Result<Unsettled, StorageError>> + Send {
+        self.query(|conn, codec| {
+            let (turn_in, turn_states) = kinds_where(TurnState::holds_process);
+            let mut turns = Vec::new();
+            for s in blobs(
+                conn,
+                &format!("SELECT snapshot FROM turns WHERE state IN ({turn_in}) ORDER BY id"),
+                params_from_iter(&turn_states),
+            )? {
+                turns.push(decode_turn(codec, &s)?);
+            }
+            // 消息表没有按回合的索引：按对话取（有索引），再按回合与状态筛
+            let (msg_in, msg_states) = kinds_where(|m: MessageStatus| !m.is_terminal());
+            let mut streaming = Vec::new();
+            for t in &turns {
+                let mut args: Vec<String> = vec![t.conversation_id.to_string(), t.id.to_string()];
+                args.extend(msg_states.iter().map(|s| s.to_string()));
+                for s in blobs(
+                    conn,
+                    &format!(
+                        "SELECT snapshot FROM messages WHERE conversation_id = ? AND turn_id = ? \
+                         AND status IN ({msg_in}) ORDER BY id"
+                    ),
+                    params_from_iter(&args),
+                )? {
+                    let mut m = decode_message(codec, &s)?;
+                    fill_streaming_body(conn, &mut m)?;
+                    streaming.push(m);
+                }
+            }
+            streaming.sort_by_key(|m| m.id);
+            let (card_in, card_kinds) = kinds_where(|k: UserActionStateKind| {
+                next_kind(k, UserActionTriggerKind::ProcessLost).is_ok()
+            });
+            let mut cards = Vec::new();
+            for s in blobs(
+                conn,
+                &format!(
+                    "SELECT snapshot FROM user_actions WHERE state_kind IN ({card_in}) ORDER BY id"
+                ),
+                params_from_iter(&card_kinds),
+            )? {
+                cards.push(decode_card(codec, &s)?);
+            }
+            Ok(Unsettled {
+                turns,
+                streaming,
+                cards,
+            })
         })
     }
 

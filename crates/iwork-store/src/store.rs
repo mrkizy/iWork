@@ -11,8 +11,8 @@ use iwork_domain::id::{MessageId, Seq};
 use iwork_ports::clock::Clock;
 use iwork_ports::store::{
     CommitReceipt, CommitRequest, DeliveryState, EventCodec, EventFilter, OutboxId, OutboxItem,
-    OutboxTarget, Projector, RebuildReport, StorageError, StorageError as E, StorageError::Io,
-    StoragePort, StoredEvent,
+    OutboxSelector, OutboxTarget, Projector, RebuildReport, RequeueReport, StorageError,
+    StorageError as E, StorageError::Io, StoragePort, StoredEvent,
 };
 use rusqlite::{Connection, params, params_from_iter};
 
@@ -20,6 +20,7 @@ use crate::data_dir::DataDir;
 use crate::migrate::{self, Migration, OpenHooks};
 use crate::read_model::{ReadDefaults, SqliteReadModel};
 use crate::reader::ReaderPool;
+use crate::signals::{CommitObserver, Failed, FailureSignal};
 use crate::sql::{ColumnText, enum_col, seq_col, seq_val, sql_err, u64_val};
 use crate::writer::{self, WriteOp, WriteTx, WriterConfig, WriterHandle};
 
@@ -89,6 +90,7 @@ pub struct SqliteStore<C: EventCodec> {
     pub(crate) writer: WriterHandle,
     pub(crate) readers: Arc<ReaderPool>,
     pub(crate) delivery_started: Arc<AtomicBool>,
+    failure: Arc<FailureSignal>,
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -144,6 +146,7 @@ impl<C: EventCodec + 'static> SqliteStore<C> {
             clock.now(),
             options.migrations,
         )?;
+        let failure = Arc::new(FailureSignal::default());
         let (writer, join) = writer::spawn(
             conn,
             codec.clone(),
@@ -154,8 +157,14 @@ impl<C: EventCodec + 'static> SqliteStore<C> {
                 max_batch: config.max_batch.max(1),
                 queue: config.write_queue.max(1),
             },
+            failure.clone(),
         )?;
-        let readers = ReaderPool::open(&dir.db_path(), config.readers, config.read_queue.max(1))?;
+        let readers = ReaderPool::open(
+            &dir.db_path(),
+            config.readers,
+            config.read_queue.max(1),
+            &failure,
+        )?;
         Ok(Self {
             codec,
             dir: dir.clone(),
@@ -163,6 +172,7 @@ impl<C: EventCodec + 'static> SqliteStore<C> {
             writer,
             readers: Arc::new(readers),
             delivery_started: Arc::new(AtomicBool::new(false)),
+            failure,
             join: Mutex::new(Some(join)),
         })
     }
@@ -175,6 +185,22 @@ impl<C: EventCodec + 'static> SqliteStore<C> {
     /// T04 起 outbox 投递循环前调。之后 `rebuild_projections` 与制品的 `recover` 一律拒绝（方案 2.9）。
     pub fn mark_delivery_started(&self) {
         self.delivery_started.store(true, Ordering::SeqCst);
+    }
+
+    /// 装提交观察者（T04 方案 2.6）：经写队列送到写线程，返回时已生效，之后的每一批成功提交都会回调。
+    /// 只能装一次，第二次返回 `Io`。
+    pub fn set_commit_observer(
+        &self,
+        observer: Box<dyn CommitObserver>,
+    ) -> impl Future<Output = Result<(), StorageError>> + Send + use<C> {
+        self.writer
+            .request(|reply| WriteOp::SetObserver(observer, reply))
+    }
+
+    /// 存储变得不可用时完成（写连接失效、写线程或读线程意外退出）；正常 `close` 不触发，future 永远不完成。
+    /// 可以有多个等待者，失效之后再调立即完成。
+    pub fn failed(&self) -> Failed {
+        self.failure.wait()
     }
 
     /// `wal_checkpoint(TRUNCATE)`：把 WAL 合回主库并截短（T04 空闲时调，方案 S11）。
@@ -332,36 +358,64 @@ impl<C: EventCodec + 'static> StoragePort for SqliteStore<C> {
         &self,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<OutboxItem>, StorageError>> + Send {
+        self.readers
+            .run(move |conn| queued_outbox(conn, "", Vec::new(), limit))
+    }
+
+    fn outbox_pending_where(
+        &self,
+        selector: OutboxSelector,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<OutboxItem>, StorageError>> + Send {
         self.readers.run(move |conn| {
-            let mut stmt = conn
-                .prepare_cached(
-                    "SELECT id, target, payload, state, attempts FROM outbox \
-                     WHERE state = 'queued' ORDER BY id LIMIT ?1",
+            let (cond, args) = match &selector {
+                OutboxSelector::Prefix(p) => (format!(" AND {}", PREFIX_MATCH), vec![p.clone()]),
+                OutboxSelector::NoneOf(ps) if ps.is_empty() => (String::new(), Vec::new()),
+                OutboxSelector::NoneOf(ps) => (
+                    format!(" AND NOT ({})", vec![PREFIX_MATCH; ps.len()].join(" OR ")),
+                    ps.clone(),
+                ),
+            };
+            queued_outbox(conn, &cond, args, limit)
+        })
+    }
+
+    fn outbox_requeue_dispatched(
+        &self,
+        redeliver_prefixes: Vec<String>,
+    ) -> impl Future<Output = Result<RequeueReport, StorageError>> + Send {
+        self.writer.sql(move |conn, now: Timestamp| {
+            // 一个 savepoint 里两条 UPDATE：先把可重投的改回 queued，剩下停在 dispatched 的都标 failed
+            let requeued = if redeliver_prefixes.is_empty() {
+                0
+            } else {
+                let cond = vec![PREFIX_MATCH; redeliver_prefixes.len()].join(" OR ");
+                let sql = format!(
+                    "UPDATE outbox SET state = ?, updated_at = ? WHERE state = ? AND ({cond})"
+                );
+                let mut args: Vec<rusqlite::types::Value> = vec![
+                    DeliveryState::Queued.to_text().to_owned().into(),
+                    now.0.into(),
+                    DeliveryState::Dispatched.to_text().to_owned().into(),
+                ];
+                args.extend(redeliver_prefixes.iter().cloned().map(Into::into));
+                conn.execute(&sql, params_from_iter(args))
+                    .map_err(sql_err)?
+            };
+            let failed = conn
+                .execute(
+                    "UPDATE outbox SET state = ?1, updated_at = ?2 WHERE state = ?3",
+                    params![
+                        DeliveryState::Failed.to_text(),
+                        now.0,
+                        DeliveryState::Dispatched.to_text()
+                    ],
                 )
                 .map_err(sql_err)?;
-            let rows = stmt
-                .query_map([limit_val(limit)], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Vec<u8>>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, i64>(4)?,
-                    ))
-                })
-                .map_err(sql_err)?;
-            let mut out = Vec::new();
-            for row in rows {
-                let (id, target, payload, state, attempts) = row.map_err(sql_err)?;
-                out.push(OutboxItem {
-                    id: OutboxId(id as u64),
-                    target: OutboxTarget(target),
-                    payload,
-                    state: enum_col("outbox", "state", &state)?,
-                    attempts: u32::try_from(attempts).unwrap_or(u32::MAX),
-                });
-            }
-            Ok(out)
+            Ok(RequeueReport {
+                requeued: requeued as u64,
+                failed: failed as u64,
+            })
         })
     }
 
@@ -400,6 +454,51 @@ impl<C: EventCodec + 'static> StoragePort for SqliteStore<C> {
         }
         self.writer.request(WriteOp::Rebuild)
     }
+}
+
+/// `target` 以一个参数开头：参数第一次出现的位置是 1 当且仅当它是前缀（空前缀出现在 1，匹配一切）。
+/// 不用 `LIKE`：前缀里的 `%`、`_` 不当通配符。语义与 [`OutboxSelector::matches`] 相同（`outbox_selector_agrees_with_sql` 对拍）。
+const PREFIX_MATCH: &str = "instr(target, ?) = 1";
+
+/// `queued` 的条目，加上额外条件 `cond`（以 ` AND` 开头，或为空）与它的参数，按 id 递增。
+fn queued_outbox(
+    conn: &Connection,
+    cond: &str,
+    cond_args: Vec<String>,
+    limit: usize,
+) -> Result<Vec<OutboxItem>, StorageError> {
+    let sql = format!(
+        "SELECT id, target, payload, state, attempts FROM outbox \
+         WHERE state = ?{cond} ORDER BY id LIMIT ?"
+    );
+    let mut args: Vec<rusqlite::types::Value> =
+        vec![DeliveryState::Queued.to_text().to_owned().into()];
+    args.extend(cond_args.into_iter().map(Into::into));
+    args.push(limit_val(limit).into());
+    let mut stmt = conn.prepare_cached(&sql).map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params_from_iter(args), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(sql_err)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, target, payload, state, attempts) = row.map_err(sql_err)?;
+        out.push(OutboxItem {
+            id: OutboxId(id as u64),
+            target: OutboxTarget(target),
+            payload,
+            state: enum_col("outbox", "state", &state)?,
+            attempts: u32::try_from(attempts).unwrap_or(u32::MAX),
+        });
+    }
+    Ok(out)
 }
 
 fn limit_val(limit: usize) -> i64 {

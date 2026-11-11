@@ -25,6 +25,8 @@ use rusqlite::ErrorCode;
 pub(crate) trait ColumnText: Sized + Copy + 'static {
     /// 类型名，出现在「列里的值认不出来」的错误里。
     const TYPE: &'static str;
+    /// 登记表里的全部变体（按表的顺序）。按领域谓词挑出一组列值时用，不在 SQL 里手写状态名。
+    const ALL: &'static [Self];
     fn to_text(self) -> &'static str;
     fn from_text(text: &str) -> Option<Self>;
 }
@@ -34,6 +36,7 @@ macro_rules! column_text {
     ($ty:ty, $name:literal { $(($($variant:tt)+) => $text:literal),+ $(,)? }) => {
         impl ColumnText for $ty {
             const TYPE: &'static str = $name;
+            const ALL: &'static [Self] = &[$($($variant)+),+];
             fn to_text(self) -> &'static str {
                 match self { $($($variant)+ => $text),+ }
             }
