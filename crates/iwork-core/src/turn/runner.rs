@@ -385,7 +385,9 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             self.unclean = None;
             return Ok(());
         };
+        tracing::debug!("retire: enter");
         if let Err(error) = session.terminate().await {
+            tracing::debug!(%error, "retire: exit, tree not cleared");
             self.unclean = Some(error.to_string());
             return Err(error);
         }
@@ -393,6 +395,7 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         if let Some(session) = self.session.take() {
             let _ = session.close().await;
         }
+        tracing::debug!("retire: exit, session dropped");
         Ok(())
     }
 

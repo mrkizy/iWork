@@ -37,6 +37,8 @@ jobs:
         run: scripts/check-no-dev-trust.sh --graph-only
 
   test:
+    # 三平台最长一次约 18 分钟（ubuntu，2026-11-11）；留一倍余量。卡住时判超时并留下日志，不挂到默认的 6 小时
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:

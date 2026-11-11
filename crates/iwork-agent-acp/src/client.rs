@@ -721,13 +721,20 @@ impl AgentSession for AcpSession {
     }
 
     async fn terminate(&self) -> Result<(), AgentError> {
+        let pid = self.conn.process.pid();
+        tracing::debug!(pid, "terminate: enter");
         self.conn.cx.stop();
-        terminate_tree(self.conn.process.as_ref()).await
+        let result = terminate_tree(self.conn.process.as_ref()).await;
+        tracing::debug!(pid, ok = result.is_ok(), "terminate: exit");
+        result
     }
 
     async fn close(self) -> Result<(), AgentError> {
+        let pid = self.conn.process.pid();
+        tracing::debug!(pid, "close: enter");
         self.conn.cx.stop();
         self.conn.process.shutdown().await;
+        tracing::debug!(pid, "close: exit");
         Ok(())
     }
 }
