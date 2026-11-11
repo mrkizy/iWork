@@ -362,7 +362,10 @@ mod tests {
             })],
             RestartPolicy::default(),
         );
-        let fault = sup.watch().await;
+        // 时限是虚拟时间：不升级的回归报成失败，而不是让测试一直挂着
+        let fault = tokio::time::timeout(Duration::from_secs(120), sup.watch())
+            .await
+            .expect("60s 内失败 5 次应升级为整体退出");
         assert_eq!(fault, Fault::CrashLoop { task: "bad" });
         assert_eq!(runs.load(Ordering::SeqCst), 5);
         let elapsed = started.elapsed();
