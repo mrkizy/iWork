@@ -456,6 +456,8 @@ mod tests {
         let mut sup = Supervisor::start(
             vec![
                 TaskSpec::restartable("other", std::future::pending::<()>),
+                // 和真实装配一样：ipc-serve 在第 4 步不停，一直留在集合里
+                TaskSpec::fatal("ipc-serve", std::future::pending::<()>()),
                 TaskSpec::fatal("store-health", async {}),
             ],
             RestartPolicy::default(),
