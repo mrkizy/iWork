@@ -1,0 +1,27 @@
+{
+  "seq": "1012",
+  "listConversations": {
+    "conversations": [
+      {
+        "id": "01JC0C0000000000000000CNV1",
+        "project": {
+          "projectId": "01JC0P0000000000000000PRJ1"
+        },
+        "state": "CONVERSATION_STATE_ACTIVE",
+        "lastReadSeq": "42",
+        "unread": 2,
+        "modelOverride": {
+          "modelId": "opus",
+          "effort": "high"
+        },
+        "approvalMode": "APPROVAL_MODE_FULL_ACCESS",
+        "updatedAt": "2025-11-01T12:30:00.123Z",
+        "title": "把登录页改成深色",
+        "titleSource": "TITLE_SOURCE_USER",
+        "lastTurnState": "TURN_STATE_FAILED",
+        "lastMessageFirstLine": "好的，我先看一下"
+      }
+    ],
+    "hasMore": true
+  }
+}

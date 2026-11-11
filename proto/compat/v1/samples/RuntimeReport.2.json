@@ -1,0 +1,9 @@
+{
+  "usage": {
+    "inputTokens": "2048",
+    "outputTokens": "512",
+    "cacheReadTokens": "4096",
+    "cacheWriteTokens": "128",
+    "costUsd": 0.125
+  }
+}

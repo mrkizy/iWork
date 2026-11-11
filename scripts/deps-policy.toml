@@ -98,8 +98,9 @@ internal = ["iwork-proto", "iwork-claude-hook"]
 transitive_exempt = ["agent-client-protocol", "tokio"]
 
 [crates.iwork-claude-hook]
+# 每次工具调用冷启动一次：只许 serde 与平台调用，不进 tokio（T06 方案 2.1）。Windows 管道在 S6 随桥接一起加 windows-sys
 internal = []
-direct = ["serde", "serde_json"]
+direct = ["serde", "serde_json", "libc"]
 
 [crates.iwork-client-core]
 internal = ["iwork-ipc", "iwork-proto"]
@@ -116,4 +117,10 @@ transitive_exempt = ["agent-client-protocol", "tokio"]
 [crates.iwork-bench]
 # T03：ipc 热路径基准（推送扇出、补发、快照、握手）。T11 收编其余基准时再按需加。
 internal = ["iwork-ipc", "iwork-proto"]
+transitive_exempt = ["tokio"]
+
+[crates.iwork-fake-daemon]
+# T09 假后台（方案 2.6）：真 ipc 服务端 + 订阅范围表（iwork-app::subscription，一处真值）。只在开发与测试用，
+# 发布的 iwork-client 不依赖它（check-no-dev-trust.sh 查 feature 图）。
+internal = ["iwork-ipc", "iwork-proto", "iwork-app", "iwork-core", "iwork-shell", "iwork-ports", "iwork-domain"]
 transitive_exempt = ["tokio"]

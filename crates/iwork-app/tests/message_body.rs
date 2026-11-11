@@ -47,6 +47,7 @@ fn appended(
                         nanos: 0,
                     }),
                     turn_id: None,
+                    created_seq: 0,
                 }),
             },
         )),

@@ -21,8 +21,8 @@ use iwork_domain::session::{AllowWrite, NetworkPolicy, SessionConstraints, Sessi
 use iwork_domain::turn::{Turn, TurnKind, TurnState};
 use iwork_ports::agent::{
     AgentError, AgentPort, AgentSession, AgentUpdate, ContentBlock, PermissionDecision,
-    PermissionHandler, PermissionRequest, RawToolInput, RuntimeCapabilities, SessionSpec,
-    TurnOutcome, UpdateStream,
+    PermissionHandler, PermissionRequest, RawToolInput, RuntimeCapabilities, SandboxStatus,
+    SessionSpec, TurnOutcome, UpdateStream,
 };
 use iwork_ports::clock::{Clock, IdGenerator, MonotonicInstant, Timer};
 use iwork_ports::live::{LivePublisher, MessageDelta};
@@ -90,6 +90,7 @@ impl Ctl {
             tool: ToolRef("Bash".into()),
             raw_input: RawToolInput(raw_input.into()),
             bypass_sandbox: false,
+            cwd: None,
         }))
     }
 }
@@ -133,6 +134,18 @@ impl AgentSession for FakeSession {
 
     fn runtime_session_id(&self) -> Option<&str> {
         Some("fake")
+    }
+
+    fn permission_wait_limit(&self) -> Option<Duration> {
+        None
+    }
+
+    fn sandbox(&self) -> SandboxStatus {
+        SandboxStatus::Enforced
+    }
+
+    async fn terminate(&self) -> Result<(), AgentError> {
+        Ok(())
     }
 
     async fn prompt(&self, _blocks: Vec<ContentBlock>) -> Result<FakeUpdates, AgentError> {
@@ -547,6 +560,8 @@ impl Bench {
                     enabled_groups: ToolGroups::new(),
                     include_always_on: true,
                 },
+                disabled_tools: Vec::new(),
+                plugin_dirs: Vec::new(),
                 resume: None,
                 kind: TurnKind::Assistant,
             },

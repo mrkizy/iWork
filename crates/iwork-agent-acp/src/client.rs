@@ -10,8 +10,11 @@
 //!   不能只靠连接断开发现崩溃；
 //! - 取消：发 `session/cancel`，等 prompt 结束（最多 3 秒），然后**总是**结束整棵进程树并确认清空，
 //!   才推「已取消」。运行时配合取消时它起的子进程也可能还在跑，取消的完成条件是整棵树没了；
-//!   会话随之失效，下一回合按运行时会话 id 续接。
+//!   会话随之失效，下一回合按运行时会话 id 续接；
+//! - 运行时的上报（用量、额度、实际模型）挂在 `session/update` 通知的 `_meta` 上，解出来进当前回合；
+//! - 运行时在错误响应里点名的错误码经 [`crate::bridge_error`] 映射，不回显运行时的文字。
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -27,13 +30,14 @@ use agent_client_protocol::v1::schema::{
 use agent_client_protocol::{Agent, Client, Lines};
 use iwork_ports::agent::{
     AgentError, AgentPort, AgentSession, AgentUpdate, ContentBlock, PermissionHandler,
-    RuntimeCapabilities, SessionSpec, TurnOutcome, UpdateStream,
+    RuntimeCapabilities, SandboxStatus, SessionSpec, TurnOutcome, UpdateStream,
 };
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::convert::{self, CLI_KEY, META_KEY};
+use crate::bridge_error::{self, ErrorContext};
+use crate::convert::{self, CLI_KEY, InitMeta, META_KEY, SessionMeta};
 use crate::diagnostics::RawLog;
 use crate::frame::read_frame;
 use crate::process::{GRACE_PERIOD, Pipes, ResourceSample, RuntimeLaunch, SupervisedProcess};
@@ -70,10 +74,12 @@ impl AcpRuntime {
         }
     }
 
-    /// 起进程、握手、做兼容检查。成功时进程与连接都可用。
+    /// 起进程、握手、做兼容检查。成功时进程与连接都可用。`model` 是要开的会话请求的模型
+    /// （能力探测时为空），只用来给运行时点名的错误补上模型名。
     async fn connect<H: PermissionHandler + 'static>(
         &self,
         handler: Option<Arc<H>>,
+        model: &str,
     ) -> Result<Connection, AgentError> {
         let (process, pipes) =
             SupervisedProcess::spawn(&self.launch).map_err(|e| AgentError::Protocol {
@@ -89,8 +95,14 @@ impl AcpRuntime {
                 env!("CARGO_PKG_VERSION").to_string(),
             ));
         let sent = cx.connection.send_request(init).block_task();
-        let response = guarded(&process, &shared, &cx, "initialize", sent).await?;
-        let registration = registration_of(&response).map_err(|message| {
+        let handshake = ErrorContext {
+            model: model.to_owned(),
+            version: String::new(),
+        };
+        let response = guarded(&process, &shared, &cx, &handshake, "initialize", sent).await?;
+        let parsed = registration_of(&response)
+            .and_then(|r| convert::init_meta(response.meta.as_ref()).map(|m| (r, m)));
+        let (registration, init_meta) = parsed.map_err(|message| {
             process.kill_tree();
             AgentError::Protocol { message }
         })?;
@@ -99,12 +111,22 @@ impl AcpRuntime {
             process.kill_tree();
             return Err(AgentError::Incompatible { version: reason });
         }
+        let errors = ErrorContext {
+            model: model.to_owned(),
+            version: registration
+                .cli
+                .as_ref()
+                .map_or(&registration.adapter_version, |c| &c.version)
+                .clone(),
+        };
         Ok(Connection {
             process,
             shared,
             cx,
             registration,
             init: response,
+            init_meta,
+            errors,
         })
     }
 }
@@ -114,8 +136,8 @@ impl AgentPort for AcpRuntime {
 
     /// 起一个探测进程握手后立即结束它。能力随运行时版本变，不缓存。
     async fn capabilities(&self) -> Result<RuntimeCapabilities, AgentError> {
-        let conn = self.connect::<NoPermissions>(None).await?;
-        let caps = capabilities_of(&conn.init);
+        let conn = self.connect::<NoPermissions>(None, "").await?;
+        let caps = capabilities_of(&conn.init, &conn.init_meta);
         conn.cx.stop();
         conn.process.shutdown().await;
         Ok(caps)
@@ -126,9 +148,15 @@ impl AgentPort for AcpRuntime {
         spec: SessionSpec,
         on_permission: H,
     ) -> Result<AcpSession, AgentError> {
-        let conn = self.connect(Some(Arc::new(on_permission))).await?;
+        let conn = self
+            .connect(Some(Arc::new(on_permission)), &spec.model.model_id.0)
+            .await?;
         match open(&conn, &spec).await {
-            Ok(session_id) => Ok(AcpSession { session_id, conn }),
+            Ok((session_id, meta)) => Ok(AcpSession {
+                session_id,
+                sandbox: meta.sandbox,
+                conn,
+            }),
             Err(e) => {
                 conn.cx.stop();
                 conn.process.kill_tree();
@@ -139,7 +167,8 @@ impl AgentPort for AcpRuntime {
 }
 
 /// 建会话：有旧会话 id 就续接（`session/load`），否则新建。会话配置放进 `_meta`。
-async fn open(conn: &Connection, spec: &SessionSpec) -> Result<String, AgentError> {
+/// 返回运行时的会话 id 与响应里的约定项；续接后运行时换了 id 就用新的。
+async fn open(conn: &Connection, spec: &SessionSpec) -> Result<(String, SessionMeta), AgentError> {
     if !spec.mcp.is_empty() {
         // 端口只给了 id 与名字；启动配置与密钥随本机导入功能（T10）接入后才能透传
         return Err(AgentError::Protocol {
@@ -164,8 +193,11 @@ async fn open(conn: &Connection, spec: &SessionSpec) -> Result<String, AgentErro
             ),
         });
     };
-    let meta = convert::session_setup_meta(&spec.model, &spec.constraints, &spec.tool_set)?;
+    let meta = convert::session_setup_meta(spec)?;
     let cx = &conn.cx.connection;
+    let session_meta = |m: Option<&agent_client_protocol::v1::schema::Meta>| {
+        convert::session_meta(m).map_err(|message| AgentError::Protocol { message })
+    };
     match &spec.resume {
         Some(old) => {
             if !caps.load_session {
@@ -177,16 +209,19 @@ async fn open(conn: &Connection, spec: &SessionSpec) -> Result<String, AgentErro
                 .system_prompt(system_prompt)
                 .meta(meta);
             let sent = cx.send_request(req).block_task();
-            guarded(&conn.process, &conn.shared, &conn.cx, "session/load", sent).await?;
-            Ok(old.clone())
+            let r = conn.guarded("session/load", sent).await?;
+            let meta = session_meta(r.meta.as_ref())?;
+            let id = meta.cli_session_id.clone().unwrap_or_else(|| old.clone());
+            Ok((id, meta))
         }
         None => {
             let req = NewSessionRequest::new(spec.cwd.clone())
                 .system_prompt(system_prompt)
                 .meta(meta);
             let sent = cx.send_request(req).block_task();
-            let r = guarded(&conn.process, &conn.shared, &conn.cx, "session/new", sent).await?;
-            Ok(r.session_id.0.to_string())
+            let r = conn.guarded("session/new", sent).await?;
+            let meta = session_meta(r.meta.as_ref())?;
+            Ok((r.session_id.0.to_string(), meta))
         }
     }
 }
@@ -196,13 +231,14 @@ async fn guarded<T>(
     process: &SupervisedProcess,
     shared: &Shared,
     cx: &ConnectionHandle,
+    errors: &ErrorContext,
     method: &str,
     request: impl Future<Output = Result<T, agent_client_protocol::Error>>,
 ) -> Result<T, AgentError> {
     tokio::select! {
         result = request => match result {
             Ok(response) => Ok(response),
-            Err(e) => Err(failure(process, shared, method, &e).await),
+            Err(e) => Err(failure(process, shared, errors, method, &e).await),
         },
         exit = process.exited() => {
             cx.stop();
@@ -221,16 +257,22 @@ fn exited(shared: &Shared, method: &str, exit: &crate::process::ExitInfo) -> Age
     }
 }
 
-/// 一次请求失败时判断原因：进程已经（或马上）退出就是进程退出，否则是协议错误。
-/// 只报方法名与错误码：错误说明由运行时给出，可能夹带正文或凭据，不进事件与日志。
+/// 一次请求失败时判断原因：运行时点名了错误码就按它（[`bridge_error`]）；进程已经（或马上）
+/// 退出就是进程退出，否则是协议错误。只报方法名与错误码：错误说明由运行时给出，可能夹带正文
+/// 或凭据，不进事件与日志。
 async fn failure(
     process: &SupervisedProcess,
     shared: &Shared,
+    errors: &ErrorContext,
     method: &str,
     error: &agent_client_protocol::Error,
 ) -> AgentError {
     if let Some(reason) = shared.fatal() {
         return AgentError::Protocol { message: reason };
+    }
+    // 点名的错误码优先于「进程退出」：运行时报了错再退出（如审批兜底触发后结束 CLI）是正常次序
+    if let Some(named) = bridge_error::map(error.data.as_ref(), errors) {
+        return named;
     }
     match process.wait_exit(EXIT_PROBE).await {
         Some(exit) => exited(shared, method, &exit),
@@ -277,13 +319,15 @@ fn registration_of(init: &InitializeResponse) -> Result<RuntimeRegistration, Str
     })
 }
 
-fn capabilities_of(init: &InitializeResponse) -> RuntimeCapabilities {
+fn capabilities_of(init: &InitializeResponse, meta: &InitMeta) -> RuntimeCapabilities {
     let caps = &init.agent_capabilities;
     RuntimeCapabilities {
         supports_resume: caps.load_session,
         supports_image_input: caps.prompt_capabilities.image,
-        // 思考强度的可选值随模型接法（技术设计 9.6）由各适配器报告，ACP 稳定版没有这个字段
-        effort_levels: Vec::new(),
+        // 思考强度、可选模型、平台沙箱 ACP 稳定版没有字段，由适配器在 `_meta` 里报（T06 方案 2.5）
+        effort_levels: meta.effort_levels.clone(),
+        sandbox_platform: meta.sandbox_platform,
+        model_options: meta.model_options.clone(),
     }
 }
 
@@ -297,6 +341,27 @@ struct Connection {
     cx: ConnectionHandle,
     registration: RuntimeRegistration,
     init: InitializeResponse,
+    init_meta: InitMeta,
+    /// 运行时点名错误码时补上的模型与版本
+    errors: ErrorContext,
+}
+
+impl Connection {
+    async fn guarded<T>(
+        &self,
+        method: &str,
+        request: impl Future<Output = Result<T, agent_client_protocol::Error>>,
+    ) -> Result<T, AgentError> {
+        guarded(
+            &self.process,
+            &self.shared,
+            &self.cx,
+            &self.errors,
+            method,
+            request,
+        )
+        .await
+    }
 }
 
 /// 连接任务的句柄。
@@ -435,7 +500,16 @@ async fn start_connection<H: PermissionHandler + 'static>(
         .name("iwork")
         .on_receive_notification(
             async move |n: SessionNotification, _cx| {
+                let report = convert::report_of(n.meta.as_ref());
+                // 先送通知本身的更新（上报照约定挂在空的 session_info_update 上，转换后什么都不产生；
+                // 挂在别的更新上也不丢那条更新），再送上报
                 on_update.turns.on_update(n.update);
+                match report {
+                    Some(Ok(report)) => on_update.turns.on_report(report),
+                    // 解不出来的上报只记一笔诊断：它不改变回合的走向，不值得中断会话
+                    Some(Err(_)) => on_update.raw.record_bad_report(),
+                    None => {}
+                }
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -451,9 +525,19 @@ async fn start_connection<H: PermissionHandler + 'static>(
                 epoch.mark_unchanged();
                 // 在派发循环里取：此前到达的更新都已进了队列，这个数就是它们的条数
                 let updates_before = on_request.turns.emitted();
+                let shared = on_request.clone();
                 // 不在派发循环里等审批：等待期间其他消息要照常处理
                 cx.spawn(async move {
-                    let request = convert::permission_request(&req, updates_before);
+                    let request = match convert::permission_request(&req, updates_before) {
+                        Ok(request) => request,
+                        // 约定项读不懂：不交给处理方，按拒绝答复运行时（失败即关闭）
+                        Err(message) => {
+                            shared.raw.record_bad_permission_meta();
+                            let deny = iwork_ports::agent::PermissionDecision::Deny { message };
+                            return responder
+                                .respond(convert::permission_response(&req.options, &deny));
+                        }
+                    };
                     let decision = tokio::select! {
                         d = handler.on_permission(request) => Some(d),
                         _ = epoch.changed() => None,
@@ -494,6 +578,7 @@ async fn start_connection<H: PermissionHandler + 'static>(
 #[derive(Debug)]
 pub struct AcpSession {
     session_id: String,
+    sandbox: SandboxStatus,
     conn: Connection,
 }
 
@@ -539,6 +624,14 @@ impl AgentSession for AcpSession {
         Some(&self.session_id)
     }
 
+    fn permission_wait_limit(&self) -> Option<Duration> {
+        self.conn.init_meta.permission_wait_limit
+    }
+
+    fn sandbox(&self) -> SandboxStatus {
+        self.sandbox
+    }
+
     async fn prompt(&self, blocks: Vec<ContentBlock>) -> Result<AcpUpdates, AgentError> {
         if let Some(exit) = self.conn.process.exit_info() {
             return Err(AgentError::ProcessExited {
@@ -555,11 +648,14 @@ impl AgentSession for AcpSession {
         let shared = self.conn.shared.clone();
         let process = self.conn.process.clone();
         let stopper = self.conn.cx.stopper();
+        let errors = self.conn.errors.clone();
         tokio::spawn(async move {
             let last = tokio::select! {
                 result = sent => match result {
                     Ok(response) => AgentUpdate::Finished(convert::outcome_of(response.stop_reason)),
-                    Err(e) => AgentUpdate::Failed(failure(&process, &shared, "session/prompt", &e).await),
+                    Err(e) => AgentUpdate::Failed(
+                        failure(&process, &shared, &errors, "session/prompt", &e).await,
+                    ),
                 },
                 exit = process.exited() => {
                     stopper.stop();
@@ -608,10 +704,37 @@ impl AgentSession for AcpSession {
         })
     }
 
+    async fn terminate(&self) -> Result<(), AgentError> {
+        self.conn.cx.stop();
+        terminate_tree(self.conn.process.as_ref()).await
+    }
+
     async fn close(self) -> Result<(), AgentError> {
         self.conn.cx.stop();
         self.conn.process.shutdown().await;
         Ok(())
+    }
+}
+
+/// 结束整棵进程树并确认清空。平台实现是 [`SupervisedProcess`]；测试换成确认不了的替身，
+/// 证明「清不掉」不会被当成清掉了。
+trait ProcessTreeKill {
+    fn kill_tree_and_wait(&self) -> impl Future<Output = bool> + Send;
+}
+
+impl ProcessTreeKill for SupervisedProcess {
+    fn kill_tree_and_wait(&self) -> impl Future<Output = bool> + Send {
+        SupervisedProcess::kill_tree_and_wait(self)
+    }
+}
+
+async fn terminate_tree(tree: &impl ProcessTreeKill) -> Result<(), AgentError> {
+    if tree.kill_tree_and_wait().await {
+        Ok(())
+    } else {
+        Err(AgentError::ProcessExited {
+            message: "运行时进程树没能在时限内结束".into(),
+        })
     }
 }
 
@@ -624,5 +747,37 @@ pub struct AcpUpdates {
 impl UpdateStream for AcpUpdates {
     async fn next(&mut self) -> Option<AgentUpdate> {
         self.rx.recv().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// 进程树确认不了清空（平台查询一直说「还有进程」）。
+    struct Unkillable(AtomicUsize);
+
+    impl ProcessTreeKill for Unkillable {
+        async fn kill_tree_and_wait(&self) -> bool {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            false
+        }
+    }
+
+    /// 清不掉的树报 `ProcessExited`，不报成功；每次调用都真的再结束一次，不缓存上次的失败。
+    #[tokio::test]
+    async fn terminate_reports_unkillable_tree() {
+        let tree = Unkillable(AtomicUsize::new(0));
+        for round in 1..=2 {
+            assert_eq!(
+                terminate_tree(&tree).await,
+                Err(AgentError::ProcessExited {
+                    message: "运行时进程树没能在时限内结束".into()
+                })
+            );
+            assert_eq!(tree.0.load(Ordering::SeqCst), round);
+        }
     }
 }

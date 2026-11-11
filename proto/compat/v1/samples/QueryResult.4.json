@@ -1,0 +1,250 @@
+{
+  "seq": "1011",
+  "getConversation": {
+    "conversation": {
+      "id": "01JC0C0000000000000000CNV1",
+      "project": {
+        "projectId": "01JC0P0000000000000000PRJ1"
+      },
+      "state": "CONVERSATION_STATE_ACTIVE",
+      "lastReadSeq": "42",
+      "unread": 2,
+      "modelOverride": {
+        "modelId": "opus",
+        "effort": "high"
+      },
+      "approvalMode": "APPROVAL_MODE_FULL_ACCESS",
+      "updatedAt": "2025-11-01T12:30:00.123Z",
+      "title": "把登录页改成深色",
+      "titleSource": "TITLE_SOURCE_USER",
+      "lastTurnState": "TURN_STATE_FAILED",
+      "lastMessageFirstLine": "好的，我先看一下"
+    },
+    "messages": [
+      {
+        "id": "01JC0M0000000000000000MSG1",
+        "conversationId": "01JC0C0000000000000000CNV1",
+        "author": {
+          "assistant": {
+            "assistantId": "01JC0A0000000000000000AST1",
+            "nameSnapshot": "审查员"
+          }
+        },
+        "contextProjectId": "01JC0P0000000000000000PRJ1",
+        "status": "MESSAGE_STATUS_STREAMING",
+        "body": {
+          "inlineText": "正在看……"
+        },
+        "attachmentIds": [
+          "01JC0F0000000000000000ATT1"
+        ],
+        "createdAt": "2025-11-01T12:33:20.123Z",
+        "turnId": "01JC0T0000000000000000TRN1",
+        "createdSeq": "1001"
+      }
+    ],
+    "turns": [
+      {
+        "id": "01JC0T0000000000000000TRN1",
+        "conversationId": "01JC0C0000000000000000CNV1",
+        "assistantId": "01JC0A0000000000000000AST1",
+        "assistantVersion": 4,
+        "runtimeId": "01JC0X0000000000000000RTM1",
+        "model": {
+          "modelId": "opus",
+          "effort": "high"
+        },
+        "runtimeSessionId": "sess-1",
+        "state": "TURN_STATE_COMPLETED",
+        "stateReason": "审批等待到上限",
+        "startedAt": "2025-11-01T12:35:00.123Z",
+        "endedAt": "2025-11-01T12:36:40.123Z",
+        "kind": "TURN_KIND_ASSISTANT",
+        "createdSeq": "1000",
+        "endedSeq": "1010",
+        "usage": {
+          "inputTokens": "1200",
+          "outputTokens": "340",
+          "cacheReadTokens": "5000",
+          "cacheWriteTokens": "60",
+          "costUsd": 0.25
+        },
+        "celebrate": true,
+        "changeSummary": {
+          "filesChanged": 2,
+          "insertions": 10,
+          "deletions": 3,
+          "paths": [
+            "src/a.rs",
+            "src/b.rs"
+          ]
+        }
+      }
+    ],
+    "toolCalls": [
+      {
+        "turnId": "01JC0T0000000000000000TRN1",
+        "toolCallId": "toolu_01",
+        "toolName": "Edit",
+        "action": {
+          "kind": "ACTION_KIND_WRITE",
+          "target": {
+            "paths": {
+              "paths": [
+                "/tmp/a.txt",
+                "/tmp/b.txt"
+              ]
+            }
+          },
+          "toolName": "Edit",
+          "rawSummary": "改两个文件"
+        },
+        "finished": true,
+        "ok": true,
+        "outputArtifact": {
+          "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+          "area": "ARTIFACT_AREA_ARTIFACTS",
+          "size": "4096"
+        },
+        "createdSeq": "1002"
+      }
+    ],
+    "approvals": [
+      {
+        "id": "01JC0V0000000000000000APR1",
+        "turnId": "01JC0T0000000000000000TRN1",
+        "conversationId": "01JC0C0000000000000000CNV1",
+        "kind": "APPROVAL_KIND_OUTSIDE_SANDBOX",
+        "action": {
+          "kind": "ACTION_KIND_OUTSIDE_SANDBOX",
+          "target": {
+            "command": {
+              "program": "npm",
+              "subcommand": "publish",
+              "argv": [
+                "npm",
+                "publish",
+                "--access=public"
+              ]
+            }
+          },
+          "toolName": "Bash",
+          "rawSummary": "npm publish --access=public",
+          "outOfBounds": true,
+          "bypassSandboxRequested": true,
+          "opaqueScript": true
+        },
+        "matchedRuleIds": [
+          "01JC0R0000000000000000RXE1"
+        ],
+        "rulesetVersion": "2026.11.1",
+        "state": "APPROVAL_STATE_APPROVED",
+        "review": "REVIEW_STATE_PASSED",
+        "reviewReason": "等待审查",
+        "offeredRemember": [
+          "REMEMBER_SCOPE_ONCE",
+          "REMEMBER_SCOPE_PROJECT"
+        ],
+        "rememberLabel": "本项目内 `npm publish …` 不再问",
+        "requestedAt": "2025-11-01T12:38:20.123Z",
+        "decidedAt": "2025-11-01T12:40:00.123Z",
+        "reviewId": "01JC0V0000000000000000RVW1",
+        "createdSeq": "1001",
+        "decider": "APPROVAL_DECIDER_USER"
+      },
+      {
+        "id": "01JC0V0000000000000000APR1",
+        "turnId": "01JC0T0000000000000000TRN1",
+        "conversationId": "01JC0C0000000000000000CNV1",
+        "kind": "APPROVAL_KIND_OUTSIDE_SANDBOX",
+        "action": {
+          "kind": "ACTION_KIND_OUTSIDE_SANDBOX",
+          "target": {
+            "command": {
+              "program": "npm",
+              "subcommand": "publish",
+              "argv": [
+                "npm",
+                "publish",
+                "--access=public"
+              ]
+            }
+          },
+          "toolName": "Bash",
+          "rawSummary": "npm publish --access=public",
+          "outOfBounds": true,
+          "bypassSandboxRequested": true,
+          "opaqueScript": true
+        },
+        "matchedRuleIds": [
+          "01JC0R0000000000000000RXE1"
+        ],
+        "rulesetVersion": "2026.11.1",
+        "state": "APPROVAL_STATE_VOIDED",
+        "review": "REVIEW_STATE_IN_PROGRESS",
+        "reviewReason": "等待审查",
+        "offeredRemember": [
+          "REMEMBER_SCOPE_ONCE",
+          "REMEMBER_SCOPE_PROJECT"
+        ],
+        "rememberLabel": "本项目内 `npm publish …` 不再问",
+        "requestedAt": "2025-11-01T12:38:20.123Z",
+        "decidedAt": "2025-11-01T12:40:00.123Z",
+        "reviewId": "01JC0V0000000000000000RVW1",
+        "createdSeq": "1001",
+        "voidReason": "VOID_REASON_TURN_CANCELLED"
+      }
+    ],
+    "userActions": [
+      {
+        "id": "01JC0D0000000000000000CRD1",
+        "turnId": "01JC0T0000000000000000TRN1",
+        "conversationId": "01JC0C0000000000000000CNV1",
+        "command": {
+          "command": "ssh-add -l",
+          "cwd": "/Users/me"
+        },
+        "reason": "列出已加载的密钥",
+        "proposalHash": "3q2+7wECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxw=",
+        "state": "USER_ACTION_STATE_UNKNOWN",
+        "exit": {
+          "code": 2
+        },
+        "outputArtifact": {
+          "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+          "area": "ARTIFACT_AREA_ARTIFACTS",
+          "size": "4096"
+        },
+        "error": "后台服务中断",
+        "voidReason": "VOID_REASON_CONVERSATION_DELETED",
+        "createdSeq": "1005"
+      }
+    ],
+    "attachments": [
+      {
+        "id": "01JC0F0000000000000000ATT1",
+        "conversationId": "01JC0C0000000000000000CNV1",
+        "sha256": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+        "size": "1024",
+        "mime": "image/png",
+        "name": "截图.png",
+        "origin": {
+          "pasted": {
+            "sha256": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+            "area": "ARTIFACT_AREA_ATTACHMENTS",
+            "size": "1024"
+          }
+        },
+        "needsConfirmation": true,
+        "createdAt": "2025-11-01T12:45:00.123Z"
+      }
+    ],
+    "usageTotal": {
+      "inputTokens": "1200",
+      "outputTokens": "340",
+      "cacheReadTokens": "5000",
+      "cacheWriteTokens": "60",
+      "costUsd": 0.25
+    }
+  }
+}

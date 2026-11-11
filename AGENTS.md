@@ -39,7 +39,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 - 协议兼容：新加或改了 `.proto` 字段后跑 `cargo run -p iwork-proto --example update-contract -- --additive` 把新字段登记进 `proto/compat/v1/contract.binpb`；它拒绝改号、改类型、删字段；加了样本构造函数后跑 `cargo run -p iwork-proto --example dump-compat -- proto/compat/v1/samples` 写出新的金样本（只增不改，已有样本内容不同会拒绝）。规则见 `proto/compat/README.md`
 - 前端：`pnpm -C client install --frozen-lockfile`、`pnpm -C client gen`（从 `proto/` 生成 TS 到 `client/src/gen/`，不入库）、`pnpm -C client typecheck`、`pnpm -C client test`（含开发服务器只绑 127.0.0.1、发布配置不含开发入口两项检查）
 - 客户端：Tauri 配置分三层，层清单只写在 `client/scripts/tauri-layers.ts`，包装脚本与 CI 检查共用它。开发用 `pnpm -C client tauri dev`（叠加 `tauri.dev.conf.json`）；发布构建用 `pnpm -C client tauri build`（叠加 `tauri.build.conf.json`）。tauri CLI 只支持 dev 和 build 两个子命令，且只能经这两条包装命令调用：包装脚本拒绝其他子命令（bundle、android、ios 等）、调用方自带的 `-c/--config` 和环境变量 `TAURI_CONFIG`；裸跑 `tauri build`、`tauri bundle` 会被拒；`client/src-tauri/` 下多出层清单没登记的 Tauri 配置文件时 `pnpm -C client test` 失败。`cargo build`/`cargo run -p iwork-client` 不需要 `dist/`，但 `cargo run` 起来的窗口是空的（没有开发服务器也没有嵌入资源），看界面要用 `tauri dev`
-- 性能基准：`cargo bench -p iwork-bench`（T01 建空 crate，T11 填实现）；存储写入基准初版 `cargo bench -p iwork-store --bench write_commit`（每组一行 JSON 到 stdout，macOS 上 fullfsync 开、关各一组；T11 收编后改这一条）；审批求值热路径单跑 `cargo bench -p iwork-bench --bench approval`（T07）；审批引擎（追平、启动折叠、并发放行，真实 SqliteStore）`cargo bench -p iwork-bench --bench approval_engine`（T07 方案 6.10.12）；审批引擎前后对照（747db6b 对当前树，同一时段交替多轮）`scripts/bench-approval-engine-ab.sh [轮数]`（脚本里每次 cargo bench 自己套 `lockf /tmp/iwork-heavy-test.lock`，外面不要再套，否则自己等自己；正式数在 mac120 空闲时段量，每轮前查有没有构建在跑）；ipc 热路径：`cargo bench -p iwork-bench --bench ipc`（`IWORK_BENCH_FANOUT_SECS` 调推送扇出时长）
+- 性能基准：`cargo bench -p iwork-bench`（T01 建空 crate，T11 填实现）；存储写入基准初版 `cargo bench -p iwork-store --bench write_commit`（每组一行 JSON 到 stdout，macOS 上 fullfsync 开、关各一组；T11 收编后改这一条）；审批求值热路径单跑 `cargo bench -p iwork-bench --bench approval`（T07）；审批引擎（追平、启动折叠、并发放行，真实 SqliteStore）`cargo bench -p iwork-bench --bench approval_engine`（T07 方案 6.10.12）；审批引擎前后对照（747db6b 对当前树，同一时段交替多轮）`scripts/bench-approval-engine-ab.sh [轮数]`（脚本里每次 cargo bench 自己套 `lockf /tmp/iwork-heavy-test.lock`，外面不要再套，否则自己等自己；正式数在 mac120 空闲时段量，每轮前查有没有构建在跑）；ipc 热路径：`cargo bench -p iwork-bench --bench ipc`（`IWORK_BENCH_FANOUT_SECS` 调推送扇出时长）；Claude hook 冷启动与体积：`cargo bench -p iwork-claude-hook --bench cold_start`（T06 S3，只 unix；S9 收进 `iwork-bench`）
 - 本机通信（T03）：
   - 不开 TCP/UDP：`scripts/check-no-tcp.sh`（源码层面；`--selftest` 证明检查会红；运行时监听检查归 T11）
   - 发布构建没有 `--dev-trust`：`scripts/check-no-dev-trust.sh`（feature 图 + release 产物 grep 含阳性对照 + 发布进程拒绝该参数；`--graph-only` 只查 feature 图，`--artifacts F...` 追加检查打包产物）
@@ -65,7 +65,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 
 ## 安全不变量（任何改动都不能破坏；违反即 blocking）
 
-- 不修改厂商 CLI，不禁用其登录方式；登录走厂商自己的流程。**不读取、不保存、不转发任何凭据或 token。** `claude auth status` 只取 `loggedIn`、`authMethod`、`subscriptionType`、`loginExpiresAt`，邮箱等不落盘、不进日志。
+- 不修改厂商 CLI，不禁用其登录方式；登录走厂商自己的流程。例外：删除对话、删除助手时，由适配层按 iWork 记录的会话编号删除对应的运行时会话记录文件（需求 v1.78；定位规则见 T06 方案 5.5：只删名字恰好是「编号.jsonl」的普通文件，不读内容、不碰别处），不动 CLI 的程序、设置与登录。**不读取、不保存、不转发任何凭据或 token。** `claude auth status` 只取 `loggedIn`、`authMethod`、`subscriptionType`、`loginExpiresAt`，邮箱等不落盘、不进日志。
 - iWork 的审批判定优先于厂商 CLI 自身的权限模式与放行规则，不能被它们放宽。
 - 成员会话与用户自己的厂商 CLI 全局配置隔离：不运行用户的 hook、不沿用用户的权限模式、不加载未经导入的 MCP、技能与插件（需求 8.4、FR20）。仓库内的 `.claude/settings.json`、`settings.local.json` 也一律不加载（v1.63），不得为了让仓库自带 hook 生效而放开。
 - Claude Code 的 PreToolUse hook：连不上桥接一律 deny（失败即关闭）；**绝不让 hook 自然超时**（实测超时即放行），桥接必须在到时前主动中断回合并以拒绝返回。

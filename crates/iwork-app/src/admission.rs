@@ -43,6 +43,7 @@ pub fn command_name(command: &Kind) -> &'static str {
         Kind::SwitchDmProject(_) => "switch_dm_project",
         Kind::DeleteConversation(_) => "delete_conversation",
         Kind::CreateConversation(_) => "create_conversation",
+        Kind::RenameConversation(_) => "rename_conversation",
         Kind::DecideApproval(_) => "decide_approval",
         Kind::SetApprovalMode(_) => "set_approval_mode",
         Kind::CreateAssistant(_) => "create_assistant",

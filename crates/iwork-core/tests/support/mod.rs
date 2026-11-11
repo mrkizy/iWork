@@ -135,6 +135,7 @@ pub fn bash_req(command: &str) -> PermissionRequest {
         raw_input: RawToolInput(serde_json::json!({ "command": command }).to_string()),
         bypass_sandbox: false,
         updates_before: 0,
+        cwd: None,
     }
 }
 
@@ -144,6 +145,7 @@ pub fn tool_req(tool: &str, input: serde_json::Value) -> PermissionRequest {
         raw_input: RawToolInput(input.to_string()),
         bypass_sandbox: false,
         updates_before: 0,
+        cwd: None,
     }
 }
 

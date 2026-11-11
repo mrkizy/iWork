@@ -1,5 +1,6 @@
 //! AI 审查的系统回合：同一个截止时间覆盖建连、prompt、更新流和关闭。
 use super::*;
+use iwork_domain::action::ToolRef;
 use iwork_domain::common::Usage;
 use iwork_domain::event::{
     QuotaObserved, TurnFinished, TurnModelReported, TurnQueued, TurnStateChanged, UsageReported,
@@ -96,16 +97,22 @@ where
             stopped,
         } = request;
         let (system_prompt, user) = review_prompt(&input);
+        let tool_set =
+            crate::approval::session::tool_set_for(TurnKind::SystemAiReview, &ToolGroups::new());
+        // 启动时就不提供的工具：和工具集出自同一份登记表（T06 方案 1.3 的 C3）
+        let disabled_tools = crate::approval::session::tools_to_disable(&tool_set)
+            .into_iter()
+            .map(ToolRef)
+            .collect();
         let spec = SessionSpec {
             cwd: keys.paths.workspace_root.0.clone(),
             model: turn.model.clone(),
             system_prompt,
             mcp: Vec::new(),
             constraints: keys.snapshot.constraints.clone(),
-            tool_set: crate::approval::session::tool_set_for(
-                TurnKind::SystemAiReview,
-                &ToolGroups::new(),
-            ),
+            tool_set,
+            disabled_tools,
+            plugin_dirs: Vec::new(),
             resume: None,
             kind: TurnKind::SystemAiReview,
         };
@@ -158,14 +165,18 @@ where
                             )
                             .await?
                         }
-                        AgentUpdate::Quota(windows) => {
+                        AgentUpdate::Quota(readings) => {
+                            let observed_at = self.ports.clock.now();
                             self.commit(
                                 ENGINE_ACTOR,
                                 vec![
                                     QuotaObserved {
                                         runtime_id: turn.runtime_id,
-                                        windows,
-                                        observed_at: self.ports.clock.now(),
+                                        windows: readings
+                                            .into_iter()
+                                            .map(|r| r.observed_at(observed_at))
+                                            .collect(),
+                                        observed_at,
                                     }
                                     .into(),
                                 ],

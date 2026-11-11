@@ -743,12 +743,18 @@ where
                 self.usage = usage;
                 return Ok(None);
             }
-            AgentUpdate::Quota(windows) => QuotaObserved {
-                runtime_id: self.turn.runtime_id,
-                windows,
-                observed_at: self.ports.clock.now(),
+            AgentUpdate::Quota(readings) => {
+                let observed_at = self.ports.clock.now();
+                QuotaObserved {
+                    runtime_id: self.turn.runtime_id,
+                    windows: readings
+                        .into_iter()
+                        .map(|r| r.observed_at(observed_at))
+                        .collect(),
+                    observed_at,
+                }
+                .into()
             }
-            .into(),
             AgentUpdate::Finished(outcome) => return Ok(Some(End::Finished(outcome))),
             AgentUpdate::Failed(error) => return Ok(Some(End::Failed(error))),
         };

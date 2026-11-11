@@ -643,3 +643,60 @@ fn process_exists(pid: u32) -> bool {
         .expect("运行 tasklist");
     String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
 }
+
+/// 运行时上报的模型、额度进事件，用量记在回合结束的统计里；额度的观测时间由编排按自己的时钟
+/// 记（上报里不带时间）。走的是真 ACP 客户端 + 回合编排 + 假运行时进程。
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_reports_become_events_with_orchestrator_time() {
+    use iwork_domain::event::DomainEvent;
+    let fake = Fake::new(&json!({ "turns": [{ "steps": [
+        { "type": "report_model", "model_id": "claude-opus", "effort": "high" },
+        { "type": "text", "text": "好" },
+        { "type": "report_quota", "windows": [
+            { "window": "five_hour", "used_pct": 42, "resets_at_secs": 1731300000 }
+        ] },
+        { "type": "report_usage", "input_tokens": 10, "output_tokens": 20 }
+    ] }] }));
+    let runtime = AcpRuntime::new(fake.launch.clone());
+    let h = Harness::new();
+    let mut line = SessionLine::new(Arc::new(StubDecider::allow_all()), None);
+    let state = line
+        .run_turn(&runtime, h.ports(), h.plan(fake.dir.path(), "hi"))
+        .await
+        .unwrap();
+    assert_eq!(state, TurnState::Completed);
+
+    let events = h.store.events();
+    let model = events.iter().find_map(|e| match e {
+        DomainEvent::TurnModelReported(m) => Some(m.model.model_id.0.clone()),
+        _ => None,
+    });
+    assert_eq!(model.as_deref(), Some("claude-opus"));
+    let quota = events
+        .iter()
+        .find_map(|e| match e {
+            DomainEvent::QuotaObserved(q) => Some(q.clone()),
+            _ => None,
+        })
+        .expect("额度进了事件");
+    assert_eq!(quota.windows.len(), 1);
+    let w = &quota.windows[0];
+    assert_eq!((w.window.as_str(), w.used_pct), ("five_hour", 42));
+    assert_eq!(
+        w.resets_at,
+        Some(iwork_domain::common::Timestamp(1_731_300_000_000))
+    );
+    assert_eq!(
+        w.observed_at, quota.observed_at,
+        "窗口的观测时间就是编排记的那一刻"
+    );
+    assert!(quota.observed_at.0 >= 1_700_000_000_000, "取自编排的时钟");
+    let usage = events.iter().find_map(|e| match e {
+        DomainEvent::UsageReported(u) => Some(u.usage),
+        _ => None,
+    });
+    assert_eq!(
+        usage.map(|u| (u.input_tokens, u.output_tokens)),
+        Some((10, 20))
+    );
+}

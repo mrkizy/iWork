@@ -87,6 +87,21 @@ message Conversation {
   // 对话级档位切换；未设置表示用项目默认（需求 FR11）。
   optional ApprovalMode approval_mode = 8;
   google.protobuf.Timestamp updated_at = 9;
+  // 标题（设计 9.0a）。AUTO 且还没发首条消息时为空，界面显示「新对话」。
+  string title = 10;
+  TitleSource title_source = 11;
+  // 最近一个回合的状态；从没有回合时不设。侧栏圆点与助手表情用（T09 方案 G4）。
+  optional TurnState last_turn_state = 12;
+  // 最近一条消息正文的首行（「全部对话」列表页用，T09 方案 G8）；没有消息时为空。
+  string last_message_first_line = 13;
+}
+
+// 标题来源（设计 9.0a）：AUTO 首条消息自动取、USER 用户改过、FIXED 跟随助手或角色名、不可重命名。
+enum TitleSource {
+  TITLE_SOURCE_UNSPECIFIED = 0;
+  TITLE_SOURCE_AUTO = 1;
+  TITLE_SOURCE_USER = 2;
+  TITLE_SOURCE_FIXED = 3;
 }
 
 // 项目对话：属于一个项目。
@@ -112,6 +127,8 @@ message Message {
   google.protobuf.Timestamp created_at = 8;
   // 助手消息所属回合。
   optional string turn_id = 9;
+  // 创建这条消息的事件 seq（MessageAppended 的信封 seq）。客户端时间线按它排序，0 是协议错误（T09 方案 G2）。
+  uint64 created_seq = 10;
 }
 
 message Author {
@@ -158,6 +175,13 @@ message Turn {
   TurnKind kind = 12;
   // state = INTERRUPTED 时必有：两种中断的后续去向不同（T01 方案 4.3）。
   optional InterruptReason interrupt_reason = 13;
+  // 创建回合的事件 seq（TurnQueued）；结束事件 seq（TurnFinished），没结束为 0（T09 方案 G2）。
+  uint64 created_seq = 14;
+  uint64 ended_seq = 15;
+  // 回合结束时的用量、印章与改动摘要，与 TurnFinished 同值（T09 方案 G3）。没结束时不设。
+  Usage usage = 16;
+  bool celebrate = 17;
+  ChangeSummary change_summary = 18;
 }
 
 // 回合种类（设计 7.2b）：系统回合由 iWork 自己发起，工具集与审批规则不同。
@@ -166,6 +190,20 @@ enum TurnKind {
   TURN_KIND_ASSISTANT = 1;
   TURN_KIND_SYSTEM_AI_REVIEW = 2;
   TURN_KIND_SYSTEM_AGENTS_MD_DRAFT = 3;
+}
+
+// 一次工具调用（ToolCallStarted / ToolCallFinished 折叠而成；T09 方案 G2）。重开对话后工具活动行由它重建。
+message ToolCall {
+  string turn_id = 1;
+  string tool_call_id = 2;
+  string tool_name = 3;
+  ActionSummary action = 4;
+  bool finished = 5;
+  // finished 时有意义。
+  bool ok = 6;
+  ArtifactRef output_artifact = 7;
+  // ToolCallStarted 的信封 seq。
+  uint64 created_seq = 8;
 }
 
 // 回合产生的改动摘要（设计 9.7 第 2 条）。
@@ -283,6 +321,12 @@ message Approval {
   optional string review_id = 15;
   // 被审批调用的完整记录（T07 Q8）：拒绝记忆、一次性放行、崩溃恢复都用它。旧事件没有。
   ApprovalCallRecord call = 16;
+  // ApprovalRequested 的信封 seq（T09 方案 G2）。
+  uint64 created_seq = 17;
+  // 终态契约（T09 方案 G3）：APPROVED 必有 decider、没有 void_reason；VOIDED 必有 void_reason、没有 decider；
+  // PENDING、DENIED 两者都没有。终态都带 decided_at。
+  optional ApprovalDecider decider = 18;
+  optional VoidReason void_reason = 19;
 }
 
 // 恢复与复查所需的最小调用记录（T07 方案 6.2）。全部是归一后的值，不含原始 JSON 全文。
@@ -406,6 +450,8 @@ message UserActionCard {
   optional string error = 11;
   // VOIDED 时的原因。
   optional VoidReason void_reason = 12;
+  // UserActionProposed 的信封 seq（T09 方案 G2）。
+  uint64 created_seq = 13;
 }
 
 // ---------- 规则与安全清单 ----------
@@ -615,6 +661,8 @@ message ResumeCard {
   string turn_id = 1;
   string conversation_id = 2;
   InterruptReason reason = 3;
+  // 回合进入 INTERRUPTED 的事件 seq：卡片在时间线上的位置（T09 方案 G2）。
+  uint64 created_seq = 4;
 }
 
 // ---------- 本机导入与设置 ----------

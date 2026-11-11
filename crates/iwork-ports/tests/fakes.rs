@@ -514,6 +514,15 @@ impl AgentSession for FakeSession {
     fn runtime_session_id(&self) -> Option<&str> {
         Some("s1")
     }
+    fn permission_wait_limit(&self) -> Option<std::time::Duration> {
+        None
+    }
+    fn sandbox(&self) -> iwork_ports::agent::SandboxStatus {
+        iwork_ports::agent::SandboxStatus::Unavailable
+    }
+    async fn terminate(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
     async fn prompt(&self, _blocks: Vec<ContentBlock>) -> Result<FakeUpdates, AgentError> {
         Ok(FakeUpdates(vec![AgentUpdate::Finished(
             TurnOutcome::Completed,
@@ -534,6 +543,8 @@ impl AgentPort for FakeAgent {
             supports_resume: true,
             supports_image_input: false,
             effort_levels: vec![],
+            sandbox_platform: iwork_ports::agent::SandboxPlatform::Unsupported,
+            model_options: vec![],
         })
     }
     async fn open_session<H: PermissionHandler + 'static>(
@@ -803,6 +814,7 @@ fn fakes_are_callable() {
             tool: iwork_domain::action::ToolRef("t".into()),
             raw_input: iwork_ports::agent::RawToolInput("{}".into()),
             bypass_sandbox: false,
+            cwd: None,
         })),
         PermissionDecision::Deny { .. }
     ));

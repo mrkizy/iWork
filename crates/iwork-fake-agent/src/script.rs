@@ -24,6 +24,25 @@ pub struct AgentInfo {
     pub load_session: bool,
     pub system_prompt: bool,
     pub image: bool,
+    /// 报了就放进 `_meta.iwork.permissionWaitLimitSecs`
+    pub permission_wait_limit_secs: Option<Value>,
+    /// 报了就放进 `_meta.iwork.sandboxPlatform`（原样，测试也用它造坏值）
+    pub sandbox_platform: Option<Value>,
+    /// 非空就放进 `_meta.iwork.effortLevels`
+    pub effort_levels: Vec<String>,
+    /// 非空就放进 `_meta.iwork.models`
+    pub models: Vec<ModelInfo>,
+    /// 报了就放进 `session/new`、`session/load` 响应的 `_meta.iwork.sandbox`
+    pub session_sandbox: Option<String>,
+    /// 报了就放进 `session/load` 响应的 `_meta.iwork.cliSessionId`
+    pub resumed_session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelInfo {
+    pub id: String,
+    pub label: String,
 }
 
 impl Default for AgentInfo {
@@ -35,6 +54,12 @@ impl Default for AgentInfo {
             load_session: true,
             system_prompt: true,
             image: false,
+            permission_wait_limit_secs: None,
+            sandbox_platform: None,
+            effort_levels: Vec::new(),
+            models: Vec::new(),
+            session_sandbox: None,
+            resumed_session_id: None,
         }
     }
 }
@@ -113,6 +138,9 @@ pub enum Step {
     /// 为某次工具调用请求权限，按结果走不同分支；客户端答「已取消」时按取消结束回合
     Permission {
         tool_call_id: String,
+        /// 报了就放进请求的 `_meta.iwork.cwd`
+        #[serde(default)]
+        cwd: Option<String>,
         #[serde(default)]
         allowed: Vec<Step>,
         #[serde(default)]
@@ -134,6 +162,50 @@ pub enum Step {
         #[serde(default)]
         args: Vec<String>,
     },
+    /// 上报实际模型（`_meta.iwork.report`，挂在一条空的 `session_info_update` 上）
+    ReportModel {
+        model_id: String,
+        #[serde(default)]
+        effort: Option<String>,
+        /// 给了就把上报挂在一条带这段正文的 `agent_message_chunk` 上（违反约定的挂法，测上报与更新都不丢）
+        #[serde(default)]
+        on_text: Option<String>,
+    },
+    /// 上报一个回合的用量
+    ReportUsage {
+        input_tokens: u64,
+        output_tokens: u64,
+        #[serde(default)]
+        cache_read_tokens: u64,
+        #[serde(default)]
+        cache_write_tokens: u64,
+        #[serde(default)]
+        cost_usd: Option<f64>,
+    },
+    /// 上报额度窗口
+    ReportQuota {
+        windows: Vec<QuotaWindow>,
+    },
+    /// 上报一个原样的 `_meta.iwork.report` 值（造解不出来的上报）
+    ReportRaw {
+        value: Value,
+    },
+    /// 以 JSON-RPC 错误结束这次 prompt，`data` 为 `{"iwork": {"code", "reason"?}}`
+    Error {
+        code: String,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuotaWindow {
+    pub window: String,
+    pub used_pct: u32,
+    /// Unix 纪元起的秒数
+    #[serde(default)]
+    pub resets_at_secs: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]

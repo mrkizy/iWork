@@ -127,6 +127,18 @@ impl AgentSession for FakeSession {
         Some(&self.id)
     }
 
+    fn permission_wait_limit(&self) -> Option<Duration> {
+        None
+    }
+
+    fn sandbox(&self) -> iwork_ports::agent::SandboxStatus {
+        iwork_ports::agent::SandboxStatus::Enforced
+    }
+
+    async fn terminate(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
+
     async fn prompt(&self, _blocks: Vec<ContentBlock>) -> Result<FakeUpdates, AgentError> {
         if self.ctl.dead.lock().unwrap().contains(&self.id) {
             return Err(AgentError::ProcessExited {
@@ -281,6 +293,8 @@ fn plan(turn: Turn) -> TurnPlan {
                 enabled_groups: ToolGroups::new(),
                 include_always_on: true,
             },
+            disabled_tools: Vec::new(),
+            plugin_dirs: Vec::new(),
             resume: None,
             kind: TurnKind::Assistant,
         },
