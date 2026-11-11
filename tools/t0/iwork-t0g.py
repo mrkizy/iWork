@@ -654,8 +654,12 @@ def observed(case_id, body):
     return cmd, read
 
 
+# 设置文件里 defaultMode 写 manual，CLI 当 default 的别名收下，system/init 报的是 default（2.1.322 打包代码：设置校验先把 manual 换成 default，init 报的是内部名）
+MODE_ALIASES = {"manual": "default"}
+
+
 def mode_took_effect(r, mode):
-    return (r["init"] or {}).get("permissionMode") == mode
+    return (r["init"] or {}).get("permissionMode") == MODE_ALIASES.get(mode, mode)
 
 
 def learn_inventory(init):
@@ -1982,6 +1986,7 @@ def selftest():
     assert st(hooked_verdict(ev_ok, hook("t1"))) == "PASS" and st(hooked_verdict(ev_ok, hook("zz"))) == "FAIL" and st(hooked_verdict(ev_none, hook("t1"))) == "INCONCLUSIVE"
     assert st(mode_verdict(moded(good_ok), "default")) == "PASS" and st(mode_verdict(moded(good_ok, "x"), "default")) == "FAIL"
     assert st(mode_verdict({**moded(good_ok), "exit": 1}, "default")) == "INCONCLUSIVE"
+    assert st(mode_verdict(moded(good_ok), "manual")) == "PASS" and st(mode_verdict(moded(good_ok, "manual"), "dontAsk")) == "FAIL", "manual 是 default 的别名：init 报 default 算生效"
     # G2 一个格子从事实到结论
     cell = {"match": bash_match(T), "parent": "main"}
     assert g2_cell_status("bash", "deny", moded(good_err), hook("t1"), cell, False, "default", "Agent") == ("PASS", "")
@@ -2090,7 +2095,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="", help="逗号分隔的组名，如 G2,G4")
     ap.add_argument("--model", default="haiku")
-    ap.add_argument("--modes", default="default,dontAsk", help="G2 要比的权限模式；新版本把 default 叫 manual 时写 manual,dontAsk")
+    ap.add_argument("--modes", default="default,dontAsk", help="G2 要比的权限模式（写进设置文件的 permissions.defaultMode）。2.1.322 的设置文件里 default 与 manual 都收（manual 是别名），init 一律报 default")
     ap.add_argument("--allowed-domains", default="*", help="G4 ② 试的「放行全部」写法")
     ap.add_argument("--corpus", default="", help="T07 导出的对拍语料：cargo run -p iwork-core --example dump-credential-corpus > corpus.json")
     ap.add_argument("--repeat", type=int, default=3, help="G7i 重复次数")
@@ -2103,6 +2108,9 @@ def main():
     ap.add_argument("--root-parent", default=HOME, help="本次根目录与结果包建在哪个目录下（默认家目录；必须在 $TMPDIR 之外）")
     ap.add_argument("--selftest", action="store_true")
     A = ap.parse_args()
+    unknown = [g for g in (x.strip() for x in A.only.split(",")) if g and g not in GROUPS]
+    if unknown:                                            # 先挡住拼错的组名：不然要先花掉一次探查运行，才在组循环里报错
+        ap.error(f"--only 里有不认识的组：{unknown}；可选 {sorted(GROUPS)}")
     R = Layout(A.root_parent)
     before = manifest(R.parent, exclude=(R.root,))
     result_path = None

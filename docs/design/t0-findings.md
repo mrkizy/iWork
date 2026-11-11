@@ -181,3 +181,101 @@
 - 两个方向都存在：冒充客户端（exec 被信任的客户端）、冒充后台（exec 出来的后台往继承的 fd 写日志）。
 - 前提：攻击者是同用户、能在本机运行代码。这比方案已知限制 L2（能在后台启动前改安装目录）门槛低，不需要改任何文件。
 - 实现里没有为它加任何机制（安全设计原则：不擅自加机制）。可选方向（未实现、未评估）：macOS 记下判定通过时的完整审计令牌，之后每帧前再读一次比对，变了就断开；Linux 没有等价的「最后读写者」信息。产品负责人已决定记为已知限制、不另加机制（需求第 9 章，v1.73）。
+
+## 附：T06 S0 实测运行说明（给产品负责人；2026-11-11，developer 按 Claude Code 2.1.322 校对）
+
+T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。脚本都在 `tools/t0/`，在仓库根目录下跑。跑出来的结论写进本文 2.4 节（新加），一项一行，注明 CLI 版本。
+
+### 先说清楚几件事
+
+- **会花订阅额度**。每次 `claude -p` 起一个实例就是一次真实的模型请求。下面每一步都写了大约起几个实例。数法：脚本给每个实例留一份 `<用例名>-stream.jsonl`（G7h 被杀掉的那几个不留），结果包里数这类文件就是这一步实际起了几个。
+- **`iwork-t0g.py` 只动自己建的目录**：`~/iwork-t0g-<随机>/`，跑完自己删；结果包是 `~/iwork-t0g-results-<时间>-<随机>.tar.gz`，不覆盖已有文件。两处例外：`~/.npmrc` 被写进沙箱的禁读名单（不读内容）；G4 ⑧ 的最小构建会写 `~/.npm`、`~/.cargo` 这些工具链缓存，不想动就加 `--skip-builds`。
+- **另外三个老脚本会清空并重写固定目录**：`~/iwork-t0-results/`、`~/iwork-t0b-results/`、`~/iwork-t0f-results/` 和同名的 `.tar.gz`。跑之前看一眼，有要留的先挪走。
+- **`iwork-t0.sh` 的结果里有邮箱**：它把 `claude auth status` 的原样输出存进 `q4-auth-status.txt`、`q4-auth-status-json.txt`。发出去之前删掉或把邮箱抹掉（安全不变量：邮箱不落盘、不进日志，这两份文件只在你本机留着）。
+- **结论只认四种证据**：流里的结构化工具调用与结果、哨兵 / 观测文件、hook 探针的调用记录、常驻会话活着时的生命周期事件。不看模型怎么说。每行是 `PASS` / `FAIL` / `INCONCLUSIVE`（没测成）/ `INFO`（只记录）。`summary.txt` 最后一行是合计；有 `FAIL` 或 `INCONCLUSIVE` 时脚本退出码是 1，这是正常的，看具体哪几行。
+
+### 跑之前要准备的
+
+| 要什么 | 为什么 |
+| --- | --- |
+| 日常账号已经登录 Claude Code（`claude` 能正常回话） | 所有组都要 |
+| `python3`（3.9 以上，只用标准库）；macOS 上要有 `lsof`（系统自带） | 脚本本身；进程清理靠 `lsof` 找工作目录在根目录里的进程，找不到就不开跑 |
+| `cargo`、`npm`、`curl`、`nc`、`gh` 在 `PATH` 上 | G4 的 ②、⑦、⑧；没有的那几行会是 `FAIL`（命令自己退出码非零），记下就行，不影响别的行 |
+| G4 ④ 的语料 `--corpus corpus.json` | 来自 `cargo run -p iwork-core --example dump-credential-corpus > corpus.json`。**main 上现在还没有这个 example**（T07 交付），没有就不加 `--corpus`，G4 ④ 记 `INCONCLUSIVE`（等 T07 合入再单独补跑 `--only G4 --corpus ...`） |
+| 一次性环境（临时 macOS 用户或虚拟机） | G2 的故障格子、G5、G9d 的完整结论只在那里拿得到，见第 4 步 |
+| 一台 Linux（能临时改名 `bwrap`） | 16.2 第 3 项 |
+| 一块能合盖的 MacBook，人在旁边 | 16.2 第 1 项 |
+
+### 顺序与估算
+
+时间按每个实例 20～60 秒估（G3、G7 里有故意等的，单算）。实例数是从脚本里数出来的上限，实际会少一些（运行门没过的格子不起实例）。
+
+| 步 | 在哪跑 | 命令 | 大约多久 | 大约起几个实例 | 看什么 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 日常账号 | `python3 tools/t0/iwork-t0g.py --selftest` | 15 秒 | 0 | 最后一行 `selftest ok`；跑完家目录下没有 `iwork-t0g-*` 残留 |
+| 2 | 日常账号 | `python3 tools/t0/iwork-t0g.py --only G2 --quick` | 1～2 小时 | 不超过 129：探查 1 + 8 个候选配置 ×（外层保护预检 5 + 普通 Bash 一行 11） | `外层保护 [...]` 那 8 行：哪几样保护在这台机器上成立。`G2 硬前提` 这一行一定是 `INCONCLUSIVE`（`--quick` 不许进已验证表），正常 |
+| 3 | 日常账号 | `python3 tools/t0/iwork-t0g.py`（全量，不带 `--disposable-env`） | 半天（G2 占大头） | 约 170～780，见下面的细账 | G1、G3、G4、G6、G7、G8、G9a～c 的结论；G2 的格子哪些因为外层保护没成立而没跑；G5、G9d 一定是 `INCONCLUSIVE`（要一次性环境），正常 |
+| 4 | 一次性环境 | `python3 tools/t0/iwork-t0g.py --only G2,G5,G9 --disposable-env` | 3～8 小时 | G2 最多 616（8 × 77），被淘汰的候选只跑 11；G5 7 个；G9 2 个 | `G2 硬前提` 一行 `PASS` 且没有 `INCONCLUSIVE` 的格子；`G5 A --setting-sources 空值` 一行 `PASS`；`G9d` 一行 `PASS` |
+| 5 | 日常账号，人在旁边 | `python3 tools/t0/iwork-t0g.py --only G3 --long` | 30～45 分钟 | 13（探查 1 + 预检 5 + 六个取值 6 + 睡眠时钟 1） | 前面六个取值各睡 90 秒，要先跑完（十几分钟）才出提示；看到「看到这行后 30 秒内合盖」就合盖，睡满 5 分钟再打开；看 `G3 睡眠后命令没执行` 一行和它的墙钟用时。步 2 里外层保护的 Bash 两项没成立的话，这一步整组不跑（运行门），改到一次性环境里加 `--disposable-env` 跑 |
+| 6 | 日常账号 | 16.2 第 2 项（没有终端时的登录）：照方案里那一行命令跑 | 1 分钟 | 0（只起 `claude auth login`，用空的配置目录，不动现有登录） | 有没有打印登录网址、有没有自己开浏览器、有没有因为没终端报错退出 |
+| 7 | Linux | `bwrap` 临时改名后：`--only G4`，再 `--only G4 --no-fail-if-unavailable` | 各 20～30 分钟 | 各约 27 | 第一次：CLI 起不来、G4 全是 `INCONCLUSIVE`，记下 stderr 的退出码与文字；第二次：`G4 ①b 写工作区外` 那一行，和 `g4-1b-stream.jsonl` 里 `system/init` 有没有沙箱状态字段。跑完把 `bwrap` 改回来 |
+| 8 | 日常账号 | `bash tools/t0/iwork-t0.sh` | 1～2 分钟 | 3 | 原 2.1 的 Q3～Q5；结果在 `~/iwork-t0-results.tar.gz`（先抹掉邮箱，见上文） |
+| 9 | 日常账号 | `bash tools/t0/iwork-t0b.sh` | 约 14 分钟 | 2 | 原 2.1 的 Q6（hook 超时 = 放行）；结果在 `~/iwork-t0b-results.tar.gz` |
+| 10 | 日常账号 | `python3 tools/t0/iwork-t0f.py` | 5 分钟左右 | 约 5 | 原 2.2a 的 V0～V3；结果在 `~/iwork-t0f-results.tar.gz` |
+
+步 2 可以省掉、直接跑步 3，它只是让你先花一两个小时看清外层保护成不成立，再决定要不要花半天跑全量。
+
+全量（步 3）的细账，每组起几个实例：
+
+| 组 | 实例数 | 说明 |
+| --- | --- | --- |
+| 开头的探查 | 1～2 | `--setting-sources ""` 跑不通才多一次 |
+| G1 | 10 | 9 种工具探针各 1，cd 之后的 cwd 1 |
+| G2 | 8 × 5 = 40 次预检，加格子 | 候选配置 = `--modes` 里的模式（默认 `default,dontAsk`）× 4 种（`+block`、`+block+prompts-none`、`+block+denyInsteadOfPrompting`、不设 onFailure 的对照）= 8 个。每个先跑普通 Bash 一行 11 格，11 格全 `PASS` 才跑剩下的 66 格。日常账号下外层保护没成立的格子不起实例 |
+| G3 | 11 | 预检 5 + 六个 timeout 取值，每个 hook 睡 90 秒 |
+| G4 | 26 + 语料行数 | 基础 15、最小构建 3（`--skip-builds` 就没有）、⑥ 重试 5、⑨ 全开档 3 |
+| G5 | 7 | 只在 `--disposable-env` 下跑 |
+| G6 | 10 | 思考强度 6、不存在的模型 1、换模型续接 2、换系统提示 1 |
+| G7 | 7 + 2 × `--repeat` | 常驻会话 3、换配置续接 4、杀进程续接每次 2（默认 `--repeat 3`） |
+| G8 | 7 | 工具清单 4、MCP 3 |
+| G9 | 1～2 | G9d 只在 `--disposable-env` 下跑 |
+
+### 一次性环境怎么搭（16.2 第 5 项）
+
+macOS 上：`sudo sysadminctl -addUser t0gtmp -password -`（按提示输密码），快速切换到这个用户，登录 Claude Code，`git clone` 一份仓库（或者拷过去），跑步 4 的命令。跑完把 `~/iwork-t0g-results-*.tar.gz` 拷出来（比如放到 `/Users/Shared/`），切回自己的账号，`sudo sysadminctl -deleteUser t0gtmp`。这个用户里不要放任何要紧的东西：故障格子会故意弄坏 hook，靠的只是沙箱和这个用户本身的隔离。
+
+### 结果不对时怎么办
+
+**`FAIL`**：说明拿到了正面证据，证明行为不对。
+
+- `G2 硬前提` 一行是 `FAIL`（每个候选配置都有格子执行了不许执行的命令）：**整张卡停**，结果包交 supervisor，由产品负责人决定（方案 P5 选项 c）。别的组先不用看。
+- 单个 G2 格子 `FAIL` 而总行不是 `FAIL`：说明那个候选配置不行，别的候选过了就用别的，记下来。
+- `进程清理` 或 `进程组` 出现 `FAIL`：脚本自己会停（清不干净不跑后面的）。看 `ps` 里还有没有工作目录在 `~/iwork-t0g-*` 下的进程，手动结束后再跑。
+- `运行前后原有文件核对` 是 `FAIL`：家目录下原有的 `iwork-t0g*` 文件或 `~/.npmrc` 变了，结果包和 `summary.txt` 里有变了哪几项，交 supervisor。
+- 别的组的 `FAIL`：就是实测结论，照实写进 2.4 节，交 supervisor 看对方案哪一节有影响（每组影响哪里见方案 16.1 的表）。
+
+**`INCONCLUSIVE`**：没测成，不是测出了问题。按 `summary.txt` 那一行后面写的原因处理：
+
+| 原因 | 怎么办 |
+| --- | --- |
+| 「外层保护没验证过（[...]），这个格子不在这台机器上跑」 | 运行门没过：日常账号下这几样保护不成立，故障格子不许跑。去一次性环境加 `--disposable-env` 跑（步 4）。同时把 `外层保护 [...]` 那几行原样记下来：产品里的本机验证就靠这几样 |
+| 「只在一次性环境……里加 --disposable-env 跑」 | G5、G9d 在日常账号下本来就不跑，去步 4 |
+| 「缺正面证据：……」「运行无效（没有 init、超时或退出码不对）」「没有归属对得上的目标调用，或不止一次」「目标调用没有按 id 对上的结果」「探针没有在这次调用上被调起的记录」 | 这次运行本身不算数：模型没按要求发调用、发了两次、超时，或 CLI 没起来。先看这个用例的 `<名>-stream.jsonl` 和 `<名>-stderr.txt`；偶发的（模型没照做、网络抖）就用 `--only <组>` 单独重跑这一组；每次都这样的，交 supervisor |
+| 「权限模式没生效：init 报 ...」 | 设置文件没被 CLI 收下（`-p` 模式下设置文件校验不过会被整个静默忽略）。看 `<名>-stderr.txt` 有没有设置校验的告警，交 supervisor，别重跑 |
+| 对照没成立（`G5 阳性对照`、`G8 MCP 阳性对照`、G9b 对照变量看不到、外层保护里要成功的那一笔没成功） | 测的办法在这台机器上不灵，负向结论说明不了问题。看对照那次的 stream 和 stderr，交 supervisor |
+| G4 ④「没给 --corpus」或「语料读不了」 | 等 T07 的 `dump-credential-corpus` 合入，再 `--only G4 --corpus corpus.json` 补跑 |
+| 「登记之外的调用（探针一律拒绝）」一行次数很多 | 这行是 `INFO`，不算结论；但次数多说明模型老跑偏，相应用例容易变成没测成。看各用例目录 `hook-calls.jsonl` 里带 `refused` 的行。偶发就重跑那一组 |
+| 「脚本自己出错：...」 | 脚本的错，交 developer，附上这一行和结果包 |
+
+`--quick` 下 `G2 硬前提` 恒为 `INCONCLUSIVE`，这是设计如此，不用处理。
+
+### 跑之前已知的风险点（S0 校对时从 2.1.322 打包代码里看不出结论，要靠这次实测）
+
+- G6 的思考强度读回：hook 输入里的 `effort` 字段只在当前模型支持思考强度时才带。脚本默认 `--model haiku`（2.1.322 里指 `claude-haiku-5-5`），它支不支持看不出来。要是 G6 五个取值都是 `FAIL` 且读回是 `None`，换 `--only G6 --model sonnet` 重跑一次再下结论；`xhigh`、`max` 也可能只有部分模型支持。
+- G6 续接时换追加系统提示：2.1.322 新增 `--system-prompt-snapshot`，默认开，会话第一次的系统提示会被记下来，续接时原样再用，后来传的不同文本不生效。那一行只是 `INFO`，读结果时知道这一点。
+- G5 的阳性对照：仓库设置里同时写了 `disableAllHooks: true`。命令行设置写的是 `false`，按设置层的优先级应当压过它，但从代码里没法确认合并后取哪个；要是对照没成立，G5 三行都是 `INCONCLUSIVE`，交 supervisor。
+- G8a `--tools ""`：要是这个版本有不受 `--tools` 管的常驻工具，`init.tools` 不会是空的，G8a 记 `FAIL`。照实记。
+- G4 ②：`allowedDomains: ["*"]` 能不能放行全部，文档只写了 `*.example.com` 这种通配，要实测。
+- G4 ⑦a `security list-keychains` 只有 macOS 有；在 Linux 上跑 G4（步 7）这一行一定是 `FAIL`，不算问题。
+- 16.2 第 1 项说「再用 G2 选定配置重复一次」：`--only G3` 用的是 `--modes` 第一个模式加 `onFailure: block`，表达不了 `--permission-prompts none` 或 `denyInsteadOfPrompting` 这两种候选。G2 选出来的要是这两种之一，第二次睡眠时钟要改脚本才能跑，交 developer。
+- `iwork-t0.sh` 按 `--help` 文字查参数在不在：2.1.322 的 `--help` 里没有 `--permission-prompt-tool`，日志会写 `flag --permission-prompt-tool: no`，但打包代码里这个参数还在（只是不在帮助里列出）；`iwork-t0f.py` 用的 `--max-turns` 也一样。不是退化。
