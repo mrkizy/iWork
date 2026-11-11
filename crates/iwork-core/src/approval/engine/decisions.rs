@@ -2,22 +2,71 @@
 //!
 //! 每条路径都是：拿令牌（含屏障）→ 追平 → 在折叠的视图上算计划（纯函数）→ 提交 → 追平 → 放令牌。
 //! 被投影器拒（状态前提不成立）就回到「拿令牌」重算，最多 [`REPLAN_ATTEMPTS`] 次。内存从不在这里改。
-use super::fold::ConversationFold;
-use super::sync::REPLAN_ATTEMPTS;
-use super::waiting::{register_ask, register_card};
+use super::sync::{REPLAN_ATTEMPTS, TokenGuard};
+use super::waiting::{AskRegistration, register_ask, register_card};
 use super::*;
 use crate::turn::Decided;
 use iwork_domain::approval::owner_alive;
 
-/// 一次求值要用的视图：在 inner 锁里一次取出，出锁后在它上面算（求值会碰文件系统）。
+/// 一次请求要用的视图：在 inner 锁里一次取出，出锁后在它上面算（求值会碰文件系统）。
+/// 只取要用的几样（方案 6.10.12「取视图」）：拒绝记忆、这个回合的一次性放行、审查上下文。
 struct View {
     cursor: Seq,
     live: Arc<Vec<RuleEntry>>,
-    conv: ConversationFold,
+    mode: ApprovalMode,
+    denial: DenialMemory,
+    grants: Vec<(ApprovalId, GrantOnce)>,
+    context: super::context::ReviewContext,
+}
+
+/// 一次请求的身份：哪条会话线、哪个回合、归一后的调用。
+#[derive(Clone, Copy)]
+struct Request<'a> {
+    keys: &'a Arc<SessionKeys>,
+    turn: TurnId,
+    call: &'a NormalizedCall,
+}
+
+/// 一次尝试的结局。
+enum Attempt {
+    Done(Decided),
+    /// 提交被投影器拒：追平后重来
+    Replan,
 }
 
 fn answer(decision: PermissionDecision, approval: Option<ApprovalId>) -> Decided {
     Decided { decision, approval }
+}
+
+fn done(decision: PermissionDecision, approval: Option<ApprovalId>) -> Attempt {
+    Attempt::Done(answer(decision, approval))
+}
+
+/// 结果是询问或沙箱外时，在这个回合的一次性放行里找同一次调用。命中就记进审计：资格还在则改成放行
+/// （折叠看到后把它挪去等交付）；资格不在了结果不改（折叠看到后作废它）。返回命中的那条审批。
+fn apply_grant(
+    eval: &mut CallEvaluation,
+    call: &NormalizedCall,
+    turn: TurnId,
+    grants: &[(ApprovalId, GrantOnce)],
+) -> Option<ApprovalId> {
+    if !matches!(
+        eval.evaluation.verdict,
+        Verdict::Ask(_) | Verdict::OutsideSandbox(_)
+    ) {
+        return None;
+    }
+    let record = call.record(eval.representative);
+    let id = grants
+        .iter()
+        .find(|(_, g)| g.matches(turn, &record))
+        .map(|(id, _)| *id)?;
+    if still_eligible(eval, Waiver::GrantOnce).is_ok() {
+        eval.evaluation.verdict = Verdict::Allow;
+        eval.evaluation.layer_hit = RuleLayer::Remembered;
+        eval.evaluation.matched = Vec::new();
+    }
+    Some(id)
 }
 
 impl<C, G, S, A, T, R> ApprovalEngine<C, G, S, A, T, R>
@@ -66,264 +115,298 @@ where
             cwd: &keys.cwd,
         };
         let call = normalize(&analysis, &ctx, &facts, &self.ports.fs);
-        let actor = format!("agent:{}", keys.assistant);
-
         for _ in 0..REPLAN_ATTEMPTS {
-            // 2. 拿令牌，追平，取视图
-            let Ok(mut token) = self.acquire(keys.conversation).await else {
-                return answer(deny(MSG_STORAGE_FAILED), None);
-            };
-            if self.catch_up().await.is_err() {
-                return answer(deny(MSG_STORAGE_FAILED), None);
-            }
-            // 3. 还能不能受理：回合不在等审批、对话在删、助手没了，都不建审批、不写审计
-            let (view, mode) = {
-                let inner = lock_std(&self.inner);
-                let f = &inner.folded;
-                let Some(conv) = f.conversation(keys.conversation) else {
-                    return answer(deny(MSG_TURN_CANCELLED), None);
-                };
-                if !f.is_waiting(turn) || conv.deleting || !f.has_assistant(keys.assistant) {
-                    return answer(deny(MSG_TURN_CANCELLED), None);
-                }
-                let mode = conv.effective_mode(keys.assistant);
-                (
-                    View {
-                        cursor: f.cursor(),
-                        live: f.live_rules(),
-                        conv: conv.clone(),
-                    },
-                    mode,
-                )
-            };
-
-            // 4. 求值；要问时在一次性放行里找同一次调用
-            let (mut eval, rules) =
-                match self.evaluate(keys, &call, &view.live, &view.conv.denial, mode) {
-                    Ok(evaluated) => evaluated,
-                    Err(error) => {
-                        return answer(deny(format!("iWork 审批规则无效：{error}")), None);
-                    }
-                };
-            let mut grant = None;
-            if matches!(
-                eval.evaluation.verdict,
-                Verdict::Ask(_) | Verdict::OutsideSandbox(_)
-            ) {
-                let record = call.record(eval.representative);
-                if let Some(id) = view
-                    .conv
-                    .grants
-                    .iter()
-                    .find(|(_, g)| g.matches(turn, &record))
-                    .map(|(id, _)| *id)
-                {
-                    // 命中就记在审计里：放行则折叠把它挪去等交付；资格不在了则折叠作废它
-                    grant = Some(id);
-                    if still_eligible(&eval, Waiver::GrantOnce).is_ok() {
-                        eval.evaluation.verdict = Verdict::Allow;
-                        eval.evaluation.layer_hit = RuleLayer::Remembered;
-                        eval.evaluation.matched = Vec::new();
-                    }
-                }
-            }
-            let elapsed = self.ports.clock.monotonic().0.saturating_sub(t0.0);
-            let audit: DomainEvent = ApprovalEvaluated {
-                turn_id: turn,
-                action: call.representative_action(eval.representative),
-                matched_rule_ids: eval.evaluation.matched.clone(),
-                ruleset_version: eval.evaluation.ruleset_version.clone(),
-                verdict: eval.evaluation.verdict.clone(),
-                layer_hit: eval.evaluation.layer_hit,
-                duration_ms: u32::try_from(elapsed / 1_000_000).unwrap_or(u32::MAX),
-                snapshot_lists_seq: keys.snapshot.lists_seq,
-                live_rules_seq: view.cursor,
-                sub_actions: call.actions.clone(),
-                call_shape: Some(call.shape.kind()),
-                snapshot_rule_paths: keys.snapshot.rule_paths.clone(),
-                grant_approval_id: grant,
-            }
-            .into();
-
-            // 5. 组计划并提交，一次请求一笔提交
-            match eval.evaluation.verdict.clone() {
-                Verdict::Allow => {
-                    // 只含审计的提交不用再追平：一次性放行的去向由同一对话下一个决定开头的追平折到
-                    return match self
-                        .commit_under(&mut [&mut token], &actor, vec![audit])
-                        .await
-                    {
-                        Ok(_) => answer(PermissionDecision::Allow, grant),
-                        Err(_) => answer(deny(MSG_STORAGE_FAILED), None),
-                    };
-                }
-                Verdict::Deny(reason) => {
-                    if let Err(error) = self
-                        .commit_under(&mut [&mut token], &actor, vec![audit])
-                        .await
-                    {
-                        tracing::warn!(%error, "拒绝的审计没能落盘");
-                    }
-                    return answer(deny(deny_message(&reason, &rules, &call)), None);
-                }
-                Verdict::UserAction(proposal) => {
-                    let card = UserActionCard {
-                        id: UserActionId::from_raw(self.new_id()),
-                        turn_id: turn,
-                        conversation_id: keys.conversation,
-                        proposal_hash: proposal_hash(&proposal),
-                        proposal,
-                        reason: call
-                            .description
-                            .clone()
-                            .unwrap_or_else(|| "Agent 未说明".into()),
-                        state: UserActionState::Pending,
-                        output_artifact: None,
-                    };
-                    let (guard, rx) = register_card(&self.inner, card.id);
-                    match self
-                        .commit_under(
-                            &mut [&mut token],
-                            &actor,
-                            vec![audit, UserActionProposed { card }.into()],
-                        )
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(StorageError::Projection { .. }) => continue,
-                        Err(_) => return answer(deny(MSG_STORAGE_FAILED), None),
-                    }
-                    self.catch_up_after_commit("on_permission").await;
-                    drop(token);
-                    let message = rx.await.unwrap_or_else(|_| MSG_TURN_CANCELLED.into());
-                    drop(guard);
-                    return answer(deny(message), None);
-                }
-                Verdict::Ask(_) | Verdict::OutsideSandbox(_) => {
-                    let (offered, label) = offered_remember(&call, &eval, &keys.scope());
-                    let approval = Approval {
-                        id: ApprovalId::from_raw(self.new_id()),
-                        turn_id: turn,
-                        conversation_id: keys.conversation,
-                        kind: if eval.constraints.outside_sandbox {
-                            ApprovalKind::OutsideSandbox
-                        } else {
-                            ApprovalKind::Ask
-                        },
-                        action: call.representative_action(eval.representative),
-                        call: Some(Box::new(call.record(eval.representative))),
-                        matched_rules: eval.evaluation.matched.clone(),
-                        ruleset_version: eval.evaluation.ruleset_version.clone(),
-                        state: ApprovalState::Pending,
-                        review: ReviewState::NotReviewed,
-                        offered_remember: offered,
-                        remember_label: label,
-                        requested_at: self.ports.clock.now(),
-                    };
-                    let id = approval.id;
-                    let wants_review = mode == ApprovalMode::Auto
-                        && eval.constraints.review_eligible()
-                        && keys.ai_review.enabled
-                        && keys.turn_kind == TurnKind::Assistant;
-                    let context = view
-                        .conv
-                        .review_messages
-                        .contexts
-                        .get(&keys.project)
-                        .cloned()
-                        .unwrap_or_default();
-                    // 先登记等待方与会话绑定，再提交
-                    let registration = register_ask(&self.inner, id, turn, keys);
-                    let mut events = vec![
-                        audit,
-                        ApprovalRequested {
-                            approval: approval.clone(),
-                        }
-                        .into(),
-                    ];
-                    // 要审查时，审查开始与审查回合和请求同一笔提交（不再留下「已请求、没人等」的审批）
-                    let review = if wants_review {
-                        let review_id = ReviewId(TurnId::from_raw(self.new_id()));
-                        let Ok(started) = plan_approval(
-                            &approval,
-                            ApprovalTrigger::AiReviewStarted { review_id },
-                            mode,
-                        ) else {
-                            return answer(deny(MSG_STORAGE_FAILED), None);
-                        };
-                        events.extend(started);
-                        let review_turn = self.review_turn(keys, review_id);
-                        events.push(self.review_queued(review_turn.clone()));
-                        Some((review_id, review_turn))
-                    } else {
-                        None
-                    };
-                    match self.commit_under(&mut [&mut token], &actor, events).await {
-                        Ok(_) => {}
-                        Err(StorageError::Projection { .. }) => continue,
-                        Err(_) => return answer(deny(MSG_STORAGE_FAILED), None),
-                    }
-                    self.catch_up_after_commit("on_permission").await;
-                    drop(token);
-
-                    // 7. 令牌外等：答复通道；有审查时同时跑审查
-                    let mut reply = registration.reply;
-                    let decision = match review {
-                        None => reply.await.unwrap_or_else(|_| deny(MSG_TURN_CANCELLED)),
-                        Some((review_id, review_turn)) => {
-                            let input = ReviewInput {
-                                actions: call
-                                    .actions
-                                    .iter()
-                                    .map(|a| format!("{:?} {:?}", a.kind, a.target))
-                                    .collect(),
-                                command_text: call.raw_summary.clone(),
-                                task_goal: context.task_goal,
-                                recent_context: context.recent_context,
-                            };
-                            let execution = self
-                                .run_review(
-                                    keys,
-                                    runtime::ReviewRequest {
-                                        turn: review_turn,
-                                        input,
-                                        stopped: registration.stopped,
-                                    },
-                                    &mut reply,
-                                )
-                                .await;
-                            let settled = match execution.exit {
-                                runtime::ReviewExit::Finished(result)
-                                    if execution.error.is_none() =>
-                                {
-                                    self.settle_review(id, review_id, result)
-                                        .await
-                                        .map(|()| None)
-                                }
-                                runtime::ReviewExit::Answer(answer) => Ok(Some(answer)),
-                                _ => Ok(None),
-                            };
-                            self.cleanup_review(execution.session).await;
-                            if let Some(error) = execution.error {
-                                deny(format!("iWork 无法记录审查回合：{error}"))
-                            } else {
-                                match settled {
-                                    Ok(Some(answer)) => answer,
-                                    Ok(None) => {
-                                        reply.await.unwrap_or_else(|_| deny(MSG_TURN_CANCELLED))
-                                    }
-                                    Err(error) => deny(format!("iWork 无法记录审查结果：{error}")),
-                                }
-                            }
-                        }
-                    };
-                    drop(registration.guard);
-                    // 8. 经审批得到的答复（允许和拒绝都算）带这条审批
-                    return answer(decision, Some(id));
-                }
+            if let Attempt::Done(decided) = self.request_once(keys, turn, &call, t0).await {
+                return decided;
             }
         }
         answer(deny(MSG_STORAGE_FAILED), None)
+    }
+
+    /// 第 2～8 步走一遍；提交被投影器拒（状态前提不成立）返回 `Replan`，由调用方追平重来。
+    async fn request_once(
+        self: &Arc<Self>,
+        keys: &Arc<SessionKeys>,
+        turn: TurnId,
+        call: &NormalizedCall,
+        t0: iwork_ports::clock::MonotonicInstant,
+    ) -> Attempt {
+        // 2. 拿令牌，追平，取视图
+        let Ok(token) = self.acquire(keys.conversation).await else {
+            return done(deny(MSG_STORAGE_FAILED), None);
+        };
+        if self.catch_up().await.is_err() {
+            return done(deny(MSG_STORAGE_FAILED), None);
+        }
+        // 3. 还能不能受理
+        let view = match self.request_view(keys, turn) {
+            Ok(view) => view,
+            Err(refused) => return Attempt::Done(refused),
+        };
+        // 4. 求值；要问时在一次性放行里找同一次调用
+        let (mut eval, rules) = match self.evaluate(keys, call, &view.live, &view.denial, view.mode)
+        {
+            Ok(evaluated) => evaluated,
+            Err(error) => return done(deny(format!("iWork 审批规则无效：{error}")), None),
+        };
+        let grant = apply_grant(&mut eval, call, turn, &view.grants);
+        let elapsed = self.ports.clock.monotonic().0.saturating_sub(t0.0);
+        let audit: DomainEvent = ApprovalEvaluated {
+            turn_id: turn,
+            action: call.representative_action(eval.representative),
+            matched_rule_ids: eval.evaluation.matched.clone(),
+            ruleset_version: eval.evaluation.ruleset_version.clone(),
+            verdict: eval.evaluation.verdict.clone(),
+            layer_hit: eval.evaluation.layer_hit,
+            duration_ms: u32::try_from(elapsed / 1_000_000).unwrap_or(u32::MAX),
+            snapshot_lists_seq: keys.snapshot.lists_seq,
+            live_rules_seq: view.cursor,
+            sub_actions: call.actions.clone(),
+            call_shape: Some(call.shape.kind()),
+            snapshot_rule_paths: keys.snapshot.rule_paths.clone(),
+            grant_approval_id: grant,
+        }
+        .into();
+        let actor = format!("agent:{}", keys.assistant);
+        // 5. 组计划并提交，一次请求一笔提交
+        let mut token = token;
+        match eval.evaluation.verdict.clone() {
+            Verdict::Allow => {
+                // 只含审计的提交不用再追平：一次性放行的去向由同一对话下一个决定开头的追平折到
+                match self
+                    .commit_under(&mut [&mut token], &actor, vec![audit])
+                    .await
+                {
+                    Ok(_) => done(PermissionDecision::Allow, grant),
+                    Err(_) => done(deny(MSG_STORAGE_FAILED), None),
+                }
+            }
+            Verdict::Deny(reason) => {
+                if let Err(error) = self
+                    .commit_under(&mut [&mut token], &actor, vec![audit])
+                    .await
+                {
+                    tracing::warn!(%error, "拒绝的审计没能落盘");
+                }
+                done(deny(deny_message(&reason, &rules, call)), None)
+            }
+            Verdict::UserAction(proposal) => {
+                self.propose_card(keys, turn, call, proposal, audit, token)
+                    .await
+            }
+            Verdict::Ask(_) | Verdict::OutsideSandbox(_) => {
+                self.ask_user(Request { keys, turn, call }, &eval, view, audit, token)
+                    .await
+            }
+        }
+    }
+
+    /// 受理门（第 3 步）：回合不在等审批、对话在删、助手没了，都不建审批、不写审计。
+    /// 通过时只取求值、找放行、审查上下文要用的那几样（不整份克隆对话的折叠）。
+    fn request_view(&self, keys: &SessionKeys, turn: TurnId) -> Result<View, Decided> {
+        let inner = lock_std(&self.inner);
+        let f = &inner.folded;
+        let Some(conv) = f.conversation(keys.conversation) else {
+            return Err(answer(deny(MSG_TURN_CANCELLED), None));
+        };
+        if !f.is_waiting(turn) || conv.deleting || !f.has_assistant(keys.assistant) {
+            return Err(answer(deny(MSG_TURN_CANCELLED), None));
+        }
+        Ok(View {
+            cursor: f.cursor(),
+            live: f.live_rules(),
+            mode: conv.effective_mode(keys.assistant),
+            denial: conv.denial.clone(),
+            grants: conv
+                .grants
+                .iter()
+                .filter(|(_, g)| g.turn == turn)
+                .map(|(id, g)| (*id, g.clone()))
+                .collect(),
+            context: conv
+                .review_messages
+                .contexts
+                .get(&keys.project)
+                .cloned()
+                .unwrap_or_default(),
+        })
+    }
+
+    /// 亲手执行：先登记卡片等待方，审计与卡片同一笔提交，然后令牌外等卡片的结果。
+    async fn propose_card(
+        &self,
+        keys: &SessionKeys,
+        turn: TurnId,
+        call: &NormalizedCall,
+        proposal: iwork_domain::user_action::Proposal,
+        audit: DomainEvent,
+        mut token: TokenGuard,
+    ) -> Attempt {
+        let card = UserActionCard {
+            id: UserActionId::from_raw(self.new_id()),
+            turn_id: turn,
+            conversation_id: keys.conversation,
+            proposal_hash: proposal_hash(&proposal),
+            proposal,
+            reason: call
+                .description
+                .clone()
+                .unwrap_or_else(|| "Agent 未说明".into()),
+            state: UserActionState::Pending,
+            output_artifact: None,
+        };
+        let (guard, rx) = register_card(&self.inner, card.id);
+        let actor = format!("agent:{}", keys.assistant);
+        match self
+            .commit_under(
+                &mut [&mut token],
+                &actor,
+                vec![audit, UserActionProposed { card }.into()],
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(StorageError::Projection { .. }) => return Attempt::Replan,
+            Err(_) => return done(deny(MSG_STORAGE_FAILED), None),
+        }
+        self.catch_up_after_commit("on_permission").await;
+        drop(token);
+        let message = rx.await.unwrap_or_else(|_| MSG_TURN_CANCELLED.into());
+        drop(guard);
+        done(deny(message), None)
+    }
+
+    /// 询问 / 沙箱外：先登记等待方与会话绑定，审计、审批（要审查时连同审查开始与审查回合）同一笔提交，
+    /// 然后令牌外等答复（第 7 步）。经审批得到的答复（允许和拒绝都算）带这条审批（第 8 步）。
+    async fn ask_user(
+        self: &Arc<Self>,
+        req: Request<'_>,
+        eval: &CallEvaluation,
+        view: View,
+        audit: DomainEvent,
+        mut token: TokenGuard,
+    ) -> Attempt {
+        let Request { keys, turn, call } = req;
+        let (offered, label) = offered_remember(call, eval, &keys.scope());
+        let approval = Approval {
+            id: ApprovalId::from_raw(self.new_id()),
+            turn_id: turn,
+            conversation_id: keys.conversation,
+            kind: if eval.constraints.outside_sandbox {
+                ApprovalKind::OutsideSandbox
+            } else {
+                ApprovalKind::Ask
+            },
+            action: call.representative_action(eval.representative),
+            call: Some(Box::new(call.record(eval.representative))),
+            matched_rules: eval.evaluation.matched.clone(),
+            ruleset_version: eval.evaluation.ruleset_version.clone(),
+            state: ApprovalState::Pending,
+            review: ReviewState::NotReviewed,
+            offered_remember: offered,
+            remember_label: label,
+            requested_at: self.ports.clock.now(),
+        };
+        let id = approval.id;
+        let registration = register_ask(&self.inner, id, turn, keys);
+        let mut events = vec![
+            audit,
+            ApprovalRequested {
+                approval: approval.clone(),
+            }
+            .into(),
+        ];
+        // 要审查时，审查开始与审查回合和请求同一笔提交（不再留下「已请求、没人等」的审批）
+        let wants_review = view.mode == ApprovalMode::Auto
+            && eval.constraints.review_eligible()
+            && keys.ai_review.enabled
+            && keys.turn_kind == TurnKind::Assistant;
+        let review = if wants_review {
+            let review_id = ReviewId(TurnId::from_raw(self.new_id()));
+            let Ok(started) = plan_approval(
+                &approval,
+                ApprovalTrigger::AiReviewStarted { review_id },
+                view.mode,
+            ) else {
+                return done(deny(MSG_STORAGE_FAILED), None);
+            };
+            events.extend(started);
+            let review_turn = self.review_turn(keys, review_id);
+            events.push(self.review_queued(review_turn.clone()));
+            Some((review_id, review_turn))
+        } else {
+            None
+        };
+        let actor = format!("agent:{}", keys.assistant);
+        match self.commit_under(&mut [&mut token], &actor, events).await {
+            Ok(_) => {}
+            Err(StorageError::Projection { .. }) => return Attempt::Replan,
+            Err(_) => return done(deny(MSG_STORAGE_FAILED), None),
+        }
+        self.catch_up_after_commit("on_permission").await;
+        drop(token);
+        let decision = self
+            .await_answer(keys, call, id, review, view.context, registration)
+            .await;
+        done(decision, Some(id))
+    }
+
+    /// 令牌外等答复；有审查时同时跑审查（6.6 ③④），审查出结论走 `settle_review`。
+    async fn await_answer(
+        &self,
+        keys: &Arc<SessionKeys>,
+        call: &NormalizedCall,
+        id: ApprovalId,
+        review: Option<(ReviewId, iwork_domain::turn::Turn)>,
+        context: super::context::ReviewContext,
+        registration: AskRegistration<'_>,
+    ) -> PermissionDecision {
+        let mut reply = registration.reply;
+        let Some((review_id, review_turn)) = review else {
+            return reply.await.unwrap_or_else(|_| deny(MSG_TURN_CANCELLED));
+        };
+        let input = ReviewInput {
+            actions: call
+                .actions
+                .iter()
+                .map(|a| format!("{:?} {:?}", a.kind, a.target))
+                .collect(),
+            command_text: call.raw_summary.clone(),
+            task_goal: context.task_goal,
+            recent_context: context.recent_context,
+        };
+        let execution = self
+            .run_review(
+                keys,
+                runtime::ReviewRequest {
+                    turn: review_turn,
+                    input,
+                    stopped: registration.stopped,
+                },
+                &mut reply,
+            )
+            .await;
+        let settled = match execution.exit {
+            runtime::ReviewExit::Finished(result) if execution.error.is_none() => self
+                .settle_review(id, review_id, result)
+                .await
+                .map(|()| None),
+            runtime::ReviewExit::Answer(answer) => Ok(Some(answer)),
+            _ => Ok(None),
+        };
+        self.cleanup_review(execution.session).await;
+        // 记不下来的审查留给常设义务放弃（失去执行者，9/F-1）；这里只把拒绝交回运行时
+        let decision = if let Some(error) = execution.error {
+            deny(format!("iWork 无法记录审查回合：{error}"))
+        } else {
+            match settled {
+                Ok(Some(answer)) => answer,
+                Ok(None) => reply.await.unwrap_or_else(|_| deny(MSG_TURN_CANCELLED)),
+                Err(error) => deny(format!("iWork 无法记录审查结果：{error}")),
+            }
+        };
+        drop(registration.guard);
+        decision
     }
 
     /// AI 审查结论回来（方案 6.10.6 第 3 条）：在克隆上判 Stale → 通过时复查资格 → 只施加一次。
@@ -334,6 +417,8 @@ where
         review_id: ReviewId,
         result: ReviewResult,
     ) -> Result<(), DecideError> {
+        // 先追平再查索引：提交后的追平失败过时，没追平的折叠里会查不到这条审批，结论就被当成「已处理」丢掉
+        self.catch_up().await?;
         let Some(conversation) = lock_std(&self.inner).folded.approval_conversation(id) else {
             return Ok(());
         };

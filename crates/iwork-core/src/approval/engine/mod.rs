@@ -585,6 +585,8 @@ where
     }
 
     /// 仅测试：对调两条审批的会话绑定（`f5_wrong_binding_is_caught` 证明放行结果取决于绑定）。
+    /// 只在 `test-hooks` 特性下编出来；正式构建里没有这个入口。
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn swap_bindings_for_test(&self, a: ApprovalId, b: ApprovalId) {
         let mut inner = lock_std(&self.inner);

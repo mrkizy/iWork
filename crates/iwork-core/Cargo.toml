@@ -17,7 +17,12 @@ futures-channel.workspace = true
 futures-core.workspace = true
 tracing.workspace = true
 
+[features]
+# 只给本 crate 的集成测试用的入口（见 ApprovalEngine::swap_bindings_for_test）。正式构建不开
+test-hooks = []
+
 [dev-dependencies]
+iwork-core = { path = ".", features = ["test-hooks"] }
 pollster.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 proptest.workspace = true

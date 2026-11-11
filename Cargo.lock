@@ -2888,6 +2888,7 @@ version = "0.1.0"
 dependencies = [
  "futures-channel",
  "futures-core",
+ "iwork-core",
  "iwork-domain",
  "iwork-ports",
  "iwork-shell",
