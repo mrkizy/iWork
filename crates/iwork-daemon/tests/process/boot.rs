@@ -1,4 +1,4 @@
-//! 启动表每一步的失败落在 2.2 启动失败表的哪一格（S3、S11e）。第 6、8、9、11 步在接上时补。
+//! 启动表每一步的失败落在 2.2 启动失败表的哪一格（S3、S11e）。第 11 步在接上时补。
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -118,7 +118,7 @@ struct Cell {
 }
 
 /// S11e：启动表每一步各失败一次，逐个断言逻辑码、状态文件写没写与写了什么、`relaunchable`、托管与非托管的退出状态。
-/// 期望值从方案 2.2 的启动失败表抄来，不从实现推。第 6、8、9、11 步在接上时补。
+/// 期望值从方案 2.2 的启动失败表抄来，不从实现推。第 11 步在接上时补。
 #[test]
 fn every_step_failure_lands_in_table() {
     let cells = [
@@ -135,6 +135,27 @@ fn every_step_failure_lands_in_table() {
         Cell {
             step: "store",
             logical: ExitCode::StoreRefused,
+            writes_status: true,
+        },
+        // 5a 别的读取错误、6、8、9：20，`Exited{20}`，`Yes`
+        Cell {
+            step: "compat",
+            logical: ExitCode::Fatal,
+            writes_status: true,
+        },
+        Cell {
+            step: "artifacts",
+            logical: ExitCode::Fatal,
+            writes_status: true,
+        },
+        Cell {
+            step: "recovery",
+            logical: ExitCode::Fatal,
+            writes_status: true,
+        },
+        Cell {
+            step: "server",
+            logical: ExitCode::Fatal,
             writes_status: true,
         },
         Cell {

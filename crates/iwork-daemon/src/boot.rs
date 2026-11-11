@@ -5,22 +5,31 @@
 //! 各步只负责把自己的错误归到变体上，不另做决定。
 
 use std::ffi::OsString;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use iwork_app::codec::ProtoEventCodec;
+use iwork_domain::id::{Seq, TurnId};
 use iwork_domain::settings::GlobalSettings;
 use iwork_ipc::peer::{self, ImageId, SelfIdentity};
 use iwork_ipc::rendezvous::{ExeStamp, ExitCode, Phase, Refusal};
-use iwork_ports::store::{CodecError, StorageError};
-use iwork_store::{DataDir, ReadDefaults, SqliteProjector, SqliteStore, StoreConfig};
+use iwork_ports::clock::IdGenerator;
+use iwork_ports::read_model::{ReadModelPort, Unsettled};
+use iwork_ports::store::{
+    CodecError, CommitReceipt, CommitRequest, EventFilter, StorageError, StoragePort, StoredEvent,
+};
+use iwork_store::{
+    DataDir, FsArtifactStore, ReadDefaults, SqliteProjector, SqliteReadModel, SqliteStore,
+    StoreConfig,
+};
 
 #[cfg(not(unix))]
 use crate::args::DaemonArgs;
 use crate::dev;
 use crate::exit::{exited, process_status};
-use crate::time::SystemClock;
+use crate::time::{MonotonicIds, SystemClock};
 
 /// 后台用的存储类型。
 pub type Store = SqliteStore<ProtoEventCodec>;
@@ -263,6 +272,190 @@ fn run_identified(args: DaemonArgs, _raw: Vec<OsString>, _id: Identity) -> std::
     status_of(process_status(&e.exit_phase(), args.service))
 }
 
+/// 启动表第 5a–8 步要用的存储操作。真实现是 [`StorePorts`]；测试用记录调用次序的假实现
+/// 证明「5a 在任何写入之前」（方案 S8 `compat_runs_before_any_write`）。
+pub trait BootPorts: Sync {
+    fn head_seq(&self) -> impl Future<Output = Result<Seq, StorageError>> + Send;
+    fn read_events(
+        &self,
+        from: Seq,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<StoredEvent>, StorageError>> + Send;
+    /// 制品残留清理（写：删文件、删登记行）。
+    fn recover_artifacts(&self) -> impl Future<Output = Result<(), String>> + Send;
+    fn mark_delivery_started(&self);
+    fn unsettled(&self) -> impl Future<Output = Result<Unsettled, StorageError>> + Send;
+    fn commit(
+        &self,
+        req: CommitRequest,
+    ) -> impl Future<Output = Result<CommitReceipt, StorageError>> + Send;
+}
+
+/// 后台用的 ID 生成器与制品存储类型。
+pub type Ids = MonotonicIds<SystemClock>;
+pub type Artifacts = FsArtifactStore<Ids, SystemClock>;
+
+/// 真实的启动端口：存储、它的读模型与制品存储。
+pub struct StorePorts {
+    pub store: Arc<Store>,
+    pub read: SqliteReadModel<ProtoEventCodec>,
+    pub artifacts: Artifacts,
+}
+
+impl BootPorts for StorePorts {
+    fn head_seq(&self) -> impl Future<Output = Result<Seq, StorageError>> + Send {
+        self.store.head_seq()
+    }
+    fn read_events(
+        &self,
+        from: Seq,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<StoredEvent>, StorageError>> + Send {
+        self.store.read_events(EventFilter::All, from, limit)
+    }
+    async fn recover_artifacts(&self) -> Result<(), String> {
+        let report = self.artifacts.recover().await.map_err(|e| e.to_string())?;
+        tracing::info!(?report, "制品残留清理完成");
+        Ok(())
+    }
+    fn mark_delivery_started(&self) {
+        self.store.mark_delivery_started();
+    }
+    fn unsettled(&self) -> impl Future<Output = Result<Unsettled, StorageError>> + Send {
+        self.read.unsettled()
+    }
+    fn commit(
+        &self,
+        req: CommitRequest,
+    ) -> impl Future<Output = Result<CommitReceipt, StorageError>> + Send {
+        self.store.commit(req)
+    }
+}
+
+/// 第 5a 步翻事件时一页多少条。
+const COMPAT_PAGE: usize = 1000;
+
+/// 第 5a 步：**只读**，把已有事件从头读一遍、逐条解码，结果丢掉。库里有本版本不认识的事件种类就在这里拒绝——
+/// 它之前本进程没有做过任何逻辑写入，之后才轮到制品恢复与崩溃恢复去写（方案 2.4、S8）。
+pub async fn compat(ports: &impl BootPorts) -> Result<u64, BootError> {
+    let head = ports
+        .head_seq()
+        .await
+        .map_err(|e| read_error(Step::Compat, e))?;
+    let mut cursor = Seq(0);
+    let mut read = 0u64;
+    while cursor < head {
+        let page = ports
+            .read_events(cursor, COMPAT_PAGE)
+            .await
+            .map_err(|e| read_error(Step::Compat, e))?;
+        let Some(last) = page.last() else { break };
+        cursor = last.seq;
+        read += page.len() as u64;
+    }
+    Ok(read)
+}
+
+/// 第 5a、6、7、8 步，按这个顺序。`enter` 在每一步开始时调（写 `Starting{step}`；开发构建返回 `false` 表示注入失败）。
+/// 返回被标成「已中断」的回合。
+pub async fn prepare(
+    ports: &impl BootPorts,
+    ids: &impl IdGenerator,
+    mut enter: impl FnMut(Step) -> bool,
+) -> Result<Vec<TurnId>, BootError> {
+    if !enter(Step::Compat) {
+        return Err(injected(Step::Compat));
+    }
+    compat(ports).await?;
+    if !enter(Step::Artifacts) {
+        return Err(injected(Step::Artifacts));
+    }
+    ports
+        .recover_artifacts()
+        .await
+        .map_err(|message| BootError::Fatal {
+            step: Step::Artifacts,
+            message,
+        })?;
+    // 第 7 步：这之后才允许恢复写事件、才允许投递（T02 流程）。没有失败可言
+    enter(Step::DeliveryGate);
+    ports.mark_delivery_started();
+    if !enter(Step::Recovery) {
+        return Err(injected(Step::Recovery));
+    }
+    crate::recovery::recover(ports, ids).await
+}
+
+/// 启动表第 9 步里、提交观察者装上之后、`bind` 之前做自己恢复的参与方（T10 接回合宿主与审批引擎的 `recover`）。
+/// 返回的错误按 [`read_error`] 归类：不认识的事件种类必须原样传上来（归 12），不能包成别的错误。
+pub trait StartupParticipant: Send + Sync {
+    fn start<'a>(
+        &'a self,
+        store: &'a Store,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + 'a>>;
+}
+
+/// 当前的参与方。T04 交付时没有；开发构建可经环境变量加一个假的（证明这个位置上的提交在 `bind` 之前落盘、
+/// 且不被重复发布）。
+pub fn startup_participants() -> Vec<Box<dyn StartupParticipant>> {
+    #[allow(unused_mut)]
+    let mut v: Vec<Box<dyn StartupParticipant>> = Vec::new();
+    #[cfg(feature = "dev")]
+    if std::env::var(dev_participant::ENV).is_ok() {
+        v.push(Box::new(dev_participant::CommitOne));
+    }
+    v
+}
+
+#[cfg(feature = "dev")]
+mod dev_participant {
+    use super::*;
+    use iwork_domain::common::Actor;
+    use iwork_domain::event::GlobalSettingsChanged;
+    use iwork_domain::id::CommandId;
+    use iwork_ports::clock::IdGenerator;
+
+    pub const ENV: &str = "IWORK_DEV_STARTUP_COMMIT";
+
+    /// 提交一条设置变更（`playful_ui = false`）。
+    pub struct CommitOne;
+
+    impl StartupParticipant for CommitOne {
+        fn start<'a>(
+            &'a self,
+            store: &'a Store,
+        ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + 'a>> {
+            Box::pin(async move {
+                let ids = MonotonicIds::new(SystemClock::new());
+                store
+                    .commit(CommitRequest {
+                        command_id: CommandId::from_raw(ids.next()),
+                        actor: Actor("system:dev-participant".into()),
+                        events: vec![
+                            GlobalSettingsChanged {
+                                playful_ui: Some(false),
+                                autostart: None,
+                                projects_root: None,
+                            }
+                            .into(),
+                        ],
+                        outbox: vec![],
+                    })
+                    .await
+                    .map(|_| ())
+            })
+        }
+    }
+}
+
+/// 开发构建注入的失败（归到这一步的 `Fatal`）。
+pub fn injected(step: Step) -> BootError {
+    BootError::Fatal {
+        step,
+        message: "开发注入的失败".into(),
+    }
+}
+
 pub fn starting(step: Step) -> Phase {
     Phase::Starting {
         step: step.name().into(),
@@ -303,6 +496,138 @@ pub fn read_defaults() -> ReadDefaults {
 mod tests {
     use super::*;
     use iwork_ipc::rendezvous::{Relaunchable, relaunchable};
+
+    /// 记录调用次序的假端口。`events` 里种类名是 `zz_future_kind` 的那条读出来报 `UnknownKind`。
+    struct Recording {
+        head: u64,
+        unknown_at: Option<u64>,
+        unsettled: Unsettled,
+        log: std::sync::Mutex<Vec<&'static str>>,
+    }
+
+    impl Recording {
+        fn push(&self, op: &'static str) {
+            self.log.lock().unwrap().push(op);
+        }
+        fn log(&self) -> Vec<&'static str> {
+            self.log.lock().unwrap().clone()
+        }
+    }
+
+    impl BootPorts for Recording {
+        async fn head_seq(&self) -> Result<Seq, StorageError> {
+            self.push("head");
+            Ok(Seq(self.head))
+        }
+        async fn read_events(
+            &self,
+            from: Seq,
+            limit: usize,
+        ) -> Result<Vec<StoredEvent>, StorageError> {
+            self.push("read");
+            let end = (from.0 + limit as u64).min(self.head);
+            if let Some(bad) = self.unknown_at
+                && bad > from.0
+                && bad <= end
+            {
+                return Err(StorageError::Codec(CodecError::UnknownKind {
+                    kind: "zz_future_kind".into(),
+                }));
+            }
+            Ok((from.0 + 1..=end)
+                .map(|n| StoredEvent {
+                    seq: Seq(n),
+                    at: iwork_domain::common::Timestamp(0),
+                    actor: iwork_domain::common::Actor("t".into()),
+                    event: iwork_domain::event::GlobalSettingsChanged {
+                        playful_ui: None,
+                        autostart: None,
+                        projects_root: None,
+                    }
+                    .into(),
+                })
+                .collect())
+        }
+        async fn recover_artifacts(&self) -> Result<(), String> {
+            self.push("WRITE artifacts.recover");
+            Ok(())
+        }
+        fn mark_delivery_started(&self) {
+            self.push("mark_delivery_started");
+        }
+        async fn unsettled(&self) -> Result<Unsettled, StorageError> {
+            self.push("unsettled");
+            Ok(self.unsettled.clone())
+        }
+        async fn commit(&self, _req: CommitRequest) -> Result<CommitReceipt, StorageError> {
+            self.push("WRITE commit");
+            Ok(CommitReceipt {
+                first_seq: Seq(1),
+                last_seq: Seq(1),
+                replayed: false,
+            })
+        }
+    }
+
+    fn unsettled_running_turn() -> Unsettled {
+        let mut t = crate::fixtures::turn(20, 10);
+        t.state = iwork_domain::turn::TurnState::Running;
+        Unsettled {
+            turns: vec![t],
+            streaming: vec![],
+            cards: vec![],
+        }
+    }
+
+    /// 方案 S8：5a 把事件翻完之前没有任何写入（制品恢复、提交都算写）；读到不认识的种类时一次写入都没有。
+    #[test]
+    fn compat_runs_before_any_write() {
+        let ids = MonotonicIds::new(SystemClock::new());
+        let ok = Recording {
+            head: 2500,
+            unknown_at: None,
+            unsettled: unsettled_running_turn(),
+            log: Default::default(),
+        };
+        let mut entered = Vec::new();
+        let interrupted = pollster::block_on(prepare(&ok, &ids, |s| {
+            entered.push(s);
+            true
+        }))
+        .unwrap();
+        assert_eq!(interrupted.len(), 1);
+        let log = ok.log();
+        let reads = log.iter().filter(|op| **op == "read").count();
+        assert_eq!(reads, 3, "2500 条按 1000 一页翻三页：{log:?}");
+        let last_read = log.iter().rposition(|op| *op == "read").unwrap();
+        let first_write = log.iter().position(|op| op.starts_with("WRITE")).unwrap();
+        assert!(last_read < first_write, "{log:?}");
+        assert!(log.contains(&"WRITE commit"), "对照：确实有写入：{log:?}");
+        assert_eq!(
+            entered,
+            [
+                Step::Compat,
+                Step::Artifacts,
+                Step::DeliveryGate,
+                Step::Recovery
+            ]
+        );
+
+        let bad = Recording {
+            head: 2500,
+            unknown_at: Some(1700),
+            unsettled: unsettled_running_turn(),
+            log: Default::default(),
+        };
+        let err = pollster::block_on(prepare(&bad, &ids, |_| true)).unwrap_err();
+        assert_eq!(err.code(), ExitCode::StoreRefused);
+        let log = bad.log();
+        assert!(
+            log.iter()
+                .all(|op| !op.starts_with("WRITE") && *op != "mark_delivery_started"),
+            "{log:?}"
+        );
+    }
 
     #[test]
     fn step_names_are_unique() {

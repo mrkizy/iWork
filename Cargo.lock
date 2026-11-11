@@ -2938,6 +2938,7 @@ dependencies = [
  "iwork-store",
  "iwork-vcs-git",
  "libc",
+ "pollster",
  "rusqlite",
  "serde_json",
  "tempfile",

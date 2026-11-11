@@ -6,5 +6,11 @@
 
 mod support;
 
+// 存储的测试夹具（实体构造、假时钟、逐表导出），与 iwork-store 的测试共用一份
+#[path = "../../../iwork-store/tests/support/fixtures.rs"]
+mod fixtures;
+mod seed;
+
 mod boot;
 mod instance;
+mod recovery;

@@ -11,8 +11,15 @@ pub mod exit;
 pub mod handler;
 pub mod instance;
 pub mod logging;
+pub mod publish;
+pub mod recovery;
 pub mod source;
 pub mod status;
 pub mod time;
 
 pub use boot::run;
+
+// 存储的测试夹具（实体构造、假时钟、逐表导出），与 iwork-store 的测试共用一份
+#[cfg(test)]
+#[path = "../../iwork-store/tests/support/fixtures.rs"]
+mod fixtures;

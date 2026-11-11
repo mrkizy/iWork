@@ -35,6 +35,7 @@ tempfile.workspace = true
 dunce.workspace = true
 rusqlite.workspace = true
 libc.workspace = true
+pollster.workspace = true
 
 # 真进程测试：测试进程不是受信映像，后台要带 --dev-trust（只在 dev feature 下存在）
 [[test]]

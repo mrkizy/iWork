@@ -136,3 +136,64 @@ where
         self.snapshots.snapshot(scopes)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures::*;
+    use iwork_domain::event::{ConversationCreated, ProjectAdded, TurnQueued};
+
+    /// 补发只留匹配范围键的事件，`next_from` 是扫描到的位置（不是最后一条匹配的 seq）；扫到库尾时是 `to`。
+    #[test]
+    fn replay_filters_by_routes_and_reports_scan_position() {
+        let env = Env::new();
+        let store = Arc::new(env.open());
+        // 1 项目 1、2 对话 10（项目 1）、3 对话 11（项目 1）、4 回合 20（对话 10）、5 回合 21（对话 11）
+        block(store.commit(cmd(
+            1,
+            vec![
+                ProjectAdded { project: project(1) }.into(),
+                ConversationCreated {
+                    conversation: project_conversation(10, 1),
+                }
+                .into(),
+                ConversationCreated {
+                    conversation: project_conversation(11, 1),
+                }
+                .into(),
+                TurnQueued { turn: turn(20, 10) }.into(),
+                TurnQueued { turn: turn(21, 11) }.into(),
+            ],
+        )))
+        .unwrap();
+        let src = StoreSource::new(store.clone(), SnapshotNotWired);
+        let conv10 = StreamKey::one("conversation", cid(10).to_string());
+        let seqs = |p: &ReplayPage| p.events.iter().map(|e| e.seq()).collect::<Vec<_>>();
+
+        let all = block(src.replay(std::slice::from_ref(&conv10), 0, 5, 100)).unwrap();
+        assert_eq!(seqs(&all), [2, 4], "只有对话 10 的");
+        assert_eq!(all.next_from, 5);
+        for e in &all.events {
+            assert!(e.routes.iter().any(|r| conv10.covers(r)));
+        }
+
+        // 一页只读 3 条：扫到 3，匹配的只有 2 —— next_from 报 3，不是 2
+        let page = block(src.replay(std::slice::from_ref(&conv10), 0, 5, 3)).unwrap();
+        assert_eq!(seqs(&page), [2]);
+        assert_eq!(page.next_from, 3);
+        let rest = block(src.replay(std::slice::from_ref(&conv10), page.next_from, 5, 3)).unwrap();
+        assert_eq!(seqs(&rest), [4]);
+        assert_eq!(rest.next_from, 5);
+
+        // 范围 to 截在中间
+        let cut = block(src.replay(std::slice::from_ref(&conv10), 0, 3, 100)).unwrap();
+        assert_eq!(seqs(&cut), [2]);
+        assert_eq!(cut.next_from, 3);
+
+        // 对照：不匹配任何东西的键，扫完也报到 to
+        let none = block(src.replay(&[StreamKey::one("conversation", "nope")], 0, 5, 100)).unwrap();
+        assert!(none.events.is_empty());
+        assert_eq!(none.next_from, 5);
+        assert_eq!(block(src.head_seq()).unwrap(), 5);
+    }
+}

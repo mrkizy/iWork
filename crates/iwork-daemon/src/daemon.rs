@@ -12,21 +12,23 @@ use iwork_ipc::rendezvous::{ExeStamp, ExitCode, LockInfo, Phase, StopReason};
 use iwork_ipc::server::{Server, ServerConfig};
 use iwork_ipc::{LocalEndpoint, LocalListener};
 use iwork_ports::store::StoragePort;
-use iwork_store::DataDir;
+use iwork_store::{DataDir, FsArtifactStore};
 use tokio_util::sync::CancellationToken;
 
 use crate::args::DaemonArgs;
 use crate::boot::{
-    self, BootError, Identity, PAUSE_BEFORE_EXIT, Step, VERSION, report, starting, status_of,
+    self, BootError, Identity, PAUSE_BEFORE_EXIT, Step, StorePorts, VERSION, report, starting,
+    status_of,
 };
 use crate::dev;
 use crate::exit::{exited, process_status, stop_code};
 use crate::handler::{DaemonHandler, Gate, NotWired};
 use crate::instance::{self, LockOutcome, StandbyAction};
 use crate::logging::{self, LogGuard};
+use crate::publish::{PublishObserver, PublishState};
 use crate::source::{SnapshotNotWired, StoreSource};
 use crate::status::{StatusBoard, StatusIdentity};
-use crate::time::SystemClock;
+use crate::time::{MonotonicIds, SystemClock};
 
 /// 第 2 步的结果。
 pub struct Places {
@@ -222,23 +224,61 @@ async fn boot_and_serve(
         Err(e) => return fail(&board, e),
     };
 
-    // 第 7 步：投递闸
-    board.set_phase(starting(Step::DeliveryGate));
-    store.mark_delivery_started();
+    // 第 5a、6、7、8 步
+    let ids = Arc::new(MonotonicIds::new(SystemClock::new()));
+    let artifacts = match FsArtifactStore::new(&store, ids.clone(), clock.clone()) {
+        Ok(a) => a,
+        Err(e) => {
+            return fail(
+                &board,
+                BootError::Fatal {
+                    step: Step::Artifacts,
+                    message: e.to_string(),
+                },
+            );
+        }
+    };
+    let ports = StorePorts {
+        store: store.clone(),
+        read: store.read_model(boot::read_defaults()),
+        artifacts,
+    };
+    let interrupted = match boot::prepare(&ports, ids.as_ref(), |step| enter(&board, step)).await {
+        Ok(i) => i,
+        Err(e) => return fail(&board, e),
+    };
 
     // 第 9 步：组装 ipc
     if !enter(&board, Step::Server) {
-        return fail(&board, injected(Step::Server));
+        return fail(&board, boot::injected(Step::Server));
     }
     let gate = Arc::new(Gate::default());
     let mut cfg = ServerConfig::new(VERSION);
     cfg.trust = args.trust;
-    let (server, _publisher) = Server::new(
+    let (server, publisher) = Server::new(
         cfg,
         id.own.clone(),
         DaemonHandler::new(gate.clone(), NotWired),
         StoreSource::new(store.clone(), SnapshotNotWired),
     );
+    let publishing = PublishState::new();
+    let observer = PublishObserver::new(Arc::new(publisher), publishing.clone());
+    if let Err(e) = store.set_commit_observer(Box::new(observer)).await {
+        return fail(
+            &board,
+            BootError::Fatal {
+                step: Step::Server,
+                message: format!("装提交观察者失败：{e}"),
+            },
+        );
+    }
+    // 观察者装上之后、bind 之前：各参与方做自己的恢复（T10 接回合宿主与审批引擎）。这里提交的事件
+    // 经观察者发布；那时还没有连接，客户端连上后靠 serve 的基线与补发拿到它们
+    for p in boot::startup_participants() {
+        if let Err(e) = p.start(&store).await {
+            return fail(&board, boot::read_error(Step::Server, e));
+        }
+    }
 
     // 第 10 步：绑定
     board.set_phase(starting(Step::Bind));
@@ -250,18 +290,32 @@ async fn boot_and_serve(
     // 第 12 步：就绪
     let shutdown = CancellationToken::new();
     let serve = tokio::spawn(server.serve(listener, shutdown.clone()));
+    // 信号处理装在写 `Ready` 之前：之后到的 SIGTERM 一定走停机流程，不会把进程直接结束
+    let signals = match Signals::register() {
+        Ok(s) => s,
+        Err(e) => {
+            return fail(
+                &board,
+                BootError::Fatal {
+                    step: Step::Tasks,
+                    message: format!("登记信号处理失败：{e}"),
+                },
+            );
+        }
+    };
     board.set_phase(Phase::Ready);
     let head = store.head_seq().await.map(|s| s.0).unwrap_or_default();
     tracing::info!(
         version = VERSION,
         protocol_major = iwork_proto::PROTOCOL_MAJOR,
         head,
+        interrupted = interrupted.len(),
         boot_ms = t0.elapsed().as_millis() as u64,
         since_start_ms = id.started.elapsed().as_millis() as u64,
         "后台服务就绪"
     );
 
-    let reason = wait_for_signal().await;
+    let reason = signals.wait().await;
     board.set_phase(Phase::Stopping { reason });
     gate.close_and_drain(Duration::from_secs(1)).await;
     shutdown.cancel();
@@ -276,13 +330,6 @@ async fn boot_and_serve(
     phase
 }
 
-fn injected(step: Step) -> BootError {
-    BootError::Fatal {
-        step,
-        message: "开发注入的失败".into(),
-    }
-}
-
 fn bind(places: &Places) -> Result<LocalListener, BootError> {
     if dev::fail_at(Step::Bind.name()) {
         return Err(BootError::Bind("开发注入：绑定失败".into()));
@@ -291,15 +338,29 @@ fn bind(places: &Places) -> Result<LocalListener, BootError> {
         .map_err(|e| BootError::Bind(format!("绑定 {} 失败：{e}", places.socket_path.display())))
 }
 
-async fn wait_for_signal() -> StopReason {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut term = signal(SignalKind::terminate()).expect("登记 SIGTERM");
-    let mut int = signal(SignalKind::interrupt()).expect("登记 SIGINT");
-    let mut hup = signal(SignalKind::hangup()).expect("登记 SIGHUP");
-    tokio::select! {
-        _ = term.recv() => {}
-        _ = int.recv() => {}
-        _ = hup.recv() => {}
+/// SIGTERM、SIGINT、SIGHUP：用户绕开客户端停后台的办法，也是系统关机、注销时收到的（方案 2.8「信号」一列）。
+struct Signals {
+    term: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
+    hup: tokio::signal::unix::Signal,
+}
+
+impl Signals {
+    fn register() -> std::io::Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            term: signal(SignalKind::terminate())?,
+            int: signal(SignalKind::interrupt())?,
+            hup: signal(SignalKind::hangup())?,
+        })
     }
-    StopReason::Signal
+
+    async fn wait(mut self) -> StopReason {
+        tokio::select! {
+            _ = self.term.recv() => {}
+            _ = self.int.recv() => {}
+            _ = self.hup.recv() => {}
+        }
+        StopReason::Signal
+    }
 }
