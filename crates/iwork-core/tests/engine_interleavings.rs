@@ -3,10 +3,18 @@
 //! 一步一步的假存储 + 手写的单线程执行器：调度表随机决定推进哪个操作的 future 一步、让存储处理一笔、
 //! 送达哪份回执、让下一次提交 Busy / 读失败、丢弃哪个还在跑的 future、给下一个提交开入队门 / 开门。
 //! 跑完后丢掉全部 future、开所有门、处理完队列，再随机二选一：调一次 `sync()`，或者丢掉引擎、
-//! 用同一份日志 `start` 一个新的并提交恢复计划。然后断言方案列的 9 条。
+//! 用同一份日志 `start` 一个新的并提交恢复计划。然后断言方案 6.10.13 列的 9 条（加一条 4'：审计不越过拒绝记忆）。
 //!
 //! 默认 256 例；完整一轮 `PROPTEST_CASES=5000`（套 `lockf /tmp/iwork-heavy-test.lock`）。
-//! 范围说明：AI 审查不在生成器里（审查运行时要异步定时器，审查的交错由确定性用例守）。
+//!
+//! 与方案范围的出入（如实写）：
+//! - AI 审查不在生成器里：审查运行时要异步定时器与审查回合的运行时，手写执行器跑不动。审查的交错由确定性用例守：
+//!   t_review_result_during_failed_void_settles、t_review_busy_never_stays_in_progress、t_sync_leaves_running_review_alone、
+//!   review_recheck_fail_keeps_pending、late_review_pass_after_user_message_asks_user、to_manual_abandons_review、
+//!   leaving_auto_abandons_review_blocked_by_denial_memory、dm_project_switch_out_of_auto_abandons_review_immediately。
+//!   所以生成器里的待审批审查子状态恒为「没审查」，性质 2 对审查子状态的比较只在这个范围里有意义。
+//! - 性质 9（绑定不串）只在 sync 收尾时查；`start` 重建的绑定来自 `keys_for`，不比。
+//! - 卡片执行只走「启动 → 执行完」一条路，没有 Stopping / Unknown。
 
 mod support;
 
@@ -54,8 +62,11 @@ fn tid(n: u8) -> TurnId {
     TurnId::from_raw(RawUlid::from_u128(0x501 + u128::from(n)))
 }
 
-/// 回合 → (对话, 助手)。c0 有两个回合（两个助手），c1 一个；t3 在第三个对话里，由「新建对话」操作建出来。
-const TURNS: [(u8, u8); 4] = [(0, 0), (0, 1), (1, 0), (2, 1)];
+/// 回合 → (对话, 助手)。c0 有两个回合（两个助手），c1 一个；t3 在第三个对话里，由「新建对话」操作建出来；
+/// t4 在 c3：助手 1 的私聊（所选项目是 p，可切走）。
+const TURNS: [(u8, u8); 5] = [(0, 0), (0, 1), (1, 0), (2, 1), (3, 1)];
+/// 私聊对话。
+const DM: u8 = 3;
 
 fn keys_for_turn(t: u8, generation: u32) -> SessionKeys {
     let (c, a) = TURNS[usize::from(t)];
@@ -116,7 +127,13 @@ fn world() -> Vec<DomainEvent> {
         }
         .into(),
     );
-    for t in 0..3 {
+    let mut dm = conversation_entity(DM);
+    dm.kind = iwork_domain::conversation::ConversationKind::AssistantDm {
+        assistant_id: aid(1),
+        context_project: Some(project()),
+    };
+    events.push(ConversationCreated { conversation: dm }.into());
+    for t in [0, 1, 2, 4] {
         events.push(
             TurnQueued {
                 turn: turn_entity(t),
@@ -158,6 +175,13 @@ enum Op {
     Switch {
         conv: u8,
         mode: u8,
+        /// 0 对话、1 成员（助手 member）、2 项目默认、3 成员恢复跟随
+        target: u8,
+        member: u8,
+    },
+    /// 私聊切项目（经 commit_with，附带离开自动档要放弃的审查）
+    DmSwitch {
+        to_project: bool,
     },
     Deliver {
         nth: u8,
@@ -223,13 +247,19 @@ enum Choice {
 }
 
 fn op() -> impl Strategy<Value = Op> {
-    let t = || 0u8..4;
-    let c = || 0u8..3;
+    let t = || 0u8..5;
+    let c = || 0u8..4;
     prop_oneof![
         20 => (t(), 0u8..4).prop_map(|(turn, cmd)| Op::Request { turn, cmd }),
         3 => t().prop_map(|turn| Op::Ask { turn }),
         12 => (any::<u8>(), 0u8..4).prop_map(|(nth, kind)| Op::Decide { nth, kind }),
-        2 => (c(), 0u8..3).prop_map(|(conv, mode)| Op::Switch { conv, mode }),
+        3 => (c(), 0u8..3, 0u8..4, 0u8..2).prop_map(|(conv, mode, target, member)| Op::Switch {
+            conv,
+            mode,
+            target,
+            member
+        }),
+        2 => any::<bool>().prop_map(|to_project| Op::DmSwitch { to_project }),
         8 => any::<u8>().prop_map(|nth| Op::Deliver { nth }),
         3 => t().prop_map(|turn| Op::Interrupt { turn }),
         2 => t().prop_map(|turn| Op::Resume { turn }),
@@ -336,7 +366,7 @@ impl Run {
         )
         .expect("启动");
         assert!(plan.is_empty());
-        let keys = (0..4).map(|t| (t, Arc::new(keys_for_turn(t, 0)))).collect();
+        let keys = (0..5).map(|t| (t, Arc::new(keys_for_turn(t, 0)))).collect();
         Self {
             store,
             engine,
@@ -451,18 +481,56 @@ impl Run {
                     Out::Other
                 });
             }
-            Op::Switch { conv, mode } => {
+            Op::Switch {
+                conv,
+                mode,
+                target,
+                member,
+            } => {
                 let mode = [
                     ApprovalMode::Manual,
                     ApprovalMode::Auto,
                     ApprovalMode::FullAccess,
                 ][usize::from(mode)];
+                let (target, mode) = match target {
+                    0 => (ApprovalModeTarget::Conversation(cid(conv)), Some(mode)),
+                    1 => (
+                        ApprovalModeTarget::Member {
+                            conversation_id: cid(conv),
+                            assistant_id: aid(member),
+                        },
+                        Some(mode),
+                    ),
+                    2 => (ApprovalModeTarget::Project(project()), Some(mode)),
+                    _ => (
+                        ApprovalModeTarget::Member {
+                            conversation_id: cid(conv),
+                            assistant_id: aid(member),
+                        },
+                        None,
+                    ),
+                };
+                self.tasks.spawn(async move {
+                    let _ = engine.switch_mode(target, mode, Actor("user".into())).await;
+                    Out::Other
+                });
+            }
+            Op::DmSwitch { to_project } => {
+                let project = to_project.then(project);
                 self.tasks.spawn(async move {
                     let _ = engine
-                        .switch_mode(
-                            ApprovalModeTarget::Conversation(cid(conv)),
-                            Some(mode),
-                            Actor("user".into()),
+                        .commit_with(
+                            Scope::DmProjectSwitched {
+                                conversation: cid(DM),
+                                project,
+                            },
+                            cmd(vec![
+                                DmProjectSwitched {
+                                    conversation_id: cid(DM),
+                                    project_id: project,
+                                }
+                                .into(),
+                            ]),
                         )
                         .await;
                     Out::Other
@@ -773,7 +841,7 @@ impl Run {
             return;
         }
         let (id, turn_id, command) = pending[usize::from(nth) % pending.len()].clone();
-        let Some(turn) = (0..4u8).find(|t| tid(*t) == turn_id) else {
+        let Some(turn) = (0..5u8).find(|t| tid(*t) == turn_id) else {
             return;
         };
         let engine = self.engine.clone();
@@ -893,6 +961,8 @@ impl Run {
 struct DenialRef {
     by_conversation: BTreeMap<ConversationId, BTreeMap<ActionFingerprint, bool>>,
     fingerprints: BTreeMap<ApprovalId, (ConversationId, BTreeSet<ActionFingerprint>)>,
+    /// 私聊 → 它的助手：助手删除时私聊整条消失
+    dms: BTreeMap<ConversationId, AssistantId>,
 }
 
 impl DenialRef {
@@ -925,6 +995,27 @@ impl DenialRef {
             }
             DomainEvent::ConversationDeleted(d) => {
                 self.by_conversation.remove(&d.conversation_id);
+            }
+            DomainEvent::ConversationCreated(c) => {
+                if let iwork_domain::conversation::ConversationKind::AssistantDm {
+                    assistant_id,
+                    ..
+                } = c.conversation.kind
+                {
+                    self.dms.insert(c.conversation.id, assistant_id);
+                }
+            }
+            DomainEvent::AssistantDeleted(d) => {
+                let gone: Vec<ConversationId> = self
+                    .dms
+                    .iter()
+                    .filter(|(_, a)| **a == d.assistant_id)
+                    .map(|(c, _)| *c)
+                    .collect();
+                for c in gone {
+                    self.by_conversation.remove(&c);
+                    self.dms.remove(&c);
+                }
             }
             _ => {}
         }
@@ -963,6 +1054,37 @@ fn check(run: &Run, engine: &Engine, check_bindings: bool) -> Result<(), TestCas
                 .card_conversation(*id)
                 .expect("没到终态的卡片在折叠里");
             prop_assert_eq!(&folded.conversation(conv).unwrap().cards[id].state, state);
+        }
+    }
+    // 性质 2 后半：拒绝记忆等于参照实现（独立于折叠的 20 行重放）；每条待审批的审查子状态等于投影
+    let mut full = DenialRef::default();
+    for e in &log {
+        full.apply(&e.event);
+    }
+    for (cid, conv) in folded.conversations() {
+        let reference = full.by_conversation.get(cid);
+        for (c, fps) in full.fingerprints.values() {
+            if c != cid {
+                continue;
+            }
+            for fp in fps {
+                let want = reference.and_then(|m| m.get(fp)).map(|auto| {
+                    if *auto {
+                        iwork_core::approval::denial::DenialPhase::AutoDeny
+                    } else {
+                        iwork_core::approval::denial::DenialPhase::ForceAskOnce
+                    }
+                });
+                prop_assert_eq!(conv.denial.get(fp), want, "对话 {} 指纹 {:?}", cid, fp);
+            }
+        }
+        for (id, p) in &conv.pending {
+            prop_assert_eq!(
+                &p.approval.review,
+                &projection.approvals[id].1,
+                "审批 {} 的审查子状态",
+                id
+            );
         }
     }
     let mut denial = DenialRef::default();
@@ -1167,7 +1289,7 @@ proptest! {
             let store = run.store.clone();
             let (engine, plan) = drive(&store, Engine::start(ports(&store), Default::default(), |c, t| {
                 TURNS.iter().position(|(cc, _)| cid(*cc) == c).map(|_| {
-                    let n = (0..4u8).find(|n| tid(*n) == t).unwrap_or(0);
+                    let n = (0..5u8).find(|n| tid(*n) == t).unwrap_or(0);
                     keys_for_turn(n, 999)
                 })
             })).map_err(|e| TestCaseError::fail(e.to_string()))?;
