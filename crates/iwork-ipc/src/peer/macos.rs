@@ -4,7 +4,7 @@
 //! 1. 对端用 socket 上的审计令牌（`LOCAL_PEERTOKEN`）换成内核跟踪的动态 `SecCode`，不经 pid，不受 pid 复用影响；
 //! 2. `SecCodeCopySigningInformation` 读出证书 / cdhash。头文件说明这些信息有一部分**来自磁盘**，可能已被换掉；
 //! 3. 所以把读到的身份写成代码要求（`certificate leaf = H"…"` 或 `cdhash H"…"`），先对映像文件做全量静态校验
-//!    （每一页哈希都对，见 [`check_image_file`]），再让 `SecCodeCheckValidity` 对同一个动态对象验一遍。后者按头文件
+//!    （每一页哈希都对，不验包资源，见 [`check_image_file`]），再让 `SecCodeCheckValidity` 对同一个动态对象验一遍。后者按头文件
 //!    说明「不受文件系统来源被改动的影响」：只有运行中的代码确实是这个身份才通过；磁盘上的代码目录与运行中的不一致
 //!    时返回 `errSecCSStaticCodeChanged`（-67034）。
 //!
@@ -43,6 +43,8 @@ type SecRef = CFTypeRef;
 
 const K_SEC_CS_DEFAULT_FLAGS: SecCSFlags = 0;
 const K_SEC_CS_SIGNING_INFORMATION: SecCSFlags = 1 << 1;
+/// `kSecCSDoNotValidateResources`（CSCommon.h）：静态校验时不验包资源（`_CodeSignature/CodeResources` 登记的文件）。
+const K_SEC_CS_DO_NOT_VALIDATE_RESOURCES: SecCSFlags = 1 << 2;
 /// CommonCrypto 的 `CC_SHA1_DIGEST_LENGTH`。
 const SHA1_LEN: usize = 20;
 
@@ -243,6 +245,12 @@ fn confirm_running(code: &Cf, claim: Claim) -> Result<SignerIdentity, String> {
 /// 动态校验只看签名本身和内核的有效位；内核是在**页被调入时**才逐页核对的。实测（N1 反例 b）：对端运行中
 /// 原地改掉一个还没调入的页，动态校验照样通过，等那一页被执行才出事。这里把这种文件当作已被篡改，直接拒。
 /// 文件按内核记录的映像定位（不是按路径重新找），之后的动态校验再确认它与运行中的代码目录一致。
+///
+/// 带 `kSecCSDoNotValidateResources`：**只跳过包资源，代码页哈希照样逐页验**，所以上面要挡的「改了还没调入的页」
+/// 照样挡得住。为什么要跳：无证书构建的 .app 不做整包签名（主程序只有链接器的 ad-hoc 签名），而包主程序的
+/// 静态代码对象代表整个包，默认参数下报 -67056（`errSecCSResourcesNotFound`：签名说有资源、却找不到），
+/// 客户端连自己的身份都算不出（T04 N5 A1 实测，`t0-findings.md` 7.1）。包资源本来就不在信任判据里；
+/// 包有没有装齐、有没有被改，由 T04 方案 2.9 的安装检查（整包验签）管。
 fn check_image_file(code: &Cf, requirement: &Cf) -> Result<(), String> {
     let mut image_file: SecRef = ptr::null();
     // SAFETY: code 是有效 SecCode；出参成功时是 +1 引用，交给 Cf。
@@ -255,7 +263,7 @@ fn check_image_file(code: &Cf, requirement: &Cf) -> Result<(), String> {
     let status = unsafe {
         SecStaticCodeCheckValidity(
             image_file.as_ptr(),
-            K_SEC_CS_DEFAULT_FLAGS,
+            K_SEC_CS_DO_NOT_VALIDATE_RESOURCES,
             requirement.as_ptr(),
         )
     };
