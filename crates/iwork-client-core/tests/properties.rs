@@ -424,6 +424,17 @@ mod live {
             .unwrap();
     }
 
+    async fn scroll_top(app: &App) {
+        app.intent(pb::UiIntent {
+            kind: Some(I::SetVisibleRows(pb::SetVisibleRows {
+                conversation_id: "c-basic".into(),
+                first_ordinal: i64::MIN,
+                last_ordinal: i64::MIN + 1,
+            })),
+        })
+        .await;
+    }
+
     async fn case(ops: Vec<u8>) -> Result<(), TestCaseError> {
         let dir = tempfile::Builder::new()
             .prefix("t09")
@@ -444,6 +455,8 @@ mod live {
         }
         let (app, mut web) = connect(&d, Some("c-basic")).await;
         let mut open = true;
+        // 网页窗口是否顶在最上面（翻页）：那样它会一直往前翻到底，比较时新客户端也要同样翻到底。
+        let mut at_top = false;
         for (i, op) in ops.into_iter().enumerate() {
             match op {
                 0 => {
@@ -457,18 +470,14 @@ mod live {
                 }
                 3 => {
                     open = !open;
+                    // 换对话会清掉网页声明的窗口。
+                    at_top = false;
                     set_conv(&app, open.then_some("c-basic")).await;
                 }
                 5 => {
                     // 翻页：窗口顶到最上面，往前翻（审查 1/F-6）。
-                    app.intent(pb::UiIntent {
-                        kind: Some(I::SetVisibleRows(pb::SetVisibleRows {
-                            conversation_id: "c-basic".into(),
-                            first_ordinal: i64::MIN,
-                            last_ordinal: i64::MIN + 1,
-                        })),
-                    })
-                    .await;
+                    at_top |= open;
+                    scroll_top(&app).await;
                 }
                 6 => {
                     // 断在重查途中：命中侧栏的事件让摘要失效、重查发出，紧接着断线（审查 1/F-6）。
@@ -483,10 +492,17 @@ mod live {
                 }
             }
         }
-        set_conv(&app, Some("c-basic")).await;
+        if !open {
+            set_conv(&app, Some("c-basic")).await;
+        }
         settle(&app, &mut web).await;
         let (fresh_app, mut fresh) = connect(&d, Some("c-basic")).await;
         settle(&fresh_app, &mut fresh).await;
+        if at_top {
+            // 被比较的一方翻到了底：新客户端也把窗口顶到最上面，同样翻到底，再比全部行。
+            scroll_top(&fresh_app).await;
+            settle(&fresh_app, &mut fresh).await;
+        }
         prop_assert_eq!(&web.state.rows, &fresh.state.rows);
         prop_assert_eq!(&web.state.sidebar, &fresh.state.sidebar);
         Ok(())
