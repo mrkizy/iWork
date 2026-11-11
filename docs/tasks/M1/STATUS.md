@@ -53,6 +53,8 @@
 
 ## 5 踩过的坑
 
+- **变异测试挂住、占着重测试锁（2026-11-11）**：T05 复审的 reviewer 在副本里做变异，被改坏的代码让 turn_runner 挂住 1.5 小时，一直占着 `/tmp/iwork-heavy-test.lock`，别的卡全排在后面。派 reviewer、developer 做变异时写明：测试命令外面套 `timeout`（如 120 秒），挂住按「测试抓住了」记。排查：`ps -o pid,etime,command` 看 lockf 进程，`lsof -p <pid> | grep cwd` 看是谁的副本。（调优窗口 T-2 期间不改 reviewer 项目提示词，先写在派活消息里。）
+
 - **worker 窗口被缩成 93×7（2026-11-10 夜）**：所有 worker 收件箱卡了 9～12 小时。`agent-scaffold ps` 出现「收件箱有 N 条消息在等待投递」先看 `tmux list-windows -t cao-a46fd0b6 -F '#{window_index} #{window_width}x#{window_height}'`，太小就逐个 `resize-window -x 140 -y 45`。
 
 - **supervisor 收件箱卡住（2026-11-10 11:22–13:30）**：CAO 把 supervisor 窗口认成「在等回答」，14 条消息一直 pending。看 `agent-scaffold ps` 里 supervisor 那行；可以用 `curl -s 'http://127.0.0.1:9895/terminals/f6c88a81/inbox/messages?status=pending&limit=100'` 直接读出来。
