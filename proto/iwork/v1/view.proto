@@ -590,6 +590,8 @@ message ConnectionView {
   optional DiagnosticsView diagnostics = 7;
   // 菜单点了「完全退出 iWork」：网页弹确认框，确认后发 QuitIntent{confirm: true}。
   bool quit_requested = 8;
+  // 有数据没取到、正在退避重试时的一行说明（如「部分数据暂时没取到，稍后自动重试」）；没有就不设。
+  optional string query_notice = 9;
 }
 
 message DiagnosticsView {

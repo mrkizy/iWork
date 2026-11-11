@@ -80,7 +80,14 @@ enum Internal {
         result: Result<Box<pb::Response>, ClientError>,
     },
     QueryFailed {
+        epoch: u64,
         request_id: u64,
+    },
+    /// 订阅被后台拒了（或没写出去）：按这条连接失败处理。
+    SubscribeFailed {
+        epoch: u64,
+        id: u32,
+        error: String,
     },
     /// 拖入的附件处理完：错误说明或成功（None）。
     AttachDone(Option<String>),
@@ -106,6 +113,10 @@ pub struct Stats {
     pub refresh_rounds: u64,
     pub dials: u64,
     pub resent_commands: u64,
+    /// 主循环转了几轮（空闲时应当不转，审查 1/F-1 的守卫）。
+    pub loop_turns: u64,
+    /// 发出的视图查询条数。
+    pub view_queries: u64,
 }
 
 pub struct Session<D: Dialer> {
@@ -136,6 +147,10 @@ pub struct Session<D: Dialer> {
     notified: BTreeSet<String>,
     stats: Stats,
     stats_tx: Option<tokio::sync::watch::Sender<Stats>>,
+    /// 每条连接一个代次：内部任务的结果带着它，断线重连后迟到的旧结果对得上号才处理（审查 1/F-9）。
+    conn_epoch: u64,
+    /// 视图查询失败后的退避，按用途种类（审查 1/F-5）。
+    query_backoff: HashMap<&'static str, (Instant, Backoff)>,
 }
 
 /// 常驻范围（方案 2.3）。
@@ -148,9 +163,14 @@ const RESIDENT: [ScopeKind; 5] = [
 ];
 
 impl<D: Dialer> Session<D> {
-    pub fn new(dialer: D, chunk_max: usize, effects: mpsc::UnboundedSender<Effect>) -> Self {
+    pub fn new(
+        dialer: D,
+        chunk_max: usize,
+        timeline_cap: usize,
+        effects: mpsc::UnboundedSender<Effect>,
+    ) -> Self {
         let (internal_tx, internal_rx) = mpsc::unbounded_channel();
-        let mut store = Store::new();
+        let mut store = Store::with_timeline_cap(timeline_cap);
         for (i, scope) in RESIDENT.iter().enumerate() {
             store.register_subscription(u32::try_from(i).unwrap_or(0) + 1, scope.clone());
         }
@@ -182,6 +202,8 @@ impl<D: Dialer> Session<D> {
             notified: BTreeSet::new(),
             stats: Stats::default(),
             stats_tx: None,
+            conn_epoch: 0,
+            query_backoff: HashMap::new(),
         }
     }
 
@@ -193,6 +215,7 @@ impl<D: Dialer> Session<D> {
     /// 跑到请求通道关闭。
     pub async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Request>) {
         loop {
+            self.stats.loop_turns += 1;
             self.service();
             let deadline = self.next_deadline();
             tokio::select! {
@@ -227,26 +250,44 @@ impl<D: Dialer> Session<D> {
 
     // ---------- 定时 ----------
 
+    /// 下一次要醒的时刻：只登记「到时真有事要做」的截止时间，而且只收将来的时刻——已经过去的说明
+    /// service 刚处理过或用不着处理，再登记就会让 sleep 立刻返回、主循环空转（审查 1/F-1）。
     fn next_deadline(&self) -> Option<Instant> {
+        let now = Self::now();
         let mut d: Option<Instant> = None;
         let mut take = |t: Option<Instant>| {
-            if let Some(t) = t {
+            if let Some(t) = t.filter(|t| *t > now) {
                 d = Some(d.map_or(t, |x| x.min(t)));
             }
         };
-        if self.dial_task.is_none() && self.client.is_none() {
+        if self.dial_task.is_none() && self.client.is_none() && self.dialer.is_some() {
             take(self.retry_at);
         }
         if self.waiter.is_some() {
             take(self.frame_due);
         }
         if self.live() {
-            take(self.store.refresh.next_due_at().map(Instant::from_std));
-            if let Some(t) = self.mark_read_last {
-                take(Some(t + MARK_READ_INTERVAL));
+            let refresh = self.store.refresh.next_due_at().map(Instant::from_std);
+            let blocked = self.backoff_until("summary");
+            take(match (refresh, blocked) {
+                (Some(r), Some(b)) => Some(r.max(b)),
+                (r, None) => r,
+                (None, Some(_)) => None,
+            });
+            take(self.mark_read_due());
+            for (until, _) in self.query_backoff.values() {
+                take(Some(*until));
             }
         }
         d
+    }
+
+    fn backoff_until(&self, kind: &str) -> Option<Instant> {
+        self.query_backoff.get(kind).map(|(t, _)| *t)
+    }
+
+    fn backed_off(&self, kind: &str, now: Instant) -> bool {
+        self.backoff_until(kind).is_some_and(|t| now < t)
     }
 
     /// 每轮循环之后：该拨就拨、该查就查、取帧的等到了就交。
@@ -265,10 +306,16 @@ impl<D: Dialer> Session<D> {
             }));
         }
         if self.live() {
-            if let Some((round, tables)) = self.store.refresh.due(now.into_std()) {
+            let with_list = self.store.conversation_list.is_some();
+            if !self.backed_off("summary", now)
+                && let Some((round, tables)) = self.store.refresh.due(now.into_std(), with_list)
+            {
                 self.stats.refresh_rounds += 1;
                 for table in tables {
-                    self.view_query(table.query(), QueryPurpose::Summary { round, table });
+                    match table.query() {
+                        Some(q) => self.view_query(q, QueryPurpose::Summary { round, table }),
+                        None => self.send_list_query(Some(round)),
+                    }
                 }
             }
             self.wanted_queries();
@@ -471,7 +518,8 @@ impl<D: Dialer> Session<D> {
                 }
             }
             Local::Retry => {
-                if self.client.is_none() {
+                // 拨号器不在（拨号任务异常结束带走了它）时点重试没有用，也不登记截止时间（审查 1/F-1）。
+                if self.client.is_none() && self.dialer.is_some() {
                     self.retry_at = Some(Self::now());
                 }
             }
@@ -499,10 +547,28 @@ impl<D: Dialer> Session<D> {
             self.next_sub_id += 1;
             let scope = ScopeKind::Conversation(new.to_owned());
             self.store.register_subscription(id, scope.clone());
-            if let Some(c) = &self.client
-                && let Err(e) = c.subscribe_nowait(id, scope.to_proto(), 0)
-            {
-                tracing::debug!(target: "iwork_client", id, error = %e, "订阅时连接已关，重连时一起订");
+            if let Some(c) = self.client.clone() {
+                self.subscribe(&c, id, scope.to_proto(), 0);
+            }
+        }
+    }
+
+    /// 写出一个订阅，并盯着它的结果：后台拒了就按这条连接失败处理（审查 1/F-4），不默默留一个永远 Loading 的视图。
+    fn subscribe(&self, client: &Client, id: u32, scope: pb::SubscriptionScope, from_seq: u64) {
+        match client.subscribe_nowait(id, scope, from_seq) {
+            Ok(rx) => {
+                let tx = self.internal_tx.clone();
+                let epoch = self.conn_epoch;
+                tokio::spawn(async move {
+                    let error = match rx.await {
+                        Ok(Ok(())) | Ok(Err(ClientError::Closed)) | Err(_) => return,
+                        Ok(Err(e)) => e.to_string(),
+                    };
+                    let _ = tx.send(Internal::SubscribeFailed { epoch, id, error });
+                });
+            }
+            Err(e) => {
+                tracing::debug!(target: "iwork_client", id, error = %e, "订阅没写出去，连接已关，重连时一起订");
             }
         }
     }
@@ -653,15 +719,32 @@ impl<D: Dialer> Session<D> {
                 }
             }
             Internal::AttachDone(e) => self.store.set_attach_error(e),
-            Internal::QueryFailed { request_id } => {
+            Internal::QueryFailed { epoch, request_id } => {
+                if epoch != self.conn_epoch {
+                    // 旧连接上的查询：那条连接关闭时在飞表已整张清空，这里对不上号，不能删新连接的同号项。
+                    return;
+                }
                 if let Some(p) = self.queries.remove(&request_id) {
-                    tracing::warn!(target: "iwork_client", request_id, purpose = ?p, "视图查询失败");
+                    tracing::warn!(target: "iwork_client", request_id, purpose = ?p, "视图查询失败，退避后重发");
                     if matches!(p, QueryPurpose::Summary { .. }) {
                         self.store.refresh.abandon_round();
                     }
                     if matches!(p, QueryPurpose::OlderPage { .. }) {
                         self.want_older = false;
                     }
+                    let now = Self::now();
+                    let entry = self
+                        .query_backoff
+                        .entry(purpose_kind(&p))
+                        .or_insert_with(|| (now, Backoff::new()));
+                    entry.0 = now + entry.1.next_delay();
+                    self.store.set_query_failing(true);
+                }
+            }
+            Internal::SubscribeFailed { epoch, id, error } => {
+                if epoch == self.conn_epoch && self.client.is_some() {
+                    tracing::warn!(target: "iwork_client", id, error, "订阅失败，这条连接按失败处理");
+                    self.on_closed("订阅失败");
                 }
             }
         }
@@ -675,11 +758,16 @@ impl<D: Dialer> Session<D> {
         };
         match client.view_query_nowait(query) {
             Ok((id, rx)) => {
+                self.stats.view_queries += 1;
                 self.queries.insert(id, purpose);
                 let tx = self.internal_tx.clone();
+                let epoch = self.conn_epoch;
                 tokio::spawn(async move {
                     if !matches!(rx.await, Ok(Ok(()))) {
-                        let _ = tx.send(Internal::QueryFailed { request_id: id });
+                        let _ = tx.send(Internal::QueryFailed {
+                            epoch,
+                            request_id: id,
+                        });
                     }
                 });
             }
@@ -693,6 +781,7 @@ impl<D: Dialer> Session<D> {
 
     /// 在飞视图查询登记表（方案 2.3）：每种用途的「还要再发」都从状态里算，不留「已经发过」的记号。
     fn wanted_queries(&mut self) {
+        let now = Self::now();
         use pb::query::Kind as Q;
         let mut want: Vec<(pb::Query, QueryPurpose)> = Vec::new();
         if let Some(tl) = &self.store.open {
@@ -710,6 +799,7 @@ impl<D: Dialer> Session<D> {
                 && tl.has_older
                 && (self.want_older || window_at_top)
                 && let Some(oldest) = tl.oldest_message_id()
+                && !self.backed_off("older", now)
                 && !self.in_flight(|p| matches!(p, QueryPurpose::OlderPage { .. }))
             {
                 want.push((
@@ -722,12 +812,14 @@ impl<D: Dialer> Session<D> {
                     },
                     QueryPurpose::OlderPage {
                         conversation_id: cid.clone(),
+                        before: oldest.to_owned(),
                     },
                 ));
             }
             if ready
                 && self.want_tail
                 && !tl.at_tail
+                && !self.backed_off("latest", now)
                 && !self.in_flight(|p| matches!(p, QueryPurpose::LatestPage { .. }))
             {
                 want.push((
@@ -743,6 +835,7 @@ impl<D: Dialer> Session<D> {
         }
         if self.store.visible.settings
             && self.store.rules.is_none()
+            && !self.backed_off("rules", now)
             && !self.in_flight(|p| *p == QueryPurpose::Rules)
         {
             want.push((
@@ -752,7 +845,7 @@ impl<D: Dialer> Session<D> {
                 QueryPurpose::Rules,
             ));
         }
-        if self.store.visible.settings {
+        if self.store.visible.settings && !self.backed_off("local_config", now) {
             for rt in self.store.runtimes.keys() {
                 if !self.store.local_config.contains_key(rt)
                     && !self.in_flight(|p| matches!(p, QueryPurpose::LocalConfig { runtime_id } if runtime_id == rt))
@@ -764,36 +857,84 @@ impl<D: Dialer> Session<D> {
                 }
             }
         }
-        if let Some(list) = &self.store.conversation_list
-            && list.loading
+        if self
+            .store
+            .conversation_list
+            .as_ref()
+            .is_some_and(|l| l.loading)
+            && !self.backed_off("list", now)
             && !self.in_flight(|p| matches!(p, QueryPurpose::ConversationList { .. }))
         {
-            let before = if self.list_append {
-                list.items.last().map(|c| c.id.clone())
-            } else {
-                None
-            };
-            let append = self.list_append && before.is_some();
-            want.push((
-                pb::Query {
-                    kind: Some(Q::ListConversations(pb::ListConversations {
-                        project_id: Some(list.query.project_id.clone()),
-                        title_contains: (!list.query.filter.is_empty())
-                            .then(|| list.query.filter.clone()),
-                        before,
-                        limit: PAGE_SIZE,
-                    })),
-                },
-                QueryPurpose::ConversationList {
-                    project_id: list.query.project_id.clone(),
-                    filter: list.query.filter.clone(),
-                    append,
-                },
-            ));
+            self.send_list_query(None);
         }
         for (q, p) in want {
             self.view_query(q, p);
         }
+    }
+
+    /// 「全部对话」列表页的一批。`round` 有值时它是摘要重查轮的一条：按已加载条数整份重查（列表随事件刷新，
+    /// 审查 1/F-3）；没有时是首批或「加载下一批」。
+    fn send_list_query(&mut self, round: Option<u64>) {
+        use pb::query::Kind as Q;
+        let Some(list) = &self.store.conversation_list else {
+            return;
+        };
+        let (before, append, limit) = match round {
+            Some(_) => (
+                None,
+                false,
+                u32::try_from(list.items.len())
+                    .unwrap_or(u32::MAX)
+                    .max(PAGE_SIZE),
+            ),
+            None => {
+                let before = if self.list_append {
+                    list.items.last().map(|c| c.id.clone())
+                } else {
+                    None
+                };
+                let append = self.list_append && before.is_some();
+                (before, append, PAGE_SIZE)
+            }
+        };
+        let query = pb::Query {
+            kind: Some(Q::ListConversations(pb::ListConversations {
+                project_id: Some(list.query.project_id.clone()),
+                title_contains: (!list.query.filter.is_empty()).then(|| list.query.filter.clone()),
+                before,
+                limit,
+            })),
+        };
+        let purpose = QueryPurpose::ConversationList {
+            project_id: list.query.project_id.clone(),
+            filter: list.query.filter.clone(),
+            append,
+            round,
+        };
+        self.view_query(query, purpose);
+    }
+
+    /// MarkRead 的下一次时刻：只有现在就该发（可见、前台、Ready、有未读）而被节流挡住时才有。
+    fn mark_read_due(&self) -> Option<Instant> {
+        let last = self.mark_read_last?;
+        self.mark_read_wanted().then_some(last + MARK_READ_INTERVAL)
+    }
+
+    fn mark_read_wanted(&self) -> bool {
+        let Some(cid) = self.store.visible.conversation_id.as_deref() else {
+            return false;
+        };
+        self.store.focused
+            && self
+                .store
+                .subscription_of(&ScopeKind::Conversation(cid.to_owned()))
+                .and_then(|id| self.store.view_state(id))
+                == Some(crate::store::ViewState::Ready)
+            && self
+                .store
+                .summary
+                .conversation(cid)
+                .is_some_and(|c| c.unread > 0)
     }
 
     /// 对话可见、窗口在前台、视图 Ready、摘要里有未读时发 `MarkRead`（每秒最多一次）。
@@ -864,6 +1005,7 @@ impl<D: Dialer> Session<D> {
             .reconnect
             .from_seq(self.store.cursor(), self.store.any_loading());
         self.store.resubscribing();
+        self.conn_epoch += 1;
         let client = Arc::new(client);
         let subs: Vec<(u32, pb::SubscriptionScope)> = self
             .store
@@ -872,9 +1014,7 @@ impl<D: Dialer> Session<D> {
             .collect();
         for (id, scope) in subs {
             // 一次写出全部范围，同一个 from_seq（T03 客户端契约）。
-            if let Err(e) = client.subscribe_nowait(id, scope, from_seq) {
-                tracing::debug!(target: "iwork_client", id, error = %e, "订阅没写出去，等连接关闭后重来");
-            }
+            self.subscribe(&client, id, scope, from_seq);
         }
         self.client = Some(client);
         self.incoming = Some(incoming);
@@ -900,8 +1040,15 @@ impl<D: Dialer> Session<D> {
         self.store.connection_closed();
         self.store.set_overloaded(self.reconnect.overloaded());
         self.store.set_connection(Connection::Reconnecting);
-        // 立即重拨；之后失败才退避。
-        self.retry_at = Some(Self::now());
+        // 第一次掉线立即重拨；同一游标又被关（续传没送出任何东西就断，多半是后台过载）就按退避来，
+        // 退避只在应用了带 seq 的项（真有进展）时复位（审查 1/F-4）。
+        self.retry_at = Some(
+            Self::now()
+                + reconnect::close_retry_delay(
+                    self.reconnect.same_cursor_closes(),
+                    &mut self.backoff,
+                ),
+        );
     }
 
     fn on_incoming(&mut self, item: Option<IncomingItem>) {
@@ -921,6 +1068,11 @@ impl<D: Dialer> Session<D> {
                 };
                 if matches!(purpose, QueryPurpose::OlderPage { .. }) {
                     self.want_older = false;
+                }
+                if self.query_backoff.remove(purpose_kind(&purpose)).is_some()
+                    && self.query_backoff.is_empty()
+                {
+                    self.store.set_query_failing(false);
                 }
                 let refresh = matches!(
                     purpose,
@@ -953,6 +1105,7 @@ impl<D: Dialer> Session<D> {
             self.notify_new_pending();
         }
         if applied.had_seq {
+            self.backoff = Backoff::new();
             self.reconnect.on_applied_seq();
             self.store.set_overloaded(self.reconnect.overloaded());
         }
@@ -960,7 +1113,6 @@ impl<D: Dialer> Session<D> {
             match f {
                 FollowUp::AllReady => {
                     self.ever_live = true;
-                    self.backoff = Backoff::new();
                     self.store.set_connection(Connection::Live);
                 }
                 FollowUp::Checkpoint { conversation_id } => {
@@ -1094,5 +1246,17 @@ async fn sleep_until(deadline: Option<Instant>) {
     match deadline {
         Some(d) => tokio::time::sleep_until(d).await,
         None => std::future::pending().await,
+    }
+}
+
+/// 视图查询用途的种类：退避按种类记（同一种用途的不同参数共用一个退避）。
+fn purpose_kind(p: &QueryPurpose) -> &'static str {
+    match p {
+        QueryPurpose::Summary { .. } => "summary",
+        QueryPurpose::LatestPage { .. } => "latest",
+        QueryPurpose::OlderPage { .. } => "older",
+        QueryPurpose::Rules => "rules",
+        QueryPurpose::LocalConfig { .. } => "local_config",
+        QueryPurpose::ConversationList { .. } => "list",
     }
 }

@@ -42,6 +42,7 @@ fn summary_result(
         }),
         SummaryTable::Assistants => K::ListAssistants(pb::ListAssistantsResult::default()),
         SummaryTable::Pending => K::ListPendingItems(pb::ListPendingItemsResult::default()),
+        SummaryTable::List => unreachable!("这些用例不开列表页"),
     };
     pb::QueryResult {
         seq,
@@ -57,7 +58,7 @@ fn run_round(
     convs: &[pb::Conversation],
     now: Instant,
 ) {
-    let (round, tables) = s.refresh.due(now).expect("该发一轮");
+    let (round, tables) = s.refresh.due(now, false).expect("该发一轮");
     for table in tables {
         s.apply(view_result(
             QueryPurpose::Summary { round, table },
@@ -162,7 +163,7 @@ fn event_during_refresh_triggers_another_round() {
         &[SIDEBAR],
         E::ConversationRead(pb::ConversationRead::default()),
     ));
-    let (round, tables) = s.refresh.due(t).unwrap();
+    let (round, tables) = s.refresh.due(t, false).unwrap();
     // 第一条结果回来后又来一个事件。
     s.apply(view_result(
         QueryPurpose::Summary {
@@ -187,7 +188,9 @@ fn event_during_refresh_triggers_another_round() {
     }
     assert!(s.refresh.is_stale(), "这一轮在飞期间有事件：不清标记");
     assert!(
-        s.refresh.due(t + Duration::from_millis(250)).is_some(),
+        s.refresh
+            .due(t + Duration::from_millis(250), false)
+            .is_some(),
         "过了节流间隔再查一轮"
     );
 }
@@ -202,7 +205,7 @@ fn refresh_one_query_fails_retries_round() {
         &[SIDEBAR],
         E::ConversationRead(pb::ConversationRead::default()),
     ));
-    let (round, tables) = s.refresh.due(t).unwrap();
+    let (round, tables) = s.refresh.due(t, false).unwrap();
     s.apply(view_result(
         QueryPurpose::Summary {
             round,
@@ -212,7 +215,10 @@ fn refresh_one_query_fails_retries_round() {
     ));
     s.refresh.abandon_round();
     assert!(s.refresh.is_stale());
-    let (_, again) = s.refresh.due(t + Duration::from_millis(250)).unwrap();
+    let (_, again) = s
+        .refresh
+        .due(t + Duration::from_millis(250), false)
+        .unwrap();
     assert_eq!(again.len(), 4, "整轮重发");
 }
 

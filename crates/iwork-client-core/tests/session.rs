@@ -41,7 +41,13 @@ async fn daemon(scenarios: &[&str]) -> (FakeDaemon, tempfile::TempDir) {
 
 async fn connect(daemon: &FakeDaemon) -> (App, Web, mpsc::UnboundedReceiver<Effect>) {
     let dialer = DirectDialer::new(daemon.endpoint(), self_trusting_identity().unwrap(), "test");
-    let (app, effects) = App::start(dialer, Options { chunk_max: 4096 });
+    let (app, effects) = App::start(
+        dialer,
+        Options {
+            chunk_max: 4096,
+            ..Options::default()
+        },
+    );
     let epoch = app.attach().await.unwrap();
     (app, Web::new(epoch), effects)
 }

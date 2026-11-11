@@ -50,6 +50,19 @@ impl ReconnectState {
     }
 }
 
+/// 连上后又被关：第一次立即重拨；同一游标又被关（续传没送出任何东西就断，多半是后台过载）就按退避等，
+/// 退避由调用方在真有进展（应用了带 seq 的项）时复位（审查 1/F-4）。
+pub fn close_retry_delay(
+    same_cursor_closes: u32,
+    backoff: &mut iwork_ipc::client::Backoff,
+) -> std::time::Duration {
+    if same_cursor_closes <= 1 {
+        std::time::Duration::ZERO
+    } else {
+        backoff.next_delay()
+    }
+}
+
 /// 拨号失败之后怎么办。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Retry {
@@ -109,6 +122,26 @@ mod tests {
         // 游标变了：重新从 1 数。
         r.on_closed(12);
         assert_eq!(r.same_cursor_closes(), 1);
+    }
+
+    /// 审查 1/F-4：同游标反复被关时重拨间隔按退避增长，不是每次立即。
+    #[test]
+    fn repeated_closes_back_off() {
+        use iwork_ipc::client::Backoff;
+        use std::time::Duration;
+        let mut b = Backoff::new();
+        let mut r = ReconnectState::default();
+        let mut delays = Vec::new();
+        for _ in 0..5 {
+            r.on_closed(10);
+            delays.push(close_retry_delay(r.same_cursor_closes(), &mut b));
+        }
+        assert_eq!(delays[0], Duration::ZERO, "第一次立即重拨");
+        assert_eq!(delays[1], Duration::from_millis(200));
+        assert!(
+            delays.windows(2).skip(1).all(|w| w[1] > w[0]),
+            "之后逐次变长：{delays:?}"
+        );
     }
 
     /// R2：有视图还在 Loading 时一律拿快照；游标为 0 也是。

@@ -15,6 +15,8 @@ pub enum SummaryTable {
     Conversations,
     Assistants,
     Pending,
+    /// 「全部对话」列表页开着时这一轮多带的那一条（方案 2.2 第 2 条）；查询由会话层按列表页的条件拼。
+    List,
 }
 
 impl SummaryTable {
@@ -25,8 +27,8 @@ impl SummaryTable {
         SummaryTable::Pending,
     ];
 
-    /// 重查这张表的查询。
-    pub fn query(self) -> pb::Query {
+    /// 重查这张表的查询；`List` 的条件在会话层，这里返回 `None`。
+    pub fn query(self) -> Option<pb::Query> {
         use pb::query::Kind as Q;
         let kind = match self {
             SummaryTable::Projects => Q::ListProjects(pb::ListProjects {}),
@@ -38,8 +40,9 @@ impl SummaryTable {
             }),
             SummaryTable::Assistants => Q::ListAssistants(pb::ListAssistants {}),
             SummaryTable::Pending => Q::ListPendingItems(pb::ListPendingItems {}),
+            SummaryTable::List => return None,
         };
-        pb::Query { kind: Some(kind) }
+        Some(pb::Query { kind: Some(kind) })
     }
 }
 
@@ -135,7 +138,7 @@ impl Refresh {
 
     /// 现在该不该发一轮：失效、没有在飞、距上次发出不少于节流间隔。该发就记下这一轮，返回轮次号与要发的表。
     /// 轮次号随查询用途一起记下，结果回来时交回 [`Refresh::result_applied`]：作废轮次的迟到结果不算数。
-    pub fn due(&mut self, now: Instant) -> Option<(u64, Vec<SummaryTable>)> {
+    pub fn due(&mut self, now: Instant, with_list: bool) -> Option<(u64, Vec<SummaryTable>)> {
         if !self.stale || self.round.is_some() {
             return None;
         }
@@ -148,12 +151,16 @@ impl Refresh {
         self.last_sent = Some(now);
         let id = self.next_round;
         self.next_round += 1;
+        let mut tables = SummaryTable::ALL.to_vec();
+        if with_list {
+            tables.push(SummaryTable::List);
+        }
         self.round = Some(Round {
             id,
-            outstanding: SummaryTable::ALL.to_vec(),
+            outstanding: tables.clone(),
             again: false,
         });
-        Some((id, SummaryTable::ALL.to_vec()))
+        Some((id, tables))
     }
 
     /// 下一次可以发的时刻（会话层据此设定时器）；不需要发时为 `None`。
@@ -211,20 +218,20 @@ mod tests {
     fn refresh_is_throttled_and_never_starves() {
         let mut r = Refresh::new();
         let start = t0();
-        assert_eq!(r.due(start), None, "没失效不发");
+        assert_eq!(r.due(start, false), None, "没失效不发");
         r.invalidate();
-        let (id1, tables) = r.due(start).unwrap();
+        let (id1, tables) = r.due(start, false).unwrap();
         assert_eq!(tables.len(), 4);
         // 在飞期间又来事件：不发第二轮，记 again。
         r.invalidate();
-        assert_eq!(r.due(start + Duration::from_secs(1)), None);
+        assert_eq!(r.due(start + Duration::from_secs(1), false), None);
         for t in SummaryTable::ALL {
             r.result_applied(id1, t);
         }
         assert!(r.is_stale(), "在飞期间有新事件，走完不清");
         // 节流：距上次发出不足 250ms 不发。
-        assert_eq!(r.due(start + Duration::from_millis(100)), None);
-        let (id2, _) = r.due(start + Duration::from_millis(250)).unwrap();
+        assert_eq!(r.due(start + Duration::from_millis(100), false), None);
+        let (id2, _) = r.due(start + Duration::from_millis(250), false).unwrap();
         // 上一轮的迟到结果不算进这一轮。
         r.result_applied(id1, SummaryTable::Projects);
         for t in SummaryTable::ALL.iter().skip(1) {
@@ -240,7 +247,7 @@ mod tests {
         for k in 0..4 {
             let mut r = Refresh::new();
             r.invalidate();
-            let (id, _) = r.due(t0()).unwrap();
+            let (id, _) = r.due(t0(), false).unwrap();
             for t in SummaryTable::ALL.iter().take(k) {
                 r.result_applied(id, *t);
             }
@@ -254,7 +261,7 @@ mod tests {
     fn snapshot_clears_stale_and_round() {
         let mut r = Refresh::new();
         r.invalidate();
-        let (id, _) = r.due(t0()).unwrap();
+        let (id, _) = r.due(t0(), false).unwrap();
         r.replaced_by_snapshot();
         assert!(!r.is_stale());
         assert!(!r.in_flight());

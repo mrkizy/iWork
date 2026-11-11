@@ -169,7 +169,11 @@ fn no_pull_produces_nothing() {
     }
     assert_eq!(e.frames_built(), built);
     assert_eq!(e.held_bytes(), 0);
-    assert_eq!(s.open.as_ref().unwrap().len(), 10_000, "状态库照常应用事件");
+    let tl = s.open.as_ref().unwrap();
+    // 状态库照常应用事件；停在最新时也按上限截掉最老的行，标成还能往上翻取回。
+    assert_eq!(tl.len(), 5000);
+    assert!(tl.row("m9999").is_some() && tl.row("m0").is_none());
+    assert!(tl.has_older);
 }
 
 /// 取了第一块就停：Rust 只留这一帧，后来的变化不另算帧。
@@ -361,4 +365,22 @@ fn oversized_assistant_model_converges() {
         w.state.assistant.as_ref().unwrap().prompt,
         "b".repeat(2 << 20)
     );
+}
+
+/// 审查 1/F-10：跳转只在请求时发一次；之后的 SetVisible、attach 都不重发。
+#[test]
+fn navigate_is_sent_once() {
+    let (mut s, mut e, mut w, t) = setup(1 << 20);
+    drain(&mut s, &mut e, &mut w, t);
+    s.request_navigate(CID.into(), "m".into());
+    drain(&mut s, &mut e, &mut w, t + FRAME_INTERVAL);
+    assert_eq!(w.state.navigate.as_ref().map(|n| n.seq), Some(1));
+    w.state.navigate = None;
+    let v = s.visible.clone();
+    s.set_visible(Visible { pending: true, ..v });
+    drain(&mut s, &mut e, &mut w, t + FRAME_INTERVAL * 2);
+    assert!(w.state.navigate.is_none(), "SetVisible 不重发");
+    let mut fresh = Web::new(e.attach(&mut s));
+    drain(&mut s, &mut e, &mut fresh, t + FRAME_INTERVAL * 3);
+    assert!(fresh.state.navigate.is_none(), "attach 不重发");
 }

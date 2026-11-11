@@ -148,6 +148,10 @@ pub struct Timeline {
     pub conversation: Option<pb::Conversation>,
     rows: BTreeMap<RowKey, Row>,
     by_id: HashMap<String, RowKey>,
+    /// 键 → 行身份（by_id 的反向；截掉一端时按键找身份，不扫全表）。
+    ids: HashMap<RowKey, String>,
+    /// 行数上限（默认 [`TIMELINE_CAP`]）。
+    cap: usize,
     /// 流式正文与工具输出，按行身份（消息 id、`turn/tool`）。长度就是下一个期望的 offset。
     text: HashMap<String, String>,
     /// 工具调用 id → 行身份（`ToolOutputDelta` 只带 tool_call_id）。
@@ -176,11 +180,18 @@ pub enum PageMode {
 
 impl Timeline {
     pub fn new(conversation_id: impl Into<String>) -> Self {
+        Self::with_cap(conversation_id, TIMELINE_CAP)
+    }
+
+    pub fn with_cap(conversation_id: impl Into<String>, cap: usize) -> Self {
+        assert!(cap > 0, "时间线上限必须大于 0");
         Self {
             conversation_id: conversation_id.into(),
             conversation: None,
             rows: BTreeMap::new(),
             by_id: HashMap::new(),
+            ids: HashMap::new(),
+            cap,
             text: HashMap::new(),
             tool_by_call: HashMap::new(),
             turns: BTreeMap::new(),
@@ -238,6 +249,13 @@ impl Timeline {
             && old != key
         {
             self.rows.remove(&old);
+            self.ids.remove(&old);
+        }
+        if let Some(prev) = self.ids.insert(key, identity.clone())
+            && prev != identity
+        {
+            // 同一个位置上换了一行（不该发生：位置由创建事件的 seq 唯一确定）：旧行的身份一起去掉。
+            self.by_id.remove(&prev);
         }
         self.by_id.insert(identity.clone(), key);
         self.rows.insert(key, row);
@@ -247,7 +265,17 @@ impl Timeline {
     fn remove(&mut self, identity: &str) -> Option<RowKey> {
         let key = self.by_id.remove(identity)?;
         self.rows.remove(&key);
+        self.ids.remove(&key);
         Some(key)
+    }
+
+    /// 按键去掉一行（截掉一端用），连同它的正文。
+    fn remove_key(&mut self, key: RowKey) -> Option<String> {
+        self.rows.remove(&key)?;
+        let id = self.ids.remove(&key)?;
+        self.by_id.remove(&id);
+        self.text.remove(&id);
+        Some(id)
     }
 
     /// 改一行（按身份找）。找不到返回 `None`：调用方丢掉事件并记 debug 日志（方案 2.2）。
@@ -374,7 +402,12 @@ impl Timeline {
                     return None;
                 }
                 t.created_seq = seq;
-                let mut c = self.derive_after_turn(&t);
+                // 时间线不接着最新时，新回合的行不进来，贴在它前面的模型切换行也不进来。
+                let mut c = if self.at_tail {
+                    self.derive_after_turn(&t)
+                } else {
+                    TimelineChange::default()
+                };
                 self.turns.insert(t.id.clone(), t);
                 c.header = true;
                 c
@@ -521,6 +554,8 @@ impl Timeline {
             }
             _ => return None,
         };
+        let mut change = change;
+        change.merge(self.trim_oldest());
         Some(change)
     }
 
@@ -663,7 +698,7 @@ impl Timeline {
         if rebuild {
             let id = self.conversation_id.clone();
             let conv = self.conversation.take();
-            *self = Timeline::new(id);
+            *self = Timeline::with_cap(id, self.cap);
             self.conversation = conv;
         }
         if mode != PageMode::Older {
@@ -692,6 +727,8 @@ impl Timeline {
         }
         if mode == PageMode::Older {
             self.enforce_cap();
+        } else {
+            c.merge(self.trim_oldest());
         }
         c
     }
@@ -879,27 +916,31 @@ impl Timeline {
             .any(|(_, r)| matches!(r, Row::Note { kind: k, .. } if *k == kind))
     }
 
-    /// 超过上限时从新的一端丢，之后新消息只计数（方案 2.2 查询结果第 4 条）。
+    /// 往上翻超过上限时从新的一端丢，之后新消息只计数（方案 2.2 查询结果第 4 条）。
     fn enforce_cap(&mut self) {
-        while self.rows.len() > TIMELINE_CAP {
-            let Some((&key, row)) = self.rows.iter().next_back() else {
+        while self.rows.len() > self.cap {
+            let Some(&key) = self.rows.keys().next_back() else {
                 break;
             };
-            let id = match row {
-                r if r.is_derived() || matches!(r, Row::Note { .. }) => self
-                    .by_id
-                    .iter()
-                    .find(|(_, k)| **k == key)
-                    .map(|(id, _)| id.clone()),
-                r => Some(r.identity(key)),
-            };
-            self.rows.remove(&key);
-            if let Some(id) = id {
-                self.by_id.remove(&id);
-                self.text.remove(&id);
-            }
+            self.remove_key(key);
             self.at_tail = false;
         }
+    }
+
+    /// 停在最新时超过上限：从老的一端丢，标成还能往上翻取回（supervisor 2026-11-11 定：长时间挂着的对话
+    /// 内存要有上界）。返回被丢的行，帧引擎据此让网页删掉。
+    fn trim_oldest(&mut self) -> TimelineChange {
+        let mut c = TimelineChange::default();
+        while self.at_tail && self.rows.len() > self.cap {
+            let Some(&key) = self.rows.keys().next() else {
+                break;
+            };
+            if let Some(id) = self.remove_key(key) {
+                c.rows.insert(id);
+            }
+            self.has_older = true;
+        }
+        c
     }
 
     /// 行身份 → 键的全部映射，按位置排序（帧引擎算窗口用）。

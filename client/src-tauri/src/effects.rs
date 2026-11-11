@@ -53,7 +53,20 @@ pub fn spawn(handle: AppHandle, core: App, mut effects: mpsc::UnboundedReceiver<
 fn install_menu(handle: &AppHandle, core: App) -> tauri::Result<()> {
     let quit = MenuItemBuilder::with_id(QUIT_MENU_ID, "完全退出 iWork").build(handle)?;
     let app_menu = SubmenuBuilder::new(handle, "iWork").item(&quit).build()?;
-    let menu = MenuBuilder::new(handle).item(&app_menu).build()?;
+    // 换掉默认菜单后 macOS 的 Cmd+C/V/X/A/Z 靠「编辑」菜单里的预置项才生效（审查 1/F-7），补回来。
+    let edit = SubmenuBuilder::new(handle, "编辑")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+    let menu = MenuBuilder::new(handle)
+        .item(&app_menu)
+        .item(&edit)
+        .build()?;
     handle.set_menu(menu)?;
     handle.on_menu_event(move |app, event| {
         if event.id() == QUIT_MENU_ID {

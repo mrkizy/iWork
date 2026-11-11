@@ -143,3 +143,16 @@ pub fn row_ids(s: &Store) -> Vec<String> {
         .map(|(_, id)| id)
         .collect()
 }
+
+/// 往前翻页的用途：before 取发出那一刻最旧的一条消息（与会话层一致）。
+pub fn older(s: &Store) -> QueryPurpose {
+    QueryPurpose::OlderPage {
+        conversation_id: CID.into(),
+        before: s
+            .open
+            .as_ref()
+            .and_then(|t| t.oldest_message_id())
+            .unwrap_or_default()
+            .to_owned(),
+    }
+}

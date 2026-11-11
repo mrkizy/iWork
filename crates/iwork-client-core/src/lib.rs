@@ -31,12 +31,15 @@ pub struct App {
 #[derive(Debug, Clone, Copy)]
 pub struct Options {
     pub chunk_max: usize,
+    /// 时间线行数上限（测试里调小，逼出截断）。
+    pub timeline_cap: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
             chunk_max: frame::FRAME_CHUNK_MAX,
+            timeline_cap: store::timeline::TIMELINE_CAP,
         }
     }
 }
@@ -47,8 +50,8 @@ impl App {
         let (tx, rx) = mpsc::unbounded_channel();
         let (effects_tx, effects_rx) = mpsc::unbounded_channel();
         let (stats_tx, stats_rx) = watch::channel(Stats::default());
-        let session =
-            session::Session::new(dialer, opts.chunk_max, effects_tx).with_stats(stats_tx);
+        let session = session::Session::new(dialer, opts.chunk_max, opts.timeline_cap, effects_tx)
+            .with_stats(stats_tx);
         tokio::spawn(session.run(rx));
         (
             App {

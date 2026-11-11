@@ -72,18 +72,23 @@ pub enum QueryPurpose {
     LatestPage {
         conversation_id: String,
     },
+    /// 往前翻页；`before` 是发出时最旧一条消息的 id。结果回来时它已不是最旧的一行（中间重建过），
+    /// 结果就不接上去，免得时间线中间留一段空洞。
     OlderPage {
         conversation_id: String,
+        before: String,
     },
     Rules,
     LocalConfig {
         runtime_id: String,
     },
-    /// 「全部对话」列表页的一批；`append` 为假时整份替换。
+    /// 「全部对话」列表页的一批；`append` 为假时整份替换。`round` 有值表示它是那一轮摘要重查的一部分
+    /// （方案 2.2 第 2 条：列表页开着时摘要轮多带一条）。
     ConversationList {
         project_id: String,
         filter: String,
         append: bool,
+        round: Option<u64>,
     },
 }
 
@@ -129,7 +134,8 @@ pub enum ViewKey {
 }
 
 impl ViewKey {
-    pub const ALL: [ViewKey; 9] = [
+    /// 「全部视图」不含跳转：跳转只在请求时发一次，attach、SetVisible 不重发（审查 1/F-10）。
+    pub const ALL: [ViewKey; 8] = [
         ViewKey::Sidebar,
         ViewKey::Pending,
         ViewKey::Settings,
@@ -138,7 +144,6 @@ impl ViewKey {
         ViewKey::Connection,
         ViewKey::ConversationList,
         ViewKey::Conversation,
-        ViewKey::Navigate,
     ];
 }
 
@@ -250,12 +255,32 @@ pub struct Store {
     /// 最近一次跳转请求（点击系统通知）：(seq, 对话, 行)。
     pub navigate: Option<(u64, String, String)>,
     subs: BTreeMap<u32, Sub>,
+    /// 这次重连以来由快照换过的摘要表（审查 1/F-8）。
+    snapshot_tables: BTreeSet<SummaryTable>,
+    /// 时间线行数上限。
+    timeline_cap: usize,
+    /// 有视图查询失败、在退避中：连接条上显示一行（审查 1/F-5）。
+    pub query_failing: bool,
     pub dirty: DirtySet,
 }
 
 impl Store {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_timeline_cap(timeline::TIMELINE_CAP)
+    }
+
+    pub fn with_timeline_cap(cap: usize) -> Self {
+        Self {
+            timeline_cap: cap,
+            ..Self::default()
+        }
+    }
+
+    pub fn set_query_failing(&mut self, on: bool) {
+        if self.query_failing != on {
+            self.query_failing = on;
+            self.dirty.mark(ViewKey::Connection);
+        }
     }
 
     pub fn cursor(&self) -> u64 {
@@ -300,6 +325,7 @@ impl Store {
 
     /// 重连：全部订阅重新写出，回到 `Loading`，直到各自的 `Subscribed` 应用完。
     pub fn resubscribing(&mut self) {
+        self.snapshot_tables.clear();
         for s in self.subs.values_mut() {
             s.state = ViewState::Loading;
         }
@@ -308,17 +334,19 @@ impl Store {
     /// 连接关闭：在飞的摘要重查作废（标记不动，方案 2.3 在飞查询表）。
     pub fn connection_closed(&mut self) {
         self.refresh.abandon_round();
-        if let Some(list) = self.conversation_list.as_mut() {
-            list.loading = false;
-        }
-        self.dirty.mark(ViewKey::ConversationList);
+        // 列表页的 loading 留着：它就是「还要再发」的记号，重新 Live 后照样发（审查 1/F-2）。
+        self.snapshot_tables.clear();
     }
 
     // ---------- 本地视图状态 ----------
 
     pub fn set_visible(&mut self, v: Visible) {
         if v.conversation_id != self.visible.conversation_id {
-            self.open = v.conversation_id.as_deref().map(Timeline::new);
+            let cap = self.timeline_cap;
+            self.open = v
+                .conversation_id
+                .as_deref()
+                .map(|id| Timeline::with_cap(id, cap));
             self.window = None;
             self.dirty.conversation(TimelineChange {
                 reset: true,
@@ -436,6 +464,8 @@ impl Store {
                 self.cursor = self.cursor.max(p.seq);
                 if feeds_summary {
                     self.refresh.invalidate();
+                    // 快照收齐四张表之前来了命中摘要的事件：已收的快照不再代表最新，不能凭它清标记。
+                    self.snapshot_tables.clear();
                 }
                 let Some(event) = p.event.and_then(|d| d.event) else {
                     tracing::warn!(target: "iwork_client", seq = p.seq, "持久事件没有载荷");
@@ -603,16 +633,22 @@ impl Store {
         if let Some(snapshot) = s.snapshot {
             applied.had_seq = true;
             self.cursor = self.cursor.max(s.snapshot_seq);
-            let tables: BTreeSet<SummaryTable> = snapshot
-                .results
-                .iter()
-                .filter_map(|r| summary_table_of(r.kind.as_ref()?))
-                .collect();
+            self.snapshot_tables.extend(
+                snapshot
+                    .results
+                    .iter()
+                    .filter_map(|r| summary_table_of(r.kind.as_ref()?)),
+            );
             for r in snapshot.results {
                 self.apply_result(None, r);
             }
-            if tables.len() == SummaryTable::ALL.len() {
+            // 一次重连的各个快照分在各自的 Subscribed 里：四张表都由快照换过、期间没有命中摘要的事件，才算对齐。
+            if SummaryTable::ALL
+                .iter()
+                .all(|t| self.snapshot_tables.contains(t))
+            {
                 self.refresh.replaced_by_snapshot();
+                self.snapshot_tables.clear();
             }
         }
         if !self.any_loading() {
@@ -633,6 +669,7 @@ impl Store {
                     project_id,
                     filter,
                     append,
+                    round,
                 }),
                 K::ListConversations(l),
             ) => {
@@ -648,6 +685,9 @@ impl Store {
                     list.has_more = l.has_more;
                     list.loading = false;
                     self.dirty.mark(ViewKey::ConversationList);
+                }
+                if let Some(round) = round {
+                    self.refresh.result_applied(*round, SummaryTable::List);
                 }
             }
             (_, K::ListProjects(l)) => {
@@ -680,9 +720,16 @@ impl Store {
                     Some(_) => PageMode::LiveLatest,
                 };
                 let cid = page.conversation.as_ref().map(|c| c.id.as_str());
+                if let Some(QueryPurpose::OlderPage { before, .. }) = p
+                    && self.open.as_ref().and_then(|t| t.oldest_message_id())
+                        != Some(before.as_str())
+                {
+                    tracing::debug!(target: "iwork_client", before, "翻页结果到达时已不接着最旧一行，丢掉");
+                    return;
+                }
                 if let Some(t) = self.open.as_mut()
                     && (cid == Some(t.conversation_id.as_str())
-                        || matches!(p, Some(QueryPurpose::OlderPage { conversation_id } | QueryPurpose::LatestPage { conversation_id }) if *conversation_id == t.conversation_id))
+                        || matches!(p, Some(QueryPurpose::OlderPage { conversation_id, .. } | QueryPurpose::LatestPage { conversation_id }) if *conversation_id == t.conversation_id))
                 {
                     let mut c = t.apply_page(&page, mode);
                     c.merge(t.sync_resume_cards(self.summary.resume_cards()));

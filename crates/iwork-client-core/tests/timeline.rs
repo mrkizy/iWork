@@ -48,9 +48,7 @@ fn snapshot_drops_rows_outside_page() {
     assert!(tl.has_older);
     // 往上翻：拿到的是已完成的 old。
     s.apply(view_result(
-        QueryPurpose::OlderPage {
-            conversation_id: CID.into(),
-        },
+        older(&s),
         page(
             51,
             vec![assistant_msg("old", 10, S::Completed, "done")],
@@ -108,7 +106,7 @@ fn detached_tail_rebuilds() {
         )],
     ));
     // 往上翻到超限：从新的一端丢，at_tail 变假。
-    let older: Vec<pb::Message> = (0..TIMELINE_CAP as u64)
+    let older_msgs: Vec<pb::Message> = (0..TIMELINE_CAP as u64)
         .map(|i| assistant_msg(&format!("o{i}"), 1000 + i, S::Completed, "x"))
         .collect();
     // 让较旧的页 seq 比 tail 小：重新造 tail 的 seq 更大。
@@ -121,12 +119,7 @@ fn detached_tail_rebuilds() {
             true,
         )],
     ));
-    s.apply(view_result(
-        QueryPurpose::OlderPage {
-            conversation_id: CID.into(),
-        },
-        page(9001, older, true),
-    ));
+    s.apply(view_result(older(&s), page(9001, older_msgs, true)));
     let tl = s.open.as_ref().unwrap();
     assert_eq!(tl.len(), TIMELINE_CAP);
     assert!(!tl.at_tail);
@@ -158,15 +151,10 @@ fn timeline_cap_detaches_tail() {
             true,
         )],
     ));
-    let older: Vec<pb::Message> = (0..TIMELINE_CAP as u64 + 10)
+    let older_msgs: Vec<pb::Message> = (0..TIMELINE_CAP as u64 + 10)
         .map(|i| assistant_msg(&format!("o{i}"), 1 + i, S::Completed, "x"))
         .collect();
-    s.apply(view_result(
-        QueryPurpose::OlderPage {
-            conversation_id: CID.into(),
-        },
-        page(9001, older, true),
-    ));
+    s.apply(view_result(older(&s), page(9001, older_msgs, true)));
     assert!(!s.open.as_ref().unwrap().at_tail);
     // 之后的新消息不进时间线，只计数。
     s.apply(persisted(
@@ -350,4 +338,133 @@ fn mode_change_note_is_live_only() {
     assert_eq!(row_ids(&s), ["note:10"]);
     s.apply(snapshot(CONV, 20, vec![page(20, vec![], false)]));
     assert!(row_ids(&s).is_empty());
+}
+
+/// 审查附注：「回到最新」（重建）先到、更早发出的翻页结果后到时，翻页结果不接上去，时间线中间不留空洞。
+#[test]
+fn stale_older_page_is_dropped_after_rebuild() {
+    let mut s = store_with_open();
+    s.apply(snapshot(
+        CONV,
+        10,
+        vec![page(
+            10,
+            vec![assistant_msg("a", 10, S::Completed, "x")],
+            true,
+        )],
+    ));
+    let stale = older(&s); // before = "a"
+    s.apply(snapshot(
+        CONV,
+        50,
+        vec![page(
+            50,
+            vec![assistant_msg("z", 50, S::Completed, "x")],
+            true,
+        )],
+    ));
+    s.apply(view_result(
+        stale,
+        page(51, vec![assistant_msg("old", 5, S::Completed, "x")], false),
+    ));
+    assert_eq!(
+        row_ids(&s),
+        ["z"],
+        "翻页结果的 before 已不是最旧的一行：丢掉"
+    );
+    // 对照：before 对得上就接上。
+    let fresh = older(&s);
+    s.apply(view_result(
+        fresh,
+        page(52, vec![assistant_msg("y", 40, S::Completed, "x")], false),
+    ));
+    assert_eq!(row_ids(&s), ["y", "z"]);
+}
+
+/// 审查附注：时间线不接着最新时，新回合不插模型切换行。
+#[test]
+fn detached_timeline_gets_no_model_switch_row() {
+    let mut s = store_with_open();
+    let turn = |id: &str, model: &str| {
+        E::TurnQueued(pb::TurnQueued {
+            turn: Some(pb::Turn {
+                id: id.into(),
+                conversation_id: CID.into(),
+                model: Some(pb::ModelSelection {
+                    model_id: model.into(),
+                    effort: None,
+                }),
+                state: pb::TurnState::Queued as i32,
+                ..Default::default()
+            }),
+        })
+    };
+    s.apply(snapshot(
+        CONV,
+        9000,
+        vec![page(
+            9000,
+            vec![assistant_msg("tail", 9000, S::Completed, "t")],
+            true,
+        )],
+    ));
+    s.apply(persisted(9001, &[CONV], turn("t1", "a")));
+    let older_msgs: Vec<pb::Message> = (0..TIMELINE_CAP as u64 + 1)
+        .map(|i| assistant_msg(&format!("o{i}"), 1 + i, S::Completed, "x"))
+        .collect();
+    s.apply(view_result(older(&s), page(9002, older_msgs, true)));
+    assert!(!s.open.as_ref().unwrap().at_tail);
+    s.apply(persisted(9003, &[CONV], turn("t2", "b")));
+    assert!(s.open.as_ref().unwrap().row("model:t2").is_none());
+}
+
+/// 审查 1/F-8：一次重连的四张摘要表分在几个 Subscribed 里，收齐且期间没有命中摘要的事件才清标记。
+#[test]
+fn snapshots_across_subscribed_clear_stale_only_without_events_between() {
+    use iwork_client_core::store::SummaryTable;
+    fn results(tables: &[SummaryTable]) -> Vec<pb::QueryResult> {
+        use pb::query_result::Kind as K;
+        tables
+            .iter()
+            .map(|t| pb::QueryResult {
+                seq: 20,
+                kind: Some(match t {
+                    SummaryTable::Projects => K::ListProjects(Default::default()),
+                    SummaryTable::Conversations => K::ListConversations(Default::default()),
+                    SummaryTable::Assistants => K::ListAssistants(Default::default()),
+                    SummaryTable::Pending => K::ListPendingItems(Default::default()),
+                    SummaryTable::List => unreachable!(),
+                }),
+            })
+            .collect()
+    }
+    let side = [
+        SummaryTable::Projects,
+        SummaryTable::Conversations,
+        SummaryTable::Assistants,
+    ];
+    for event_between in [false, true] {
+        let mut s = store_with_open();
+        s.apply(persisted(
+            5,
+            &[SIDEBAR],
+            E::ConversationRead(pb::ConversationRead::default()),
+        ));
+        assert!(s.refresh.is_stale());
+        s.resubscribing();
+        s.apply(snapshot(SIDEBAR, 20, results(&side)));
+        if event_between {
+            s.apply(persisted(
+                21,
+                &[PENDING],
+                E::ConversationRead(pb::ConversationRead::default()),
+            ));
+        }
+        s.apply(snapshot(PENDING, 21, results(&[SummaryTable::Pending])));
+        assert_eq!(
+            s.refresh.is_stale(),
+            event_between,
+            "期间有事件：{event_between}"
+        );
+    }
 }

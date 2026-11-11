@@ -20,6 +20,7 @@ pub const MEMORY_EMPTY: &str = "M1 暂不记录助手记忆";
 pub const INCOMPLETE: &str = "数据不完整，无法显示这个对话";
 pub const RECONNECTING: &str = "正在重新连接";
 pub const CONNECTING: &str = "正在连接后台服务";
+pub const QUERY_RETRYING: &str = "部分数据暂时没取到，稍后自动重试";
 pub const OVERLOADED: &str = "后台负载过高，稍后重试或重新打开 iWork";
 pub const DIAGNOSTICS_TITLE: &str = "连不上后台服务";
 pub const NEWER_SCHEMA_HINT: &str = "装回更新的那一版可继续使用";

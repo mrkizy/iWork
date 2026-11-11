@@ -230,7 +230,13 @@ mod live {
 
     async fn connect(d: &FakeDaemon, conv: Option<&str>) -> (App, Web) {
         let dialer = DirectDialer::new(d.endpoint(), self_trusting_identity().unwrap(), "test");
-        let (app, _effects) = App::start(dialer, Options { chunk_max: 4096 });
+        let (app, _effects) = App::start(
+            dialer,
+            Options {
+                chunk_max: 4096,
+                ..Options::default()
+            },
+        );
         std::mem::forget(_effects);
         let web = Web::new(app.attach().await.unwrap());
         set_conv(&app, conv).await;
@@ -407,7 +413,7 @@ mod live {
             cases: 12,
             ..ProptestConfig::default()
         });
-        let strategy = proptest::collection::vec(0u8..5, 5..40);
+        let strategy = proptest::collection::vec(0u8..7, 5..40);
         let rt = tokio::runtime::Handle::current();
         runner
             .run(&strategy, |ops| {
@@ -452,6 +458,23 @@ mod live {
                 3 => {
                     open = !open;
                     set_conv(&app, open.then_some("c-basic")).await;
+                }
+                5 => {
+                    // 翻页：窗口顶到最上面，往前翻（审查 1/F-6）。
+                    app.intent(pb::UiIntent {
+                        kind: Some(I::SetVisibleRows(pb::SetVisibleRows {
+                            conversation_id: "c-basic".into(),
+                            first_ordinal: i64::MIN,
+                            last_ordinal: i64::MIN + 1,
+                        })),
+                    })
+                    .await;
+                }
+                6 => {
+                    // 断在重查途中：命中侧栏的事件让摘要失效、重查发出，紧接着断线（审查 1/F-6）。
+                    d.append(f::conversation_read("c-basic", 0));
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    d.disconnect_all().await;
                 }
                 _ => {
                     let _ = timeout(Duration::from_millis(20), app.next_frame(web.request()))
