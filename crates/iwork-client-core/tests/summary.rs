@@ -317,6 +317,29 @@ fn with_summary(
     s
 }
 
+/// 内置 iWork 在助手分区排第一（ui-m1 第 2 节第 1 条），不管后台给的顺序；其余保持后台的顺序。
+#[test]
+fn builtin_assistant_comes_first_whatever_the_backend_order() {
+    let s = with_summary(
+        vec![project(0)],
+        vec![],
+        vec![
+            assistant("a-asen", "阿森", false),
+            assistant("a-blob", "小团", false),
+            assistant("a-iwork", "iWork", true),
+            assistant("a-lao", "老周", false),
+        ],
+        vec![],
+        vec![],
+    );
+    let names: Vec<_> = derive::sidebar::sidebar(&s, ctx())
+        .assistants
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    assert_eq!(names, ["iWork", "阿森", "小团", "老周"]);
+}
+
 /// 助手未读只算它那条私聊（2a 第 3 条）：项目对话里的未读不算到助手上。
 #[test]
 fn assistant_unread_is_dm_only() {

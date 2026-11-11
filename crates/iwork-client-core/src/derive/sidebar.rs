@@ -24,15 +24,21 @@ pub fn sidebar(store: &Store, ctx: Ctx) -> pb::SidebarView {
             u32::try_from(store.summary.pending.len()).unwrap_or(u32::MAX),
         ),
         projects,
-        assistants: store
-            .summary
-            .assistants
-            .iter()
+        assistants: assistants_in_order(store)
             .map(|a| assistant_row(store, a))
             .collect(),
         quota: quota_cells(store, ctx),
         title_max_chars: u32::try_from(crate::intent::TITLE_MAX_CHARS).unwrap_or(u32::MAX),
     }
+}
+
+/// 助手分区的顺序：内置 iWork 排第一（ui-m1.md 第 2 节第 1 条），其余照后台给的顺序。
+/// 不信后台的顺序：查询结果怎么排是后台的事，「iWork 第一」是界面规则，在这里保证。
+fn assistants_in_order(store: &Store) -> impl Iterator<Item = &pb::Assistant> {
+    let all = &store.summary.assistants;
+    all.iter()
+        .filter(|a| a.builtin)
+        .chain(all.iter().filter(|a| !a.builtin))
 }
 
 /// 在待处理表里有项的对话。
