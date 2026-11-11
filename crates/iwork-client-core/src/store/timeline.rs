@@ -359,7 +359,7 @@ impl Timeline {
                     return None;
                 }
                 let text = body_text(e.body.as_ref()).map(str::to_owned);
-                let c = self.update(&e.message_id, |r| {
+                let mut c = self.update(&e.message_id, |r| {
                     if let Row::Message(m) = r {
                         m.body.clone_from(&e.body);
                         m.status = e.status;
@@ -367,6 +367,15 @@ impl Timeline {
                 })?;
                 if let Some(t) = text {
                     self.text.insert(e.message_id.clone(), t);
+                }
+                // 回合结束行读同回合消息的 status（derive::row::has_failed_message）：status 变了它也得重发。
+                if let Some(Row::Message(m)) = self.row(&e.message_id)
+                    && let Some(turn) = m.turn_id.as_deref()
+                {
+                    let end = format!("end:{turn}");
+                    if self.by_id.contains_key(&end) {
+                        c.rows.insert(end);
+                    }
                 }
                 c
             }
@@ -576,7 +585,11 @@ impl Timeline {
                 if let Some(conv) = self.conversation.as_mut() {
                     conv.state = pb::ConversationState::Deleting as i32;
                 }
-                TimelineChange::default().with_header()
+                // 亲手执行卡片的说明读「对话是否在删除中」（「有一张卡片的执行结果无法核对，请确认后继续删除」）。
+                let mut c = TimelineChange::default().with_header();
+                c.rows
+                    .extend(self.identities_where(|r| matches!(r, Row::UserAction(_))));
+                c
             }
             _ => return None,
         };

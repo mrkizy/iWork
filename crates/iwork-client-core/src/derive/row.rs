@@ -1,4 +1,19 @@
 //! 时间线一行 → `RowView`（行登记表的每一种行一臂）。
+//!
+//! **行外读取与标脏**：一行的视图模型读了行外的状态，那份状态变了这一行就得重发，否则网页停在旧值上。
+//! 下面是这里全部的行外读取，每一处都有对应的标脏方（`tests/row_dependencies.rs` 逐行一条用例）；
+//! 新加一处行外读取，就在这张表加一行、在那里加一条用例：
+//!
+//! | 读的什么 | 用在哪 | 标脏方 |
+//! | --- | --- | --- |
+//! | 连接状态（`commands_enabled`） | 审批、亲手执行、继续卡片的按钮 | `Store::set_connection` |
+//! | 回合状态与原因（`tl.turns`） | 消息表情、失败说明行 | 时间线 `TurnStateChanged` / `TurnFinished`（`messages_of_turn`） |
+//! | 同回合消息的 status（`has_failed_message`） | 回合结束行要不要说原因 | 时间线 `MessageCompleted`（`end:<turn_id>`） |
+//! | 对话是否在删除中（`tl.conversation.state`） | 亲手执行卡片的说明 | 时间线 `ConversationDeleting`（全部亲手执行卡片行） |
+//! | 助手表（`avatar`） | 消息头像 | `Store` 应用 `ListAssistants`（内容变了才标） |
+//! | 项目表（`project_name`） | 分隔线、当次说明 | `Store` 应用 `ListProjects`（内容变了才标） |
+//! | 附件表（`tl.attachments`） | 消息的附件 | 时间线 `AttachmentStored` / `AttachmentConfirmed` |
+//! | 流式正文、工具输出（`tl.text`） | 各自本行 | 增量事件本身（追加或整行） |
 
 use iwork_proto::pb;
 use pb::row_view::Row as V;
