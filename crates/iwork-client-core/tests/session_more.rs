@@ -36,6 +36,7 @@ async fn connect(d: &FakeDaemon, cap: usize) -> (App, Web) {
         Options {
             chunk_max: 4096,
             timeline_cap: cap,
+            ..Options::default()
         },
     );
     std::mem::forget(effects);
@@ -444,6 +445,117 @@ fn every_query_purpose_has_a_disconnect_case() {
         assert!(
             src.contains(&format!("async fn {name}")),
             "用途 {p:?} 的用例 {name} 不存在"
+        );
+    }
+}
+
+/// 奇数次读钟时「超前」20ms、偶数次是真实时间的时钟。一轮循环里若读两次钟（service 一次、登记截止时间
+/// 一次），第二次必然越过一个 16ms 的帧间隔：帧的截止时间正好落在两次读钟之间（审查 2/F-1 的确定复现）。
+/// 一轮只读一次钟时，同一轮里判断与登记用的是同一个时刻，跨轮的来回跳只会让等待略长或略短。
+fn skewed_clock() -> iwork_client_core::Clock {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let calls = Arc::new(AtomicU64::new(0));
+    Arc::new(move || {
+        let n = calls.fetch_add(1, Ordering::SeqCst);
+        tokio::time::Instant::now() + Duration::from_millis(if n % 2 == 1 { 20 } else { 0 })
+    })
+}
+
+struct Never;
+impl Dialer for Never {
+    async fn dial(&mut self) -> Result<(Client, Incoming), DialError> {
+        std::future::pending().await
+    }
+}
+
+/// 2/F-1：帧的截止时间落在两次读钟之间时也不漏登，取帧不会挂住。
+#[tokio::test(flavor = "multi_thread")]
+async fn frame_due_between_clock_reads_is_not_lost() {
+    let (app, effects) = App::start(
+        Never,
+        Options {
+            clock: skewed_clock(),
+            ..Options::default()
+        },
+    );
+    std::mem::forget(effects);
+    let mut web = Web::new(app.attach().await.unwrap());
+    for i in 0..10 {
+        let c = timeout(Duration::from_secs(3), app.next_frame(web.request()))
+            .await
+            .unwrap_or_else(|_| panic!("第 {i} 帧挂住了"))
+            .unwrap();
+        web.accept(&c);
+        // 让下一帧有脏键：换一下可见视图。
+        intent(&app, visible(None, i % 2 == 0)).await;
+    }
+}
+
+/// 2/F-2：列表页那条（属于摘要轮的）查询一直出错，摘要重查照常走下一轮：新对话仍能进侧栏。
+#[tokio::test(flavor = "multi_thread")]
+async fn failing_list_query_does_not_stall_summary() {
+    let (d, _dir) = daemon(&["conversation-basic"]).await;
+    d.fail_queries(Some(Box::new(|q: &pb::Query| {
+        matches!(&q.kind, Some(pb::query::Kind::ListConversations(l)) if l.title_contains.as_deref() == Some("坏"))
+    })));
+    let (app, mut web) = connect(&d, 5000).await;
+    intent(
+        &app,
+        I::SetVisible(pb::SetVisible {
+            sidebar: true,
+            conversation_list: Some(pb::ConversationListQuery {
+                project_id: scenario::PROJECT.into(),
+                filter: "坏".into(),
+            }),
+            ..Default::default()
+        }),
+    )
+    .await;
+    settle(&app, &mut web).await;
+    for i in 0..3 {
+        let id = format!("c-new-{i}");
+        d.append(f::project_conversation(&id, scenario::PROJECT));
+        until(&app, &mut web, &format!("{id} 进侧栏"), |s| {
+            s.sidebar.as_ref().is_some_and(|v| {
+                v.projects
+                    .iter()
+                    .flat_map(|p| &p.recent)
+                    .any(|c| c.conversation_id == id)
+            })
+        })
+        .await;
+    }
+}
+
+/// 2/F-3：断线造成的查询失败不算失败：重连后没有「数据没取到」的提示。
+#[tokio::test(flavor = "multi_thread")]
+async fn queries_cut_by_disconnect_are_not_failures() {
+    let (d, _dir) = daemon(&["conversation-basic", "approval-states"]).await;
+    let (app, mut web) = connect(&d, 5000).await;
+    until(&app, &mut web, "连上", live).await;
+    for _ in 0..3 {
+        intent(
+            &app,
+            I::SetVisible(pb::SetVisible {
+                sidebar: true,
+                settings: true,
+                conversation_list: Some(pb::ConversationListQuery {
+                    project_id: scenario::PROJECT.into(),
+                    filter: String::new(),
+                }),
+                ..Default::default()
+            }),
+        )
+        .await;
+        d.disconnect_all().await;
+        settle(&app, &mut web).await;
+        assert_eq!(
+            web.state
+                .connection
+                .as_ref()
+                .and_then(|c| c.query_notice.clone()),
+            None
         );
     }
 }

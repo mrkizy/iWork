@@ -151,6 +151,16 @@ pub struct Session<D: Dialer> {
     conn_epoch: u64,
     /// 视图查询失败后的退避，按用途种类（审查 1/F-5）。
     query_backoff: HashMap<&'static str, (Instant, Backoff)>,
+    /// 时钟（方案 2.4 第 10 条：注入）。一轮循环只读一次，service 与 next_deadline 用同一个时刻（审查 2/F-1）。
+    clock: Clock,
+}
+
+/// 会话用的时钟。
+pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// 默认时钟：tokio 的时间（测试里可暂停）。
+pub fn tokio_clock() -> Clock {
+    Arc::new(Instant::now)
 }
 
 /// 常驻范围（方案 2.3）。
@@ -167,6 +177,7 @@ impl<D: Dialer> Session<D> {
         dialer: D,
         chunk_max: usize,
         timeline_cap: usize,
+        clock: Clock,
         effects: mpsc::UnboundedSender<Effect>,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::unbounded_channel();
@@ -204,6 +215,7 @@ impl<D: Dialer> Session<D> {
             stats_tx: None,
             conn_epoch: 0,
             query_backoff: HashMap::new(),
+            clock,
         }
     }
 
@@ -216,8 +228,11 @@ impl<D: Dialer> Session<D> {
     pub async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Request>) {
         loop {
             self.stats.loop_turns += 1;
-            self.service();
-            let deadline = self.next_deadline();
+            // 一轮只读一次时钟：service 判「还没到」与 next_deadline 登记截止时间用的必须是同一个时刻，
+            // 否则两次读钟之间过去的那个截止时间会被漏登，主循环睡到别的事件来（审查 2/F-1）。
+            let now = self.now();
+            self.service(now);
+            let deadline = self.next_deadline(now);
             tokio::select! {
                 req = rx.recv() => match req {
                     Some(r) => self.on_request(r),
@@ -234,8 +249,8 @@ impl<D: Dialer> Session<D> {
         }
     }
 
-    fn now() -> Instant {
-        Instant::now()
+    fn now(&self) -> Instant {
+        (self.clock)()
     }
 
     fn ctx() -> Ctx {
@@ -250,13 +265,12 @@ impl<D: Dialer> Session<D> {
 
     // ---------- 定时 ----------
 
-    /// 下一次要醒的时刻：只登记「到时真有事要做」的截止时间，而且只收将来的时刻——已经过去的说明
-    /// service 刚处理过或用不着处理，再登记就会让 sleep 立刻返回、主循环空转（审查 1/F-1）。
-    fn next_deadline(&self) -> Option<Instant> {
-        let now = Self::now();
+    /// 下一次要醒的时刻。只登记「到时真有事要做」的截止时间（审查 1/F-1）；登记了的不论过没过都收
+    /// （过了的下一轮立即处理，审查 2/F-1）。`now` 与这一轮 service 用的是同一个时刻。
+    fn next_deadline(&self, now: Instant) -> Option<Instant> {
         let mut d: Option<Instant> = None;
         let mut take = |t: Option<Instant>| {
-            if let Some(t) = t.filter(|t| *t > now) {
+            if let Some(t) = t {
                 d = Some(d.map_or(t, |x| x.min(t)));
             }
         };
@@ -275,8 +289,10 @@ impl<D: Dialer> Session<D> {
                 (None, Some(_)) => None,
             });
             take(self.mark_read_due());
+            // 退避到期只表示「可以再发」，要不要发由 service 用同一个 now 判过了；没发就是用不着，
+            // 只登记还没到期的，免得过期的退避项让主循环空转。
             for (until, _) in self.query_backoff.values() {
-                take(Some(*until));
+                take(Some(*until).filter(|t| *t > now));
             }
         }
         d
@@ -291,8 +307,7 @@ impl<D: Dialer> Session<D> {
     }
 
     /// 每轮循环之后：该拨就拨、该查就查、取帧的等到了就交。
-    fn service(&mut self) {
-        let now = Self::now();
+    fn service(&mut self, now: Instant) {
         if self.client.is_none()
             && self.dial_task.is_none()
             && self.retry_at.is_some_and(|t| t <= now)
@@ -520,7 +535,7 @@ impl<D: Dialer> Session<D> {
             Local::Retry => {
                 // 拨号器不在（拨号任务异常结束带走了它）时点重试没有用，也不登记截止时间（审查 1/F-1）。
                 if self.client.is_none() && self.dialer.is_some() {
-                    self.retry_at = Some(Self::now());
+                    self.retry_at = Some(self.now());
                 }
             }
         }
@@ -726,13 +741,19 @@ impl<D: Dialer> Session<D> {
                 }
                 if let Some(p) = self.queries.remove(&request_id) {
                     tracing::warn!(target: "iwork_client", request_id, purpose = ?p, "视图查询失败，退避后重发");
-                    if matches!(p, QueryPurpose::Summary { .. }) {
+                    // 属于某一轮摘要重查的查询（四张表与列表页那一条）失败：这一轮作废，标记还在，整轮重发
+                    // （审查 2/F-2：列表那一条原来不走这一支，这一轮永远走不完、摘要从此停更）。
+                    if matches!(
+                        p,
+                        QueryPurpose::Summary { .. }
+                            | QueryPurpose::ConversationList { round: Some(_), .. }
+                    ) {
                         self.store.refresh.abandon_round();
                     }
                     if matches!(p, QueryPurpose::OlderPage { .. }) {
                         self.want_older = false;
                     }
-                    let now = Self::now();
+                    let now = self.now();
                     let entry = self
                         .query_backoff
                         .entry(purpose_kind(&p))
@@ -743,8 +764,12 @@ impl<D: Dialer> Session<D> {
             }
             Internal::SubscribeFailed { epoch, id, error } => {
                 if epoch == self.conn_epoch && self.client.is_some() {
-                    tracing::warn!(target: "iwork_client", id, error, "订阅失败，这条连接按失败处理");
-                    self.on_closed("订阅失败");
+                    tracing::warn!(target: "iwork_client", id, error, "订阅被拒，这条连接按失败处理，退避后重连");
+                    // 不按「同游标被关」计数：那会在第三次显示「后台负载过高」，和真实原因（订阅被拒）对不上。
+                    self.drop_connection("订阅被拒");
+                    self.store.connection_closed();
+                    self.store.set_connection(Connection::Reconnecting);
+                    self.retry_at = Some(self.now() + self.backoff.next_delay());
                 }
             }
         }
@@ -763,11 +788,15 @@ impl<D: Dialer> Session<D> {
                 let tx = self.internal_tx.clone();
                 let epoch = self.conn_epoch;
                 tokio::spawn(async move {
-                    if !matches!(rx.await, Ok(Ok(()))) {
-                        let _ = tx.send(Internal::QueryFailed {
-                            epoch,
-                            request_id: id,
-                        });
+                    match rx.await {
+                        // 断线造成的失败不算查询失败：在飞表随连接关闭整张清空，不进退避与界面提示（审查 2/F-3）。
+                        Ok(Ok(())) | Ok(Err(ClientError::Closed)) | Err(_) => {}
+                        Ok(Err(_)) => {
+                            let _ = tx.send(Internal::QueryFailed {
+                                epoch,
+                                request_id: id,
+                            });
+                        }
                     }
                 });
             }
@@ -781,7 +810,7 @@ impl<D: Dialer> Session<D> {
 
     /// 在飞视图查询登记表（方案 2.3）：每种用途的「还要再发」都从状态里算，不留「已经发过」的记号。
     fn wanted_queries(&mut self) {
-        let now = Self::now();
+        let now = self.now();
         use pb::query::Kind as Q;
         let mut want: Vec<(pb::Query, QueryPurpose)> = Vec::new();
         if let Some(tl) = &self.store.open {
@@ -993,7 +1022,7 @@ impl<D: Dialer> Session<D> {
                 tracing::info!(target: "iwork_client", error = ?e, "连不上后台服务");
                 self.store.set_connection(view);
                 self.retry_at = match retry {
-                    Retry::Backoff => Some(Self::now() + self.backoff.next_delay()),
+                    Retry::Backoff => Some(self.now() + self.backoff.next_delay()),
                     Retry::Manual => None,
                 };
             }
@@ -1032,10 +1061,7 @@ impl<D: Dialer> Session<D> {
     }
 
     fn on_closed(&mut self, why: &str) {
-        tracing::info!(target: "iwork_client", why, "与后台服务的连接断了");
-        self.client = None;
-        self.incoming = None;
-        self.queries.clear();
+        self.drop_connection(why);
         self.reconnect.on_closed(self.store.cursor());
         self.store.connection_closed();
         self.store.set_overloaded(self.reconnect.overloaded());
@@ -1043,12 +1069,23 @@ impl<D: Dialer> Session<D> {
         // 第一次掉线立即重拨；同一游标又被关（续传没送出任何东西就断，多半是后台过载）就按退避来，
         // 退避只在应用了带 seq 的项（真有进展）时复位（审查 1/F-4）。
         self.retry_at = Some(
-            Self::now()
+            self.now()
                 + reconnect::close_retry_delay(
                     self.reconnect.same_cursor_closes(),
                     &mut self.backoff,
                 ),
         );
+    }
+
+    /// 丢掉这条连接与它的在飞状态（断线、订阅被拒共用）。
+    fn drop_connection(&mut self, why: &str) {
+        tracing::info!(target: "iwork_client", why, "与后台服务的连接断了");
+        self.client = None;
+        self.incoming = None;
+        self.queries.clear();
+        // 查询退避属于出错的那条连接：新连接从头来（审查 2/F-3）。
+        self.query_backoff.clear();
+        self.store.set_query_failing(false);
     }
 
     fn on_incoming(&mut self, item: Option<IncomingItem>) {
@@ -1116,7 +1153,7 @@ impl<D: Dialer> Session<D> {
                     self.store.set_connection(Connection::Live);
                 }
                 FollowUp::Checkpoint { conversation_id } => {
-                    let now = Self::now();
+                    let now = self.now();
                     if self
                         .checkpoint_last
                         .get(&conversation_id)

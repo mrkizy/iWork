@@ -213,6 +213,15 @@ impl Timeline {
         self.rows.len()
     }
 
+    /// 旁表的条目数：(回合, 附件, 工具调用索引)。截断时它们要跟着变小（内存上界）。
+    pub fn side_table_sizes(&self) -> (usize, usize, usize) {
+        (
+            self.turns.len(),
+            self.attachments.len(),
+            self.tool_by_call.len(),
+        )
+    }
+
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
@@ -271,10 +280,25 @@ impl Timeline {
 
     /// 按键去掉一行（截掉一端用），连同它的正文。
     fn remove_key(&mut self, key: RowKey) -> Option<String> {
-        self.rows.remove(&key)?;
+        let row = self.rows.remove(&key)?;
         let id = self.ids.remove(&key)?;
         self.by_id.remove(&id);
         self.text.remove(&id);
+        // 随行一起截掉的旁表（审查 2 附注）：截掉一端时它们不能留着无限长。
+        match &row {
+            Row::Tool(t) => {
+                self.tool_by_call.remove(&t.tool_call_id);
+            }
+            Row::Message(m) => {
+                for a in &m.attachment_ids {
+                    self.attachments.remove(a);
+                }
+            }
+            Row::TurnEnd(t) if !turn_is_active(t.state) => {
+                self.turns.remove(&t.id);
+            }
+            _ => {}
+        }
         Some(id)
     }
 

@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 pub use intent::Effect;
 pub use session::dial::{DialError, Dialer, DirectDialer};
-pub use session::{FrameError, Request, ShellEvent, Stats};
+pub use session::{Clock, FrameError, Request, ShellEvent, Stats, tokio_clock};
 
 /// 会话的句柄。克隆便宜；全部句柄丢掉后会话结束。
 #[derive(Clone)]
@@ -27,12 +27,23 @@ pub struct App {
     stats: watch::Receiver<Stats>,
 }
 
-/// 启动时的可调项（测试里调小分块上限，逼着每种 patch 都被切）。
-#[derive(Debug, Clone, Copy)]
+/// 启动时的可调项（测试里调小分块上限、时间线上限，注入时钟）。
+#[derive(Clone)]
 pub struct Options {
     pub chunk_max: usize,
     /// 时间线行数上限（测试里调小，逼出截断）。
     pub timeline_cap: usize,
+    /// 时钟（方案 2.4 第 10 条）；默认 tokio 时间。
+    pub clock: Clock,
+}
+
+impl std::fmt::Debug for Options {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Options")
+            .field("chunk_max", &self.chunk_max)
+            .field("timeline_cap", &self.timeline_cap)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for Options {
@@ -40,6 +51,7 @@ impl Default for Options {
         Self {
             chunk_max: frame::FRAME_CHUNK_MAX,
             timeline_cap: store::timeline::TIMELINE_CAP,
+            clock: tokio_clock(),
         }
     }
 }
@@ -50,8 +62,14 @@ impl App {
         let (tx, rx) = mpsc::unbounded_channel();
         let (effects_tx, effects_rx) = mpsc::unbounded_channel();
         let (stats_tx, stats_rx) = watch::channel(Stats::default());
-        let session = session::Session::new(dialer, opts.chunk_max, opts.timeline_cap, effects_tx)
-            .with_stats(stats_tx);
+        let session = session::Session::new(
+            dialer,
+            opts.chunk_max,
+            opts.timeline_cap,
+            opts.clock,
+            effects_tx,
+        )
+        .with_stats(stats_tx);
         tokio::spawn(session.run(rx));
         (
             App {

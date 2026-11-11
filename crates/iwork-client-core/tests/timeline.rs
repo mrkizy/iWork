@@ -468,3 +468,65 @@ fn snapshots_across_subscribed_clear_stale_only_without_events_between() {
         );
     }
 }
+
+/// 审查 2 附注：截掉一端时，回合、附件、工具调用索引这些旁表跟着变小，不随对话一直涨。
+#[test]
+fn trimming_also_trims_side_tables() {
+    use iwork_client_core::store::timeline::Timeline;
+    let mut s = store_with_open();
+    s.open = Some(Timeline::with_cap(CID, 20));
+    for i in 0..100u64 {
+        let seq = 10 + i * 5;
+        let turn = format!("t{i}");
+        s.apply(persisted(
+            seq,
+            &[CONV],
+            E::TurnQueued(pb::TurnQueued {
+                turn: Some(pb::Turn {
+                    id: turn.clone(),
+                    conversation_id: CID.into(),
+                    ..Default::default()
+                }),
+            }),
+        ));
+        s.apply(persisted(
+            seq + 1,
+            &[CONV],
+            E::ToolCallStarted(pb::ToolCallStarted {
+                turn_id: turn.clone(),
+                tool_call_id: format!("tc{i}"),
+                ..Default::default()
+            }),
+        ));
+        s.apply(persisted(
+            seq + 2,
+            &[CONV],
+            E::AttachmentStored(pb::AttachmentStored {
+                attachment: Some(pb::Attachment {
+                    id: format!("a{i}"),
+                    conversation_id: CID.into(),
+                    ..Default::default()
+                }),
+            }),
+        ));
+        let mut m = assistant_msg(&format!("m{i}"), 0, S::Completed, "x");
+        m.attachment_ids = vec![format!("a{i}")];
+        s.apply(persisted(seq + 3, &[CONV], appended(m)));
+        s.apply(persisted(
+            seq + 4,
+            &[CONV],
+            E::TurnFinished(pb::TurnFinished {
+                turn_id: turn,
+                state: pb::TurnState::Completed as i32,
+                ..Default::default()
+            }),
+        ));
+    }
+    let tl = s.open.as_ref().unwrap();
+    assert!(tl.len() <= 20);
+    let (turns, attachments, tools) = tl.side_table_sizes();
+    assert!(
+        turns <= 20 && attachments <= 20 && tools <= 20,
+        "旁表 {turns}/{attachments}/{tools} 没跟着截"
+    );
+}

@@ -32,7 +32,12 @@ struct Shared {
     /// 当前这一代服务端的发布端；重启（断开全部连接）时换新的。
     publisher: Mutex<Option<Publisher>>,
     auto_reply: AtomicBool,
+    /// 只给测试用：命中的查询一律回错误（模拟查询受理出错）。
+    failing_queries: Mutex<Option<QueryFilter>>,
 }
+
+/// 哪些查询要回错误。
+pub type QueryFilter = Box<dyn Fn(&pb::Query) -> bool + Send + Sync>;
 
 impl Shared {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -204,6 +209,22 @@ impl RequestHandler for Handler {
                 Ok(a) => Out::Accepted(a),
                 Err(e) => Out::Error(e),
             },
+            Some(Body::Query(q))
+                if self
+                    .0
+                    .failing_queries
+                    .lock()
+                    .expect("查询故障表锁中毒")
+                    .as_ref()
+                    .is_some_and(|f| f(&q)) =>
+            {
+                Out::Error(pb::Error {
+                    code: pb::ErrorCode::Internal.into(),
+                    message: "假后台：按测试设定让这条查询出错".into(),
+                    retryable: true,
+                    details: Default::default(),
+                })
+            }
             Some(Body::Query(q)) => {
                 let st = self.0.lock();
                 match st.tables.query(st.head(), &q) {
@@ -312,6 +333,7 @@ impl FakeDaemon {
             state: Mutex::new(State::default()),
             publisher: Mutex::new(None),
             auto_reply: AtomicBool::new(false),
+            failing_queries: Mutex::new(None),
         });
         let running = spawn_server(&shared, &socket_path, own.clone(), NORMAL_TRUST)?;
         Ok(FakeDaemon {
@@ -355,6 +377,15 @@ impl FakeDaemon {
     /// 只给测试场景用：直接改折叠表（不产生事件）。
     pub fn mutate_tables(&self, f: impl FnOnce(&mut Tables)) {
         f(&mut self.shared.lock().tables);
+    }
+
+    /// 只给测试用：之后命中 `f` 的查询一律回 INTERNAL 错误；`None` 恢复正常。
+    pub fn fail_queries(&self, f: Option<QueryFilter>) {
+        *self
+            .shared
+            .failing_queries
+            .lock()
+            .expect("查询故障表锁中毒") = f;
     }
 
     /// SendMessage 之后要不要自动回一个脚本化回合（默认关）。
