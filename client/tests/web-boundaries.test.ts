@@ -1,7 +1,8 @@
 // 网页层的边界（T09 方案 2.4 第 7 条、2.5、第 7 节配置检查）：
 // - Tauri 的 invoke 只在 src/bridge/call.ts 里出现，且只传命令与载荷两个参数（不带选项、不带自定义头）；
 // - 开发服务器能读的目录只比默认多了设计系统一个；
-// - 发布构建的入口只有 index.html（录像播放页只在开发服务器上）。
+// - 发布构建的入口只有 index.html（录像播放页只在开发服务器上）；
+// - 按 HTML 插入内容只有 ui/Avatar.tsx 一处（内联设计系统自带的形象 SVG，不是来自协议的内容）。
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -36,6 +37,25 @@ describe("Tauri invoke 只有一个出口", () => {
   it("出口只传命令与载荷，不传选项", () => {
     const calls = readFileSync(`${SRC_DIR}${CALL_FILE}`, "utf8").match(/invoke\(([^)]*)\)/g) ?? [];
     expect(calls).toEqual(["invoke(command, body)"]);
+  });
+});
+
+// 写法：JSX 属性 innerHTML={...}、赋值 .innerHTML = / outerHTML、insertAdjacentHTML。注释里提到这个词不算。
+const HTML_SINK = /\binnerHTML\s*=|\bouterHTML\s*=|insertAdjacentHTML\s*\(/;
+const HTML_SINK_ALLOWED = "ui/Avatar.tsx";
+
+describe("按 HTML 插入内容只有一处", () => {
+  it("只有 ui/Avatar.tsx 用 innerHTML", () => {
+    const files = sourceFiles(SRC_DIR).filter((f) => !/\.test\.tsx?$/.test(f));
+    const offenders = files.filter((f) => HTML_SINK.test(readFileSync(`${SRC_DIR}${f}`, "utf8")));
+    expect(offenders).toEqual([HTML_SINK_ALLOWED]);
+  });
+
+  it("对照：正则认得出三种写法，不认注释里的词", () => {
+    for (const code of ["<span innerHTML={x} />", "el.innerHTML = s", "el.outerHTML=s", "el.insertAdjacentHTML('beforeend', s)"]) {
+      expect(code).toMatch(HTML_SINK);
+    }
+    expect("// 不用 innerHTML；").not.toMatch(HTML_SINK);
   });
 });
 
