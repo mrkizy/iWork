@@ -93,5 +93,5 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 
 ## 语言与风格
 
-- 文档、提交说明、任务汇报用中文；代码标识符、日志字段、协议字段用英文。
+- 文档、任务汇报用中文；git 提交信息（标题与正文）用英文（产品负责人 2026-11-11 定）；代码标识符、日志字段、协议字段用英文。
 - 错误不得静默吞掉；对外错误统一 `{code, message, retryable, details}`，错误码定义在 Protobuf 里。
