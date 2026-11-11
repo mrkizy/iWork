@@ -178,10 +178,13 @@ fn kill9_recovers_seeded_state() {
     a.kill9();
     let mut b = sb.spawn(&[], &[]);
     sb.wait_ready(b.pid(), START);
-    // 投递任务对账：T04 的去向登记表是空的，`dispatched` 的那条不能重投、`queued` 的没人认领，都标失败
-    // （大声报错，不悄悄留着）。恢复提交本身不碰 outbox（见 unknown_event_kind_with_unsettled_objects_writes_nothing）
+    // 投递任务：T04 的去向登记表是空的。`queued` 的三条没人认领，原样留着、只报 error（1/F-4）；
+    // 停在 `dispatched` 的那条按现行对账接口（重投清单以外一律标失败）变 failed——这一行待主管定（见回报）。
+    // 恢复提交本身不碰 outbox（见 unknown_event_kind_with_unsettled_objects_writes_nothing）
+    let want = ["failed", "queued", "queued", "queued"];
     let deadline = std::time::Instant::now() + START;
-    while outbox_states(&sb) != ["failed"; 4] {
+    while outbox_states(&sb) != want || !crate::support::log_text(&sb).contains("没有登记去向")
+    {
         assert!(
             std::time::Instant::now() < deadline,
             "{:?}",
@@ -193,7 +196,7 @@ fn kill9_recovers_seeded_state() {
     assert_eq!(code(b.wait_exit(START)), Some(0), "{}", b.stderr());
 
     assert_recovered(&sb, seeded);
-    assert_eq!(outbox_states(&sb), ["failed"; 4]);
+    assert_eq!(outbox_states(&sb), want);
 }
 
 /// S4：恢复提交前被杀 → 什么都没变；提交后被杀 → 恰好一次；再起不重复。

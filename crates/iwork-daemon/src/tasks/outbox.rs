@@ -3,8 +3,10 @@
 //! - 去向登记表：每个去向一行（前缀、结果不确定时怎么办、单次时限、次数上限、投递实现）。加一种去向 = 加一行。
 //!   T04 交付时登记表是空的，T10 登记真实去向。
 //! - 每次启动先对账：停在 `Dispatched` 的条目，能幂等的改回 `Queued`、不能的标 `Failed`（只重启这个任务时也走这里）。
-//! - 每个去向一条道，互不等待；没有去向认领的条目也有一条自己的道（取一批标一批 `Failed`）。每条道都「取到取不到为止」，
-//!   之后才等下一次叫醒（提交观察者在有新 outbox 条目时叫醒）。不轮询。
+//! - 每个去向一条道，互不等待；每条道都「取到取不到为止」，之后才等下一次叫醒（提交观察者在有新 outbox 条目时叫醒）。
+//!   不轮询。超时、panic 后改回排队的那条先于同去向后面的条目再投（保序）。
+//! - 没有去向认领的条目原样留在 `queued`，只报不动（产品负责人 2026-11-11 定，审查 1/F-4）：不标失败、不加次数、
+//!   不派发，装回认识这个去向的版本后照常按先后投出。启动时查一次、之后每次叫醒查一次，只报新出现的。
 //! - 「结果不确定」只有一个处理函数 [`settle_uncertain`]：上一次投递没了（启动对账）、单次超时、投递自己 panic 都走它。
 
 use std::future::Future;
@@ -118,8 +120,12 @@ pub async fn settle_uncertain<St: StoragePort>(
 }
 
 /// 任务体。被监督器重启时从头来：先对账，再按登记表起各条道。
-pub async fn run<St>(store: Arc<St>, routes: Arc<Vec<OutboxRoute>>, wake: watch::Sender<u64>)
-where
+pub async fn run<St>(
+    store: Arc<St>,
+    routes: Arc<Vec<OutboxRoute>>,
+    wake: watch::Sender<u64>,
+    report: UnclaimedSink,
+) where
     St: StoragePort + Send + Sync + 'static,
 {
     let redeliver: Vec<String> = routes
@@ -151,6 +157,7 @@ where
         store.clone(),
         routes.clone(),
         wake.subscribe(),
+        report,
     ));
     // 道不该结束；一条道 panic 让整个任务 panic，由监督器重启（丢弃 JoinSet 会取消其余的道）
     if let Some(Err(e)) = lanes.join_next().await
@@ -270,37 +277,77 @@ async fn after_uncertain<St: StoragePort>(
     }
 }
 
-/// 没有去向认领的条目：在存储里筛「不属于任何已登记前缀」的，取一批标一批 `Failed`，取到取不到为止。
+/// 一次「没有去向认领」的报告：新出现的条目，按 target 计数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unclaimed {
+    /// (target, 条数)，按 target 排序。
+    pub targets: Vec<(String, usize)>,
+    pub total: usize,
+}
+
+/// 报告的去处。生产用 [`log_unclaimed`]（一条 `error` 日志）；测试换成记录器。
+pub type UnclaimedSink = Arc<dyn Fn(&Unclaimed) + Send + Sync>;
+
+/// 把报告记成一条 `error` 日志，点名各 target 与条数。
+pub fn log_unclaimed() -> UnclaimedSink {
+    Arc::new(|u: &Unclaimed| {
+        let targets = u
+            .targets
+            .iter()
+            .map(|(t, n)| format!("{t}×{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        tracing::error!(
+            total = u.total,
+            %targets,
+            "outbox 有没有登记去向的条目，原样留在 queued（装回认识这个去向的版本后会照常投出）"
+        );
+    })
+}
+
+/// 一次最多看这么多条没人认领的（都不动，取不到后面的；超出的部分下次条目减少后才看得到）。
+const UNCLAIMED_SCAN: usize = 10_000;
+
+/// 纯函数：这次查到的条目里，上次没报过的那些。
+pub fn new_unclaimed(
+    seen: &std::collections::BTreeSet<u64>,
+    items: &[OutboxItem],
+) -> Option<Unclaimed> {
+    let mut by_target: std::collections::BTreeMap<String, usize> = Default::default();
+    for item in items.iter().filter(|i| !seen.contains(&i.id.0)) {
+        *by_target.entry(item.target.0.clone()).or_default() += 1;
+    }
+    let total = by_target.values().sum();
+    (total > 0).then(|| Unclaimed {
+        targets: by_target.into_iter().collect(),
+        total,
+    })
+}
+
+/// 没有去向认领的条目：在存储里筛「不属于任何已登记前缀」的，只报不动。
+/// 取到的都留在 `queued`，所以不能「取到取不到为止」：启动时查一次，之后每次叫醒查一次。
 async fn unclaimed_lane<St: StoragePort>(
     store: Arc<St>,
     routes: Arc<Vec<OutboxRoute>>,
     mut wake: watch::Receiver<u64>,
+    report: UnclaimedSink,
 ) {
     let prefixes: Vec<String> = routes.iter().map(|r| r.prefix.to_owned()).collect();
+    // 上次查到的条目 id：这次只报新出现的，同一批不反复刷屏
+    let mut seen = std::collections::BTreeSet::new();
     loop {
         wake.mark_unchanged();
-        loop {
-            let items = match store
-                .outbox_pending_where(OutboxSelector::NoneOf(prefixes.clone()), UNCLAIMED_PAGE)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(error = %e, "取无人认领的 outbox 条目失败，稍后再试");
-                    tokio::time::sleep(FIRST_BACKOFF).await;
-                    continue;
+        match store
+            .outbox_pending_where(OutboxSelector::NoneOf(prefixes.clone()), UNCLAIMED_SCAN)
+            .await
+        {
+            Ok(items) => {
+                if let Some(u) = new_unclaimed(&seen, &items) {
+                    report(&u);
                 }
-            };
-            if items.is_empty() {
-                break;
+                seen = items.iter().map(|i| i.id.0).collect();
             }
-            for item in items {
-                tracing::error!(id = item.id.0, target = %item.target.0, "outbox 条目没有登记的去向，标为失败");
-                if let Err(e) = store.outbox_mark(item.id, DeliveryState::Failed).await {
-                    tracing::error!(id = item.id.0, error = %e, "标 outbox 失败出错");
-                    tokio::time::sleep(FIRST_BACKOFF).await;
-                }
-            }
+            Err(e) => tracing::warn!(error = %e, "查无人认领的 outbox 条目失败，下次叫醒再查"),
         }
         if wake.changed().await.is_err() {
             return std::future::pending().await;
@@ -384,6 +431,8 @@ mod tests {
         store: Arc<Store>,
         wake: watch::Sender<u64>,
         next_cmd: AtomicUsize,
+        /// 无人认领的报告
+        reports: Arc<Mutex<Vec<Unclaimed>>>,
     }
 
     type Store = iwork_store::SqliteStore<iwork_app::codec::ProtoEventCodec>;
@@ -397,6 +446,7 @@ mod tests {
                 store,
                 wake: watch::Sender::new(0),
                 next_cmd: AtomicUsize::new(100),
+                reports: Arc::default(),
             }
         }
 
@@ -416,6 +466,19 @@ mod tests {
             );
             req.outbox = targets.iter().map(|t| outbox(t, b"p")).collect();
             self.store.commit(req).await.unwrap();
+        }
+
+        fn reports(&self) -> Vec<Unclaimed> {
+            self.reports.lock().unwrap().clone()
+        }
+
+        fn ids(&self) -> Vec<u64> {
+            let conn = rusqlite::Connection::open(self.env.db()).unwrap();
+            let mut st = conn.prepare("SELECT id FROM outbox ORDER BY id").unwrap();
+            st.query_map([], |r| r.get::<_, i64>(0).map(|v| v as u64))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
         }
 
         fn wake(&self) {
@@ -442,7 +505,13 @@ mod tests {
 
         fn start(&self, routes: Vec<OutboxRoute>) -> tokio::task::JoinHandle<()> {
             validate(&routes).unwrap();
-            tokio::spawn(run(self.store.clone(), Arc::new(routes), self.wake.clone()))
+            let reports = self.reports.clone();
+            tokio::spawn(run(
+                self.store.clone(),
+                Arc::new(routes),
+                self.wake.clone(),
+                Arc::new(move |u: &Unclaimed| reports.lock().unwrap().push(u.clone())),
+            ))
         }
 
         async fn until(&self, what: &str, limit: Duration, f: impl Fn(&Self) -> bool) {
@@ -481,39 +550,76 @@ mod tests {
         assert!(validate(&[route("", OnUncertain::Fail, Mode::Ok, &s)]).is_err());
     }
 
+    /// 1/F-4：没有登记去向的条目原样留在 `queued`（不标失败、不加次数、不派发），点名报一次。
     #[tokio::test(flavor = "multi_thread")]
-    async fn unclaimed_target_is_failed_loudly() {
+    async fn unclaimed_target_is_reported_and_kept() {
         let w = World::new();
         let s = seen();
         let _t = w.start(vec![route("a:", OnUncertain::Redeliver, Mode::Ok, &s)]);
+        tokio::time::sleep(Duration::from_millis(50)).await;
         w.add(&["nobody:1"]).await;
         w.wake();
-        w.until("无人认领的标失败", Duration::from_secs(5), |w| {
-            w.count("nobody:", "failed") == 1
+        w.until("报出来", Duration::from_secs(5), |w| {
+            w.reports().len() == 1
         })
         .await;
+        assert_eq!(
+            w.reports()[0],
+            Unclaimed {
+                targets: vec![("nobody:1".into(), 1)],
+                total: 1
+            }
+        );
+        assert_eq!(
+            w.states(),
+            [("nobody:1".to_string(), "queued".to_string(), 0)]
+        );
         assert!(s.lock().unwrap().is_empty(), "没投给任何去向");
     }
 
-    /// S17a：一次提交 65 条无人认领、只叫醒一次 → 全部失败（不止前 64 条）。
+    /// S17a（1/F-4 改）：一次提交 65 条未知去向 → 全部仍是 `queued`、次数不变，一条报告点名全部；
+    /// 再叫醒不重复报；之后新来的只报新的那条。
     #[tokio::test(flavor = "multi_thread")]
-    async fn unclaimed_65_in_one_wake_all_failed() {
+    async fn unclaimed_65_kept_and_reported_once() {
         let w = World::new();
         let _t = w.start(vec![]);
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let targets: Vec<String> = (0..65).map(|i| format!("nobody:{i}")).collect();
+        let targets: Vec<String> = (0..65).map(|i| format!("nobody:{}", i % 5)).collect();
         let refs: Vec<&str> = targets.iter().map(String::as_str).collect();
         w.add(&refs).await;
         w.wake();
-        w.until("65 条全部失败", Duration::from_secs(5), |w| {
-            w.count("nobody:", "failed") == 65
+        w.until("报出来", Duration::from_secs(5), |w| {
+            !w.reports().is_empty()
         })
         .await;
+        let r = &w.reports()[0];
+        assert_eq!(r.total, 65);
+        assert_eq!(
+            r.targets,
+            (0..5)
+                .map(|i| (format!("nobody:{i}"), 13))
+                .collect::<Vec<_>>()
+        );
+        for _ in 0..3 {
+            w.wake();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(w.reports().len(), 1, "同一批不反复报");
+        assert_eq!(w.count("nobody:", "queued"), 65);
+        assert!(w.states().iter().all(|(_, _, n)| *n == 0), "次数不变");
+        w.add(&["later:1"]).await;
+        w.wake();
+        w.until("新来的报出来", Duration::from_secs(5), |w| {
+            w.reports().len() == 2
+        })
+        .await;
+        assert_eq!(w.reports()[1].targets, [("later:1".to_string(), 1)]);
     }
 
-    /// S17a：一条无人认领的排在 100 条某去向的条目后面（那条道卡在第一条上）→ 一次叫醒内变失败。
+    /// S17a（1/F-4 改）：一条无人认领的排在 100 条某去向的条目后面（那条道卡在第一条上）→ 启动时就报出，
+    /// 前面 100 条不受影响。
     #[tokio::test(flavor = "multi_thread")]
-    async fn unclaimed_behind_claimed_is_found() {
+    async fn unclaimed_behind_claimed_is_reported() {
         let w = World::new();
         let s = seen();
         let mut hung = route("a:", OnUncertain::Redeliver, Mode::Hang, &s);
@@ -523,12 +629,66 @@ mod tests {
         w.add(&refs).await;
         w.add(&["nobody:x"]).await;
         let _t = w.start(vec![hung]);
-        w.until("无人认领的那条失败", Duration::from_secs(5), |w| {
-            w.count("nobody:", "failed") == 1
+        w.until("那 1 条报出来", Duration::from_secs(5), |w| {
+            w.reports().len() == 1
+        })
+        .await;
+        assert_eq!(w.reports()[0].targets, [("nobody:x".to_string(), 1)]);
+        assert_eq!(w.count("nobody:", "queued"), 1);
+        w.until("道卡在第一条上", Duration::from_secs(5), |w| {
+            w.count("a:", "dispatched") == 1
         })
         .await;
         assert_eq!(w.count("a:", "queued"), 99);
-        assert_eq!(w.count("a:", "dispatched"), 1, "道卡在第一条上");
+    }
+
+    /// S17a（1/F-4 改）：登记表为空时写下的条目，换成登记了这个去向的配置启动后，按先后全部送达（装回新版补投）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unclaimed_delivered_after_route_is_registered() {
+        let w = World::new();
+        w.add(&["a:1", "a:2", "a:3"]).await;
+        let old = w.start(vec![]);
+        w.until("报出来", Duration::from_secs(5), |w| {
+            w.reports().len() == 1
+        })
+        .await;
+        old.abort();
+        let _ = old.await;
+        assert_eq!(w.count("a:", "queued"), 3);
+        let s = seen();
+        let _new = w.start(vec![route("a:", OnUncertain::Redeliver, Mode::Ok, &s)]);
+        w.until("全部送达", Duration::from_secs(5), |w| {
+            w.count("a:", "accepted_by_runtime") == 3
+        })
+        .await;
+        assert_eq!(*s.lock().unwrap(), w.ids(), "按先后");
+    }
+
+    #[test]
+    fn new_unclaimed_reports_only_new_items() {
+        let item = |id: u64, t: &str| OutboxItem {
+            id: iwork_ports::store::OutboxId(id),
+            target: iwork_ports::store::OutboxTarget(t.into()),
+            payload: vec![],
+            state: DeliveryState::Queued,
+            attempts: 0,
+        };
+        let items = [item(1, "x"), item(2, "y"), item(3, "x")];
+        let none = std::collections::BTreeSet::new();
+        assert_eq!(
+            new_unclaimed(&none, &items),
+            Some(Unclaimed {
+                targets: vec![("x".into(), 2), ("y".into(), 1)],
+                total: 3
+            })
+        );
+        let seen: std::collections::BTreeSet<u64> = [1, 2, 3].into();
+        assert_eq!(new_unclaimed(&seen, &items), None);
+        let seen: std::collections::BTreeSet<u64> = [1, 2].into();
+        assert_eq!(
+            new_unclaimed(&seen, &items).unwrap().targets,
+            [("x".to_string(), 1)]
+        );
     }
 
     /// 某个去向一次来 40 条、只叫醒一次 → 全部送达（取到取不到为止，不止一页）。
@@ -709,7 +869,7 @@ mod tests {
             let mut sup = Supervisor::start(
                 vec![TaskSpec::restartable("outbox", move || {
                     st.fetch_add(1, Ordering::SeqCst);
-                    run(store.clone(), routes.clone(), wake.clone())
+                    run(store.clone(), routes.clone(), wake.clone(), log_unclaimed())
                 })],
                 RestartPolicy::default(),
             );

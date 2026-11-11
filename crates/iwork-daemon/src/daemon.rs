@@ -537,7 +537,14 @@ async fn serve_with<W: RunningWork>(
         }),
         TaskSpec::restartable("outbox", {
             let (store, routes, wake) = (store.clone(), routes.clone(), publishing.outbox.clone());
-            move || outbox::run(store.clone(), routes.clone(), wake.clone())
+            move || {
+                outbox::run(
+                    store.clone(),
+                    routes.clone(),
+                    wake.clone(),
+                    outbox::log_unclaimed(),
+                )
+            }
         }),
         TaskSpec::restartable("maintenance", {
             let (store, artifacts) = (store.clone(), artifacts.clone());
