@@ -144,7 +144,11 @@ describe.skipIf(noFixtures)("不可信内容（R7 的 DOM 一侧；真实 WebVie
     expect(root.querySelectorAll("script, iframe, object, embed").length).toBe(0);
     expect(root.querySelectorAll("[onerror], [onload], [onclick], [onmouseover]").length).toBe(0);
     expect(root.querySelectorAll("[href]").length, "正文里的链接都不带 href（任何元素）").toBe(0);
-    expect(root.querySelectorAll("img").length, "远程图片不加载").toBe(1); // 只有侧栏的 iWork 标志
+    // 页面上的图片只有随包带的 iWork 标志（侧栏品牌、iWork 的头像），正文里的远程图片不加载
+    const srcs = [...root.querySelectorAll("img")].map((i) => i.getAttribute("src") ?? "");
+    expect(srcs.length, "对照：确实有标志图").toBeGreaterThan(0);
+    expect(new Set(srcs).size, "远程图片不加载：全是同一张标志").toBe(1);
+    expect(srcs.filter((s) => s.includes("example.com")), "远程图片不加载").toEqual([]);
     // 对照：这些字符串确实被画出来了（当文字）
     expect(root.body.textContent).toContain("<script>alert(1)</script>");
   });

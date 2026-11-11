@@ -201,7 +201,7 @@ export function Sidebar(props: { router: Router }) {
         onClick={() => props.router.go({ page: "conversation", id: a().dmConversationId })}
         onContextMenu={(e) => openMenu(e, (at) => ({ kind: "assistant", assistant: a(), at }))}
       >
-        <Avatar avatar={a().avatar} expression={a().expression} size={32} interactive label={a().name} />
+        <Avatar avatar={a().avatar} size={32} interactive label={a().name} />
         <span class="iw-assistant__text">
           <span class="iw-assistant__name">
             {a().name}

@@ -276,6 +276,8 @@ pub struct Store {
     snapshot_tables: BTreeSet<SummaryTable>,
     /// 时间线行数上限。
     timeline_cap: usize,
+    /// 只给录像与预览：按助手 id 换形象（derive::avatar）。正式运行时为空。
+    pub character_overrides: crate::derive::avatar::CharacterOverrides,
     /// 有视图查询失败、在退避中：连接条上显示一行（审查 1/F-5）。
     pub query_failing: bool,
     pub dirty: DirtySet,

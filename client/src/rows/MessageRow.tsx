@@ -41,7 +41,7 @@ export function MessageRow(props: { row: Row }) {
           <Show when={!m().bubbleHidden}>
             <div class="iw-msg__head">
               <Show when={m().avatar}>
-                <Avatar avatar={m().avatar} expression={m().expression} size={22} interactive label={m().authorName} />
+                <Avatar avatar={m().avatar} size={22} interactive label={m().authorName} />
               </Show>
               <span>{m().authorName}</span>
               <Show when={m().statusLabel}>

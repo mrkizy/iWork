@@ -4,10 +4,8 @@ use std::collections::BTreeSet;
 
 use iwork_proto::pb;
 
-use super::{
-    Ctx, avatar, can_rename, conversation_title, expression_of_turn, pending_conversation, text,
-    to_system_time,
-};
+use super::avatar::{AvatarState, avatar, state_of_turn};
+use super::{Ctx, can_rename, conversation_title, pending_conversation, text, to_system_time};
 use crate::store::Store;
 
 /// 侧栏每个项目下显示的对话数。
@@ -131,10 +129,10 @@ fn assistant_row(store: &Store, a: &pb::Assistant) -> pb::AssistantRow {
         .activities
         .iter()
         .find(|x| x.assistant_id == a.id);
-    let expression = match activity.and_then(|x| pb::AssistantActivityKind::try_from(x.kind).ok()) {
-        Some(pb::AssistantActivityKind::Waiting) => pb::Expression::Waiting,
-        Some(pb::AssistantActivityKind::Running) => pb::Expression::Working,
-        _ => expression_of_turn(dm.and_then(|c| c.last_turn_state)),
+    let state = match activity.and_then(|x| pb::AssistantActivityKind::try_from(x.kind).ok()) {
+        Some(pb::AssistantActivityKind::Waiting) => AvatarState::Waiting,
+        Some(pb::AssistantActivityKind::Running) => AvatarState::Working,
+        _ => state_of_turn(dm.and_then(|c| c.last_turn_state)),
     };
     pb::AssistantRow {
         assistant_id: a.id.clone(),
@@ -143,8 +141,7 @@ fn assistant_row(store: &Store, a: &pb::Assistant) -> pb::AssistantRow {
             .as_ref()
             .map(|c| c.name.clone())
             .unwrap_or_default(),
-        avatar: Some(avatar(store, &a.id)),
-        expression: expression.into(),
+        avatar: Some(avatar(store, &a.id, state)),
         activity_line: activity.and_then(|x| activity_line(store, x)),
         // 助手未读 = 它那条私聊的未读（2a 第 3 条）。
         unread: dm.map_or(0, |c| c.unread),

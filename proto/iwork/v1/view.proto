@@ -54,20 +54,22 @@ message NavigatePatch {
 
 // ---------- 通用小件 ----------
 
-// 头像：首字与颜色来自助手配置；形象 SVG 由网页按 character 名字内联。
+// 助手头像（ui-m1.md 3.3）。画什么全由 Rust 定（client-core derive::avatar）；形象与表情给字符串 id，
+// 对应 design-system/characters/<形象>-<表情>.svg，网页按 id 查构建时生成的素材清单。加素材不改协议。
 message AvatarView {
-  string initial = 1;
+  // 原来的字母头像首字：M1 不再画字母头像（F-10）。
+  reserved 1;
+  reserved "initial";
+  // 形象主色（助手配置里选的），经 --ch4 传给素材；空表示用素材自带的颜色。
   string color = 2;
+  // 形象 id。
   string character = 3;
-}
-
-// 助手表情（ui-m1.md 3.3）。随状态变化，与「轻松元素」开关无关。
-enum Expression {
-  EXPRESSION_UNSPECIFIED = 0;
-  EXPRESSION_IDLE = 1;
-  EXPRESSION_WORKING = 2;
-  EXPRESSION_WAITING = 3;
-  EXPRESSION_ERROR = 4;
+  // 表情 id，随状态变化，与「轻松元素」开关无关。
+  string mood = 4;
+  // 配合的动效：motion.css 里的类名去掉 `iw-` 前缀（如 float）；空表示没有。
+  string motion = 5;
+  // 内置 iWork：画应用标志，不画形象。
+  bool app_logo = 6;
 }
 
 // 侧栏对话圆点（ui-m1.md 2a 第 1 条）：等你处理 > 出错 > 运行中 > 空闲。
@@ -139,7 +141,9 @@ message AssistantRow {
   string assistant_id = 1;
   string name = 2;
   AvatarView avatar = 3;
-  Expression expression = 4;
+  // 原来的表情枚举，并进了 AvatarView.mood。
+  reserved 4;
+  reserved "expression";
   // 最近动态一行；从没说过话时不设，界面不显示第二行。
   optional string activity_line = 5;
   // 只算它那条私聊。
@@ -347,7 +351,9 @@ message MessageRow {
   Speaker speaker = 2;
   string author_name = 3;
   AvatarView avatar = 4;
-  Expression expression = 5;
+  // 原来的表情枚举，并进了 AvatarView.mood。
+  reserved 5;
+  reserved "expression";
   string text = 6;
   bool streaming = 7;
   // 「已中断」「失败」；正常为空。

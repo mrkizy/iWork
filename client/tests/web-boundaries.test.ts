@@ -2,7 +2,8 @@
 // - Tauri 的 invoke 只在 src/bridge/call.ts 里出现，且只传命令与载荷两个参数（不带选项、不带自定义头）；
 // - 开发服务器能读的目录只比默认多了设计系统一个；
 // - 发布构建的入口只有 index.html（录像播放页只在开发服务器上）；
-// - 按 HTML 插入内容只有 ui/Avatar.tsx 一处（内联设计系统自带的形象 SVG，不是来自协议的内容）。
+// - 按 HTML 插入内容只有 ui/Avatar.tsx 一处（内联设计系统自带的形象 SVG，不是来自协议的内容）；
+// - 形象名、表情名不写死在源码里：素材清单由目录生成，兜底常量只在 ui/characters.ts。
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -56,6 +57,36 @@ describe("按 HTML 插入内容只有一处", () => {
       expect(code).toMatch(HTML_SINK);
     }
     expect("// 不用 innerHTML；").not.toMatch(HTML_SINK);
+  });
+});
+
+// 设计系统的形象目录：名字从文件名现读，不在测试里再抄一份。
+const CHARACTERS_DIR = fileURLToPath(new URL("../../docs/design/design-system/characters/", import.meta.url));
+const CHARACTER_FILES_OWNER = "ui/characters.ts";
+
+describe("形象与表情不写死", () => {
+  const names = new Set<string>();
+  for (const f of readdirSync(CHARACTERS_DIR)) {
+    const m = /^(.+)-([^-]+)\.svg$/.exec(f);
+    if (m) {
+      names.add(m[1]);
+      names.add(m[2]);
+    }
+  }
+  const literal = new RegExp(`(["'\`])(${[...names].join("|")})\\1`);
+
+  it("除了清单与兜底常量，源码里没有形象名、表情名的字面量", () => {
+    const files = sourceFiles(SRC_DIR).filter((f) => !/\.test\.tsx?$/.test(f) && f !== CHARACTER_FILES_OWNER);
+    const offenders = files.flatMap((f) => {
+      const m = literal.exec(readFileSync(`${SRC_DIR}${f}`, "utf8"));
+      return m ? [`${f}: ${m[0]}`] : [];
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  it("对照：目录读到了名字，兜底常量所在的文件确实含字面量", () => {
+    expect(names.has("blob") && names.has("idle")).toBe(true);
+    expect(readFileSync(`${SRC_DIR}${CHARACTER_FILES_OWNER}`, "utf8")).toMatch(literal);
   });
 });
 

@@ -190,7 +190,13 @@ impl Pump<'_> {
     }
 }
 
-pub async fn record(s: &Scenario, opts: Options) -> Result<Recording, String> {
+/// 场景登记的形象映射（只给录像与预览）放进 `opts.characters`。
+pub async fn record(s: &Scenario, mut opts: Options) -> Result<Recording, String> {
+    opts.characters = s
+        .characters
+        .iter()
+        .map(|(a, c)| ((*a).to_owned(), (*c).to_owned()))
+        .collect();
     let dir = tempfile::Builder::new()
         .prefix("t09-record")
         .tempdir_in("/tmp")

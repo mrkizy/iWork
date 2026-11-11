@@ -18,7 +18,8 @@
 use iwork_proto::pb;
 use pb::row_view::Row as V;
 
-use super::{avatar, commands_enabled, expression_of_turn, text};
+use super::avatar::{avatar, state_of_turn};
+use super::{commands_enabled, text};
 use crate::store::Store;
 use crate::store::timeline::{NoteText, Row, RowKey, Timeline, tool_identity};
 
@@ -108,7 +109,7 @@ fn project_name(store: &Store, id: Option<&str>) -> Option<String> {
 
 fn message(store: &Store, tl: &Timeline, m: &pb::Message) -> pb::MessageRow {
     use pb::author::Kind as A;
-    let (speaker, name, av, expression) = match m.author.as_ref().and_then(|a| a.kind.as_ref()) {
+    let (speaker, name, av) = match m.author.as_ref().and_then(|a| a.kind.as_ref()) {
         Some(A::Assistant(a)) => {
             let state = m
                 .turn_id
@@ -118,22 +119,11 @@ fn message(store: &Store, tl: &Timeline, m: &pb::Message) -> pb::MessageRow {
             (
                 pb::Speaker::Assistant,
                 a.name_snapshot.clone(),
-                Some(avatar(store, &a.assistant_id)),
-                expression_of_turn(state),
+                Some(avatar(store, &a.assistant_id, state_of_turn(state))),
             )
         }
-        Some(A::System(_)) => (
-            pb::Speaker::System,
-            text::SYSTEM_NAME.to_owned(),
-            None,
-            pb::Expression::Unspecified,
-        ),
-        Some(A::User(_)) | None => (
-            pb::Speaker::User,
-            text::USER_NAME.to_owned(),
-            None,
-            pb::Expression::Unspecified,
-        ),
+        Some(A::System(_)) => (pb::Speaker::System, text::SYSTEM_NAME.to_owned(), None),
+        Some(A::User(_)) | None => (pb::Speaker::User, text::USER_NAME.to_owned(), None),
     };
     let status = pb::MessageStatus::try_from(m.status).unwrap_or_default();
     let body_is_artifact = matches!(
@@ -153,7 +143,6 @@ fn message(store: &Store, tl: &Timeline, m: &pb::Message) -> pb::MessageRow {
         speaker: speaker.into(),
         author_name: name,
         avatar: av,
-        expression: expression.into(),
         body_pending: body_is_artifact && text_now.is_empty(),
         text: text_now,
         streaming: status == pb::MessageStatus::Streaming,

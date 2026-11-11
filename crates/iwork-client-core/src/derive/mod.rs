@@ -4,6 +4,7 @@
 //! 错误说明）原样用；摘要值（未读、标题、最近动态）只读后台的，不在这里推演。
 
 pub mod assistant;
+pub mod avatar;
 pub mod connection;
 pub mod conversation;
 pub mod model_menu;
@@ -70,29 +71,5 @@ pub(crate) fn pending_conversation(item: &pb::PendingItem) -> Option<&str> {
         pb::pending_item::Item::UserAction(c) => Some(&c.conversation_id),
         pb::pending_item::Item::Resume(r) => Some(&r.conversation_id),
         pb::pending_item::Item::AgentsMdDraft(_) => None,
-    }
-}
-
-pub(crate) fn avatar(store: &Store, assistant_id: &str) -> pb::AvatarView {
-    let a = store
-        .summary
-        .assistant(assistant_id)
-        .and_then(|a| a.config.as_ref())
-        .and_then(|c| c.avatar.as_ref());
-    pb::AvatarView {
-        initial: a.map(|a| a.initial.clone()).unwrap_or_default(),
-        color: a.map(|a| a.color.clone()).unwrap_or_default(),
-        character: String::new(),
-    }
-}
-
-/// 回合状态 → 表情（ui-m1.md 3.3：表情随状态变化，与轻松元素开关无关）。
-pub(crate) fn expression_of_turn(state: Option<i32>) -> pb::Expression {
-    use pb::TurnState as S;
-    match state.and_then(|s| S::try_from(s).ok()) {
-        Some(S::Queued | S::Running | S::Cancelling) => pb::Expression::Working,
-        Some(S::WaitingApproval | S::Interrupted) => pb::Expression::Waiting,
-        Some(S::Failed) => pb::Expression::Error,
-        _ => pb::Expression::Idle,
     }
 }

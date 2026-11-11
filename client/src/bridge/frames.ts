@@ -34,10 +34,10 @@ export interface FrameSink {
   fail(failure: TransportFailure): void;
 }
 
-type Generation = { state: "idle" } | { state: "switching"; attempt: number } | { state: "live"; epoch: number } | { state: "stopped" };
+type Generation = { state: "unattached" } | { state: "switching"; attempt: number } | { state: "live"; epoch: number } | { state: "stopped" };
 
 export class FrameBridge {
-  #gen: Generation = { state: "idle" };
+  #gen: Generation = { state: "unattached" };
   #attempts = 0;
 
   constructor(

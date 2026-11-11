@@ -237,6 +237,12 @@ impl<D: Dialer> Session<D> {
         }
     }
 
+    /// 只给录像与预览：按助手 id 换形象（M1 没有选形象的入口）。
+    pub fn with_characters(mut self, c: crate::derive::avatar::CharacterOverrides) -> Self {
+        self.store.character_overrides = c;
+        self
+    }
+
     pub fn with_stats(mut self, tx: tokio::sync::watch::Sender<Stats>) -> Self {
         self.stats_tx = Some(tx);
         self

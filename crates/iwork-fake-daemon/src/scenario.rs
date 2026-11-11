@@ -33,6 +33,9 @@ pub struct Scenario {
     pub about: &'static str,
     /// 录像与预览页打开的对话；没有就停在首页（录像只记侧栏、待处理、设置）。
     pub focus: Option<&'static str>,
+    /// 只给录像与预览：助手 id → 形象 id（client-core `Options::characters`）。
+    /// M1 没有选形象的入口，正式运行时内置 iWork 画标志、其余一律圆团子；阿森、林岚、老周只在这里出现。
+    pub characters: &'static [(&'static str, &'static str)],
     build: fn() -> Vec<Step>,
 }
 
@@ -76,108 +79,137 @@ pub const REGISTRY: &[Scenario] = &[
         about: "只有基础世界",
         build: empty,
         focus: None,
+        characters: &[],
     },
     Scenario {
         name: "conversation-basic",
         about: "一问一答、工具活动、回合结束印章",
         build: conversation_basic,
         focus: Some("c-basic"),
+        characters: &[],
     },
     Scenario {
         name: "streaming",
         about: "一条助手消息分 20 段流式到达",
         build: streaming,
         focus: Some("c-stream"),
+        characters: &[],
     },
     Scenario {
         name: "approval-states",
         about: "审批：待定、已允许、已拒绝、已作废、切档放行、必问、沙箱外",
         build: approval_states,
         focus: Some("c-approval"),
+        characters: &[],
     },
     Scenario {
         name: "user-action-states",
         about: "亲手执行：待定、执行中、已执行、已忽略、失败、已作废、结果未知",
         build: user_action_states,
         focus: Some("c-user-action"),
+        characters: &[],
     },
     Scenario {
         name: "user-action-unknown-deleting",
         about: "结果未知的卡片挡住删除，对话停在删除中",
         build: user_action_unknown_deleting,
         focus: Some("c-ua-deleting"),
+        characters: &[],
     },
     Scenario {
         name: "turn-end",
         about: "回合结束：搞定印章、失败、取消",
         build: turn_end,
         focus: Some("c-turn-end"),
+        characters: &[],
     },
     Scenario {
         name: "turn-failed",
         about: "回合失败：一开始就失败（空的失败消息）、输出一部分后失败（ui-m1.md 2a 第 10 条）",
         focus: Some("c-turn-failed"),
         build: turn_failed,
+        characters: &[],
     },
     Scenario {
         name: "resume-card",
         about: "崩溃中断的回合：继续 / 放弃卡片",
         build: resume_card,
         focus: Some("c-resume"),
+        characters: &[],
     },
     Scenario {
         name: "sidebar-dots",
         about: "侧栏圆点四种状态与未读",
         build: sidebar_dots,
         focus: None,
+        characters: &[],
     },
     Scenario {
         name: "assistants-20",
         about: "20 个助手，部分有最近动态",
         build: assistants_20,
         focus: None,
+        characters: &[],
     },
     Scenario {
         name: "quota-missing",
         about: "额度取不到",
         build: quota_missing,
         focus: None,
+        characters: &[],
     },
     Scenario {
         name: "stream-16x100",
         about: "16 个对话各 100 条流式消息（基准用）",
         build: stream_16x100,
         focus: Some("c-s00"),
+        characters: &[],
     },
     Scenario {
         name: "history-100k",
         about: "一个对话十万条消息",
         build: history_100k,
         focus: Some("c-history"),
+        characters: &[],
     },
     Scenario {
         name: "xss-corpus",
         about: "正文、标题、文件名、工具输出里的脚本与链接",
         build: xss_corpus,
         focus: Some("c-xss"),
+        characters: &[],
     },
     Scenario {
         name: "reconnect-basic",
         about: "中途断开全部连接后继续",
         build: reconnect_basic,
         focus: Some("c-reconnect"),
+        characters: &[],
     },
     Scenario {
         name: "dm-project-switch",
         about: "助手私聊换项目：「已切换为」说明、项目分隔线；打开后两个项目都改名",
         build: dm_project_switch,
         focus: Some(IWORK_DM),
+        characters: &[],
+    },
+    Scenario {
+        name: "characters-preview-only",
+        about: "测试专用：阿森、林岚、老周与圆团子的形象和表情（工作中、等你、出错、空闲）。M1 没有选形象的入口，形象由场景按助手 id 映射",
+        build: characters_preview_only,
+        focus: Some("c-dm-laozhou"),
+        characters: &[
+            ("as-asen", "asen"),
+            ("as-linlan", "linlan"),
+            ("as-laozhou", "laozhou"),
+        ],
     },
     Scenario {
         name: "rename-via-summary-refresh-until-t10",
         about: "测试专用：直接改摘要里的标题，再发一条落在侧栏订阅上的已有事件触发摘要失效。T10 补上 ConversationRenamed 后换成真事件",
         build: rename_via_summary_refresh_until_t10,
         focus: Some("c-rename"),
+        characters: &[],
     },
 ];
 
@@ -768,6 +800,76 @@ fn dm_project_switch() -> Vec<Step> {
     s.push(Step::Sleep(Duration::from_millis(100)));
     s.push(a(f::project_renamed(PROJECT, "demo-改名")));
     s.push(a(f::project_renamed(OTHER_PROJECT, "web-改名")));
+    s
+}
+
+/// 四个助手各停在一种状态：阿森工作中（浮动）、林岚等你（有待审批）、老周最近一轮失败（sorry）、
+/// 圆团子（没换形象、配置里的颜色）空闲。打开老周的私聊，消息头像也是 sorry。
+fn characters_preview_only() -> Vec<Step> {
+    let mut s = base();
+    for (id, name) in [
+        ("as-asen", "阿森"),
+        ("as-linlan", "林岚"),
+        ("as-laozhou", "老周"),
+        ("as-blob", "小团"),
+    ] {
+        s.push(a(f::assistant(id, name, false)));
+        s.push(a(f::dm(&format!("c-dm-{}", &id[3..]), id)));
+    }
+    // 阿森：回合在跑
+    s.push(a(f::user_message("m-asen-u", "c-dm-asen", "把测试补上")));
+    s.push(a(f::turn_queued("t-asen", "c-dm-asen", "as-asen")));
+    s.push(a(f::turn_state("t-asen", T::Queued, T::Running, None)));
+    // 林岚：等你批一条命令
+    s.push(a(f::user_message(
+        "m-linlan-u",
+        "c-dm-linlan",
+        "清一下构建目录",
+    )));
+    s.push(a(f::turn_queued("t-linlan", "c-dm-linlan", "as-linlan")));
+    s.push(a(f::turn_state("t-linlan", T::Queued, T::Running, None)));
+    s.push(a(f::approval(
+        "ap-linlan",
+        "c-dm-linlan",
+        "t-linlan",
+        f::command_action("rm -rf target"),
+        pb::ApprovalKind::Ask,
+        &[],
+    )));
+    s.push(a(f::turn_state(
+        "t-linlan",
+        T::Running,
+        T::WaitingApproval,
+        None,
+    )));
+    // 老周：最近一轮失败
+    s.push(a(f::user_message(
+        "m-laozhou-u",
+        "c-dm-laozhou",
+        "看看为什么挂了",
+    )));
+    s.push(a(f::turn_queued("t-laozhou", "c-dm-laozhou", "as-laozhou")));
+    s.push(a(f::turn_state("t-laozhou", T::Queued, T::Running, None)));
+    s.push(a(f::assistant_message(
+        "m-laozhou-a",
+        "c-dm-laozhou",
+        "t-laozhou",
+        "as-laozhou",
+        "老周",
+    )));
+    s.push(a(f::turn_state(
+        "t-laozhou",
+        T::Running,
+        T::Failed,
+        Some("模型暂时不可用"),
+    )));
+    s.push(a(f::message_ended(
+        "c-dm-laozhou",
+        "m-laozhou-a",
+        "我先看一下日志",
+        pb::MessageStatus::Failed,
+    )));
+    s.push(a(f::turn_finished("t-laozhou", T::Failed, false, None)));
     s
 }
 
