@@ -87,8 +87,9 @@ internal = ["iwork-proto", "iwork-claude-hook"]
 transitive_exempt = ["agent-client-protocol", "tokio"]
 
 [crates.iwork-claude-hook]
+# 每次工具调用冷启动一次：只许 serde 与平台调用，不进 tokio（T06 方案 2.1）。Windows 管道在 S6 随桥接一起加 windows-sys
 internal = []
-direct = ["serde", "serde_json"]
+direct = ["serde", "serde_json", "libc"]
 
 [crates.iwork-client-core]
 internal = ["iwork-ipc", "iwork-proto"]
