@@ -10,35 +10,42 @@
 //! ID 时除外）。第 1、2 步之间崩溃：回合还是 `Queued`、没有 ID，运行时只开了会话、没收到 prompt，
 //! 重启后照常派发是安全的。prompt 发不出去（如进程已退出且续接失败）时回合已是 `Running`，按失败收尾。
 //!
-//! 回合状态只在 [`SessionLine::run_turn`] 的循环里写。它同时等四路输入，优先次序：
+//! **续接**（T06 方案 2.6 第 4 条）：`TurnPlan.turn` 处于 `Interrupted` 时，第一步用 `Resume` 而不是
+//! `Started`，另起一条助手消息（同一个回合）；说明文字由调用方用 [`super::resume_note`] 生成放进 `blocks`。
+//! 入口完全由回合状态决定，不另设字段。
+//!
+//! 回合状态只在 [`SessionLine::run_turn`] 的循环里写。它同时等几路输入，优先次序：
 //! 1. **取消**：最先处理，更新再多也不会被饿死；回合结束前还会再看一眼有没有已收到的取消；
 //! 2. **检查点定时**：上次检查点之后最多 500ms 把未落盘的正文刷出去，即使没有新的更新；
-//! 3. **更新流**与**权限信箱**：一般先更新、后信箱；连续处理 [`FAIR_BURST`] 条更新后先让出一次
-//!    执行权、再先看一次信箱。
-//!    「开始等审批」带着前序边界（适配器给出的「这次请求之前已交出的更新条数」）：编排先把本回合
-//!    的更新处理到这个条数再受理，不管积压多少，「工具调用开始」都排在「等待审批」之前。等边界
-//!    期间取消照样优先、照样按批让出。
+//! 3. **等待上限**：有在等判定方的票、会话声明了上限（`permission_wait_limit`）时每秒查一次期限；
+//! 4. **更新流**与**交接表**（受理请求、采纳结论）：一般先更新、后交接表；连续处理 [`FAIR_BURST`] 条更新后
+//!    先让出一次执行权、再先看一次交接表。
+//!    权限请求带着前序边界（适配器给出的「这次请求之前已交出的更新条数」）：编排先把本回合的更新处理到
+//!    这个条数再受理，不管积压多少，「工具调用开始」都排在「等待审批」之前。
+//!
+//! **审批的提交、交付、等待上限由提交顺序裁决**（T06 方案 4.2）：采纳一条结论时先提交（经审批的带
+//! `ApprovalDelivered`），再回执；等待上限到时先采纳表里已有的结论，还有超期的票就提交
+//! `Interrupted{ApprovalWaitLimit}`，然后停止受理（交接表在锁里逐格回绝）、请运行时停下。用户取消同样是
+//! 提交 → 停止受理 → 停运行时 → 提醒判定方。
 //!
 //! 运行时进程意外退出（后台服务还活着）时回合怎么收尾：
 //! - `Running` 或 `WaitingApproval`：回合 `Failed`，原因是进程退出（`AgentError::ProcessExited`
 //!   可原样重试），助手消息 `Failed`；
 //! - `Cancelling`：本来就要取消，算 `Cancelled`。
 //!
-//! `Interrupted(Crash)` 只留给后台服务重启后发现进程已不在的情况（崩溃恢复，不在这里）。
-//! 进程退出后丢掉这条会话，下一回合用记下的运行时会话 id 续接。
+//! **丢掉一条会话只有一条路 [`SessionLine::retire`]**（T06 方案 4.2a）：确认整棵进程树清空才放掉会话。
+//! 清不掉时会话留着、记下「旧树未确认清空」，下一次开会话之前先再清一次，仍不行就不开；因等待上限中断的回合
+//! 清不掉时改记 `Failed`，不能续接。
 //!
-//! 编排自己出错（写不进存储、表外转换）时：先撤掉回合信箱（迟到的审批回调一律被拒），再关闭会话
-//! （结束运行时，免得工具继续改文件），然后把原始错误交给上层；不重发 prompt。
+//! 编排自己出错（写不进存储、表外转换）时：先撤掉交接表（迟到的审批回调一律被拒），再丢掉会话（结束运行时，
+//! 免得工具继续改文件），然后把原始错误交给上层；不重发 prompt。
 
-use std::collections::BTreeSet;
 use std::future::{Future, poll_fn};
-use std::pin::{Pin, pin};
+use std::pin::pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::Poll;
 use std::time::Duration;
 
-use futures_channel::mpsc;
-use futures_core::Stream;
 use iwork_domain::action::{Action, ActionFlags, ActionKind, ActionTarget};
 use iwork_domain::approval::VoidReason;
 use iwork_domain::common::{Actor, Usage};
@@ -58,10 +65,11 @@ use iwork_ports::clock::{Clock, IdGenerator, MonotonicInstant, Timer};
 use iwork_ports::live::{LivePublisher, MessageDelta};
 use iwork_ports::store::{CommitRequest, StorageError, StoragePort};
 
+use super::binding::{Rebind, mismatch_reason, rebind};
 use super::permission::{
-    PermissionDecider, PermissionGate, Signal, Ticket, TurnInbox, TurnSlot, VoidPlanError,
-    new_ticket,
+    AcceptedAt, PermissionDecider, PermissionGate, Ticket, TurnSlot, VoidPlanError,
 };
+use super::scheduler::{Input, Scheduler};
 
 /// 回合编排写入的事件以它为 actor：这些事件由后台服务按运行时的输出产生，不是用户的命令。
 pub const ORCHESTRATOR_ACTOR: &str = "system";
@@ -69,15 +77,21 @@ pub const ORCHESTRATOR_ACTOR: &str = "system";
 /// 流式正文的检查点间隔（技术设计 3.5：崩溃后最多丢这么久的显示文字）。
 pub const CHECKPOINT_INTERVAL: Duration = Duration::from_millis(500);
 
-/// 连续处理这么多条更新后，先让出一次执行权、再先看一次权限信箱。
+/// 连续处理这么多条更新后，先让出一次执行权、再先看一次交接表。
 pub const FAIR_BURST: u32 = 32;
 
+/// 有在等判定方的票时，隔这么久查一次等待上限（T06 方案 2.6 第 4 条）。
+pub const LIMIT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
 /// 一笔带作废的提交从头到尾最多等这么久：要作废计划（含等令牌）、带着句柄等提交、被拒后的重算，合起来
-/// 共用这一个期限（T07 方案 6.10.8）。到期就按编排出错收场：撤信箱、关会话，运行时先停下。
+/// 共用这一个期限（T07 方案 6.10.8）。到期就按编排出错收场：撤交接表、丢掉会话，运行时先停下。
 pub const STOP_LIMIT: Duration = Duration::from_secs(5);
 
 /// 提交之后提醒判定方，最多等这么久；到期就算了，不是错误（判定方下一个决定自己会追平）。
 pub const NUDGE_LIMIT: Duration = Duration::from_secs(1);
+
+/// 因等待上限中断的回合，旧进程树没能确认清空时，改记 `Failed` 的原因。
+pub const TREE_NOT_CLEARED: &str = "运行时进程树没能结束";
 
 /// 带作废的提交被投影器拒（计划过期）后重新要计划，最多这么多次。
 const VOID_COMMIT_ATTEMPTS: u32 = 3;
@@ -112,7 +126,8 @@ pub struct TurnPorts<'a, S, C, I, L, T> {
     pub timer: &'a T,
 }
 
-/// 一个回合要做什么。`turn` 处于 `Queued`，`TurnQueued` 已由受理命令的一方写入。
+/// 一个回合要做什么。`turn` 处于 `Queued`（新回合，`TurnQueued` 已由受理命令的一方写入）或
+/// `Interrupted`（续接）。
 #[derive(Debug, Clone)]
 pub struct TurnPlan {
     pub turn: Turn,
@@ -125,7 +140,7 @@ pub struct TurnPlan {
 }
 
 /// 编排失败：写不进存储，或碰到转换表外的转换（程序缺陷）。回合本身的失败不在这里，
-/// 而是回合以 `Failed` 等状态正常收尾。出这种错时会话已被关闭。
+/// 而是回合以 `Failed` 等状态正常收尾。出这种错时会话已被丢掉。
 #[derive(Debug, thiserror::Error)]
 pub enum TurnRunError {
     #[error(transparent)]
@@ -157,10 +172,15 @@ async fn within<T: Timer, F: Future>(timer: &T, limit: Duration, fut: F) -> Opti
 }
 
 /// 一条运行时会话线（技术设计 6.4）：一个对话（或「助手 × 项目」）对应一条，跨回合续接。
+/// 同一条线上的回合一个接一个：`run_turn` 拿 `&mut self`，续接只能排在上一次 `run_turn` 返回之后。
 pub struct SessionLine<A: AgentPort, D> {
     session: Option<A::Session>,
     /// 最近一次的运行时会话 id；会话没了（进程退出、取消后、后台服务重启）时用它续接
     resume: Option<String>,
+    /// 打开当前（或上一条）会话时用的 spec：会话绑定项守卫拿它比（`binding.rs`）
+    bound: Option<SessionSpec>,
+    /// 丢掉会话时进程树没能确认清空：原因。有它时 `session` 还留着，开新会话前先再清一次
+    unclean: Option<String>,
     slot: Arc<TurnSlot>,
     decider: Arc<D>,
 }
@@ -174,13 +194,11 @@ pub struct TurnCanceller {
 impl TurnCanceller {
     /// 请求取消。回合已经结束或换了就什么都不做。
     pub fn cancel(&self, turn_id: TurnId) {
-        if let Some(inbox) = self.slot.current(Some(turn_id)) {
-            let _ = inbox.cancel.unbounded_send(());
-        }
+        self.slot.cancel(turn_id);
     }
 }
 
-/// 回合信箱的生命周期：回合开始时打开，函数以任何方式返回时撤掉。
+/// 交接表的生命周期：回合开始时打开，函数以任何方式返回时停止受理并撤掉。
 struct SlotGuard<'a>(&'a TurnSlot);
 
 impl Drop for SlotGuard<'_> {
@@ -189,12 +207,17 @@ impl Drop for SlotGuard<'_> {
     }
 }
 
+/// 开会话之前就不能开始的原因（回合以 `Failed` 收尾，原因写进状态变化）。
+type StartRefused = String;
+
 impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
     /// `resume`：已知的运行时会话 id（如后台服务重启前记下的），没有就新开。
     pub fn new(decider: Arc<D>, resume: Option<String>) -> Self {
         Self {
             session: None,
             resume,
+            bound: None,
+            unclean: None,
             slot: Arc::new(TurnSlot::default()),
             decider,
         }
@@ -216,7 +239,7 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         self.resume.as_deref()
     }
 
-    /// 跑一个回合，返回它停在的状态。返回 `Err` 时会话已关闭，回合信箱已撤。
+    /// 跑一个回合，返回它停在的状态。返回 `Err` 时交接表已撤，会话已丢掉（清不掉的记着，见模块文档）。
     pub async fn run_turn<S, C, I, L, T>(
         &mut self,
         agent: &A,
@@ -231,11 +254,10 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         T: Timer,
     {
         let result = self.run_turn_inner(agent, ports, plan).await;
-        if result.is_err()
-            && let Some(session) = self.session.take()
-        {
-            // 信箱已随 run_turn_inner 返回撤掉；关掉运行时，免得它在无人记录时继续动手
-            let _ = session.close().await;
+        if result.is_err() {
+            // 交接表已随 run_turn_inner 返回撤掉；结束运行时，免得它在无人记录时继续动手。
+            // 清不掉的记在 unclean 里，下一次开会话前再清；这里交回的是原始错误
+            let _ = self.retire().await;
         }
         result
     }
@@ -260,41 +282,46 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             spec,
             blocks,
         } = plan;
-        let (signals_tx, mut signals) = mpsc::unbounded();
-        let (cancel_tx, mut cancels) = mpsc::unbounded();
-        self.slot.open(TurnInbox {
-            turn_id: turn.id,
-            signals: signals_tx,
-            cancel: cancel_tx,
-        });
+        let first = match turn.state {
+            TurnState::Interrupted { .. } => TurnTrigger::Resume,
+            // Queued 之外的状态在第一步里报表外转换
+            _ => TurnTrigger::Started,
+        };
+        let mut cancels = self.slot.open(turn.id);
         let slot = self.slot.clone();
         let _guard = SlotGuard(&slot);
         let decider = self.decider.clone();
         let timer = ports.timer;
-        let mut run = TurnRun::new(turn, ports, &*decider);
+        let mut run = TurnRun::new(turn, ports, &*decider, &slot);
 
         let reused = match self.ensure_session(agent, &spec).await {
             Ok(reused) => reused,
-            Err(e) => {
-                run.fail_before_start(&e).await?;
+            Err(reason) => {
+                run.fail_before_start(reason).await?;
                 return Ok(run.turn.state);
             }
         };
-        run.started(self.resume.clone(), assistant_name, context_project_id)
-            .await?;
+        run.started(
+            first,
+            self.resume.clone(),
+            assistant_name,
+            context_project_id,
+        )
+        .await?;
         let mut updates = match self.prompt(agent, spec, blocks, reused, &mut run).await? {
             Ok(updates) => updates,
             Err(e) => {
                 let process_gone = matches!(e, AgentError::ProcessExited { .. });
                 run.finish(End::Failed(e)).await?;
                 if process_gone {
-                    self.session = None;
+                    let _ = self.retire().await;
                 }
                 return Ok(run.turn.state);
             }
         };
 
         let session = self.session.as_ref().expect("prompt 成功后一定有会话");
+        let limit = session.permission_wait_limit();
         let mut sched = Scheduler::default();
         let end = loop {
             let mut next = pin!(updates.next());
@@ -304,13 +331,26 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
                 {
                     sched.flush_timer = Some(Box::pin(timer.sleep(delay)));
                 }
-                let input =
-                    poll_fn(|cx| sched.poll(next.as_mut(), &mut signals, &mut cancels, cx)).await;
+                let input = poll_fn(|cx| sched.poll(next.as_mut(), &slot, &mut cancels, cx)).await;
                 match input {
                     Input::Update(update) => break update,
                     Input::Cancel => run.on_cancel(session).await?,
                     Input::FlushDue => run.checkpoint().await?,
-                    Input::Signal(signal) => run.on_signal(signal).await?,
+                    Input::Admit(ticket) => run.on_admit(ticket).await?,
+                    Input::Adopt(ticket) => run.on_adopt(ticket).await?,
+                    Input::LimitCheck => {
+                        if let Some(limit) = limit {
+                            run.on_limit_check(session, limit).await?;
+                        }
+                    }
+                }
+                // 有在等判定方的票就按时查期限；票是编排受理的，受理之后、查过之后都走到这里
+                if limit.is_some()
+                    && sched.limit_timer.is_none()
+                    && run.turn.state == TurnState::WaitingApproval
+                    && slot.inspect(|h| h.has_deciding()).unwrap_or(false)
+                {
+                    sched.limit_timer = Some(Box::pin(timer.sleep(LIMIT_CHECK_INTERVAL)));
                 }
             };
             let end = match update {
@@ -329,19 +369,58 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         };
         let process_gone = matches!(&end, End::Failed(AgentError::ProcessExited { .. }));
         run.finish(end).await?;
-        if process_gone {
-            // 丢弃即结束进程树；下一回合按记下的 id 续接
-            self.session = None;
+        let interrupted = matches!(run.turn.state, TurnState::Interrupted { .. });
+        // 进程没了、因等待上限中断：旧树不会再用，确认清空再放掉。取消的回合会话留着（适配器取消时已确认
+        // 清树，清不掉会报进程退出、走上面那条），下一回合 prompt 发现进程已退出时经 retire 换一棵
+        if (process_gone || interrupted) && self.retire().await.is_err() && interrupted {
+            // 清理失败留在事件里：这个回合不能续接
+            run.fail_after_interrupt().await?;
         }
         Ok(run.turn.state)
     }
 
-    /// 确保有会话：已有就沿用（返回 `true`），没有就按记下的 ID 续接或新开（返回 `false`）。
-    async fn ensure_session(&mut self, agent: &A, spec: &SessionSpec) -> Result<bool, AgentError> {
+    /// 丢掉当前会话：确认整棵进程树清空才放掉。清不掉时会话留着、记下原因，返回错误。
+    async fn retire(&mut self) -> Result<(), AgentError> {
+        let Some(session) = self.session.as_ref() else {
+            self.unclean = None;
+            return Ok(());
+        };
+        if let Err(error) = session.terminate().await {
+            self.unclean = Some(error.to_string());
+            return Err(error);
+        }
+        self.unclean = None;
+        if let Some(session) = self.session.take() {
+            let _ = session.close().await;
+        }
+        Ok(())
+    }
+
+    /// 确保有会话：已有且绑定项相同就沿用（返回 `true`），否则按记下的 ID 续接或新开（返回 `false`）。
+    async fn ensure_session(
+        &mut self,
+        agent: &A,
+        spec: &SessionSpec,
+    ) -> Result<bool, StartRefused> {
+        if let Some(reason) = self.unclean.clone() {
+            self.retire().await.map_err(|e| {
+                format!("上一棵运行时进程树没能确认清空（{reason}），不开新会话：{e}")
+            })?;
+        }
+        if let Some(bound) = &self.bound {
+            match rebind(bound, spec) {
+                Rebind::Same => {}
+                Rebind::Mismatch(field) => return Err(mismatch_reason(field)),
+                // 模型、系统提示改了：下一轮生效，关掉会话带 resume 重开
+                Rebind::Reopen => self.retire().await.map_err(|e| e.to_string())?,
+            }
+        }
         if self.session.is_some() {
             return Ok(true);
         }
-        self.open_session(agent, spec.clone()).await?;
+        self.open_session(agent, spec.clone())
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(false)
     }
 
@@ -351,14 +430,16 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             slot: self.slot.clone(),
             decider: self.decider.clone(),
         };
+        let bound = spec.clone();
         let session = agent.open_session(spec, gate).await?;
         self.resume = session.runtime_session_id().map(str::to_owned);
         self.session = Some(session);
+        self.bound = Some(bound);
         Ok(())
     }
 
     /// 发 prompt（回合已提交为 `Running`）。沿用的会话进程已经退出（崩溃、取消时被结束）时，
-    /// prompt 没送到：续接一次，先把新会话的绑定落盘，再发。外层错误是编排自己的错误，
+    /// prompt 没送到：丢掉旧会话、续接一次，先把新会话的绑定落盘，再发。外层错误是编排自己的错误，
     /// 内层是运行时的错误（回合按失败收尾）。
     async fn prompt<S, C, I, L, T>(
         &mut self,
@@ -383,110 +464,15 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         if !(reused && matches!(first, Err(AgentError::ProcessExited { .. }))) {
             return Ok(first);
         }
-        self.session = None;
+        if let Err(e) = self.retire().await {
+            return Ok(Err(e));
+        }
         if let Err(e) = self.open_session(agent, spec).await {
             return Ok(Err(e));
         }
         run.bind_session(self.resume.clone()).await?;
         let session = self.session.as_ref().expect("刚开好会话");
         Ok(session.prompt(blocks).await)
-    }
-}
-
-enum Input {
-    Update(Option<AgentUpdate>),
-    Cancel,
-    FlushDue,
-    Signal(Signal),
-}
-
-/// 多路输入的调度状态，见模块文档的优先次序。
-#[derive(Default)]
-struct Scheduler<'t> {
-    flush_timer: Option<Pin<Box<dyn Future<Output = ()> + Send + 't>>>,
-    /// 连续处理的更新条数
-    burst: u32,
-    /// 这一轮连续更新之后是否已经让出过
-    yielded: bool,
-    /// 本回合已处理的更新条数，与审批的前序边界比较
-    consumed: u64,
-    /// 收到、还没到前序边界的「开始等审批」
-    deferred_ask: Option<(Signal, u64)>,
-}
-
-impl Scheduler<'_> {
-    fn poll<F: Future<Output = Option<AgentUpdate>>>(
-        &mut self,
-        mut next: Pin<&mut F>,
-        signals: &mut mpsc::UnboundedReceiver<Signal>,
-        cancels: &mut mpsc::UnboundedReceiver<()>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Input> {
-        // 两个信箱的发送端在回合信箱里，回合结束前不会全部关闭；关闭了也只是不再有输入
-        if let Poll::Ready(Some(())) = Pin::new(cancels).poll_next(cx) {
-            return Poll::Ready(Input::Cancel);
-        }
-        if let Some(timer) = self.flush_timer.as_mut()
-            && timer.as_mut().poll(cx).is_ready()
-        {
-            self.flush_timer = None;
-            return Poll::Ready(Input::FlushDue);
-        }
-        loop {
-            if let Some((_, after)) = &self.deferred_ask {
-                if self.consumed >= *after {
-                    let (ask, _) = self.deferred_ask.take().expect("刚检查过");
-                    return Poll::Ready(Input::Signal(ask));
-                }
-                // 还没到边界：只处理更新（其余信号留在信箱里排队），照样按批让出
-                if self.burst >= FAIR_BURST {
-                    if !self.yielded {
-                        self.yielded = true;
-                        cx.waker().wake_by_ref();
-                        return Poll::Pending;
-                    }
-                    self.yielded = false;
-                    self.burst = 0;
-                }
-                return match next.as_mut().poll(cx) {
-                    Poll::Ready(update) => Poll::Ready(self.update(update)),
-                    Poll::Pending => Poll::Pending,
-                };
-            }
-            let signal_first = self.burst >= FAIR_BURST;
-            if !signal_first && let Poll::Ready(update) = next.as_mut().poll(cx) {
-                return Poll::Ready(self.update(update));
-            }
-            if signal_first && !self.yielded {
-                // 更新一直就绪时主动让出一次，别的任务（含运行时的其他会话）才有机会跑
-                self.yielded = true;
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
-            self.yielded = false;
-            self.burst = 0;
-            match Pin::new(&mut *signals).poll_next(cx) {
-                Poll::Ready(Some(Signal::PermissionAsked { reply, after })) => {
-                    // 先把边界之前的更新处理完再受理，下一轮循环走上面的分支
-                    self.deferred_ask = Some((Signal::PermissionAsked { reply, after }, after));
-                    continue;
-                }
-                Poll::Ready(Some(signal)) => return Poll::Ready(Input::Signal(signal)),
-                Poll::Ready(None) | Poll::Pending => {}
-            }
-            if signal_first && let Poll::Ready(update) = next.as_mut().poll(cx) {
-                return Poll::Ready(self.update(update));
-            }
-            return Poll::Pending;
-        }
-    }
-
-    fn update(&mut self, update: Option<AgentUpdate>) -> Input {
-        self.burst += 1;
-        if update.is_some() {
-            self.consumed += 1;
-        }
-        Input::Update(update)
     }
 }
 
@@ -501,11 +487,11 @@ struct TurnRun<'a, S, C, I, L, T, D> {
     turn: Turn,
     ports: TurnPorts<'a, S, C, I, L, T>,
     decider: &'a D,
+    /// 这个回合的交接表：在途的权限请求只记在这里
+    slot: &'a TurnSlot,
     message_id: Option<MessageId>,
     body: String,
     usage: Usage,
-    /// 已受理、还没有采纳结果的审批票；空了才离开 `WaitingApproval`
-    pending: BTreeSet<Ticket>,
     last_checkpoint: Option<MonotonicInstant>,
     checkpointed_len: usize,
 }
@@ -519,15 +505,20 @@ where
     T: Timer,
     D: PermissionDecider,
 {
-    fn new(turn: Turn, ports: TurnPorts<'a, S, C, I, L, T>, decider: &'a D) -> Self {
+    fn new(
+        turn: Turn,
+        ports: TurnPorts<'a, S, C, I, L, T>,
+        decider: &'a D,
+        slot: &'a TurnSlot,
+    ) -> Self {
         Self {
             turn,
             ports,
             decider,
+            slot,
             message_id: None,
             body: String::new(),
             usage: Usage::default(),
-            pending: BTreeSet::new(),
             last_checkpoint: None,
             checkpointed_len: 0,
         }
@@ -631,9 +622,10 @@ where
         .into())
     }
 
-    async fn fail_before_start(&mut self, error: &AgentError) -> Result<(), TurnRunError> {
+    /// 会话开不起来（运行时错误、旧树清不掉、绑定项不一致）：回合从 `Queued` 或 `Interrupted` 直接失败。
+    async fn fail_before_start(&mut self, reason: String) -> Result<(), TurnRunError> {
         let events = vec![
-            self.step(TurnTrigger::Failed, Some(error.to_string()))?,
+            self.step(TurnTrigger::Failed, Some(reason))?,
             self.finished_event(),
         ];
         self.commit_and_nudge(events, Voiding::of(TurnTrigger::Failed, 0))
@@ -668,8 +660,10 @@ where
     }
 
     /// 发 prompt 之前的那次提交：会话绑定、进 `Running`、空的助手消息。
+    /// `first`：新回合是 `Started`，续接是 `Resume`。续接也另起一条助手消息（同一个回合）。
     async fn started(
         &mut self,
+        first: TurnTrigger,
         runtime_session_id: Option<String>,
         assistant_name: String,
         context_project_id: Option<ProjectId>,
@@ -680,7 +674,7 @@ where
             .session_binding(runtime_session_id)
             .into_iter()
             .collect();
-        events.push(self.step(TurnTrigger::Started, None)?);
+        events.push(self.step(first, None)?);
         let author = Author::Assistant {
             id: self.turn.assistant_id,
             name_snapshot: assistant_name,
@@ -805,18 +799,26 @@ where
         Ok(())
     }
 
+    /// 受理那一刻的两种时钟读数。
+    fn now(&self) -> AcceptedAt {
+        AcceptedAt {
+            mono: self.ports.clock.monotonic(),
+            wall: self.ports.clock.now(),
+        }
+    }
+
+    /// 用户取消。次序：提交（带作废）→ 停止受理 → 停运行时 → 提醒。提交一返回就停止受理：交接表在锁里逐格
+    /// 回绝，名下每个权限请求都已有结论，`cancel()` 等它们写出答复时不会等到编排身上。
     async fn on_cancel<Sess: AgentSession>(&mut self, session: &Sess) -> Result<(), TurnRunError> {
         if matches!(
             self.turn.state,
             TurnState::Running | TurnState::WaitingApproval
         ) {
-            // 次序：提交（带作废）→ 清票 → 停运行时 → 提醒。提交一返回就去停运行时，中间不等判定方
             let events = vec![self.step(TurnTrigger::Cancel, None)?];
             let committed = self
                 .commit(events, Voiding::of(TurnTrigger::Cancel, 0))
                 .await?;
-            // 等着的审批不再有结果可采纳
-            self.pending.clear();
+            self.slot.stop_accepting();
             // 通知发不出去也没关系：适配器到时结束进程树，更新流照样以取消收尾
             let _ = session.cancel().await;
             self.nudge(&committed).await;
@@ -824,68 +826,117 @@ where
         Ok(())
     }
 
-    async fn on_signal(&mut self, signal: Signal) -> Result<(), TurnRunError> {
-        match signal {
-            Signal::PermissionAsked { reply, .. } => {
-                let accept = match self.turn.state {
-                    TurnState::Running => {
-                        let events = vec![self.step(TurnTrigger::PermissionAsked, None)?];
-                        self.commit_and_nudge(events, None).await?;
-                        true
-                    }
-                    TurnState::WaitingApproval => true,
-                    // 正在取消：不再受理新的权限请求，处理方按「回合已结束」拒绝
-                    _ => false,
-                };
-                if accept {
-                    let ticket = new_ticket();
-                    self.pending.insert(ticket);
-                    let _ = reply.send(Some(ticket));
-                } else {
-                    let _ = reply.send(None);
-                }
+    /// 受理一张票：回合还在跑就先提交「等待审批」，再把票交回处理方，处理方这才去问判定方。
+    async fn on_admit(&mut self, ticket: Ticket) -> Result<(), TurnRunError> {
+        match self.turn.state {
+            TurnState::Running => {
+                let events = vec![self.step(TurnTrigger::PermissionAsked, None)?];
+                self.commit_and_nudge(events, None).await?;
             }
-            Signal::PermissionDecided {
-                ticket,
-                approval,
-                ack,
-            } => {
-                // 只采纳这一回合、还在等审批、确有这张票的结果；否则拒绝且不动计数
-                let accepted =
-                    self.turn.state == TurnState::WaitingApproval && self.pending.remove(&ticket);
-                if accepted {
-                    // 结果出自一条审批：交付事件是「这条批准已经用掉」的唯一依据（T06 方案 2.6 第 4 条），
-                    // 没有别的票在等时和回到 Running 同一笔
-                    let mut events = Vec::new();
-                    if let Some(approval_id) = approval {
-                        events.push(
-                            ApprovalDelivered {
-                                approval_id,
-                                turn_id: self.turn.id,
-                            }
-                            .into(),
-                        );
-                    }
-                    if self.pending.is_empty() {
-                        events.push(self.step(TurnTrigger::PermissionDecided, None)?);
-                    }
-                    if !events.is_empty() {
-                        self.commit_and_nudge(events, None).await?;
-                    }
-                }
-                let _ = ack.send(accepted);
+            TurnState::WaitingApproval => {}
+            // 停止受理之后表里没有「等受理」的格子；到这里说明状态与表对不上，按不受理处理
+            _ => {
+                self.slot.refuse(ticket);
+                return Ok(());
             }
         }
+        self.slot.admit(ticket, self.now());
         Ok(())
+    }
+
+    /// 采纳一张票的结论：状态是 `WaitingApproval` 且票在「有结论」才采纳。先提交（经审批的带
+    /// `ApprovalDelivered`；没有别的票在等时和回到 `Running` 同一笔），再回执 `true`。回执就是交接点。
+    async fn on_adopt(&mut self, ticket: Ticket) -> Result<(), TurnRunError> {
+        let found = self
+            .slot
+            .inspect(|h| {
+                h.decided(ticket)
+                    .map(|approval| (approval, h.others_await_approval(ticket)))
+            })
+            .flatten();
+        let Some((approval, others)) =
+            found.filter(|_| self.turn.state == TurnState::WaitingApproval)
+        else {
+            self.slot.refuse(ticket);
+            return Ok(());
+        };
+        // 结果出自一条审批：交付事件是「这条批准已经用掉」的唯一依据（T06 方案 2.6 第 4 条）
+        let mut events = Vec::new();
+        if let Some(approval_id) = approval {
+            events.push(
+                ApprovalDelivered {
+                    approval_id,
+                    turn_id: self.turn.id,
+                }
+                .into(),
+            );
+        }
+        if !others {
+            events.push(self.step(TurnTrigger::PermissionDecided, None)?);
+        }
+        if !events.is_empty() {
+            self.commit_and_nudge(events, None).await?;
+        }
+        let adopted = self.slot.adopt(ticket);
+        debug_assert!(adopted.is_some(), "采纳之前格子只有编排能拿走");
+        Ok(())
+    }
+
+    /// 查等待上限（T06 方案 4.2 第三行）。有票超期时：先把表里已到的结论采纳完（用户已经做了决定的，算数）；
+    /// 还有超期的票 → 提交 `Interrupted{ApprovalWaitLimit}` → 停止受理 → 停运行时 → 提醒。审批不作废。
+    async fn on_limit_check<Sess: AgentSession>(
+        &mut self,
+        session: &Sess,
+        limit: Duration,
+    ) -> Result<(), TurnRunError> {
+        let overdue = |run: &Self| {
+            let now = run.now();
+            run.slot
+                .inspect(|h| h.deciding_overdue(limit, now))
+                .unwrap_or(false)
+        };
+        if self.turn.state != TurnState::WaitingApproval || !overdue(self) {
+            return Ok(());
+        }
+        while let Some(ticket) = self.slot.inspect(|h| h.any_decided()).flatten() {
+            self.on_adopt(ticket).await?;
+        }
+        if self.turn.state != TurnState::WaitingApproval || !overdue(self) {
+            return Ok(());
+        }
+        let events = vec![self.step(TurnTrigger::WaitLimitReached, None)?];
+        let committed = self.commit(events, None).await?;
+        self.slot.stop_accepting();
+        let _ = session.cancel().await;
+        self.nudge(&committed).await;
+        Ok(())
+    }
+
+    /// 因等待上限中断的回合，旧进程树没能确认清空：改记 `Failed`（带作废），回合不能续接。
+    async fn fail_after_interrupt(&mut self) -> Result<(), TurnRunError> {
+        let events = vec![
+            self.step(TurnTrigger::Failed, Some(TREE_NOT_CLEARED.into()))?,
+            self.finished_event(),
+        ];
+        self.commit_and_nudge(events, Voiding::of(TurnTrigger::Failed, 0))
+            .await
     }
 
     /// 按结局推进到最终状态，写入消息结局与回合结束事件。
     async fn finish(&mut self, end: End) -> Result<(), TurnRunError> {
+        // 更新流已经结束：还在等的请求不会再有人采纳
+        self.slot.stop_accepting();
         let mut triggers = Vec::new();
         let state = self.turn.state;
         match end {
+            // 已因等待上限中断：业务状态不再随更新流变，只把助手消息收尾。失败原因不进事件，记一条日志
+            // （进程退出由 run_turn_inner 去清树，那里会再见到它）
+            end if matches!(state, TurnState::Interrupted { .. }) => {
+                if let End::Failed(error) = end {
+                    tracing::warn!(turn = %self.turn.id, %error, "回合已因等待上限中断，运行时随后报了失败");
+                }
+            }
             End::Finished(TurnOutcome::Completed) => {
-                self.pending.clear();
                 if state == TurnState::WaitingApproval {
                     triggers.push((TurnTrigger::PermissionDecided, None));
                 }

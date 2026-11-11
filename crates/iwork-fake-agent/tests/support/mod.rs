@@ -61,6 +61,14 @@ impl Fake {
         read_records(&self.record)
     }
 
+    /// 客户端发来的东西按到达 stdin 的先后：方法名，或「permission_response <工具调用 id> <选项>」。
+    pub fn arrivals(&self) -> Vec<String> {
+        self.records()
+            .into_iter()
+            .filter_map(|r| r["arrived"].as_str().map(str::to_owned))
+            .collect()
+    }
+
     /// 记录里某个方法收到的全部参数。
     pub fn params_of(&self, method: &str) -> Vec<Value> {
         self.records()
@@ -71,14 +79,19 @@ impl Fake {
     }
 }
 
+/// 记录文件里写完的行。假运行时可能正在写最后一行：结尾没有换行的末行还没写完，跳过，下次再读。
 pub fn read_records(path: &Path) -> Vec<Value> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => text
-            .lines()
-            .map(|l| serde_json::from_str(l).expect("记录是 JSON"))
-            .collect(),
-        Err(_) => Vec::new(),
-    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let complete = match text.rfind('\n') {
+        Some(end) => &text[..end],
+        None => "",
+    };
+    complete
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("记录是 JSON"))
+        .collect()
 }
 
 pub fn spec(cwd: &Path) -> SessionSpec {

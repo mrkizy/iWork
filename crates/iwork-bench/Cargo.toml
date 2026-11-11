@@ -40,3 +40,8 @@ harness = false
 [[bench]]
 name = "ipc"
 harness = false
+
+# T06 方案第 14 节：回合编排的流式热路径（交接表换掉信号信箱前后对比用）
+[[bench]]
+name = "turn_stream"
+harness = false

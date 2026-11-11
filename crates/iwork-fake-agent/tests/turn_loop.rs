@@ -321,7 +321,8 @@ async fn cooperative_cancel_still_clears_children_and_next_turn_resumes() {
         .run_turn(
             &AcpRuntime::new(healthy.launch.clone()),
             h.ports(),
-            h.plan(healthy.dir.path(), "继续"),
+            // 同一条会话线的工作目录不变（会话绑定项守卫）；换的只是运行时
+            h.plan(fake.dir.path(), "继续"),
         )
         .await
         .unwrap();
@@ -555,7 +556,8 @@ async fn crash_mid_turn_fails_the_turn_and_next_turn_resumes() {
         .run_turn(
             &AcpRuntime::new(healthy.launch.clone()),
             h.ports(),
-            h.plan(healthy.dir.path(), "继续"),
+            // 同一条会话线的工作目录不变（会话绑定项守卫）；换的只是运行时
+            h.plan(crashing.dir.path(), "继续"),
         )
         .await
         .unwrap();

@@ -53,8 +53,10 @@ impl Recorder {
     fn write(&self, value: Value) {
         if let Some(file) = &self.0 {
             let mut file = file.lock().unwrap_or_else(|p| p.into_inner());
+            // 整行（含换行）拼好后一次写出：`writeln!` 会分几次写，测试并发读时可能读到半行。
             // 记录写不进去说明测试环境坏了，直接让进程失败，比静默丢记录好查
-            writeln!(file, "{value}").expect("写记录文件失败");
+            let line = format!("{value}\n");
+            file.write_all(line.as_bytes()).expect("写记录文件失败");
             file.flush().expect("写记录文件失败");
         }
     }
@@ -73,6 +75,49 @@ struct State {
     tool_calls: Mutex<HashMap<String, ToolCallUpdateFields>>,
     /// 当前回合是否已被取消；每次 prompt 开始时清零
     cancelled: watch::Sender<bool>,
+}
+
+/// 到达记录：认出客户端发来的每一行是什么。发出的权限请求按 JSON-RPC id 记下工具调用 id，
+/// 答复到达时据此点名。
+#[derive(Default)]
+struct Arrivals {
+    permission_ids: Mutex<HashMap<String, String>>,
+}
+
+impl Arrivals {
+    /// 记下发出去的权限请求。
+    fn sent(&self, line: &str) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            return;
+        };
+        if v["method"] == "session/request_permission"
+            && let Some(tool) = v["params"]["toolCall"]["toolCallId"].as_str()
+        {
+            self.permission_ids
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(v["id"].to_string(), tool.to_owned());
+        }
+    }
+
+    /// 一行到达的东西：请求与通知是方法名，权限答复是「permission_response <工具调用 id> <选项或 cancelled>」。
+    fn arrived(&self, line: &str) -> Option<String> {
+        let v = serde_json::from_str::<Value>(line).ok()?;
+        if let Some(method) = v["method"].as_str() {
+            return Some(method.to_owned());
+        }
+        let tool = self
+            .permission_ids
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&v["id"].to_string())?;
+        let outcome = &v["result"]["outcome"];
+        let picked = outcome["optionId"]
+            .as_str()
+            .or(outcome["outcome"].as_str())
+            .unwrap_or("error");
+        Some(format!("permission_response {tool} {picked}"))
+    }
 }
 
 /// 一个回合怎么结束。
@@ -131,21 +176,35 @@ async fn run() -> Result<(), String> {
         cancelled: watch::channel(false).0,
     });
 
+    // 到达记录在读到这一行时就写，早于派发：记录文件里的先后就是到达 stdin 的先后
+    let arrivals = Arc::new(Arrivals::default());
+    let (reader, writer) = (state.clone(), arrivals.clone());
     let incoming = futures::stream::unfold(
-        BufReader::new(tokio::io::stdin()).lines(),
-        |mut lines| async move {
-            match lines.next_line().await {
-                Ok(Some(line)) => Some((Ok(line), lines)),
-                Ok(None) => None,
-                Err(e) => Some((Err(e), lines)),
+        (BufReader::new(tokio::io::stdin()).lines(), arrivals),
+        move |(mut lines, arrivals)| {
+            let state = reader.clone();
+            async move {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        if let Some(arrived) = arrivals.arrived(&line) {
+                            state.record.write(json!({ "arrived": arrived }));
+                        }
+                        Some((Ok(line), (lines, arrivals)))
+                    }
+                    Ok(None) => None,
+                    Err(e) => Some((Err(e), (lines, arrivals))),
+                }
             }
         },
     );
-    let outgoing = futures::sink::unfold(tokio::io::stdout(), |mut w, line: String| async move {
-        w.write_all(line.as_bytes()).await?;
-        w.write_all(b"\n").await?;
-        w.flush().await?;
-        Ok::<_, std::io::Error>(w)
+    let outgoing = futures::sink::unfold(tokio::io::stdout(), move |mut w, line: String| {
+        writer.sent(&line);
+        async move {
+            w.write_all(line.as_bytes()).await?;
+            w.write_all(b"\n").await?;
+            w.flush().await?;
+            Ok::<_, std::io::Error>(w)
+        }
     });
     let transport = Lines::new(Box::pin(outgoing), Box::pin(incoming));
 
@@ -319,6 +378,18 @@ impl Ctx<'_> {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         calls.get(id).cloned().unwrap_or_default()
+    }
+
+    /// 某次工具调用的权限请求（允许一次 / 拒绝一次两个选项）。
+    fn permission_request(&self, tool_call_id: &str) -> RequestPermissionRequest {
+        RequestPermissionRequest::new(
+            self.session.clone(),
+            ToolCallUpdate::new(tool_call_id.to_owned(), self.tool_fields(tool_call_id)),
+            vec![
+                PermissionOption::new(ALLOW_ID, "允许", PermissionOptionKind::AllowOnce),
+                PermissionOption::new(REJECT_ID, "拒绝", PermissionOptionKind::RejectOnce),
+            ],
+        )
     }
 
     fn is_cancelled(&self) -> bool {
@@ -500,14 +571,7 @@ impl Ctx<'_> {
                 allowed,
                 denied,
             } => {
-                let mut request = RequestPermissionRequest::new(
-                    self.session.clone(),
-                    ToolCallUpdate::new(tool_call_id.clone(), self.tool_fields(tool_call_id)),
-                    vec![
-                        PermissionOption::new(ALLOW_ID, "允许", PermissionOptionKind::AllowOnce),
-                        PermissionOption::new(REJECT_ID, "拒绝", PermissionOptionKind::RejectOnce),
-                    ],
-                );
+                let mut request = self.permission_request(tool_call_id);
                 if let Some(cwd) = cwd {
                     request = request.meta(iwork_meta(json!({ "cwd": cwd })));
                 }
@@ -522,6 +586,23 @@ impl Ctx<'_> {
                     RequestPermissionOutcome::Selected(_) => self.run(denied).await,
                     _ => Ok(Flow::Cancelled),
                 }
+            }
+            Step::ParallelPermissions { tool_call_ids } => {
+                let asks = tool_call_ids.iter().map(|id| {
+                    self.cx
+                        .send_request(self.permission_request(id))
+                        .block_task()
+                });
+                for (id, response) in tool_call_ids
+                    .iter()
+                    .zip(futures::future::join_all(asks).await)
+                {
+                    self.state.record.write(json!({
+                        "tool_call_id": id,
+                        "permission_response": serde_json::to_value(&response?).expect("可序列化"),
+                    }));
+                }
+                Ok(Flow::Done)
             }
             Step::Sleep { ms } => Ok(cancelled(!self.pause(Duration::from_millis(*ms)).await)),
             Step::Crash { exit_code } => {

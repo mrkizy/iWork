@@ -110,6 +110,16 @@ pub const TURN_TRANSITIONS: &[Transition<TurnState, TurnTrigger>] = &[
         T::Abandon,
         S::Cancelled,
     ),
+    // 中断之后没有合法的继续：等待上限中断后旧进程树清不掉、续接开不起来（旧树未清、会话记录不在、
+    // 运行时起不来）。和别处的失败一样作废挂着的审批（T06 方案 2.6 第 4 条）
+    (S::Interrupted { reason: Crash }, T::Failed, S::Failed),
+    (
+        S::Interrupted {
+            reason: ApprovalWaitLimit,
+        },
+        T::Failed,
+        S::Failed,
+    ),
 ];
 
 /// 回合状态机名，出现在 [`IllegalTransition`] 里。
