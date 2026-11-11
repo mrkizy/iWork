@@ -18,21 +18,20 @@ claude --help > "$OUT/help.txt" 2>&1
 claude auth --help > "$OUT/auth-help.txt" 2>&1
 
 # ---------- Q4 登录状态检测 ----------
-# auth status 的输出里有邮箱等账号信息，不得落盘（AGENTS.md 安全不变量）：原文只在管道里过一遍，
-# 落盘的只有 loggedIn、authMethod、subscriptionType、loginExpiresAt 四个字段；不是 JSON 时只记字节数；stderr 只记字节数。
+# auth status 的输出里有邮箱等账号信息，不得落盘（AGENTS.md 安全不变量）：原文只在内存里过一遍，
+# 落盘的只有 loggedIn、authMethod、subscriptionType、loginExpiresAt 四个字段；不是 JSON 时只记字节数。
+# stderr 直接丢弃，不经任何临时文件（中断也不会留下原文）。
 auth_fields() {  # $1 = 结果文件；其余参数原样传给 claude auth status
   local file="$1"; shift
-  local raw err rc
-  err="$(mktemp)"
-  raw="$(claude auth status "$@" 2>"$err")"; rc=$?
+  local raw rc
+  raw="$(claude auth status "$@" 2>/dev/null)"; rc=$?
   if printf '%s' "$raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
     printf '%s' "$raw" | jq '{loggedIn, authMethod, subscriptionType, loginExpiresAt}' > "$file"
   else
     echo "输出不是 JSON 对象（${#raw} 字节，内容不记录）" > "$file"
   fi
-  echo "stderr=$(wc -c < "$err" | tr -d ' ') 字节（内容不记录）" >> "$file"
+  echo "stderr 已丢弃（内容不记录）" >> "$file"
   echo "exit=$rc" >> "$file"
-  rm -f "$err"
 }
 command -v jq >/dev/null || { echo "需要 jq（过滤 auth status 的输出）" >&2; exit 1; }
 log "Q4: claude auth status（只留四个字段）"
