@@ -342,11 +342,15 @@ fn confirm_running(code: &Cf, claim: Claim) -> Result<SignerIdentity, String> {
 /// 原地改掉一个还没调入的页，动态校验照样通过，等那一页被执行才出事。这里把这种文件当作已被篡改，直接拒。
 /// 文件按内核记录的映像定位（不是按路径重新找），之后的动态校验再确认它与运行中的代码目录一致。
 ///
-/// 带 `kSecCSDoNotValidateResources`：**只跳过包资源，代码页哈希照样逐页验**，所以上面要挡的「改了还没调入的页」
-/// 照样挡得住。为什么要跳：无证书构建的 .app 不做整包签名（主程序只有链接器的 ad-hoc 签名），而包主程序的
-/// 静态代码对象代表整个包，默认参数下报 -67056（`errSecCSResourcesNotFound`：签名说有资源、却找不到），
-/// 客户端连自己的身份都算不出（T04 N5 A1 实测，`t0-findings.md` 7.1）。包资源本来就不在信任判据里；
-/// 包有没有装齐、有没有被改，由 T04 方案 2.9 的安装检查（整包验签）管。
+/// 带 `kSecCSDoNotValidateResources`：主程序的代码页哈希照样逐页验，上面要挡的「改了还没调入的页」照样挡得住
+/// （`tests/peer_bundle_macos.rs` 有用例）。为什么要带：无证书构建的 .app 不做整包签名（主程序只有链接器的
+/// ad-hoc 签名），而包主程序的静态代码对象代表整个包，默认参数下报 -67056（`errSecCSResourcesNotFound`），
+/// 客户端连自己的身份都算不出（T04 N5 A1 实测，`t0-findings.md` 7.1）。
+///
+/// 代价（已知缺口，技术设计第 1 节）：握手时**不验对端包里的资源、嵌套程序与 Frameworks 里的库**——这个参数把它们
+/// 一起放过了，换掉嵌套程序或 dylib 照样通过。T04 的安装检查只查后台自己的安装目录，不覆盖对端。
+/// 约束：有证书的包里不放会被加载的 dylib、framework 或影响行为的资源；将来要放时，证书分支改回默认参数
+/// （整包签名的包默认参数能过，T04 N5 B1）。
 fn check_image_file(code: &Cf, requirement: &Cf) -> Result<(), String> {
     let mut image_file: SecRef = ptr::null();
     // SAFETY: code 是有效 SecCode；出参成功时是 +1 引用，交给 Cf。
