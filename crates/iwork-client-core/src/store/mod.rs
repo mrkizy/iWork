@@ -384,9 +384,10 @@ impl Store {
         if self.connection != c {
             self.connection = c;
             self.dirty.mark(ViewKey::Connection);
-            // 「会发命令的按钮」随连接状态变。
+            // 「会发命令的按钮」随连接状态变：输入框在标题栏一带，卡片按钮在行里（derive::row 的 live）。
             self.dirty.mark(ViewKey::Conversation);
             self.dirty.conversation.header = true;
+            self.mark_rows(|r| matches!(r, Row::Approval(_) | Row::UserAction(_) | Row::Resume(_)));
         }
     }
 
@@ -522,8 +523,7 @@ impl Store {
                     s.projects_root.clone_from(v);
                 }
                 self.dirty.mark(ViewKey::Settings);
-                self.dirty.mark(ViewKey::Conversation);
-                self.dirty.conversation.rows.extend(self.turn_end_rows());
+                self.mark_rows(|r| matches!(r, Row::TurnEnd(_)));
             }
             E::CloneFinished(e) => {
                 if let Some(job) = self.clone_job.as_mut()
@@ -572,14 +572,16 @@ impl Store {
         }
     }
 
-    fn turn_end_rows(&self) -> Vec<String> {
-        self.open.as_ref().map_or_else(Vec::new, |t| {
-            t.identities()
-                .into_iter()
-                .filter(|(_, id)| id.starts_with("end:"))
-                .map(|(_, id)| id)
-                .collect()
-        })
+    /// 把打开的时间线里满足条件的行标脏（行外状态变了，见 `Timeline::identities_where`）。
+    fn mark_rows(&mut self, pred: impl Fn(&Row) -> bool) {
+        let Some(t) = self.open.as_ref() else {
+            return;
+        };
+        let rows = t.identities_where(pred);
+        if !rows.is_empty() {
+            self.dirty.mark(ViewKey::Conversation);
+            self.dirty.conversation.rows.extend(rows);
+        }
     }
 
     fn apply_transient(&mut self, t: pb::transient_event::Event, applied: &mut Applied) {
@@ -691,6 +693,10 @@ impl Store {
                 }
             }
             (_, K::ListProjects(l)) => {
+                // 项目名进了分隔线与「已切到项目」说明的文字（derive::row::project_name）。
+                if self.summary.projects != l.projects {
+                    self.mark_rows(|r| matches!(r, Row::Divider { .. } | Row::Note { .. }));
+                }
                 self.summary.projects = l.projects;
                 self.mark_summary_views();
             }
@@ -701,6 +707,10 @@ impl Store {
                 self.dirty.conversation.header = true;
             }
             (_, K::ListAssistants(l)) => {
+                // 助手头像进了消息行（derive::avatar）。
+                if self.summary.assistants != l.assistants {
+                    self.mark_rows(|r| matches!(r, Row::Message(_)));
+                }
                 self.summary.assistants = l.assistants;
                 self.summary.activities = l.activities;
                 self.mark_summary_views();

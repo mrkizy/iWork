@@ -444,7 +444,7 @@ impl Timeline {
                 t.state = e.to;
                 t.state_reason.clone_from(&e.reason);
                 t.interrupt_reason = e.interrupt_reason;
-                TimelineChange::default().with_header()
+                self.messages_of_turn(&e.turn_id).with_header()
             }
             E::TurnModelReported(e) => {
                 let t = self.turns.get_mut(&e.turn_id)?;
@@ -466,11 +466,10 @@ impl Timeline {
                     add_usage(self.usage_total.get_or_insert_with(Default::default), u);
                 }
                 let id = format!("end:{}", turn.id);
-                let mut c = if self.admit_new(&id, false) {
-                    self.insert(RowKey::entity(seq), id, Row::TurnEnd(turn))
-                } else {
-                    TimelineChange::default()
-                };
+                let mut c = self.messages_of_turn(&turn.id);
+                if self.admit_new(&id, false) {
+                    c.merge(self.insert(RowKey::entity(seq), id, Row::TurnEnd(turn)));
+                }
                 c.header = true;
                 c
             }
@@ -975,6 +974,25 @@ impl Timeline {
     }
 
     /// 行身份 → 键的全部映射，按位置排序（帧引擎算窗口用）。
+    /// 满足条件的行的身份。行的视图模型读了行外的状态（回合状态、连接、摘要表、设置）时，
+    /// 那份状态一变，持有它的一方用这个把受影响的行标脏（`derive::row` 里每一处行外读取都要有对应的标脏）。
+    pub fn identities_where(&self, pred: impl Fn(&Row) -> bool) -> Vec<String> {
+        self.by_id
+            .iter()
+            .filter(|(_, k)| self.rows.get(k).is_some_and(&pred))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// 这个回合的消息行：它们的表情读回合状态（`derive::row::message`）。
+    fn messages_of_turn(&self, turn_id: &str) -> TimelineChange {
+        let mut c = TimelineChange::default();
+        c.rows.extend(self.identities_where(
+            |r| matches!(r, Row::Message(m) if m.turn_id.as_deref() == Some(turn_id)),
+        ));
+        c
+    }
+
     pub fn identities(&self) -> Vec<(RowKey, String)> {
         let mut v: Vec<(RowKey, String)> =
             self.by_id.iter().map(|(id, k)| (*k, id.clone())).collect();

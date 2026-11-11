@@ -28,6 +28,8 @@ pub enum Step {
 pub struct Scenario {
     pub name: &'static str,
     pub about: &'static str,
+    /// 录像与预览页打开的对话；没有就停在首页（录像只记侧栏、待处理、设置）。
+    pub focus: Option<&'static str>,
     build: fn() -> Vec<Step>,
 }
 
@@ -46,81 +48,97 @@ pub const REGISTRY: &[Scenario] = &[
         name: "empty",
         about: "只有基础世界",
         build: empty,
+        focus: None,
     },
     Scenario {
         name: "conversation-basic",
         about: "一问一答、工具活动、回合结束印章",
         build: conversation_basic,
+        focus: Some("c-basic"),
     },
     Scenario {
         name: "streaming",
         about: "一条助手消息分 20 段流式到达",
         build: streaming,
+        focus: Some("c-stream"),
     },
     Scenario {
         name: "approval-states",
         about: "审批：待定、已允许、已拒绝、已作废、切档放行、必问、沙箱外",
         build: approval_states,
+        focus: Some("c-approval"),
     },
     Scenario {
         name: "user-action-states",
         about: "亲手执行：待定、执行中、已执行、已忽略、失败、已作废、结果未知",
         build: user_action_states,
+        focus: Some("c-user-action"),
     },
     Scenario {
         name: "user-action-unknown-deleting",
         about: "结果未知的卡片挡住删除，对话停在删除中",
         build: user_action_unknown_deleting,
+        focus: Some("c-ua-deleting"),
     },
     Scenario {
         name: "turn-end",
         about: "回合结束：搞定印章、失败、取消",
         build: turn_end,
+        focus: Some("c-turn-end"),
     },
     Scenario {
         name: "resume-card",
         about: "崩溃中断的回合：继续 / 放弃卡片",
         build: resume_card,
+        focus: Some("c-resume"),
     },
     Scenario {
         name: "sidebar-dots",
         about: "侧栏圆点四种状态与未读",
         build: sidebar_dots,
+        focus: None,
     },
     Scenario {
         name: "assistants-20",
         about: "20 个助手，部分有最近动态",
         build: assistants_20,
+        focus: None,
     },
     Scenario {
         name: "quota-missing",
         about: "额度取不到",
         build: quota_missing,
+        focus: None,
     },
     Scenario {
         name: "stream-16x100",
         about: "16 个对话各 100 条流式消息（基准用）",
         build: stream_16x100,
+        focus: Some("c-s00"),
     },
     Scenario {
         name: "history-100k",
         about: "一个对话十万条消息",
         build: history_100k,
+        focus: Some("c-history"),
     },
     Scenario {
         name: "xss-corpus",
         about: "正文、标题、文件名、工具输出里的脚本与链接",
         build: xss_corpus,
+        focus: Some("c-xss"),
     },
     Scenario {
         name: "reconnect-basic",
         about: "中途断开全部连接后继续",
         build: reconnect_basic,
+        focus: Some("c-reconnect"),
     },
     Scenario {
         name: "rename-via-summary-refresh-until-t10",
         about: "测试专用：直接改摘要里的标题，再发一条落在侧栏订阅上的已有事件触发摘要失效。T10 补上 ConversationRenamed 后换成真事件",
         build: rename_via_summary_refresh_until_t10,
+        focus: Some("c-rename"),
     },
 ];
 
