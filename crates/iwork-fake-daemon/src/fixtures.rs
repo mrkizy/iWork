@@ -104,6 +104,34 @@ pub fn dm(id: &str, assistant_id: &str) -> pb::DomainEvent {
     )
 }
 
+/// 改项目名（只带 `name`，其余字段不动）。
+pub fn project_renamed(id: &str, name: &str) -> pb::DomainEvent {
+    ev(E::ProjectUpdated(pb::ProjectUpdated {
+        project_id: id.into(),
+        name: Some(name.into()),
+        pinned: None,
+        last_active_at: None,
+    }))
+}
+
+/// 助手私聊切换上下文项目；`None` 是切回纯私聊。
+pub fn dm_project_switched(conversation_id: &str, project_id: Option<&str>) -> pb::DomainEvent {
+    ev(E::DmProjectSwitched(pb::DmProjectSwitched {
+        conversation_id: conversation_id.into(),
+        project_id: project_id.map(Into::into),
+    }))
+}
+
+/// 给消息事件标上上下文项目（助手私聊里的消息记着发出时的项目，设计 9.1）。
+pub fn in_project(mut e: pb::DomainEvent, project_id: &str) -> pb::DomainEvent {
+    if let Some(E::MessageAppended(pb::MessageAppended { message: Some(m) })) = &mut e.event {
+        m.context_project_id = Some(project_id.into());
+    } else {
+        panic!("in_project 只用于 MessageAppended：{e:?}");
+    }
+    e
+}
+
 pub fn user_message(id: &str, conversation_id: &str, body: &str) -> pb::DomainEvent {
     ev(E::MessageAppended(pb::MessageAppended {
         message: Some(pb::Message {

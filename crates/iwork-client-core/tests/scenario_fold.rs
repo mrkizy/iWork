@@ -1,8 +1,9 @@
-//! 每个假后台场景：场景与客户端同时跑，网页逐帧折叠的结果 == 重新 attach 后那一帧全量（Rust 侧的录像对拍）。
+//! 每个假后台场景：网页逐帧折叠的结果 == 重新 attach 后那一帧全量（Rust 侧的录像对拍）。
 //!
-//! 守的是「行的视图模型读了行外的状态（回合状态、连接、摘要表），那份状态变了行就得重发」：
-//! 漏标一处脏，折叠结果就停在旧值上，和全量对不上。网页的同名对拍（client/src/state/fixtures.test.ts）
-//! 吃的是同一批场景的录像；这里不依赖 Node，cargo test 就能挡住。
+//! 守的是「行的视图模型读了行外的状态，那份状态变了行就得重发」与帧引擎的增量规则：漏标一处脏、
+//! 漏发一次增量，折叠结果就停在旧值上，和全量对不上。录法是两段式（tests/support/record.rs）：
+//! 先打开 focus 对话拿到快照，再跑剩下的事件，所以比的是增量，不是两份快照（审查 2a 1/F-2）；
+//! 每个场景都断言打开之后确实收到过增量。
 
 // 假后台只在 Unix 上监听（iwork-fake-daemon）；M1 暂不支持 Windows。
 #![cfg(unix)]
@@ -11,51 +12,14 @@ mod support;
 
 use std::time::Duration;
 
-use iwork_client_core::{App, DirectDialer, Options};
-use iwork_fake_daemon::{FakeDaemon, scenario, self_trusting_identity};
+use iwork_client_core::Options;
+use iwork_fake_daemon::scenario;
 use iwork_proto::pb;
+use prost::Message;
 use support::web::{Web, WebState};
 use tokio::time::timeout;
 
-/// 场景跑完后，这么久没有新块就算取空了。
-const QUIET: Duration = Duration::from_millis(300);
-const LIMIT: Duration = Duration::from_secs(120);
-
-fn visible(conversation: Option<&str>) -> pb::UiIntent {
-    pb::UiIntent {
-        kind: Some(pb::ui_intent::Kind::SetVisible(pb::SetVisible {
-            sidebar: true,
-            pending: true,
-            settings: true,
-            conversation_id: conversation.map(Into::into),
-            ..Default::default()
-        })),
-    }
-}
-
-fn exists(daemon: &FakeDaemon, conversation: &str) -> bool {
-    daemon
-        .try_query(&pb::Query {
-            kind: Some(pb::query::Kind::GetConversation(pb::GetConversation {
-                conversation_id: conversation.into(),
-                before_message_id: None,
-                limit: 1,
-            })),
-        })
-        .is_ok()
-}
-
-/// 取一块交给网页；等不到返回 false。
-async fn pull(app: &App, web: &mut Web, wait: Duration) -> bool {
-    match timeout(wait, app.next_frame(web.request())).await {
-        Ok(Ok(c)) => {
-            web.accept(&c);
-            true
-        }
-        Ok(Err(e)) => panic!("取帧失败：{e:?}"),
-        Err(_) => false,
-    }
-}
+const LIMIT: Duration = Duration::from_secs(300);
 
 /// 对拍时只比视图内容：跳转请求是一次性的事件，全量帧不重发它。
 fn comparable(s: &WebState) -> WebState {
@@ -65,66 +29,29 @@ fn comparable(s: &WebState) -> WebState {
     }
 }
 
-async fn fold_and_full(s: &scenario::Scenario) -> (WebState, WebState) {
-    let dir = tempfile::Builder::new()
-        .prefix("t09-fold")
-        .tempdir_in("/tmp")
-        .unwrap();
-    let daemon = FakeDaemon::start(dir.path().join("d.sock")).await.unwrap();
-    let dialer = DirectDialer::new(daemon.endpoint(), self_trusting_identity().unwrap(), "test");
-    let (app, _effects) = App::start(dialer, Options::default());
-    let mut web = Web::new(app.attach().await.unwrap());
-    assert_eq!(app.intent(visible(None)).await.error, None);
-
-    let mut focused = s.focus.is_none();
-    let run = daemon.run_scenario(s.name);
-    tokio::pin!(run);
-    let mut done = false;
-    loop {
-        let got = if done {
-            pull(&app, &mut web, QUIET).await
-        } else {
-            tokio::select! {
-                r = &mut run => { r.unwrap(); done = true; continue; }
-                g = pull(&app, &mut web, QUIET) => g,
-            }
-        };
-        if !focused && s.focus.is_some_and(|c| exists(&daemon, c)) {
-            assert_eq!(app.intent(visible(s.focus)).await.error, None);
-            focused = true;
-        }
-        // 安静了还不够：声明打开对话后快照可能还没到（CI 上慢），要等 focus 对话的行到了网页才算收敛。
-        let arrived = s.focus.is_none_or(|c| {
-            web.state.conversation_id.as_deref() == Some(c) && !web.state.rows.is_empty()
-        });
-        // 没连上之前的安静不算：CI 上场景跑完时客户端可能还在拨号
-        let live = web
-            .state
-            .connection
-            .as_ref()
-            .is_some_and(|c| c.state == pb::ConnectionState::Live as i32);
-        if !got && done && focused && arrived && live {
-            break;
-        }
+fn fold(frames: &[Vec<u8>]) -> WebState {
+    let mut web = Web::new(0);
+    for f in frames {
+        web.apply(&pb::ViewPatch::decode(f.as_slice()).unwrap());
     }
-
-    let mut full = Web::new(app.attach().await.unwrap());
-    while full.frames == 0 {
-        assert!(
-            pull(&app, &mut full, Duration::from_secs(5)).await,
-            "重新 attach 后等不到全量帧"
-        );
-    }
-    (comparable(&web.state), comparable(&full.state))
+    web.state
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn every_scenario_folds_to_full() {
     let mut mismatched = Vec::new();
     for s in scenario::REGISTRY {
-        let (folded, full) = timeout(LIMIT, fold_and_full(s))
+        let rec = timeout(LIMIT, support::record::record(s, Options::default()))
             .await
-            .unwrap_or_else(|_| panic!("场景 {} 超时", s.name));
+            .unwrap_or_else(|_| panic!("场景 {} 超时", s.name))
+            .unwrap_or_else(|e| panic!("场景 {} 录不下来：{e}", s.name));
+        assert!(
+            rec.increments > 0,
+            "{}：打开之后没有收到任何增量帧，对拍会退化成比两份快照",
+            s.name
+        );
+        let folded = comparable(&fold(&rec.frames));
+        let full = comparable(&fold(std::slice::from_ref(&rec.full)));
         // 对照：真比了东西
         assert!(full.sidebar.is_some(), "{}：全量帧带侧栏", s.name);
         if s.focus.is_some() {

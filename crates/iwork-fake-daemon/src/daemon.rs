@@ -431,12 +431,18 @@ impl FakeDaemon {
 
     pub async fn run_scenario(&self, name: &str) -> Result<(), UnknownScenario> {
         let sc = scenario::get(name).ok_or_else(|| UnknownScenario(name.to_owned()))?;
-        for step in sc.steps() {
+        self.run_steps(sc.steps()).await;
+        Ok(())
+    }
+
+    /// 按顺序跑一串步骤（场景的一段，见 `Scenario::split_at_focus`）。
+    pub async fn run_steps(&self, steps: Vec<Step>) {
+        for step in steps {
             match step {
                 Step::Append(e) => {
                     self.append(*e);
                 }
-                Step::Transient(e) => self.transient(e),
+                Step::Transient(t) => self.transient(t),
                 Step::Sleep(d) => {
                     tokio::time::sleep(d * self.shared.pace.load(Ordering::Relaxed)).await;
                 }
@@ -444,7 +450,6 @@ impl FakeDaemon {
                 Step::Mutate(f) => self.mutate_tables(f),
             }
         }
-        Ok(())
     }
 
     pub async fn shutdown(self) {

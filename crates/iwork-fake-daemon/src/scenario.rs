@@ -25,6 +25,9 @@ pub enum Step {
     Mutate(Box<dyn FnOnce(&mut Tables) + Send>),
 }
 
+/// 打开对话之后最多实时跑多少步（见 [`Scenario::split_at_focus`]）。
+pub const LIVE_TAIL: usize = 200;
+
 pub struct Scenario {
     pub name: &'static str,
     pub about: &'static str,
@@ -36,6 +39,30 @@ pub struct Scenario {
 impl Scenario {
     pub fn steps(&self) -> Vec<Step> {
         (self.build)()
+    }
+
+    /// 切成「打开对话之前」与「打开之后」两段：前一段跑完、客户端打开对话拿到快照，再跑后一段，
+    /// 后一段的事件才会作为增量进时间线（对拍要比的是增量，不是两份快照）。没有 focus 时前一段为空。
+    /// 切点在建出 focus 对话之后；后一段最多留 [`LIVE_TAIL`] 步，更早的在打开前跑完
+    /// （history-100k 若十万条都在打开后实时推，对拍要跑好几分钟，增量也不需要那么多）。
+    pub fn split_at_focus(&self) -> (Vec<Step>, Vec<Step>) {
+        let mut steps = self.steps();
+        let Some(focus) = self.focus else {
+            return (Vec::new(), steps);
+        };
+        let at = steps.iter().position(|s| match s {
+            Step::Append(e) => matches!(
+                &e.event,
+                Some(pb::domain_event::Event::ConversationCreated(c))
+                    if c.conversation.as_ref().is_some_and(|c| c.id == focus)
+            ),
+            _ => false,
+        });
+        let at = at
+            .unwrap_or_else(|| panic!("场景 {} 里没有建出 focus 对话 {focus} 的那一步", self.name));
+        let cut = (at + 1).max(steps.len().saturating_sub(LIVE_TAIL));
+        let rest = steps.split_off(cut);
+        (steps, rest)
     }
 }
 
@@ -141,6 +168,12 @@ pub const REGISTRY: &[Scenario] = &[
         focus: Some("c-reconnect"),
     },
     Scenario {
+        name: "dm-project-switch",
+        about: "助手私聊换项目：「已切换为」说明、项目分隔线；打开后两个项目都改名",
+        build: dm_project_switch,
+        focus: Some(IWORK_DM),
+    },
+    Scenario {
         name: "rename-via-summary-refresh-until-t10",
         about: "测试专用：直接改摘要里的标题，再发一条落在侧栏订阅上的已有事件触发摘要失效。T10 补上 ConversationRenamed 后换成真事件",
         build: rename_via_summary_refresh_until_t10,
@@ -160,6 +193,8 @@ pub fn get(name: &str) -> Option<&'static Scenario> {
 
 pub const PROJECT: &str = "p-demo";
 pub const IWORK_DM: &str = "c-dm-iwork";
+/// 第二个项目：只有需要两个项目的场景才建。
+pub const OTHER_PROJECT: &str = "p-web";
 
 fn a(e: pb::DomainEvent) -> Step {
     Step::Append(Box::new(e))
@@ -699,6 +734,40 @@ fn reconnect_basic() -> Vec<Step> {
     s.push(Step::DisconnectAll);
     s.extend(exchange(c, "r2", "第二问", "第二答"));
     s.push(a(f::turn_finished("t-r2", T::Completed, false, None)));
+    s
+}
+
+/// 私聊里的当次说明与分隔线都按项目 id 现查项目名（derive::row::project_name）：
+/// 先切到 demo（出「已切换为 demo」），聊一轮；再来一轮上下文是 web 的消息，中间没有切换说明，出分隔线；
+/// 最后两个项目都改名，说明与分隔线要跟着变（项目表变化要标脏这两种行）。
+fn dm_project_switch() -> Vec<Step> {
+    let c = IWORK_DM;
+    let mut s = base();
+    s.push(a(f::project(OTHER_PROJECT, "web", "~/work/web")));
+    s.push(a(f::dm_project_switched(c, Some(PROJECT))));
+    for (n, project, q, ans) in [
+        ("dm1", PROJECT, "demo 的测试怎么跑", "pnpm test"),
+        ("dm2", OTHER_PROJECT, "web 呢", "也是 pnpm test"),
+    ] {
+        let turn = format!("t-{n}");
+        let reply = format!("m-{n}-a");
+        s.push(a(f::in_project(
+            f::user_message(&format!("m-{n}-u"), c, q),
+            project,
+        )));
+        s.push(a(f::turn_queued(&turn, c, IWORK)));
+        s.push(a(f::turn_state(&turn, T::Queued, T::Running, None)));
+        s.push(a(f::in_project(
+            f::assistant_message(&reply, c, &turn, IWORK, "iWork"),
+            project,
+        )));
+        s.push(a(f::message_completed(c, &reply, ans)));
+        s.push(a(f::turn_finished(&turn, T::Completed, false, None)));
+    }
+    // 隔开几帧再改名：说明与分隔线先按旧名字推出去，改名才是对这两行的增量
+    s.push(Step::Sleep(Duration::from_millis(100)));
+    s.push(a(f::project_renamed(PROJECT, "demo-改名")));
+    s.push(a(f::project_renamed(OTHER_PROJECT, "web-改名")));
     s
 }
 

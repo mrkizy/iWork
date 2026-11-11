@@ -9,6 +9,8 @@ export interface FixtureEntry {
   about: string;
   /** 录像打开的对话；没有就是首页。 */
   focus: string | null;
+  /** 打开对话（首页录像是连上）时已经收到几帧；之后的帧是增量。 */
+  opened: number;
 }
 
 export function decodeFrames(bytes: Uint8Array): ViewPatch[] {
