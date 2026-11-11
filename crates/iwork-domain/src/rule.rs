@@ -1,8 +1,10 @@
 //! 审批求值的类型（方案 4.4）：判定结果、规则条目、规则集。只定类型，求值在 T07（`iwork-core`）。
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use crate::action::{ActionFingerprint, ActionKind};
+use crate::action::{ActionFingerprint, ActionFlag, ActionKind};
+use crate::approval_mode::ApprovalMode;
 use crate::common::{Actor, Timestamp};
 use crate::id::{ApprovalId, AssistantId, ConversationId, ProjectId, RuleId};
 use crate::user_action::Proposal;
@@ -82,6 +84,10 @@ pub enum RuleMatcher {
     ToolName(String),
     ActionKindIs(ActionKind),
     Any,
+    /// 全部子条件同时命中（T07 Q1）。空列表恒命中，与 `Any` 同义
+    All(Vec<RuleMatcher>),
+    /// 动作带这个标记（越界、清单外重试、执行脚本）
+    Flag(ActionFlag),
 }
 
 /// 规则的效果。比 [`Verdict`] 多一个 `UserActionEligible`：底线条目只说「拒绝，且允许生成卡片」，
@@ -117,6 +123,9 @@ pub enum RuleScope {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RuleSetVersion(pub String);
 
+/// 条目在哪些档位生效。空集 = 全部档位（旧事件没有这个字段，解出来就是空集）。
+pub type ApprovalModes = BTreeSet<ApprovalMode>;
+
 /// 规则条目：安全规则都是这一种数据（需求第 9 章）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleEntry {
@@ -129,6 +138,15 @@ pub struct RuleEntry {
     pub created_at: Timestamp,
     /// 给人看的说明，如「本项目内 `npm test …` 不再问」
     pub label: String,
+    /// 只在这些档位生效；空集 = 全部档位（T07 Q1）。必问层的删除只在手动、自动档生效就靠它
+    pub applies_in: ApprovalModes,
+}
+
+impl RuleEntry {
+    /// 这条条目在 `mode` 档位下是否生效。
+    pub fn applies_in_mode(&self, mode: ApprovalMode) -> bool {
+        self.applies_in.is_empty() || self.applies_in.contains(&mode)
+    }
 }
 
 /// 求值用的规则快照。

@@ -4,7 +4,7 @@ use crate::machine::finite_enum;
 
 finite_enum! {
     /// 审批档位。全开只在当前对话生效、不可设为默认（需求 FR11）。
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum ApprovalMode {
         Manual,
         Auto,

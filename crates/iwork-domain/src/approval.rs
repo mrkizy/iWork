@@ -5,9 +5,13 @@
 //! 由 [`Approval::apply`] 填进去。AI 审查结果先过三条生效条件，不满足的是 `Stale`
 //! （预料之中的乱序，丢弃并审计），不是表外转换（程序缺陷）。
 
-use crate::action::Action;
+use std::collections::BTreeSet;
+
+use crate::action::{
+    Action, ActionFingerprint, CallShapeKind, CanonicalPath, SandboxPlacement, ToolRef,
+};
 use crate::approval_mode::{ApprovalMode, RememberScope};
-use crate::common::Timestamp;
+use crate::common::{Sha256, Timestamp};
 use crate::id::{ApprovalId, ConversationId, ReviewId, RuleId, TurnId};
 use crate::machine::{IllegalTransition, Transition, finite_enum, lookup};
 use crate::rule::RuleSetVersion;
@@ -68,8 +72,10 @@ finite_enum! {
         AiReviewFailed,
         AiReviewErrored,
         AiReviewTimedOut,
-        /// 有效档位切回手动：手动档不经 AI 审查，进行中的审查作废、转问用户
-        ModeChangedToManual,
+        /// 有效档位离开自动：手动与全开都不经 AI 审查，未放行的审查转问用户
+        ModeChangedFromAuto,
+        /// 进行中的审查失去执行者（后台服务崩溃重启）：放弃、转问用户（T07 Q9）
+        AiReviewAbandoned,
     }
 }
 
@@ -152,7 +158,8 @@ pub const APPROVAL_TRANSITIONS: &[Transition<ApprovalState, ApprovalTriggerKind>
     (A::Pending, AT::AiReviewFailed, A::Pending),
     (A::Pending, AT::AiReviewErrored, A::Pending),
     (A::Pending, AT::AiReviewTimedOut, A::Pending),
-    (A::Pending, AT::ModeChangedToManual, A::Pending),
+    (A::Pending, AT::ModeChangedFromAuto, A::Pending),
+    (A::Pending, AT::AiReviewAbandoned, A::Pending),
 ];
 
 pub const APPROVAL_MACHINE: &str = "approval";
@@ -191,7 +198,9 @@ finite_enum! {
         Failed,
         Errored,
         TimedOut,
-        ModeChangedToManual,
+        ModeChangedFromAuto,
+        /// 审查回合失去执行者（T07 Q9）
+        ExecutorLost,
     }
 }
 
@@ -206,7 +215,8 @@ pub const REVIEW_TRANSITIONS: &[Transition<ReviewPhase, ReviewTrigger>] = &[
     (R::InProgress, RT::Failed, R::Failed),
     (R::InProgress, RT::Errored, R::Errored),
     (R::InProgress, RT::TimedOut, R::TimedOut),
-    (R::InProgress, RT::ModeChangedToManual, R::Abandoned),
+    (R::InProgress, RT::ModeChangedFromAuto, R::Abandoned),
+    (R::InProgress, RT::ExecutorLost, R::Abandoned),
 ];
 
 pub const REVIEW_MACHINE: &str = "approval_review";
@@ -232,7 +242,8 @@ impl ApprovalTriggerKind {
             AT::AiReviewFailed => Some(RT::Failed),
             AT::AiReviewErrored => Some(RT::Errored),
             AT::AiReviewTimedOut => Some(RT::TimedOut),
-            AT::ModeChangedToManual => Some(RT::ModeChangedToManual),
+            AT::ModeChangedFromAuto => Some(RT::ModeChangedFromAuto),
+            AT::AiReviewAbandoned => Some(RT::ExecutorLost),
         }
     }
 
@@ -250,12 +261,36 @@ impl ApprovalTriggerKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ReviewState {
     NotReviewed,
-    InProgress { review_id: ReviewId },
-    Passed { review_id: ReviewId },
-    Failed { review_id: ReviewId, reason: String },
-    Errored { review_id: ReviewId },
-    TimedOut { review_id: ReviewId },
-    Abandoned { review_id: ReviewId },
+    InProgress {
+        review_id: ReviewId,
+    },
+    Passed {
+        review_id: ReviewId,
+        reason: String,
+    },
+    Failed {
+        review_id: ReviewId,
+        reason: String,
+    },
+    Errored {
+        review_id: ReviewId,
+    },
+    TimedOut {
+        review_id: ReviewId,
+    },
+    Abandoned {
+        review_id: ReviewId,
+        reason: AbandonReason,
+    },
+}
+
+/// 进行中的审查为什么被放弃。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AbandonReason {
+    /// 有效档位离开自动
+    ModeChangedFromAuto,
+    /// 审查回合失去执行者：后台服务在审查进行中崩溃重启（T07 Q9）
+    ExecutorLost,
 }
 
 impl ReviewState {
@@ -275,11 +310,11 @@ impl ReviewState {
         match self {
             Self::NotReviewed => None,
             Self::InProgress { review_id }
-            | Self::Passed { review_id }
+            | Self::Passed { review_id, .. }
             | Self::Failed { review_id, .. }
             | Self::Errored { review_id }
             | Self::TimedOut { review_id }
-            | Self::Abandoned { review_id } => Some(*review_id),
+            | Self::Abandoned { review_id, .. } => Some(*review_id),
         }
     }
 }
@@ -287,16 +322,36 @@ impl ReviewState {
 /// 审批触发（带载荷）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ApprovalTrigger {
-    UserAllow { remember: RememberScope },
+    UserAllow {
+        remember: RememberScope,
+    },
     UserDeny,
     ModeSwitchAllows,
-    Void { reason: VoidReason },
-    AiReviewStarted { review_id: ReviewId },
-    AiReviewPassed { review_id: ReviewId },
-    AiReviewFailed { review_id: ReviewId, reason: String },
-    AiReviewErrored { review_id: ReviewId },
-    AiReviewTimedOut { review_id: ReviewId },
-    ModeChangedToManual,
+    Void {
+        reason: VoidReason,
+    },
+    AiReviewStarted {
+        review_id: ReviewId,
+    },
+    AiReviewPassed {
+        review_id: ReviewId,
+        reason: String,
+    },
+    AiReviewFailed {
+        review_id: ReviewId,
+        reason: String,
+    },
+    AiReviewErrored {
+        review_id: ReviewId,
+    },
+    AiReviewTimedOut {
+        review_id: ReviewId,
+    },
+    ModeChangedFromAuto,
+    /// 恢复时发现审查进行中但没有执行者（T07 Q9）。`review_id` 必须是当前进行中的那次
+    AiReviewAbandoned {
+        review_id: ReviewId,
+    },
 }
 
 impl ApprovalTrigger {
@@ -311,7 +366,8 @@ impl ApprovalTrigger {
             Self::AiReviewFailed { .. } => AT::AiReviewFailed,
             Self::AiReviewErrored { .. } => AT::AiReviewErrored,
             Self::AiReviewTimedOut { .. } => AT::AiReviewTimedOut,
-            Self::ModeChangedToManual => AT::ModeChangedToManual,
+            Self::ModeChangedFromAuto => AT::ModeChangedFromAuto,
+            Self::AiReviewAbandoned { .. } => AT::AiReviewAbandoned,
         }
     }
 
@@ -319,15 +375,16 @@ impl ApprovalTrigger {
     pub fn review_id(&self) -> Option<ReviewId> {
         match self {
             Self::AiReviewStarted { review_id }
-            | Self::AiReviewPassed { review_id }
+            | Self::AiReviewPassed { review_id, .. }
             | Self::AiReviewFailed { review_id, .. }
             | Self::AiReviewErrored { review_id }
-            | Self::AiReviewTimedOut { review_id } => Some(*review_id),
+            | Self::AiReviewTimedOut { review_id }
+            | Self::AiReviewAbandoned { review_id } => Some(*review_id),
             Self::UserAllow { .. }
             | Self::UserDeny
             | Self::ModeSwitchAllows
             | Self::Void { .. }
-            | Self::ModeChangedToManual => None,
+            | Self::ModeChangedFromAuto => None,
         }
     }
 }
@@ -339,6 +396,33 @@ pub enum ApprovalKind {
     OutsideSandbox,
 }
 
+/// 恢复与复查所需的最小调用记录（T07 Q8、方案 6.2）。全部是归一后的值，不含原始 JSON 全文。
+///
+/// 指纹集合不单独存，由 `actions` 算（[`ApprovalCallRecord::fingerprints`]），一处真值。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ApprovalCallRecord {
+    pub tool: ToolRef,
+    pub cwd: CanonicalPath,
+    pub shape: CallShapeKind,
+    pub placement: SandboxPlacement,
+    pub bypass_sandbox_requested: bool,
+    /// 全部子动作，保持顺序；代表动作是 `actions[representative]`。子动作的 `raw_summary` 为空，
+    /// 命令原文只在 `Approval.action` 上存一份（T07 7/F-2）
+    pub actions: Vec<Action>,
+    pub representative: u32,
+    /// sha256(工具名 ‖ 规范化 JSON)：防文字层面的改写
+    pub raw_input_digest: Sha256,
+    /// sha256(有序子动作 ‖ 形状 ‖ 沙箱位置 ‖ cwd)：防同文字不同解析
+    pub normalized_digest: Sha256,
+}
+
+impl ApprovalCallRecord {
+    /// 全部子动作的指纹，去重（拒绝记忆按它工作）。
+    pub fn fingerprints(&self) -> BTreeSet<ActionFingerprint> {
+        self.actions.iter().map(Action::fingerprint).collect()
+    }
+}
+
 /// 审批实体。状态只经 [`Approval::apply`] 改变。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Approval {
@@ -346,7 +430,13 @@ pub struct Approval {
     pub turn_id: TurnId,
     pub conversation_id: ConversationId,
     pub kind: ApprovalKind,
+    /// 代表动作，给卡片展示
     pub action: Action,
+    /// 被审批调用的完整记录（T07 Q8）。旧事件没有：拒绝记忆退化为只记 `action`；批准后不发一次性放行，
+    /// 也不要求续接（放行只能由调用记录生成，续接以「有放行可用」为准，T07 方案 6.2 E1、6.10.6 第 2 条），
+    /// 回合停在中断，由用户点「继续」
+    /// 装箱：记录有几百字节，审批常被整条放进集合与枚举
+    pub call: Option<Box<ApprovalCallRecord>>,
     pub matched_rules: Vec<RuleId>,
     pub ruleset_version: RuleSetVersion,
     pub state: ApprovalState,
@@ -414,6 +504,16 @@ impl Approval {
         ctx: &ApprovalContext,
     ) -> Result<Applied, ApprovalApplyError> {
         let kind = trigger.kind();
+        if let ApprovalTrigger::AiReviewAbandoned { review_id } = trigger
+            && self.review.review_id() != Some(review_id)
+            && self.review.phase() == R::InProgress
+        {
+            return Err(ApprovalApplyError::Stale {
+                trigger: kind,
+                review_id,
+                why: StaleReason::ReviewIdMismatch,
+            });
+        }
         if kind.is_review_result() {
             let review_id = trigger
                 .review_id()
@@ -451,6 +551,14 @@ impl Approval {
         Ok(applied)
     }
 
+    /// 被审批调用的全部子动作指纹；没有调用记录的旧审批只有代表动作（T07 方案 6.2）。
+    pub fn fingerprints(&self) -> BTreeSet<ActionFingerprint> {
+        match &self.call {
+            Some(call) => call.fingerprints(),
+            None => BTreeSet::from([self.action.fingerprint()]),
+        }
+    }
+
     /// 是否计入「待你处理」：待审批且不在 AI 审查中（审查中用户还没被问到）。
     pub fn awaits_user(&self) -> bool {
         self.state == A::Pending && self.review.phase() != R::InProgress
@@ -478,8 +586,9 @@ impl Approval {
             ApprovalTrigger::AiReviewStarted { review_id } => ReviewState::InProgress {
                 review_id: *review_id,
             },
-            ApprovalTrigger::AiReviewPassed { review_id } => ReviewState::Passed {
+            ApprovalTrigger::AiReviewPassed { review_id, reason } => ReviewState::Passed {
                 review_id: *review_id,
+                reason: reason.clone(),
             },
             ApprovalTrigger::AiReviewFailed { review_id, reason } => ReviewState::Failed {
                 review_id: *review_id,
@@ -491,11 +600,16 @@ impl Approval {
             ApprovalTrigger::AiReviewTimedOut { review_id } => ReviewState::TimedOut {
                 review_id: *review_id,
             },
-            ApprovalTrigger::ModeChangedToManual => ReviewState::Abandoned {
+            ApprovalTrigger::ModeChangedFromAuto => ReviewState::Abandoned {
                 review_id: self
                     .review
                     .review_id()
-                    .expect("REVIEW_TRANSITIONS 只允许 InProgress 收到 ModeChangedToManual，它一定有 review_id"),
+                    .expect("REVIEW_TRANSITIONS 只允许 InProgress 收到 ModeChangedFromAuto，它一定有 review_id"),
+                reason: AbandonReason::ModeChangedFromAuto,
+            },
+            ApprovalTrigger::AiReviewAbandoned { review_id } => ReviewState::Abandoned {
+                review_id: *review_id,
+                reason: AbandonReason::ExecutorLost,
             },
             ApprovalTrigger::UserAllow { .. }
             | ApprovalTrigger::UserDeny
@@ -504,5 +618,153 @@ impl Approval {
                 unreachable!("{:?} 不改变审查子状态，不应走到这里", trigger.kind())
             }
         }
+    }
+}
+
+// ---------- 提交时校验（T02 方案 2.6「状态前提」、T07 方案 6.10.7）----------
+
+/// 已落盘的状态接不了这条事件。`message` 点名现在的状态与事件要的状态，由存储层加上实体 id。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct PreconditionFailed {
+    pub message: String,
+}
+
+impl PreconditionFailed {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+/// 审批事件的状态前提：已落盘的主状态 `state` 与审查子状态 `review` 能不能接 `event`。
+/// 只看审批流里会改已有审批的三种事件，别的事件一律通过。读的是 [`APPROVAL_TRANSITIONS`] 与
+/// [`REVIEW_TRANSITIONS`]：主状态表的边都从 `Pending` 出发，所以「主状态是 Pending」就是「是表里的边」。
+pub fn check_committed(
+    state: ApprovalState,
+    review: &ReviewState,
+    event: &crate::event::DomainEvent,
+) -> Result<(), PreconditionFailed> {
+    use crate::event::DomainEvent as E;
+    let require_pending = |what: &str| {
+        if state == ApprovalState::Pending {
+            Ok(())
+        } else {
+            Err(PreconditionFailed::new(format!(
+                "{what}要求审批是 Pending，现在是 {state:?}"
+            )))
+        }
+    };
+    match event {
+        E::ApprovalDecided(e) => match e.state {
+            ApprovalState::Approved { .. } | ApprovalState::Denied => require_pending("批准或拒绝"),
+            other => Err(PreconditionFailed::new(format!(
+                "ApprovalDecided 只记批准与拒绝，不能是 {other:?}"
+            ))),
+        },
+        E::ApprovalVoided(_) => require_pending("作废"),
+        E::ApprovalReviewUpdated(e) => {
+            require_pending("审查更新")?;
+            let (from, to) = (review.phase(), e.review.phase());
+            if !REVIEW_TRANSITIONS
+                .iter()
+                .any(|(a, _, b)| *a == from && *b == to)
+            {
+                return Err(PreconditionFailed::new(format!(
+                    "审查子状态 {from:?} → {to:?} 不是 REVIEW_TRANSITIONS 里的边"
+                )));
+            }
+            if to != ReviewPhase::InProgress && e.review.review_id() != review.review_id() {
+                return Err(PreconditionFailed::new(format!(
+                    "审查结果的 review_id {:?} 与正在跑的 {:?} 不同",
+                    e.review.review_id(),
+                    review.review_id()
+                )));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// 有没有记录（不是「还在跑」：回合结束了记录仍在）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Presence {
+    Present,
+    Gone,
+}
+
+/// 回合所在的对话：在、删除中、没有记录。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConversationPresence {
+    Present,
+    Deleting,
+    Gone,
+}
+
+/// 一条审批或卡片的归属事实（T07 方案 6.10.7）：判断「它的回合、对话、助手还在不在」要用的三样。
+/// 存储一侧读行、引擎折叠一侧查表，各自给出这一份；判断只在 [`owner_alive`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OwnerFacts {
+    /// 所属回合有没有记录
+    pub turn: Presence,
+    /// 回合所在的对话。`turn` 是 `Gone` 时不看
+    pub conversation: ConversationPresence,
+    /// 回合的助手有没有记录。`turn` 是 `Gone` 时不看
+    pub assistant: Presence,
+}
+
+/// 缺的是哪一样。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+pub enum OwnerGone {
+    #[error("回合没有记录")]
+    Turn,
+    #[error("对话正在删除")]
+    ConversationDeleting,
+    #[error("对话没有记录")]
+    Conversation,
+    #[error("助手没有记录")]
+    Assistant,
+}
+
+/// 归属存续：按回合 → 对话 → 助手的顺序看，报第一样缺的。
+pub fn owner_alive(facts: &OwnerFacts) -> Result<(), OwnerGone> {
+    if facts.turn == Presence::Gone {
+        return Err(OwnerGone::Turn);
+    }
+    match facts.conversation {
+        ConversationPresence::Gone => return Err(OwnerGone::Conversation),
+        ConversationPresence::Deleting => return Err(OwnerGone::ConversationDeleting),
+        ConversationPresence::Present => {}
+    }
+    if facts.assistant == Presence::Gone {
+        return Err(OwnerGone::Assistant);
+    }
+    Ok(())
+}
+
+/// 归属不在时用什么原因作废：助手没了 → `AssistantDeleted`；别的三样 → `ConversationDeleted`
+/// （回合的记录只会随对话一起消失）。
+pub fn void_reason_for(gone: OwnerGone) -> VoidReason {
+    match gone {
+        OwnerGone::Assistant => VoidReason::AssistantDeleted,
+        OwnerGone::Turn | OwnerGone::ConversationDeleting | OwnerGone::Conversation => {
+            VoidReason::ConversationDeleted
+        }
+    }
+}
+
+/// 这条事件写入前要不要查归属存续（建审批、建卡片、批准、卡片启动）。拒绝、作废、关闭、审查更新不查：
+/// 孤儿要能被清掉。存储与引擎共用这一处。
+pub fn requires_owner(event: &crate::event::DomainEvent) -> bool {
+    use crate::event::DomainEvent as E;
+    match event {
+        E::ApprovalRequested(_) | E::UserActionProposed(_) => true,
+        E::ApprovalDecided(e) => matches!(e.state, ApprovalState::Approved { .. }),
+        E::UserActionStateChanged(e) => {
+            matches!(e.state, crate::user_action::UserActionState::Starting)
+        }
+        _ => false,
     }
 }

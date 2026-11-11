@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use crate::action::Action;
+use crate::action::{Action, CallShapeKind};
 use crate::approval::{Approval, ApprovalState, ReviewPhase, ReviewState, StaleReason, VoidReason};
 use crate::approval_mode::{ApprovalMode, RememberScope};
 use crate::assistant::{Assistant, AssistantConfig};
@@ -302,6 +302,14 @@ pub struct TurnSessionBound {
     pub runtime_session_id: String,
 }
 
+/// 编排采纳了一条审批结果、即将交给运行时：「这条批准已经用掉」的唯一依据。允许和拒绝都算审批结果，
+/// 被拒绝的审批交付时同样有这条事件（T06 方案 2.6 第 2 条；T07 方案 6.10.8）。只由编排提交。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalDelivered {
+    pub approval_id: ApprovalId,
+    pub turn_id: TurnId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallStarted {
     pub turn_id: TurnId,
@@ -358,6 +366,27 @@ pub struct ApprovalEvaluated {
     pub verdict: Verdict,
     pub layer_hit: RuleLayer,
     pub duration_ms: u32,
+    /// 会话快照读取三张安全清单时 `rule` 流的游标（T07 Q10）
+    pub snapshot_lists_seq: Seq,
+    /// 活规则缓存最后应用的 `rule` 流游标（T07 Q10）
+    pub live_rules_seq: Seq,
+    /// 全部子动作（`action` 是其中的代表动作）
+    pub sub_actions: Vec<Action>,
+    /// T07 之前的审计事件没有，为 `None`
+    pub call_shape: Option<CallShapeKind>,
+    /// 会话快照里规则路径的解析结果（只含解析后位置与原位置不同的项，按原路径排序）：
+    /// 重放用它重算别名条目，不读磁盘（T07 方案 4.3、6.8）
+    pub snapshot_rule_paths: Vec<RulePathResolution>,
+    /// 这次求值命中的一次性放行出自哪条审批；没命中为 `None`。结果是放行表示用它放行，
+    /// 不是放行表示它作废（T07 方案 6.10.6 第 1 条）
+    pub grant_approval_id: Option<ApprovalId>,
+}
+
+/// 一条规则路径解析到的真实位置（T07 方案 4.3）。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RulePathResolution {
+    pub path: std::path::PathBuf,
+    pub resolved: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -559,6 +588,7 @@ domain_events! {
     ToolCallStarted => "tool_call_started",
     ToolCallFinished => "tool_call_finished",
     TurnSessionBound => "turn_session_bound",
+    ApprovalDelivered => "approval_delivered",
     ApprovalRequested => "approval_requested",
     ApprovalReviewUpdated => "approval_review_updated",
     ApprovalDecided => "approval_decided",
@@ -652,6 +682,7 @@ impl DomainEvent {
             Self::TurnSessionBound(e) => (K::Turn, StreamId::of(e.turn_id)),
             Self::ToolCallStarted(e) => (K::Turn, StreamId::of(e.turn_id)),
             Self::ToolCallFinished(e) => (K::Turn, StreamId::of(e.turn_id)),
+            Self::ApprovalDelivered(e) => (K::Turn, StreamId::of(e.turn_id)),
             Self::ApprovalRequested(e) => (K::Approval, StreamId::of(e.approval.id)),
             Self::ApprovalReviewUpdated(e) => (K::Approval, StreamId::of(e.approval_id)),
             Self::ApprovalDecided(e) => (K::Approval, StreamId::of(e.approval_id)),

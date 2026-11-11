@@ -1,8 +1,9 @@
 //! 写入基准初版（卡验收 6，方案 7.1；T11 收编进 iwork-bench）。
 //!
 //! 每条命令是典型三件套：用户消息 + 助手消息 + 一次回合状态变化，外加一条 outbox。
-//! 两个场景：`single`（1 个生产者串行 2000 条，看单命令延迟）、`concurrent_16`（16 线程各 500 条，
-//! 看组提交下的吞吐）。macOS 上 `fullfsync` 开、关各一组，其他平台一组（`"fullfsync": "n/a"`）。
+//! 三个场景：`single`（1 个生产者串行 2000 条，看单命令延迟）、`concurrent_16`（16 线程各 500 条，
+//! 看组提交下的吞吐）、`approvals`（1 个生产者串行 2000 条，每条是「建审批 + 批准」，量提交时校验：
+//! 状态前提读那一行、归属存续多读回合、对话、助手三行，T02 方案 2.6）。macOS 上 `fullfsync` 开、关各一组，其他平台一组（`"fullfsync": "n/a"`）。
 //! 每组一行 JSON 到 stdout，人读的表到 stderr。
 //!
 //! 运行：`cargo bench -p iwork-store --bench write_commit`
@@ -14,8 +15,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fixtures::*;
+use iwork_domain::approval::{ApprovalState, Decider};
 use iwork_domain::event::{
-    ConversationCreated, DomainEvent, MessageAppended, ProjectAdded, TurnQueued, TurnStateChanged,
+    ApprovalDecided, ApprovalRequested, AssistantCreated, ConversationCreated, DomainEvent,
+    MessageAppended, ProjectAdded, TurnQueued, TurnStateChanged,
 };
 use iwork_domain::turn::TurnState;
 use iwork_ports::store::StoragePort;
@@ -25,20 +28,47 @@ struct Scenario {
     name: &'static str,
     threads: u128,
     per_thread: u128,
+    events: fn(u128, bool) -> Vec<DomainEvent>,
 }
 
-const SCENARIOS: [Scenario; 2] = [
+const SCENARIOS: [Scenario; 3] = [
     Scenario {
         name: "single",
         threads: 1,
         per_thread: 2000,
+        events: typical,
     },
     Scenario {
         name: "concurrent_16",
         threads: 16,
         per_thread: 500,
+        events: typical,
+    },
+    Scenario {
+        name: "approvals",
+        threads: 1,
+        per_thread: 2000,
+        events: approvals,
     },
 ];
+
+/// 建一条审批并当场批准：两条受管事件，各过一次状态前提与归属存续。
+fn approvals(n: u128, _flip: bool) -> Vec<DomainEvent> {
+    vec![
+        ApprovalRequested {
+            approval: approval(n, 20, 10),
+        }
+        .into(),
+        ApprovalDecided {
+            approval_id: apid(n),
+            state: ApprovalState::Approved {
+                decider: Decider::User,
+            },
+            remember: None,
+        }
+        .into(),
+    ]
+}
 
 fn typical(n: u128, flip: bool) -> Vec<DomainEvent> {
     let (from, to) = if flip {
@@ -84,6 +114,11 @@ fn run(scenario: &Scenario, fullfsync: Option<bool>, label: &str) {
         1,
         vec![
             ProjectAdded { project: project(1) }.into(),
+            // 回合的助手：审批写入前查归属存续（前后两个版本都带这一条，结果可比）
+            AssistantCreated {
+                assistant: assistant(1, false),
+            }
+            .into(),
             ConversationCreated { conversation: project_conversation(10, 1) }.into(),
             TurnQueued { turn: turn(20, 10) }.into(),
         ],
@@ -95,11 +130,12 @@ fn run(scenario: &Scenario, fullfsync: Option<bool>, label: &str) {
         .map(|t| {
             let store = store.clone();
             let per = scenario.per_thread;
+            let events = scenario.events;
             std::thread::spawn(move || {
                 let mut lat = Vec::with_capacity(per as usize);
                 for i in 0..per {
                     let n = 1_000 + t * 1_000_000 + i;
-                    let mut req = cmd(n, typical(n, i % 2 == 0));
+                    let mut req = cmd(n, events(n, i % 2 == 0));
                     req.outbox = vec![outbox("runtime", b"prompt")];
                     let t0 = Instant::now();
                     block(store.commit(req)).expect("提交");

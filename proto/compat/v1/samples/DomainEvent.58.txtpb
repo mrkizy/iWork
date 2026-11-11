@@ -1,0 +1,55 @@
+approval_evaluated {
+  turn_id: "01JC0T0000000000000000TRN1"
+  action {
+    kind: ACTION_KIND_EXECUTE
+    target {
+      command {
+        program: "find"
+        argv: ["-H", "gate/root", "-delete"]
+      }
+    }
+    tool_name: "Bash"
+    raw_summary: "chmod u+x gate; find -H gate/root -delete"
+    resource_limit_hit: true
+    unlexable: true
+    path_unresolved: true
+  }
+  matched_rule_ids: ["01JC0R0000000000000000RXE1"]
+  ruleset_version: "m1-2"
+  verdict {
+    deny {
+      denial_memory {
+        kind: ACTION_KIND_DELETE
+        target {
+          path: "/Users/me/code/iwork/build"
+        }
+      }
+    }
+  }
+  layer_hit: RULE_LAYER_USER_DENY
+  duration_ms: 1
+  snapshot_lists_seq: 5
+  live_rules_seq: 6
+  sub_actions: [{
+    kind: ACTION_KIND_EXECUTE
+    target {
+      command {
+        program: "find"
+        argv: ["-H", "gate/root", "-delete"]
+      }
+    }
+    tool_name: "Bash"
+    raw_summary: "chmod u+x gate; find -H gate/root -delete"
+    resource_limit_hit: true
+    unlexable: true
+    path_unresolved: true
+  }]
+  call_shape: CALL_SHAPE_COMPOUND
+  snapshot_rule_paths: [{
+    path: "/Users/me/.npmrc"
+    resolved: "/Users/me/dotfiles/npmrc"
+  }, {
+    path: "/etc"
+    resolved: "/private/etc"
+  }]
+}

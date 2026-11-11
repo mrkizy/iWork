@@ -1,0 +1,8 @@
+{
+  "approvalReviewUpdated": {
+    "approvalId": "01JC0V0000000000000000APR1",
+    "reviewId": "01JC0V0000000000000000RVW1",
+    "review": "REVIEW_STATE_ABANDONED",
+    "reason": "后台服务重启，审查中止"
+  }
+}

@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 34217e1e2237b02f2fe26157dec9a9f4c4d48c14900fa8db37a6b074975f12f2 # shrinks to req = PermissionRequest { tool: ToolRef("Edit"), raw_input: RawToolInput("{\"file_path\":\"/home/u/.ssh/id_rsa\",\"new_string\":\"b\",\"old_string\":\"a\"}"), bypass_sandbox: false, updates_before: 0 }, live = [], mode = Manual
+cc 8db85a5929b70a5b5a2e24271a870315eca4cd6777f65d094910bf414ba5e7e8 # shrinks to req = PermissionRequest { tool: ToolRef("Write"), raw_input: RawToolInput("{\"content\":\"x\",\"file_path\":\"/home/u/.ssh/id_rsa\"}"), bypass_sandbox: false, updates_before: 0 }, pick = Index(0)
+cc df67c3af6585e601786b4a6ca4547305b32a7ea726d0068e4f578b650eea0901 # shrinks to req = PermissionRequest { tool: ToolRef("Bash"), raw_input: RawToolInput("{\"command\":\"npm publish\"}"), bypass_sandbox: false, updates_before: 0 }, pick = Index(0)

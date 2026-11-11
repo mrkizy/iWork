@@ -40,11 +40,12 @@ use std::time::Duration;
 use futures_channel::mpsc;
 use futures_core::Stream;
 use iwork_domain::action::{Action, ActionFlags, ActionKind, ActionTarget};
+use iwork_domain::approval::VoidReason;
 use iwork_domain::common::{Actor, Usage};
 use iwork_domain::event::{
-    DomainEvent, MessageAppended, MessageCompleted, QuotaObserved, ToolCallFinished,
-    ToolCallStarted, TurnFinished, TurnModelReported, TurnSessionBound, TurnStateChanged,
-    UsageReported,
+    ApprovalDelivered, DomainEvent, MessageAppended, MessageCompleted, QuotaObserved,
+    ToolCallFinished, ToolCallStarted, TurnFinished, TurnModelReported, TurnSessionBound,
+    TurnStateChanged, UsageReported,
 };
 use iwork_domain::id::{CommandId, MessageId, ProjectId, TurnId};
 use iwork_domain::message::{Author, Message, MessageBody, MessageStatus};
@@ -58,7 +59,8 @@ use iwork_ports::live::{LivePublisher, MessageDelta};
 use iwork_ports::store::{CommitRequest, StorageError, StoragePort};
 
 use super::permission::{
-    PermissionDecider, PermissionGate, Signal, Ticket, TurnInbox, TurnSlot, new_ticket,
+    PermissionDecider, PermissionGate, Signal, Ticket, TurnInbox, TurnSlot, VoidPlanError,
+    new_ticket,
 };
 
 /// 回合编排写入的事件以它为 actor：这些事件由后台服务按运行时的输出产生，不是用户的命令。
@@ -69,6 +71,33 @@ pub const CHECKPOINT_INTERVAL: Duration = Duration::from_millis(500);
 
 /// 连续处理这么多条更新后，先让出一次执行权、再先看一次权限信箱。
 pub const FAIR_BURST: u32 = 32;
+
+/// 一笔带作废的提交从头到尾最多等这么久：要作废计划（含等令牌）、带着句柄等提交、被拒后的重算，合起来
+/// 共用这一个期限（T07 方案 6.10.8）。到期就按编排出错收场：撤信箱、关会话，运行时先停下。
+pub const STOP_LIMIT: Duration = Duration::from_secs(5);
+
+/// 提交之后提醒判定方，最多等这么久；到期就算了，不是错误（判定方下一个决定自己会追平）。
+pub const NUDGE_LIMIT: Duration = Duration::from_secs(1);
+
+/// 带作废的提交被投影器拒（计划过期）后重新要计划，最多这么多次。
+const VOID_COMMIT_ATTEMPTS: u32 = 3;
+
+/// 一笔提交里要作废的：原因，以及作废事件插在第几条之后（紧跟触发它的那条状态变化）。
+#[derive(Debug, Clone, Copy)]
+struct Voiding {
+    reason: VoidReason,
+    after: usize,
+}
+
+impl Voiding {
+    /// `trigger` 是这笔提交里第 `index` 条事件（状态变化）的触发。
+    fn of(trigger: TurnTrigger, index: usize) -> Option<Self> {
+        trigger.void_reason().map(|reason| Self {
+            reason,
+            after: index + 1,
+        })
+    }
+}
 
 /// 动作摘要最多保留的字符数。
 const SUMMARY_CHARS: usize = 200;
@@ -103,6 +132,28 @@ pub enum TurnRunError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Illegal(#[from] TurnIllegal),
+    /// 判定方算不出作废计划
+    #[error(transparent)]
+    VoidPlan(#[from] VoidPlanError),
+    /// 带作废的提交没能在 `STOP_LIMIT` 里记完账；`step` 是 `"void_plan"` 或 `"void_commit"`
+    #[error("回合停止的记账超时（{step}）")]
+    StopTimedOut { step: &'static str },
+}
+
+/// `fut` 和 `limit` 后到期的定时器赛跑；到期返回 `None` 并丢掉 `fut`。
+async fn within<T: Timer, F: Future>(timer: &T, limit: Duration, fut: F) -> Option<F::Output> {
+    let mut fut = pin!(fut);
+    let mut sleep = pin!(timer.sleep(limit));
+    poll_fn(|cx| {
+        if let Poll::Ready(out) = fut.as_mut().poll(cx) {
+            return Poll::Ready(Some(out));
+        }
+        if sleep.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 /// 一条运行时会话线（技术设计 6.4）：一个对话（或「助手 × 项目」）对应一条，跨回合续接。
@@ -482,46 +533,111 @@ where
         }
     }
 
-    async fn commit(&self, events: Vec<DomainEvent>) -> Result<(), StorageError> {
-        let request = CommitRequest {
+    fn request(&self, events: Vec<DomainEvent>) -> CommitRequest {
+        CommitRequest {
             command_id: CommandId::from_raw(self.ports.ids.next()),
             actor: Actor(ORCHESTRATOR_ACTOR.into()),
             events,
             outbox: Vec::new(),
-        };
-        self.ports.store.commit(request).await.map(|_| ())
+        }
     }
 
-    /// 推进一步状态，返回要写入的事件：状态变化，以及这一步作废的审批（取消、失败时）。
-    async fn step(
+    /// 提交，返回已落盘的全部事件。`void` 有值时向判定方要作废计划，和这些事件同一笔提交：要计划、
+    /// 带着句柄等提交、被拒后的重算共用一个 `STOP_LIMIT`。**不在这里提醒判定方**：由调用方在该做的事做完
+    /// 之后调 [`Self::nudge`]（停止路径上排在 `session.cancel()` 之后）。
+    async fn commit(
+        &self,
+        events: Vec<DomainEvent>,
+        void: Option<Voiding>,
+    ) -> Result<Vec<DomainEvent>, TurnRunError> {
+        let Some(Voiding { reason, after }) = void else {
+            self.ports
+                .store
+                .commit(self.request(events.clone()))
+                .await?;
+            return Ok(events);
+        };
+        let deadline = self.ports.clock.monotonic().0 + STOP_LIMIT.as_nanos() as u64;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let (voids, hold) = self
+                .until(deadline, self.decider.void_pending(self.turn.id, reason))
+                .await
+                .ok_or(TurnRunError::StopTimedOut { step: "void_plan" })??;
+            let mut all = events.clone();
+            all.splice(after..after, voids);
+            let result = self
+                .until(deadline, self.ports.store.commit(self.request(all.clone())))
+                .await;
+            // 到期也在这里丢：令牌放了，那笔提交去向不明，下一位过屏障
+            drop(hold);
+            match result.ok_or(TurnRunError::StopTimedOut {
+                step: "void_commit",
+            })? {
+                Ok(_) => return Ok(all),
+                // 计划过期（有审批或卡片已被别的提交改了）：回合自己的事件不重算，重新要作废那一段
+                Err(StorageError::Projection { .. }) if attempt < VOID_COMMIT_ATTEMPTS => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    /// 在单调时钟的 `deadline` 之前等 `fut`；已经过了就立刻到期。
+    async fn until<F: Future>(&self, deadline: u64, fut: F) -> Option<F::Output> {
+        let left = deadline.saturating_sub(self.ports.clock.monotonic().0);
+        within(self.ports.timer, Duration::from_nanos(left), fut).await
+    }
+
+    /// 提醒判定方「有新事件」。带期限，到期丢掉、记一条 debug 日志，从不返回错误。
+    async fn nudge(&self, events: &[DomainEvent]) {
+        if within(
+            self.ports.timer,
+            NUDGE_LIMIT,
+            self.decider.committed(events),
+        )
+        .await
+        .is_none()
+        {
+            tracing::debug!(turn = %self.turn.id, "提醒判定方超时，丢掉这一次");
+        }
+    }
+
+    /// 提交然后提醒：不带作废、也不在停止路径上的提交都走这里。
+    async fn commit_and_nudge(
+        &self,
+        events: Vec<DomainEvent>,
+        void: Option<Voiding>,
+    ) -> Result<(), TurnRunError> {
+        let committed = self.commit(events, void).await?;
+        self.nudge(&committed).await;
+        Ok(())
+    }
+
+    /// 推进一步状态，返回状态变化事件。这一步要作废的审批由调用方带着 `Voiding::of(trigger, 位置)` 交给 `commit`。
+    fn step(
         &mut self,
         trigger: TurnTrigger,
         reason: Option<String>,
-    ) -> Result<Vec<DomainEvent>, TurnIllegal> {
+    ) -> Result<DomainEvent, TurnIllegal> {
         let from = self.turn.state;
         let to = self.turn.apply(trigger, self.ports.clock.now())?;
-        let mut events = vec![
-            TurnStateChanged {
-                turn_id: self.turn.id,
-                from,
-                to,
-                reason,
-            }
-            .into(),
-        ];
-        if let Some(void) = trigger.void_reason() {
-            events.extend(self.decider.void_pending(self.turn.id, void).await);
+        Ok(TurnStateChanged {
+            turn_id: self.turn.id,
+            from,
+            to,
+            reason,
         }
-        Ok(events)
+        .into())
     }
 
     async fn fail_before_start(&mut self, error: &AgentError) -> Result<(), TurnRunError> {
-        let mut events = self
-            .step(TurnTrigger::Failed, Some(error.to_string()))
-            .await?;
-        events.push(self.finished_event());
-        self.commit(events).await?;
-        Ok(())
+        let events = vec![
+            self.step(TurnTrigger::Failed, Some(error.to_string()))?,
+            self.finished_event(),
+        ];
+        self.commit_and_nudge(events, Voiding::of(TurnTrigger::Failed, 0))
+            .await
     }
 
     /// 会话 ID 与回合上记着的不同时，返回要写的绑定事件，并记到回合上。
@@ -546,7 +662,7 @@ where
         runtime_session_id: Option<String>,
     ) -> Result<(), TurnRunError> {
         if let Some(event) = self.session_binding(runtime_session_id) {
-            self.commit(vec![event]).await?;
+            self.commit_and_nudge(vec![event], None).await?;
         }
         Ok(())
     }
@@ -564,7 +680,7 @@ where
             .session_binding(runtime_session_id)
             .into_iter()
             .collect();
-        events.extend(self.step(TurnTrigger::Started, None).await?);
+        events.push(self.step(TurnTrigger::Started, None)?);
         let author = Author::Assistant {
             id: self.turn.assistant_id,
             name_snapshot: assistant_name,
@@ -581,8 +697,7 @@ where
             turn_id: Some(self.turn.id),
         };
         events.push(MessageAppended { message }.into());
-        self.commit(events).await?;
-        Ok(())
+        self.commit_and_nudge(events, None).await
     }
 
     /// 处理一条更新；回合到此结束时返回结局。
@@ -637,7 +752,7 @@ where
             AgentUpdate::Finished(outcome) => return Ok(Some(End::Finished(outcome))),
             AgentUpdate::Failed(error) => return Ok(Some(End::Failed(error))),
         };
-        self.commit(vec![event]).await?;
+        self.commit_and_nudge(vec![event], None).await?;
         Ok(None)
     }
 
@@ -689,12 +804,16 @@ where
             self.turn.state,
             TurnState::Running | TurnState::WaitingApproval
         ) {
-            let events = self.step(TurnTrigger::Cancel, None).await?;
-            self.commit(events).await?;
+            // 次序：提交（带作废）→ 清票 → 停运行时 → 提醒。提交一返回就去停运行时，中间不等判定方
+            let events = vec![self.step(TurnTrigger::Cancel, None)?];
+            let committed = self
+                .commit(events, Voiding::of(TurnTrigger::Cancel, 0))
+                .await?;
             // 等着的审批不再有结果可采纳
             self.pending.clear();
             // 通知发不出去也没关系：适配器到时结束进程树，更新流照样以取消收尾
             let _ = session.cancel().await;
+            self.nudge(&committed).await;
         }
         Ok(())
     }
@@ -704,8 +823,8 @@ where
             Signal::PermissionAsked { reply, .. } => {
                 let accept = match self.turn.state {
                     TurnState::Running => {
-                        let events = self.step(TurnTrigger::PermissionAsked, None).await?;
-                        self.commit(events).await?;
+                        let events = vec![self.step(TurnTrigger::PermissionAsked, None)?];
+                        self.commit_and_nudge(events, None).await?;
                         true
                     }
                     TurnState::WaitingApproval => true,
@@ -720,13 +839,33 @@ where
                     let _ = reply.send(None);
                 }
             }
-            Signal::PermissionDecided { ticket, ack } => {
+            Signal::PermissionDecided {
+                ticket,
+                approval,
+                ack,
+            } => {
                 // 只采纳这一回合、还在等审批、确有这张票的结果；否则拒绝且不动计数
                 let accepted =
                     self.turn.state == TurnState::WaitingApproval && self.pending.remove(&ticket);
-                if accepted && self.pending.is_empty() {
-                    let events = self.step(TurnTrigger::PermissionDecided, None).await?;
-                    self.commit(events).await?;
+                if accepted {
+                    // 结果出自一条审批：交付事件是「这条批准已经用掉」的唯一依据（T06 方案 2.6 第 4 条），
+                    // 没有别的票在等时和回到 Running 同一笔
+                    let mut events = Vec::new();
+                    if let Some(approval_id) = approval {
+                        events.push(
+                            ApprovalDelivered {
+                                approval_id,
+                                turn_id: self.turn.id,
+                            }
+                            .into(),
+                        );
+                    }
+                    if self.pending.is_empty() {
+                        events.push(self.step(TurnTrigger::PermissionDecided, None)?);
+                    }
+                    if !events.is_empty() {
+                        self.commit_and_nudge(events, None).await?;
+                    }
                 }
                 let _ = ack.send(accepted);
             }
@@ -736,33 +875,43 @@ where
 
     /// 按结局推进到最终状态，写入消息结局与回合结束事件。
     async fn finish(&mut self, end: End) -> Result<(), TurnRunError> {
-        let mut events = Vec::new();
+        let mut triggers = Vec::new();
         let state = self.turn.state;
         match end {
             End::Finished(TurnOutcome::Completed) => {
                 self.pending.clear();
                 if state == TurnState::WaitingApproval {
-                    events.extend(self.step(TurnTrigger::PermissionDecided, None).await?);
+                    triggers.push((TurnTrigger::PermissionDecided, None));
                 }
-                if self.turn.state == TurnState::Cancelling {
-                    // 取消请求到达前运行时已经做完了：按取消收尾，用户要的是停下
-                    events.extend(self.step(TurnTrigger::ProcessEnded, None).await?);
+                // 取消请求到达前运行时已经做完了：按取消收尾，用户要的是停下
+                let last = if state == TurnState::Cancelling {
+                    TurnTrigger::ProcessEnded
                 } else {
-                    events.extend(self.step(TurnTrigger::Completed, None).await?);
-                }
+                    TurnTrigger::Completed
+                };
+                triggers.push((last, None));
             }
             End::Finished(TurnOutcome::Cancelled) => {
                 if state != TurnState::Cancelling {
-                    events.extend(self.step(TurnTrigger::Cancel, None).await?);
+                    triggers.push((TurnTrigger::Cancel, None));
                 }
-                events.extend(self.step(TurnTrigger::ProcessEnded, None).await?);
+                triggers.push((TurnTrigger::ProcessEnded, None));
             }
             End::Failed(error) => {
                 let trigger = match state {
                     TurnState::Cancelling => TurnTrigger::ProcessEnded,
                     _ => TurnTrigger::Failed,
                 };
-                events.extend(self.step(trigger, Some(error.to_string())).await?);
+                triggers.push((trigger, Some(error.to_string())));
+            }
+        }
+        let mut events = Vec::new();
+        let mut void = None;
+        for (trigger, reason) in triggers {
+            events.push(self.step(trigger, reason)?);
+            if let Some(v) = Voiding::of(trigger, events.len() - 1) {
+                debug_assert!(void.is_none(), "一笔提交里最多一个会作废的触发");
+                void = Some(v);
             }
         }
         let message_id = self.message_id.expect("started 之后才会 finish");
@@ -788,8 +937,7 @@ where
         if self.turn.state.is_terminal() {
             events.push(self.finished_event());
         }
-        self.commit(events).await?;
-        Ok(())
+        self.commit_and_nudge(events, void).await
     }
 
     fn finished_event(&self) -> DomainEvent {

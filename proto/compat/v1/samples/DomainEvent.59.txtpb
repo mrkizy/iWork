@@ -1,0 +1,43 @@
+approval_evaluated {
+  turn_id: "01JC0T0000000000000000TRN1"
+  action {
+    kind: ACTION_KIND_OUTSIDE_SANDBOX
+    target {
+      command {
+        program: "npm"
+        subcommand: "publish"
+        argv: ["npm", "publish", "--access=public"]
+      }
+    }
+    tool_name: "Bash"
+    raw_summary: "npm publish --access=public"
+    out_of_bounds: true
+    bypass_sandbox_requested: true
+    opaque_script: true
+  }
+  ruleset_version: "m1-2"
+  verdict {
+    allow {}
+  }
+  layer_hit: RULE_LAYER_DEFAULT
+  duration_ms: 2
+  snapshot_lists_seq: 8
+  live_rules_seq: 9
+  sub_actions: [{
+    kind: ACTION_KIND_OUTSIDE_SANDBOX
+    target {
+      command {
+        program: "npm"
+        subcommand: "publish"
+        argv: ["npm", "publish", "--access=public"]
+      }
+    }
+    tool_name: "Bash"
+    raw_summary: "npm publish --access=public"
+    out_of_bounds: true
+    bypass_sandbox_requested: true
+    opaque_script: true
+  }]
+  call_shape: CALL_SHAPE_SINGLE_SIMPLE_COMMAND
+  grant_approval_id: "01JC0V0000000000000000APR1"
+}

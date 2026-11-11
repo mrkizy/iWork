@@ -1,11 +1,12 @@
 //! 实体与值对象的转换。函数成对出现：`x_to_proto` / `x_from_proto`。
 
 use iwork_domain::action::{
-    Action, ActionFingerprint, ActionFlags, ActionKind, ActionTarget, CanonicalPath, ToolRef,
+    Action, ActionFingerprint, ActionFlag, ActionFlags, ActionKind, ActionTarget, CallShapeKind,
+    CanonicalPath, SandboxPlacement, ToolRef,
 };
 use iwork_domain::approval::{
-    Approval, ApprovalKind, ApprovalState, Decider, ReviewPhase, ReviewState, StaleReason,
-    VoidReason,
+    AbandonReason, Approval, ApprovalCallRecord, ApprovalKind, ApprovalState, Decider, ReviewPhase,
+    ReviewState, StaleReason, VoidReason,
 };
 use iwork_domain::approval_mode::{ApprovalMode, ProjectDefaultMode, RememberScope};
 use iwork_domain::assistant::{Assistant, AssistantConfig, AssistantVersion, Avatar};
@@ -142,6 +143,26 @@ enum_pair!(action_kind_to_proto, action_kind_from_proto, ActionKind, pb::ActionK
     ActionKind::McpCall => pb::ActionKind::McpCall,
     ActionKind::Unclassified => pb::ActionKind::Unclassified,
 });
+enum_pair!(action_flag_to_proto, action_flag_from_proto, ActionFlag, pb::ActionFlag, {
+    ActionFlag::OutOfBounds => pb::ActionFlag::OutOfBounds,
+    ActionFlag::BypassSandboxRequested => pb::ActionFlag::BypassSandboxRequested,
+    ActionFlag::OpaqueScript => pb::ActionFlag::OpaqueScript,
+    ActionFlag::ArgumentPath => pb::ActionFlag::ArgumentPath,
+    ActionFlag::ResourceLimitHit => pb::ActionFlag::ResourceLimitHit,
+    ActionFlag::Unlexable => pb::ActionFlag::Unlexable,
+    ActionFlag::PathUnresolved => pb::ActionFlag::PathUnresolved,
+});
+enum_pair!(call_shape_to_proto, call_shape_from_proto, CallShapeKind, pb::CallShape, {
+    CallShapeKind::Tool => pb::CallShape::Tool,
+    CallShapeKind::SingleSimpleCommand => pb::CallShape::SingleSimpleCommand,
+    CallShapeKind::Compound => pb::CallShape::Compound,
+    CallShapeKind::Unparsable => pb::CallShape::Unparsable,
+});
+enum_pair!(sandbox_placement_to_proto, sandbox_placement_from_proto, SandboxPlacement, pb::SandboxPlacement, {
+    SandboxPlacement::Inside => pb::SandboxPlacement::Inside,
+    SandboxPlacement::Outside => pb::SandboxPlacement::Outside,
+    SandboxPlacement::Ambiguous => pb::SandboxPlacement::Ambiguous,
+});
 enum_pair!(approval_kind_to_proto, approval_kind_from_proto, ApprovalKind, pb::ApprovalKind, {
     ApprovalKind::Ask => pb::ApprovalKind::Ask,
     ApprovalKind::OutsideSandbox => pb::ApprovalKind::OutsideSandbox,
@@ -270,9 +291,19 @@ pub fn approval_state_to_proto(state: ApprovalState) -> (i32, Option<i32>, Optio
 }
 
 /// 审查子状态 → (review, review_id, reason)。
+/// 「失去执行者」放弃时 `reason` 字段的固定文字（T07 Q9）。proto 没有放弃原因的枚举（方案定
+/// proto 不变），用这段文字区分两种放弃；其余放弃都是离开自动，编码时不带文字。
+pub const REVIEW_ABANDONED_EXECUTOR_LOST: &str = "后台服务重启，审查中止";
+
 pub fn review_state_to_proto(review: &ReviewState) -> (i32, Option<String>, Option<String>) {
     let reason = match review {
-        ReviewState::Failed { reason, .. } => Some(reason.clone()),
+        ReviewState::Passed { reason, .. } | ReviewState::Failed { reason, .. } => {
+            Some(reason.clone())
+        }
+        ReviewState::Abandoned {
+            reason: AbandonReason::ExecutorLost,
+            ..
+        } => Some(REVIEW_ABANDONED_EXECUTOR_LOST.to_owned()),
         _ => None,
     };
     (
@@ -283,7 +314,8 @@ pub fn review_state_to_proto(review: &ReviewState) -> (i32, Option<String>, Opti
 }
 
 /// 由 (review, review_id, reason) 拼回审查子状态。NOT_REVIEWED 时忽略 review_id；
-/// 其余状态 review_id 必填；FAILED 时 reason 必填；其他状态的 reason 被忽略（domain 不存）。
+/// 其余状态 review_id 必填；PASSED 兼容旧事件缺少 reason（空串）；FAILED 时 reason 必填；ABANDONED 时 reason 区分放弃原因
+/// （见 [`REVIEW_ABANDONED_EXECUTOR_LOST`]）；其他状态的 reason 被忽略（domain 不存）。
 pub fn review_state_from_proto(
     kind: &'static str,
     review: i32,
@@ -302,14 +334,25 @@ pub fn review_state_from_proto(
     Ok(match phase {
         ReviewPhase::NotReviewed => unreachable!("上面已返回"),
         ReviewPhase::InProgress => ReviewState::InProgress { review_id },
-        ReviewPhase::Passed => ReviewState::Passed { review_id },
+        ReviewPhase::Passed => ReviewState::Passed {
+            review_id,
+            reason: reason.unwrap_or_default().to_owned(),
+        },
         ReviewPhase::Failed => ReviewState::Failed {
             review_id,
             reason: required(kind, "reason", reason)?.to_owned(),
         },
         ReviewPhase::Errored => ReviewState::Errored { review_id },
         ReviewPhase::TimedOut => ReviewState::TimedOut { review_id },
-        ReviewPhase::Abandoned => ReviewState::Abandoned { review_id },
+        ReviewPhase::Abandoned => ReviewState::Abandoned {
+            review_id,
+            // T07 之前只有切回手动一种放弃，旧事件的 reason 可能为空或任意说明文字
+            reason: if reason == Some(REVIEW_ABANDONED_EXECUTOR_LOST) {
+                AbandonReason::ExecutorLost
+            } else {
+                AbandonReason::ModeChangedFromAuto
+            },
+        },
     })
 }
 
@@ -890,6 +933,10 @@ pub fn action_to_proto(a: &Action) -> R<pb::ActionSummary> {
         out_of_bounds: a.flags.out_of_bounds,
         bypass_sandbox_requested: a.flags.bypass_sandbox_requested,
         opaque_script: a.flags.opaque_script,
+        argument_path: a.flags.argument_path,
+        resource_limit_hit: a.flags.resource_limit_hit,
+        unlexable: a.flags.unlexable,
+        path_unresolved: a.flags.path_unresolved,
     })
 }
 
@@ -905,6 +952,10 @@ pub fn action_from_proto(kind: &'static str, a: Option<&pb::ActionSummary>) -> R
             out_of_bounds: a.out_of_bounds,
             bypass_sandbox_requested: a.bypass_sandbox_requested,
             opaque_script: a.opaque_script,
+            argument_path: a.argument_path,
+            resource_limit_hit: a.resource_limit_hit,
+            unlexable: a.unlexable,
+            path_unresolved: a.path_unresolved,
         },
     })
 }
@@ -933,6 +984,7 @@ pub fn approval_to_proto(a: &Approval) -> R<pb::Approval> {
         conversation_id: a.conversation_id.to_string(),
         kind: approval_kind_to_proto(a.kind),
         action: Some(action_to_proto(&a.action)?),
+        call: a.call.as_deref().map(call_record_to_proto).transpose()?,
         matched_rule_ids: ids_to_strings(&a.matched_rules),
         ruleset_version: a.ruleset_version.0.clone(),
         state,
@@ -969,6 +1021,11 @@ pub fn approval_from_proto(a: &pb::Approval) -> R<Approval> {
         conversation_id: parse_id(K, "conversation_id", &a.conversation_id)?,
         kind: approval_kind_from_proto(K, "kind", a.kind)?,
         action: action_from_proto(K, a.action.as_ref())?,
+        call: a
+            .call
+            .as_ref()
+            .map(|c| call_record_from_proto(c).map(Box::new))
+            .transpose()?,
         matched_rules: parse_ids(K, "matched_rule_ids", &a.matched_rule_ids)?,
         ruleset_version: RuleSetVersion(a.ruleset_version.clone()),
         state,
@@ -986,6 +1043,58 @@ pub fn approval_from_proto(a: &pb::Approval) -> R<Approval> {
         remember_label: a.remember_label.clone(),
         requested_at: required_timestamp(K, "requested_at", a.requested_at.as_ref())?,
     })
+}
+
+pub fn call_record_to_proto(c: &ApprovalCallRecord) -> R<pb::ApprovalCallRecord> {
+    Ok(pb::ApprovalCallRecord {
+        tool_name: c.tool.0.clone(),
+        cwd: canonical_to_proto("ApprovalCallRecord", "cwd", &c.cwd)?,
+        shape: call_shape_to_proto(c.shape),
+        placement: sandbox_placement_to_proto(c.placement),
+        bypass_sandbox_requested: c.bypass_sandbox_requested,
+        actions: actions_to_proto(&c.actions)?,
+        representative: c.representative,
+        raw_input_digest: c.raw_input_digest.0.to_vec().into(),
+        normalized_digest: c.normalized_digest.0.to_vec().into(),
+    })
+}
+
+pub fn call_record_from_proto(c: &pb::ApprovalCallRecord) -> R<ApprovalCallRecord> {
+    const K: &str = "ApprovalCallRecord";
+    let actions = actions_from_proto(K, &c.actions)?;
+    if c.representative as usize >= actions.len() {
+        return Err(ConvertError::InvalidValue {
+            kind: K,
+            field: "representative",
+            reason: format!(
+                "代表动作下标 {} 超出子动作个数 {}",
+                c.representative,
+                actions.len()
+            ),
+        });
+    }
+    Ok(ApprovalCallRecord {
+        tool: ToolRef(c.tool_name.clone()),
+        cwd: canonical_from_proto(&c.cwd),
+        shape: call_shape_from_proto(K, "shape", c.shape)?,
+        placement: sandbox_placement_from_proto(K, "placement", c.placement)?,
+        bypass_sandbox_requested: c.bypass_sandbox_requested,
+        actions,
+        representative: c.representative,
+        raw_input_digest: sha256_from_bytes(K, "raw_input_digest", &c.raw_input_digest)?,
+        normalized_digest: sha256_from_bytes(K, "normalized_digest", &c.normalized_digest)?,
+    })
+}
+
+pub fn actions_to_proto(actions: &[Action]) -> R<Vec<pb::ActionSummary>> {
+    actions.iter().map(action_to_proto).collect()
+}
+
+pub fn actions_from_proto(kind: &'static str, actions: &[pb::ActionSummary]) -> R<Vec<Action>> {
+    actions
+        .iter()
+        .map(|a| action_from_proto(kind, Some(a)))
+        .collect()
 }
 
 pub fn proposal_to_proto(p: &Proposal) -> R<pb::user_action_proposal::Content> {
@@ -1175,29 +1284,62 @@ pub fn scope_from_proto(kind: &'static str, s: Option<&pb::Scope>) -> R<RuleScop
     )
 }
 
-pub fn rule_to_proto(r: &RuleEntry) -> R<pb::Rule> {
+pub fn rule_matcher_to_proto(m: &RuleMatcher) -> R<pb::RuleMatcher> {
     use pb::rule_matcher::Kind as M;
-    use pb::rule_source::Kind as S;
     const K: &str = "RuleMatcher";
+    Ok(pb::RuleMatcher {
+        kind: Some(match m {
+            RuleMatcher::PathUnder(p) => M::PathUnder(path_to_proto(K, "path_under", p)?),
+            RuleMatcher::PathIs(p) => M::PathIs(path_to_proto(K, "path_is", p)?),
+            RuleMatcher::ProgramSubcommand {
+                program,
+                subcommand,
+            } => M::ProgramSubcommand(pb::ProgramSubcommand {
+                program: program.clone(),
+                subcommand: subcommand.clone(),
+            }),
+            RuleMatcher::ToolName(n) => M::ToolName(n.clone()),
+            RuleMatcher::ActionKindIs(k) => M::ActionKindIs(action_kind_to_proto(*k)),
+            RuleMatcher::Any => M::Any(pb::AnyMatcher {}),
+            RuleMatcher::All(all) => M::All(pb::AllMatcher {
+                matchers: all.iter().map(rule_matcher_to_proto).collect::<R<_>>()?,
+            }),
+            RuleMatcher::Flag(f) => M::Flag(action_flag_to_proto(*f)),
+        }),
+    })
+}
+
+pub fn rule_matcher_from_proto(m: &pb::RuleMatcher) -> R<RuleMatcher> {
+    use pb::rule_matcher::Kind as M;
+    const K: &str = "RuleMatcher";
+    Ok(match required(K, "kind", m.kind.as_ref())? {
+        M::PathUnder(p) => RuleMatcher::PathUnder(path_from_proto(p)),
+        M::PathIs(p) => RuleMatcher::PathIs(path_from_proto(p)),
+        M::ProgramSubcommand(ps) => RuleMatcher::ProgramSubcommand {
+            program: ps.program.clone(),
+            subcommand: ps.subcommand.clone(),
+        },
+        M::ToolName(n) => RuleMatcher::ToolName(n.clone()),
+        M::ActionKindIs(k) => {
+            RuleMatcher::ActionKindIs(action_kind_from_proto(K, "action_kind_is", *k)?)
+        }
+        M::Any(_) => RuleMatcher::Any,
+        M::All(all) => RuleMatcher::All(
+            all.matchers
+                .iter()
+                .map(rule_matcher_from_proto)
+                .collect::<R<_>>()?,
+        ),
+        M::Flag(f) => RuleMatcher::Flag(action_flag_from_proto(K, "flag", *f)?),
+    })
+}
+
+pub fn rule_to_proto(r: &RuleEntry) -> R<pb::Rule> {
+    use pb::rule_source::Kind as S;
     Ok(pb::Rule {
         id: r.id.to_string(),
         layer: rule_layer_to_proto(r.layer),
-        matcher: Some(pb::RuleMatcher {
-            kind: Some(match &r.matcher {
-                RuleMatcher::PathUnder(p) => M::PathUnder(path_to_proto(K, "path_under", p)?),
-                RuleMatcher::PathIs(p) => M::PathIs(path_to_proto(K, "path_is", p)?),
-                RuleMatcher::ProgramSubcommand {
-                    program,
-                    subcommand,
-                } => M::ProgramSubcommand(pb::ProgramSubcommand {
-                    program: program.clone(),
-                    subcommand: subcommand.clone(),
-                }),
-                RuleMatcher::ToolName(n) => M::ToolName(n.clone()),
-                RuleMatcher::ActionKindIs(k) => M::ActionKindIs(action_kind_to_proto(*k)),
-                RuleMatcher::Any => M::Any(pb::AnyMatcher {}),
-            }),
-        }),
+        matcher: Some(rule_matcher_to_proto(&r.matcher)?),
         effect: rule_effect_to_proto(r.effect),
         source: Some(pb::RuleSource {
             kind: Some(match &r.source {
@@ -1217,18 +1359,18 @@ pub fn rule_to_proto(r: &RuleEntry) -> R<pb::Rule> {
         scope: Some(scope_to_proto(&r.scope)),
         created_at: Some(timestamp_to_proto(r.created_at)),
         label: r.label.clone(),
+        applies_in: r
+            .applies_in
+            .iter()
+            .map(|m| approval_mode_to_proto(*m))
+            .collect(),
     })
 }
 
 pub fn rule_from_proto(r: &pb::Rule) -> R<RuleEntry> {
-    use pb::rule_matcher::Kind as M;
     use pb::rule_source::Kind as S;
     const K: &str = "Rule";
-    let matcher = required(
-        "RuleMatcher",
-        "kind",
-        required(K, "matcher", r.matcher.as_ref())?.kind.as_ref(),
-    )?;
+    let matcher = rule_matcher_from_proto(required(K, "matcher", r.matcher.as_ref())?)?;
     let source = required(
         "RuleSource",
         "kind",
@@ -1237,21 +1379,7 @@ pub fn rule_from_proto(r: &pb::Rule) -> R<RuleEntry> {
     Ok(RuleEntry {
         id: parse_id(K, "id", &r.id)?,
         layer: rule_layer_from_proto(K, "layer", r.layer)?,
-        matcher: match matcher {
-            M::PathUnder(p) => RuleMatcher::PathUnder(path_from_proto(p)),
-            M::PathIs(p) => RuleMatcher::PathIs(path_from_proto(p)),
-            M::ProgramSubcommand(ps) => RuleMatcher::ProgramSubcommand {
-                program: ps.program.clone(),
-                subcommand: ps.subcommand.clone(),
-            },
-            M::ToolName(n) => RuleMatcher::ToolName(n.clone()),
-            M::ActionKindIs(k) => RuleMatcher::ActionKindIs(action_kind_from_proto(
-                "RuleMatcher",
-                "action_kind_is",
-                *k,
-            )?),
-            M::Any(_) => RuleMatcher::Any,
-        },
+        matcher,
         effect: rule_effect_from_proto(K, "effect", r.effect)?,
         source: match source {
             S::Builtin(b) => RuleSource::Builtin {
@@ -1267,6 +1395,11 @@ pub fn rule_from_proto(r: &pb::Rule) -> R<RuleEntry> {
         scope: scope_from_proto(K, r.scope.as_ref())?,
         created_at: required_timestamp(K, "created_at", r.created_at.as_ref())?,
         label: r.label.clone(),
+        applies_in: r
+            .applies_in
+            .iter()
+            .map(|m| approval_mode_from_proto(K, "applies_in", *m))
+            .collect::<R<_>>()?,
     })
 }
 

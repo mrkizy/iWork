@@ -21,7 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iwork_app::codec::ProtoEventCodec;
-use iwork_core::turn::{PermissionDecider, SessionLine, TurnPlan, TurnPorts};
+use iwork_core::turn::{
+    Decided, PermissionDecider, SessionLine, TurnPlan, TurnPorts, VoidPlanError,
+};
 use iwork_domain::approval::VoidReason;
 use iwork_domain::common::{ModelId, ModelSelection, Timestamp, ToolGroups};
 use iwork_domain::conversation::{Conversation, ConversationKind, ConversationState};
@@ -31,9 +33,8 @@ use iwork_domain::session::{AllowWrite, NetworkPolicy, SessionConstraints, Sessi
 use iwork_domain::settings::GlobalSettings;
 use iwork_domain::turn::{Turn, TurnKind, TurnState};
 use iwork_ports::agent::{
-    AgentError, AgentPort, AgentSession, AgentUpdate, ContentBlock, PermissionDecision,
-    PermissionHandler, PermissionRequest, RuntimeCapabilities, SessionSpec, TurnOutcome,
-    UpdateStream,
+    AgentError, AgentPort, AgentSession, AgentUpdate, ContentBlock, PermissionHandler,
+    PermissionRequest, RuntimeCapabilities, SessionSpec, TurnOutcome, UpdateStream,
 };
 use iwork_ports::clock::{Clock, IdGenerator, MonotonicInstant, Timer};
 use iwork_ports::live::{LivePublisher, MessageDelta};
@@ -164,12 +165,18 @@ impl UpdateStream for FakeUpdates {
 struct NoPermissions;
 
 impl PermissionDecider for NoPermissions {
-    async fn decide(&self, _turn_id: TurnId, _req: &PermissionRequest) -> PermissionDecision {
+    type VoidHold = ();
+
+    async fn decide(&self, _turn_id: TurnId, _req: &PermissionRequest) -> Decided {
         unreachable!("假运行时不发权限请求")
     }
 
-    async fn void_pending(&self, _turn_id: TurnId, _reason: VoidReason) -> Vec<DomainEvent> {
-        Vec::new()
+    async fn void_pending(
+        &self,
+        _turn_id: TurnId,
+        _reason: VoidReason,
+    ) -> Result<(Vec<DomainEvent>, ()), VoidPlanError> {
+        Ok((Vec::new(), ()))
     }
 }
 

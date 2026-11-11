@@ -68,7 +68,7 @@ fn domain_event_kinds_match_proto_oneof() {
         .into_iter()
         .map(|(_, name)| name)
         .collect();
-    assert_eq!(proto.len(), 53, "对照：proto 事件数");
+    assert_eq!(proto.len(), 54, "对照：proto 事件数");
     assert_eq!(proto, DomainEvent::KINDS);
 }
 
