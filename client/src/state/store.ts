@@ -32,6 +32,8 @@ export interface ConversationState {
   rows: Record<string, RowView>;
   /** 行 key 按 ordinal 排好的顺序；只在行增删时重算。 */
   order: string[];
+  /** 这个对话被 reset 过几次（打开、时间线重建、回到最新）：时间线据此回到底部。 */
+  resets: number;
 }
 
 export interface ViewState {
@@ -131,7 +133,8 @@ function applyConversation(
 ) {
   if (p.reset || state.conversation?.id !== p.conversationId) {
     textBytes.clear();
-    set("conversation", { id: p.conversationId, rows: {}, order: [] });
+    const resets = state.conversation?.id === p.conversationId ? state.conversation.resets + 1 : 0;
+    set("conversation", { id: p.conversationId, rows: {}, order: [], resets });
   }
   set(
     "conversation",

@@ -1,11 +1,12 @@
 // 用户操作：编码 UiIntent，经唯一出口交给 Rust，解出受理结果。
 // 网页不在本地改状态：点了按钮就等下一帧（T09 方案 2.5）。
-import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
-import { IntentAckSchema, UiIntentSchema, type IntentAck, type UiIntent } from "../gen/iwork/v1/view_pb";
+import { create, fromBinary, toBinary, type MessageInitShape } from "@bufbuild/protobuf";
+import { IntentAckSchema, UiIntentSchema, type IntentAck } from "../gen/iwork/v1/view_pb";
 import type { RawCall } from "./call";
 import { failureOf, type TransportFailure } from "./frames";
 
-export type IntentKind = UiIntent["kind"];
+/** 一个操作：`{ case, value }`，value 写字段即可（初始化形状），编码时补全。 */
+export type IntentKind = MessageInitShape<typeof UiIntentSchema>["kind"];
 
 export type SendIntent = (kind: IntentKind) => Promise<IntentAck>;
 

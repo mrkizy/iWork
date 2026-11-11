@@ -1,0 +1,108 @@
+.iw-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--bd);
+  background: var(--surf);
+  color: var(--tx);
+  font-size: var(--fs-sm2);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.iw-btn:hover:not(:disabled) {
+  background: var(--surf2);
+}
+.iw-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.iw-btn--primary {
+  background: var(--pri);
+  border-color: var(--pri);
+  color: var(--priTx);
+}
+.iw-btn--primary:hover:not(:disabled) {
+  background: var(--pri);
+  opacity: 0.9;
+}
+.iw-btn--accent {
+  background: var(--acc);
+  border-color: var(--acc);
+  color: var(--accTx);
+}
+.iw-btn--accent:hover:not(:disabled) {
+  background: var(--acc);
+  opacity: 0.9;
+}
+.iw-btn--ghost {
+  background: transparent;
+  border-color: transparent;
+}
+.iw-btn--ghost:hover:not(:disabled) {
+  background: var(--sideOn);
+}
+.iw-btn--link {
+  background: transparent;
+  border: none;
+  height: auto;
+  padding: 0;
+  color: var(--brand);
+}
+.iw-btn--link:hover:not(:disabled) {
+  background: transparent;
+  text-decoration: underline;
+}
+
+.iw-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--tx2);
+  cursor: pointer;
+}
+.iw-icon-btn:hover:not(:disabled) {
+  background: var(--sideOn);
+  color: var(--tx);
+}
+.iw-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 悬停提示：带 data-tip 的元素，纯 CSS，不另起浮层 */
+[data-tip] {
+  position: relative;
+}
+[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  z-index: 50;
+  left: 50%;
+  top: calc(100% + 6px);
+  transform: translateX(-50%);
+  padding: 4px 8px;
+  border-radius: var(--r-xs);
+  background: var(--tx);
+  color: var(--bg);
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  line-height: 1.4;
+  /* 保留换行（额度提示一行一个窗口），不自动折行 */
+  white-space: pre;
+  pointer-events: none;
+  box-shadow: var(--shadow-tip);
+}
+[data-tip-side="top"]:hover::after {
+  top: auto;
+  bottom: calc(100% + 6px);
+}

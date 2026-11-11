@@ -16,9 +16,10 @@ function load(name: string, kind: "frames" | "full") {
   return decodeFrames(new Uint8Array(readFileSync(`${DIR}${name}.${kind}.binpb`)));
 }
 
-/** 对拍时只比视图内容：跳转请求是一次性的事件，全量帧不重发它。 */
+/** 对拍时只比视图内容：跳转请求是一次性的事件，全量帧不重发它；reset 次数是网页本地的计数（让时间线回到底部）。 */
 function comparable(s: ViewState): ViewState {
   const { navigate: _navigate, ...rest } = structuredClone(unwrap(s));
+  if (rest.conversation) rest.conversation.resets = 0;
   return rest;
 }
 

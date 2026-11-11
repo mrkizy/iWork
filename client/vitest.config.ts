@@ -1,5 +1,6 @@
 import { defineConfig } from "vitest/config";
 import solid from "vite-plugin-solid";
+import { fileURLToPath } from "node:url";
 import { DESIGN_SYSTEM_ALIAS, DESIGN_SYSTEM_DIR } from "./vite.config.ts";
 
 // 两组测试分开跑：
@@ -18,6 +19,8 @@ export default defineConfig({
       {
         plugins: [solid()],
         resolve: { alias: { [DESIGN_SYSTEM_ALIAS]: DESIGN_SYSTEM_DIR } },
+        // 与开发服务器相同：只多放行设计系统目录（组件内联形象 SVG）
+        server: { fs: { allow: [fileURLToPath(new URL("./", import.meta.url)), DESIGN_SYSTEM_DIR] } },
         test: {
           name: "web",
           environment: "jsdom",

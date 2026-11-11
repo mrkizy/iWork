@@ -11,7 +11,8 @@
     "dev": "vite",
     "build": "vite build",
     "tauri": "node scripts/tauri.ts",
-    "fixtures": "cargo run -q -p iwork-client-core --example dump-view-fixtures -- fixtures"
+    "fixtures": "cargo run -q -p iwork-client-core --example dump-view-fixtures -- fixtures",
+    "preview:ui": "pnpm gen && pnpm fixtures && vite --open /preview.html"
   },
   "dependencies": {
     "@bufbuild/protobuf": "2.16.0",

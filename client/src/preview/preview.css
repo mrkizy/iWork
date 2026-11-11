@@ -1,0 +1,40 @@
+.iw-preview-index {
+  height: 100%;
+  overflow: auto;
+  padding: 32px 48px;
+  user-select: text;
+}
+.iw-preview-index h1 {
+  margin: 0 0 6px;
+  font-size: var(--fs-title);
+}
+.iw-preview-index p {
+  margin: 0 0 18px;
+  color: var(--tx2);
+}
+.iw-preview-index table {
+  border-collapse: collapse;
+}
+.iw-preview-index td {
+  padding: 6px 14px 6px 0;
+  border-bottom: 1px solid var(--bd);
+  vertical-align: top;
+}
+.iw-preview-index a {
+  color: var(--brand);
+}
+.iw-preview-log {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 400;
+  max-width: 420px;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  background: var(--tx);
+  color: var(--bg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  opacity: 0.85;
+  pointer-events: none;
+}

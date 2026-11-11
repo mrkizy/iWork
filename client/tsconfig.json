@@ -22,5 +22,5 @@
   },
   "include": ["src"],
   // 测试要 node 类型（读录像文件），归 tsconfig.test.json 检查，不让 node 类型混进网页代码
-  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test-setup.ts"]
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test-setup.ts", "src/test-fixtures.tsx"]
 }

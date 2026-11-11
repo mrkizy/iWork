@@ -1,0 +1,33 @@
+.iw-dialog-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--scrim);
+}
+.iw-dialog {
+  width: min(460px, calc(100vw - 48px));
+  padding: 22px 24px 18px;
+  border-radius: var(--r-2xl);
+  background: var(--surf);
+  box-shadow: var(--shadow-dialog);
+  color: var(--tx);
+}
+.iw-dialog__title {
+  margin: 0 0 10px;
+  font-size: var(--fs-title);
+  font-weight: 600;
+}
+.iw-dialog__body {
+  color: var(--tx2);
+  font-size: var(--fs-md);
+  line-height: var(--lh-ui);
+}
+.iw-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
