@@ -10,6 +10,7 @@
 //! - 受理先到、快照后到：范围在等着，[`CreatedWatch::covered_by_snapshot`] 把它交出来；
 //! - 快照先到、受理后到（重连时先订阅、后重发在飞命令）：受理来时范围已经落在游标之内又配不上，
 //!   [`CreatedWatch::accepted`] 当场回 [`Accepted::Missed`]，不再进等待表。
+//!
 //! 调用方按用途收尾：侧栏那次丢掉，首页那次报原因。
 
 use std::collections::VecDeque;
