@@ -70,6 +70,7 @@ iwork-host = { path = "crates/iwork-host" }
 iwork-ipc = { path = "crates/iwork-ipc" }
 iwork-claude-hook = { path = "crates/iwork-claude-hook" }
 iwork-client-core = { path = "crates/iwork-client-core" }
+iwork-fake-daemon = { path = "crates/iwork-fake-daemon" }
 
 # hook 每次工具调用都冷启动一次，体积与启动时间进基准（T06 方案 2.3、第 14 节）
 [profile.release.package.iwork-claude-hook]

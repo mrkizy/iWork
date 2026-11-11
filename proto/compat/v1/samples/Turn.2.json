@@ -1,0 +1,36 @@
+{
+  "id": "01JC0T0000000000000000TRN1",
+  "conversationId": "01JC0C0000000000000000CNV1",
+  "assistantId": "01JC0A0000000000000000AST1",
+  "assistantVersion": 4,
+  "runtimeId": "01JC0X0000000000000000RTM1",
+  "model": {
+    "modelId": "opus",
+    "effort": "high"
+  },
+  "runtimeSessionId": "sess-1",
+  "state": "TURN_STATE_COMPLETED",
+  "stateReason": "审批等待到上限",
+  "startedAt": "2025-11-01T12:35:00.123Z",
+  "endedAt": "2025-11-01T12:36:40.123Z",
+  "kind": "TURN_KIND_ASSISTANT",
+  "createdSeq": "1000",
+  "endedSeq": "1010",
+  "usage": {
+    "inputTokens": "1200",
+    "outputTokens": "340",
+    "cacheReadTokens": "5000",
+    "cacheWriteTokens": "60",
+    "costUsd": 0.25
+  },
+  "celebrate": true,
+  "changeSummary": {
+    "filesChanged": 2,
+    "insertions": 10,
+    "deletions": 3,
+    "paths": [
+      "src/a.rs",
+      "src/b.rs"
+    ]
+  }
+}

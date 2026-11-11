@@ -26,6 +26,7 @@ message Command {
     SwitchDmProject switch_dm_project = 17;
     DeleteConversation delete_conversation = 18;
     CreateConversation create_conversation = 19;
+    RenameConversation rename_conversation = 20;
 
     // 审批 30–49
     DecideApproval decide_approval = 30;
@@ -136,6 +137,12 @@ message DeleteConversation {
 
 message CreateConversation {
   string project_id = 1;
+}
+
+// 重命名项目对话（设计 9.0a）：去掉首尾空白后 1–50 个字符；私聊与成员子对话返回不可重命名。
+message RenameConversation {
+  string conversation_id = 1;
+  string title = 2;
 }
 
 // ---------- 审批 ----------

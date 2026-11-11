@@ -68,7 +68,7 @@ fn every_command() -> Vec<(String, pb::command::Kind)> {
 #[test]
 fn command_names_match_proto_oneof() {
     let commands = every_command();
-    assert_eq!(commands.len(), 42, "对照：proto 命令数");
+    assert_eq!(commands.len(), 43, "对照：proto 命令数");
     for (name, kind) in &commands {
         assert_eq!(command_name(kind), name);
     }

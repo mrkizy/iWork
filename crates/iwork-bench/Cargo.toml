@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 
 [dev-dependencies]
+iwork-client-core.workspace = true
 iwork-core.workspace = true
 iwork-store.workspace = true
 iwork-app.workspace = true
@@ -44,4 +45,9 @@ harness = false
 # T06 方案第 14 节：回合编排的流式热路径（交接表换掉信号信箱前后对比用）
 [[bench]]
 name = "turn_stream"
+harness = false
+
+# T09 方案第 6 节：客户端帧热路径（新热路径，以它为基线）。
+[[bench]]
+name = "view"
 harness = false

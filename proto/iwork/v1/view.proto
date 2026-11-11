@@ -1,10 +1,12 @@
-// ViewPatch：客户端 Rust 侧每 16ms 合并一次推给网页层的视图增量（设计 3.6；T01 方案 3.5）。
-// 网页层只解这一个文件的类型，不接触协议全集、不做业务判断：「可否点击」「计数」「表情状态」都由 Rust 侧算好放进来。
+// ViewPatch：客户端 Rust 侧每 16ms 最多算一帧、由网页层经 invoke 长等待取走的视图增量（设计 3.6；T09 方案 2.4）。
+// 网页层只解这一个文件的类型，不接触协议全集、不做业务判断：「可否点击」「计数」「表情状态」「文案」都由
+// Rust 侧（iwork-client-core 的 derive）算好放进来。
 //
-// T01 只定信封与各 patch 的壳，字段由 T09 按画布补齐。
 // 兼容规则：字段只增不改号；删字段先 `reserved` 编号与名字；枚举值同理；不改 oneof 字段的类型。
 // 本文件不落盘、只在客户端进程内传，所以不进 proto/compat/ 契约比对（S8）；但照样只加 optional 字段与新变体，
 // 老字段标 deprecated，不改结构。
+//
+// 不 import model.proto：网页层不认识协议实体。需要回传给 Rust 的取值（如记住范围）用 Rust 侧给的不透明整数。
 syntax = "proto3";
 
 package iwork.v1;
@@ -31,33 +33,225 @@ message ViewChange {
     AddProjectPatch add_project = 15;
     // 连接状态、「正在切换版本」、诊断信息。
     ConnectionPatch connection = 16;
+    // 「全部对话」列表页（T09 方案 2.7）。
+    ConversationListPatch conversation_list = 17;
+    // 请网页跳到某个对话（点击系统通知后）。
+    NavigatePatch navigate = 18;
   }
 }
 
-// 每个 *Patch 都是「可选整体快照 + 增量列表」的形状，T09 加字段只是加 optional。
-message SidebarPatch {}
+// 跳转请求：seq 单调递增，网页按 seq 去重，只跳一次。
+message NavigatePatch {
+  uint64 seq = 1;
+  string conversation_id = 2;
+  // 跳到对话里的这一行；空表示停在最新。
+  string row_key = 3;
+}
+
+// ---------- 通用小件 ----------
+
+// 头像：首字与颜色来自助手配置；形象 SVG 由网页按 character 名字内联。
+message AvatarView {
+  string initial = 1;
+  string color = 2;
+  string character = 3;
+}
+
+// 助手表情（ui-m1.md 3.3）。随状态变化，与「轻松元素」开关无关。
+enum Expression {
+  EXPRESSION_UNSPECIFIED = 0;
+  EXPRESSION_IDLE = 1;
+  EXPRESSION_WORKING = 2;
+  EXPRESSION_WAITING = 3;
+  EXPRESSION_ERROR = 4;
+}
+
+// 侧栏对话圆点（ui-m1.md 2a 第 1 条）：等你处理 > 出错 > 运行中 > 空闲。
+enum DotState {
+  DOT_STATE_UNSPECIFIED = 0;
+  DOT_STATE_IDLE = 1;
+  DOT_STATE_RUNNING = 2;
+  DOT_STATE_ERROR = 3;
+  DOT_STATE_WAITING = 4;
+}
+
+// 一个由 Rust 侧给的选项：value 原样回传，label 原样显示。
+message OptionView {
+  int32 value = 1;
+  string label = 2;
+}
+
+// ---------- 侧栏 ----------
+
+message SidebarPatch {
+  // 脏了就整份发（T09 方案 2.4）。
+  optional SidebarView view = 1;
+}
+
+message SidebarView {
+  // 「待你处理」计数（不含已作废）。
+  uint32 pending_count = 1;
+  repeated ProjectRow projects = 2;
+  repeated AssistantRow assistants = 3;
+  repeated QuotaCell quota = 4;
+}
+
+message ProjectRow {
+  string project_id = 1;
+  string name = 2;
+  uint32 unread = 3;
+  bool pinned = 4;
+  // 找不到路径：划线、标签、行内「重新定位」。
+  bool path_missing = 5;
+  string path_missing_label = 6;
+  // 最近 5 个对话（Rust 侧按最近活动取好）。
+  repeated ConversationItem recent = 7;
+  // 有没有更多对话（显示「全部对话」）。
+  bool has_more_conversations = 8;
+  string root_path = 9;
+}
+
+message ConversationItem {
+  string conversation_id = 1;
+  string title = 2;
+  DotState dot = 3;
+  // 悬停时的状态名。
+  string dot_label = 4;
+  bool can_rename = 5;
+  bool can_delete = 6;
+  uint32 unread = 7;
+  // 当前打开的对话。
+  bool selected = 8;
+  // 「全部对话」页用：最近一条消息首行与最近活动时间（已格式化）。
+  string last_message_first_line = 9;
+  string last_active_label = 10;
+}
+
+message AssistantRow {
+  string assistant_id = 1;
+  string name = 2;
+  AvatarView avatar = 3;
+  Expression expression = 4;
+  // 最近动态一行；从没说过话时不设，界面不显示第二行。
+  optional string activity_line = 5;
+  // 只算它那条私聊。
+  uint32 unread = 6;
+  bool can_delete = 7;
+  string dm_conversation_id = 8;
+  bool builtin = 9;
+  bool selected = 10;
+}
+
+// 额度一行里的一格：取不到时 value_text 是「—」。
+message QuotaCell {
+  string runtime_label = 1;
+  string value_text = 2;
+  // 悬停：窗口类型与重置时间。
+  string tooltip = 3;
+}
+
+// ---------- 对话 ----------
 
 message ConversationPatch {
   string conversation_id = 1;
   // 标题、项目选择器、运行时·模型、档位按钮状态、本对话用量。
   ConversationHeader header = 2;
-  // 整条替换（含卡片状态、头像表情）。
-  repeated MessageView upserts = 3;
-  // 流式追加。
+  // 已废弃：行改用 rows（T09 方案 2.4）。
+  repeated MessageView upserts = 3 [deprecated = true];
+  // 流式追加。同一帧里这一行也整行重发时只发整行。
   repeated MessageTextAppend appends = 4;
+  // 网页应删掉的行（RowView.key）。
   repeated string removed_ids = 5;
   // 可见范围与总数，供虚拟滚动。
   WindowInfo window = 6;
+  // 整行替换或新增，按 key 认行。
+  repeated RowView rows = 7;
+  // 为真时网页先清空这个对话的全部行再应用本 patch（换代、时间线重建、切换对话）。
+  bool reset = 8;
+  ComposerView composer = 9;
+  // 时间线不可用时的整页说明（如「数据不完整，无法显示这个对话」）；设了就不显示行。
+  optional string blocking_notice = 10;
 }
 
-message ConversationHeader {}
+message ConversationHeader {
+  string title = 1;
+  bool can_rename = 2;
+  // 「本对话用量」：token 合计与悬停明细。
+  string usage_text = 3;
+  string usage_tooltip = 4;
+  // 私聊的项目选择器：当前值的文字与选项；项目对话不设。
+  optional string project_selector_label = 5;
+  repeated ProjectOption project_options = 6;
+  // 「已回到最新消息」等提示条。
+  optional string notice = 7;
+  bool is_dm = 8;
+  string project_id = 9;
+}
+
+message ProjectOption {
+  // 空表示「私聊」。
+  string project_id = 1;
+  string label = 2;
+  bool selected = 3;
+}
+
+// 输入框一带：发送 / 停止、运行时·模型、档位。
+message ComposerView {
+  bool can_send = 1;
+  // 发不了时输入框上方的一行说明；警示色由 tone 决定。
+  optional string block_reason = 2;
+  Tone block_tone = 3;
+  // 验证中：转圈。
+  bool busy = 4;
+  // 「查看详情」「重新定位」等出口。
+  optional string block_action_label = 5;
+  BlockAction block_action = 6;
+  // 回合进行中：显示「停止」。
+  bool can_stop = 7;
+  optional string running_turn_id = 8;
+  // 「运行时 · 模型」按钮。
+  string runtime_model_label = 9;
+  // 对话开始后运行时一节置灰。
+  bool runtime_locked = 10;
+  // 档位按钮。
+  ApprovalModeView approval_mode = 11;
+  // 上一次添加附件被拒的原因（如拖入的文件超过 20MB）；下一次成功添加后清掉。
+  optional string attach_error = 12;
+  // 输入框上方的附件托盘：本对话已上传、还没随消息发出的附件。
+  repeated AttachmentChip tray = 13;
+}
+
+enum Tone {
+  TONE_UNSPECIFIED = 0;
+  TONE_NEUTRAL = 1;
+  TONE_WARNING = 2;
+}
+
+enum BlockAction {
+  BLOCK_ACTION_UNSPECIFIED = 0;
+  BLOCK_ACTION_RELOCATE_PROJECT = 1;
+  BLOCK_ACTION_OPEN_RUNTIME_DETAILS = 2;
+}
+
+message ApprovalModeView {
+  string label = 1;
+  // 全开：赭红。
+  bool full_access = 2;
+  // 断链图标：成员单独设置。
+  bool overridden = 3;
+  repeated OptionView options = 4;
+  int32 current = 5;
+  string scope_title = 6;
+}
 
 message MessageView {
   string message_id = 1;
 }
 
 message MessageTextAppend {
+  // 行的 key。
   string message_id = 1;
+  // 追加前这一行正文的长度（UTF-8 字节），网页核对用：对不上就等整行重发。
   uint64 offset = 2;
   string text = 3;
 }
@@ -66,14 +260,615 @@ message WindowInfo {
   uint32 first_index = 1;
   uint32 count = 2;
   uint32 total = 3;
+  // 更早的还有没有（往上翻）。
+  bool has_older = 4;
+  // 时间线是否接着最新；否则新消息只计数。
+  bool at_tail = 5;
+  // 「回到最新（N）」。
+  uint32 new_below = 6;
+  // 往前翻页在飞。
+  bool loading_older = 7;
 }
 
-message PendingPatch {}
+// 时间线的一行。ordinal 是 Rust 侧发的稳定行号（往前翻页发负数），网页拿它排序、当高度缓存的键。
+message RowView {
+  sint64 ordinal = 1;
+  string key = 2;
+  oneof row {
+    MessageRow message = 10;
+    ToolRow tool = 11;
+    ApprovalRow approval = 12;
+    UserActionRow user_action = 13;
+    TurnEndRow turn_end = 14;
+    ResumeRow resume = 15;
+    NoteRow model_switch = 16;
+    NoteRow divider = 17;
+    NoteRow note = 18;
+  }
+}
 
-message SettingsPatch {}
+enum Speaker {
+  SPEAKER_UNSPECIFIED = 0;
+  SPEAKER_USER = 1;
+  SPEAKER_ASSISTANT = 2;
+  SPEAKER_SYSTEM = 3;
+}
 
-message AssistantProfilePatch {}
+message MessageRow {
+  string message_id = 1;
+  Speaker speaker = 2;
+  string author_name = 3;
+  AvatarView avatar = 4;
+  Expression expression = 5;
+  string text = 6;
+  bool streaming = 7;
+  // 「已中断」「失败」；正常为空。
+  string status_label = 8;
+  repeated AttachmentChip attachments = 9;
+  // 正文是制品引用、还没读到。
+  bool body_pending = 10;
+}
 
-message AddProjectPatch {}
+message AttachmentChip {
+  string attachment_id = 1;
+  string name = 2;
+  string size_label = 3;
+  // 凭据文件等用户确认。
+  bool needs_confirmation = 4;
+}
 
-message ConnectionPatch {}
+message ToolRow {
+  string tool_call_id = 1;
+  string title = 2;
+  string summary = 3;
+  bool running = 4;
+  bool failed = 5;
+  string status_label = 6;
+  string output = 7;
+}
+
+message ApprovalRow {
+  string approval_id = 1;
+  string title = 2;
+  // 「越界」「沙箱外」等标签。
+  repeated string tags = 3;
+  string code = 4;
+  // AI 审查一行。
+  string review_line = 5;
+  // 「已允许（你）」「已作废：回合已取消」等；待定为空。
+  string state_label = 6;
+  bool can_decide = 7;
+  // 只列后台给的 offered_remember；value 是不透明的记住范围，原样回传。
+  repeated OptionView remember_options = 8;
+  // 置灰（已作废）。
+  bool muted = 9;
+  // 切档放行后的折叠形态。
+  bool folded = 10;
+  // 沙箱外说明、脚本不可见说明。
+  repeated string notes = 11;
+}
+
+message UserActionRow {
+  string card_id = 1;
+  // 命令或补丁二选一。
+  string command = 2;
+  string cwd = 3;
+  string patch_path = 4;
+  string diff = 5;
+  string reason = 6;
+  string state_label = 7;
+  bool can_execute = 8;
+  bool can_copy = 9;
+  bool can_dismiss = 10;
+  bool can_stop = 11;
+  // 结果未知：「我已核对」。
+  bool can_confirm_ended = 12;
+  optional string exit_label = 13;
+  string output = 14;
+  bool muted = 15;
+  // 「执行结果未知，请自行核对」等说明。
+  optional string notice = 16;
+}
+
+message TurnEndRow {
+  string turn_id = 1;
+  // 「搞定」印章，只由回合结束行带（R9）。
+  bool celebrate = 2;
+  string summary_line = 3;
+  repeated string paths = 4;
+  // 失败、取消的原因；正常结束为空。
+  string outcome_label = 5;
+  bool failed = 6;
+}
+
+message ResumeRow {
+  string turn_id = 1;
+  string reason = 2;
+  bool can_resume = 3;
+  bool can_abandon = 4;
+}
+
+message NoteRow {
+  string text = 1;
+}
+
+// ---------- 全部对话 ----------
+
+message ConversationListPatch {
+  optional ConversationListView view = 1;
+}
+
+message ConversationListView {
+  string project_id = 1;
+  string filter = 2;
+  repeated ConversationItem items = 3;
+  bool has_more = 4;
+  bool loading = 5;
+  // 空、筛选无结果的说明；有条目时为空。
+  string empty_text = 6;
+}
+
+// ---------- 待你处理 ----------
+
+message PendingPatch {
+  optional PendingView view = 1;
+}
+
+message PendingView {
+  repeated PendingEntry entries = 1;
+  string empty_text = 2;
+}
+
+enum PendingKind {
+  PENDING_KIND_UNSPECIFIED = 0;
+  PENDING_KIND_APPROVAL = 1;
+  PENDING_KIND_USER_ACTION = 2;
+  PENDING_KIND_AGENTS_MD_DRAFT = 3;
+  PENDING_KIND_RESUME = 4;
+}
+
+message PendingEntry {
+  string item_id = 1;
+  PendingKind kind = 2;
+  string kind_label = 3;
+  string title = 4;
+  // 所在对话或项目。
+  string context_label = 5;
+  // 点击跳转：对话与行；草稿卡片没有对话。
+  optional string conversation_id = 6;
+  optional string row_key = 7;
+  optional string project_id = 8;
+}
+
+// ---------- 设置 ----------
+
+message SettingsPatch {
+  optional SettingsView view = 1;
+}
+
+message SettingsView {
+  bool playful_ui = 1;
+  bool autostart = 2;
+  string projects_root = 3;
+  repeated RuntimeView runtimes = 4;
+  repeated RuleGroup rule_groups = 5;
+  bool rules_loading = 6;
+  string rules_empty_text = 7;
+  repeated ImportGroup import_groups = 8;
+  string import_empty_text = 9;
+}
+
+message RuntimeView {
+  string runtime_id = 1;
+  string display_name = 2;
+  string state_label = 3;
+  // 验证状态只在设置 › 运行时、引导页与诊断页出现（R10）。
+  optional string verification_label = 4;
+  string version_label = 5;
+  string login_label = 6;
+  // 未安装、未登录：文字指引 + 「重新检测」。
+  optional string guidance = 7;
+  bool can_redetect = 8;
+  bool ready = 9;
+}
+
+message RuleGroup {
+  string title = 1;
+  repeated RuleItem rules = 2;
+}
+
+message RuleItem {
+  string rule_id = 1;
+  string label = 2;
+  bool can_revoke = 3;
+}
+
+message ImportGroup {
+  string title = 1;
+  repeated ImportItem items = 2;
+}
+
+message ImportItem {
+  string item_id = 1;
+  string name = 2;
+  string description = 3;
+  string source = 4;
+  bool imported = 5;
+}
+
+// ---------- 助手主页 ----------
+
+message AssistantProfilePatch {
+  optional AssistantProfileView view = 1;
+}
+
+message AssistantProfileView {
+  string assistant_id = 1;
+  string name = 2;
+  AvatarView avatar = 3;
+  string prompt = 4;
+  string runtime_id = 5;
+  string model_id = 6;
+  string effort = 7;
+  repeated ToolToggle tools = 8;
+  bool builtin = 9;
+  bool can_delete = 10;
+  // 删除确认框里写的私聊工作目录。
+  string dm_workdir = 11;
+  uint32 version = 12;
+  repeated OptionView runtime_options = 13;
+  bool runtime_locked = 14;
+  // 「动态」「记忆」空态说明（D3）。
+  string activity_empty_text = 15;
+  string memory_empty_text = 16;
+}
+
+message ToolToggle {
+  int32 group = 1;
+  string label = 2;
+  bool enabled = 3;
+}
+
+// ---------- 添加项目 ----------
+
+message AddProjectPatch {
+  optional AddProjectView view = 1;
+}
+
+message AddProjectView {
+  optional CloneProgressView clone = 1;
+  repeated DraftCardView drafts = 2;
+}
+
+message CloneProgressView {
+  string job_id = 1;
+  string phase = 2;
+  uint32 percent = 3;
+  string text = 4;
+  optional string error = 5;
+  bool can_retry = 6;
+}
+
+message DraftCardView {
+  string card_id = 1;
+  string project_id = 2;
+  string project_name = 3;
+}
+
+// ---------- 连接 ----------
+
+message ConnectionPatch {
+  optional ConnectionView view = 1;
+}
+
+enum ConnectionState {
+  CONNECTION_STATE_UNSPECIFIED = 0;
+  // 正常。
+  CONNECTION_STATE_LIVE = 1;
+  // 首次连接中、或订阅快照还没到齐。
+  CONNECTION_STATE_CONNECTING = 2;
+  // 顶部细条「正在重新连接」。
+  CONNECTION_STATE_RECONNECTING = 3;
+  // 整页中性提示（版本不一致、正在切换版本）。
+  CONNECTION_STATE_WAITING = 4;
+  // 诊断页。
+  CONNECTION_STATE_DIAGNOSTICS = 5;
+  // 整页说明、不自动重拨（如 M1 的 Windows）。
+  CONNECTION_STATE_ENVIRONMENT = 6;
+}
+
+message ConnectionView {
+  ConnectionState state = 1;
+  string title = 2;
+  string message = 3;
+  // 提示上的出口文字。
+  repeated string exits = 4;
+  // 「后台负载过高」提示条；不过载时不设。
+  optional string overload_notice = 5;
+  // 会发命令的按钮可不可点（断线时不可点，D8）。
+  bool commands_enabled = 6;
+  optional DiagnosticsView diagnostics = 7;
+  // 菜单点了「完全退出 iWork」：网页弹确认框，确认后发 QuitIntent{confirm: true}。
+  bool quit_requested = 8;
+  // 有数据没取到、正在退避重试时的一行说明（如「部分数据暂时没取到，稍后自动重试」）；没有就不设。
+  optional string query_notice = 9;
+}
+
+message DiagnosticsView {
+  repeated DiagnosticLine lines = 1;
+  // 「装回更新的那一版可继续使用」等提示。
+  optional string hint = 2;
+  bool can_retry = 3;
+}
+
+message DiagnosticLine {
+  string label = 1;
+  string value = 2;
+}
+
+// ---------- 网页 → Rust：三个 invoke 命令的载荷 ----------
+
+// attach 的回包。
+message AttachReply {
+  uint32 epoch = 1;
+}
+
+// next_frame 的请求。applied 是网页已经应用到的最后一块；还没收到过任何块时不设。
+message NextFrame {
+  uint32 epoch = 1;
+  optional FramePosition applied = 2;
+}
+
+message FramePosition {
+  uint64 frame = 1;
+  uint32 index = 2;
+}
+
+// next_frame 的回包：一帧编码后的 ViewPatch 按 256 KiB 切成的一块。收齐 last 再解码。
+message FrameChunk {
+  uint32 epoch = 1;
+  uint64 frame = 2;
+  uint32 index = 3;
+  bool last = 4;
+  bytes data = 5;
+}
+
+// ui_intent 的请求。
+message UiIntent {
+  oneof kind {
+    // 视图声明
+    SetVisible set_visible = 1;
+    SetVisibleRows set_visible_rows = 2;
+    LoadOlder load_older = 3;
+    JumpToLatest jump_to_latest = 4;
+    SetFocused set_focused = 5;
+    LoadMoreConversations load_more_conversations = 6;
+    Retry retry = 7;
+    OpenExternal open_external = 8;
+
+    // 对话
+    SendMessageIntent send_message = 20;
+    CreateConversationIntent create_conversation = 21;
+    RenameConversationIntent rename_conversation = 22;
+    DeleteConversationIntent delete_conversation = 23;
+    TurnIntent cancel_turn = 24;
+    TurnIntent resume_turn = 25;
+    TurnIntent abandon_turn = 26;
+    SetModelIntent set_model = 27;
+    SwitchDmProjectIntent switch_dm_project = 28;
+    SetApprovalModeIntent set_approval_mode = 29;
+
+    // 卡片
+    DecideApprovalIntent decide_approval = 40;
+    CardIntent execute_user_action = 41;
+    CardIntent dismiss_user_action = 42;
+    CardIntent stop_user_action = 43;
+    CardIntent confirm_user_action_ended = 44;
+    AttachmentIntent confirm_credential_attachment = 45;
+    DraftIntent decide_agents_md_draft = 46;
+
+    // 附件
+    AttachPaths attach_paths = 60;
+    AttachPasted attach_pasted = 61;
+
+    // 项目
+    ProjectPathIntent add_project = 70;
+    PinProjectIntent pin_project = 71;
+    ProjectIntent remove_project = 72;
+    RelocateProjectIntent relocate_project = 73;
+
+    // 助手与设置
+    AssistantEditIntent create_assistant = 80;
+    AssistantEditIntent update_assistant = 81;
+    AssistantIntent delete_assistant = 82;
+    ToggleIntent set_playful_ui = 83;
+    ToggleIntent set_autostart = 84;
+    RuleIntent revoke_rule = 85;
+    RuntimeIntent redetect_runtime = 86;
+    // 「完全退出 iWork」确认框的结果：确认则关后台服务并退出，取消则关掉确认框。
+    QuitIntent quit = 87;
+  }
+}
+
+message QuitIntent {
+  bool confirm = 1;
+}
+
+// 网页当前可见的视图（整份声明，替换上一次）。
+message SetVisible {
+  bool sidebar = 1;
+  optional string conversation_id = 2;
+  bool pending = 3;
+  bool settings = 4;
+  optional string assistant_id = 5;
+  bool add_project = 6;
+  // 「全部对话」列表页：项目与筛选文字。
+  optional ConversationListQuery conversation_list = 7;
+}
+
+message ConversationListQuery {
+  string project_id = 1;
+  string filter = 2;
+}
+
+// 网页声明的行窗口（按 ordinal，闭区间）。Rust 只发窗口前后各多 30 行以内的行。
+message SetVisibleRows {
+  string conversation_id = 1;
+  sint64 first_ordinal = 2;
+  sint64 last_ordinal = 3;
+}
+
+message LoadOlder {
+  string conversation_id = 1;
+}
+
+message JumpToLatest {
+  string conversation_id = 1;
+}
+
+message SetFocused {
+  bool focused = 1;
+}
+
+message LoadMoreConversations {}
+
+message Retry {}
+
+message OpenExternal {
+  string url = 1;
+}
+
+message SendMessageIntent {
+  string conversation_id = 1;
+  string text = 2;
+  repeated string attachment_ids = 3;
+}
+
+message CreateConversationIntent {
+  string project_id = 1;
+}
+
+message RenameConversationIntent {
+  string conversation_id = 1;
+  string title = 2;
+}
+
+message DeleteConversationIntent {
+  string conversation_id = 1;
+}
+
+message TurnIntent {
+  string turn_id = 1;
+}
+
+message SetModelIntent {
+  string conversation_id = 1;
+  string model_id = 2;
+  optional string effort = 3;
+}
+
+message SwitchDmProjectIntent {
+  string conversation_id = 1;
+  // 空表示切回纯私聊。
+  string project_id = 2;
+}
+
+message SetApprovalModeIntent {
+  string conversation_id = 1;
+  // ApprovalModeView.options 里的 value。
+  int32 mode = 2;
+}
+
+message DecideApprovalIntent {
+  string approval_id = 1;
+  bool allow = 2;
+  // ApprovalRow.remember_options 里的 value；不记住时为 0。
+  int32 remember = 3;
+}
+
+// 亲手执行卡片：提议哈希由 Rust 从实体取，网页只给卡片 id（R7）。
+message CardIntent {
+  string card_id = 1;
+}
+
+message AttachmentIntent {
+  string attachment_id = 1;
+}
+
+message DraftIntent {
+  string card_id = 1;
+  bool accept = 2;
+}
+
+// 拖入或选择的本机文件：只传路径（设计 3.7）。
+message AttachPaths {
+  string conversation_id = 1;
+  repeated string paths = 2;
+}
+
+// 粘贴的数据：Rust 侧做 20MB 检查后用 Chunk 上传。
+message AttachPasted {
+  string conversation_id = 1;
+  string name = 2;
+  string mime = 3;
+  bytes data = 4;
+}
+
+message ProjectPathIntent {
+  string path = 1;
+}
+
+message PinProjectIntent {
+  string project_id = 1;
+  bool pinned = 2;
+}
+
+message ProjectIntent {
+  string project_id = 1;
+}
+
+message RelocateProjectIntent {
+  string project_id = 1;
+  string new_path = 2;
+}
+
+message AssistantEditIntent {
+  // 新建时为空。
+  string assistant_id = 1;
+  string name = 2;
+  string prompt = 3;
+  string runtime_id = 4;
+  string model_id = 5;
+  optional string effort = 6;
+  repeated int32 disabled_groups = 7;
+  string avatar_initial = 8;
+  string avatar_color = 9;
+}
+
+message AssistantIntent {
+  string assistant_id = 1;
+}
+
+message ToggleIntent {
+  bool on = 1;
+}
+
+message RuleIntent {
+  string rule_id = 1;
+}
+
+message RuntimeIntent {
+  string runtime_id = 1;
+}
+
+// ui_intent 的回包：受理结果。被后台拒绝或本地校验不过时带错误，网页显示成提示。
+message IntentAck {
+  optional IntentError error = 1;
+}
+
+message IntentError {
+  // 机器可读的错误名（如 "approval_not_pending"、"attachment_too_large"、"offline"）。
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+}

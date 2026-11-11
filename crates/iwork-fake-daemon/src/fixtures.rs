@@ -1,0 +1,445 @@
+//! 造事件的小函数：场景、命令与测试共用，免得各处手写一长串 proto 字面量。
+//!
+//! 只造形状，不定规则：seq、created_seq、标题等由折叠（[`crate::tables`]）算。
+
+use iwork_proto::pb;
+use iwork_proto::pb::domain_event::Event as E;
+
+/// 信封时间的起点（2025-11-01 附近，录像可复现）。
+pub const BASE_TIME: i64 = 1_762_000_000;
+
+pub const RUNTIME: &str = "rt-claude";
+pub const IWORK: &str = "as-iwork";
+
+pub fn ev(e: E) -> pb::DomainEvent {
+    pb::DomainEvent { event: Some(e) }
+}
+
+pub fn ts(secs: i64) -> prost_types::Timestamp {
+    prost_types::Timestamp {
+        seconds: BASE_TIME + secs,
+        nanos: 0,
+    }
+}
+
+pub fn text(t: impl Into<String>) -> Option<pb::MessageBody> {
+    Some(pb::MessageBody {
+        content: Some(pb::message_body::Content::InlineText(t.into())),
+    })
+}
+
+pub fn project(id: &str, name: &str, root: &str) -> pb::DomainEvent {
+    ev(E::ProjectAdded(pb::ProjectAdded {
+        project: Some(pb::Project {
+            id: id.into(),
+            root_path: root.into(),
+            vcs_kind: "git".into(),
+            name: name.into(),
+            pinned: false,
+            last_active_at: Some(ts(0)),
+            path_status: pb::PathStatus::Ok.into(),
+            settings: Some(pb::ProjectSettings {
+                default_approval_mode: pb::ApprovalMode::Manual.into(),
+                default_model: None,
+                ai_review: None,
+            }),
+            unread: 0,
+        }),
+    }))
+}
+
+pub fn assistant(id: &str, name: &str, builtin: bool) -> pb::DomainEvent {
+    let initial = name.chars().next().map(String::from).unwrap_or_default();
+    ev(E::AssistantCreated(pb::AssistantCreated {
+        assistant: Some(pb::Assistant {
+            id: id.into(),
+            builtin,
+            version: 1,
+            config: Some(pb::AssistantConfig {
+                name: name.into(),
+                avatar: Some(pb::Avatar {
+                    initial,
+                    color: "#4F7DF3".into(),
+                }),
+                prompt: format!("你是{name}。"),
+                runtime_id: RUNTIME.into(),
+                model: Some(pb::ModelSelection {
+                    model_id: "fake-large".into(),
+                    effort: Some("medium".into()),
+                }),
+                disabled_groups: vec![],
+            }),
+            updated_at: Some(ts(0)),
+        }),
+    }))
+}
+
+fn conversation(id: &str, kind: pb::conversation::Kind) -> pb::DomainEvent {
+    ev(E::ConversationCreated(pb::ConversationCreated {
+        conversation: Some(pb::Conversation {
+            id: id.into(),
+            kind: Some(kind),
+            state: pb::ConversationState::Active.into(),
+            ..Default::default()
+        }),
+    }))
+}
+
+pub fn project_conversation(id: &str, project_id: &str) -> pb::DomainEvent {
+    conversation(
+        id,
+        pb::conversation::Kind::Project(pb::ProjectConversation {
+            project_id: project_id.into(),
+        }),
+    )
+}
+
+pub fn dm(id: &str, assistant_id: &str) -> pb::DomainEvent {
+    conversation(
+        id,
+        pb::conversation::Kind::AssistantDm(pb::AssistantDm {
+            assistant_id: assistant_id.into(),
+            context_project_id: None,
+        }),
+    )
+}
+
+pub fn user_message(id: &str, conversation_id: &str, body: &str) -> pb::DomainEvent {
+    ev(E::MessageAppended(pb::MessageAppended {
+        message: Some(pb::Message {
+            id: id.into(),
+            conversation_id: conversation_id.into(),
+            author: Some(pb::Author {
+                kind: Some(pb::author::Kind::User(pb::UserAuthor {})),
+            }),
+            status: pb::MessageStatus::Sent.into(),
+            body: text(body),
+            ..Default::default()
+        }),
+    }))
+}
+
+/// 助手消息开头：STREAMING、正文为空（设计 3.5）。
+pub fn assistant_message(
+    id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    assistant_id: &str,
+    name: &str,
+) -> pb::DomainEvent {
+    ev(E::MessageAppended(pb::MessageAppended {
+        message: Some(pb::Message {
+            id: id.into(),
+            conversation_id: conversation_id.into(),
+            author: Some(pb::Author {
+                kind: Some(pb::author::Kind::Assistant(pb::AssistantAuthor {
+                    assistant_id: assistant_id.into(),
+                    name_snapshot: name.into(),
+                })),
+            }),
+            status: pb::MessageStatus::Streaming.into(),
+            body: None,
+            turn_id: Some(turn_id.into()),
+            ..Default::default()
+        }),
+    }))
+}
+
+pub fn message_completed(conversation_id: &str, message_id: &str, body: &str) -> pb::DomainEvent {
+    message_ended(
+        conversation_id,
+        message_id,
+        body,
+        pb::MessageStatus::Completed,
+    )
+}
+
+pub fn message_ended(
+    conversation_id: &str,
+    message_id: &str,
+    body: &str,
+    status: pb::MessageStatus,
+) -> pb::DomainEvent {
+    ev(E::MessageCompleted(pb::MessageCompleted {
+        conversation_id: conversation_id.into(),
+        message_id: message_id.into(),
+        body: text(body),
+        status: status.into(),
+    }))
+}
+
+pub fn delta(message_id: &str, offset: u64, t: &str) -> pb::TransientEvent {
+    pb::TransientEvent {
+        event: Some(pb::transient_event::Event::MessageDelta(pb::MessageDelta {
+            message_id: message_id.into(),
+            offset,
+            text: t.into(),
+        })),
+    }
+}
+
+pub fn turn_queued(id: &str, conversation_id: &str, assistant_id: &str) -> pb::DomainEvent {
+    ev(E::TurnQueued(pb::TurnQueued {
+        turn: Some(pb::Turn {
+            id: id.into(),
+            conversation_id: conversation_id.into(),
+            assistant_id: assistant_id.into(),
+            assistant_version: 1,
+            runtime_id: RUNTIME.into(),
+            model: Some(pb::ModelSelection {
+                model_id: "fake-large".into(),
+                effort: Some("medium".into()),
+            }),
+            state: pb::TurnState::Queued.into(),
+            kind: pb::TurnKind::Assistant.into(),
+            ..Default::default()
+        }),
+    }))
+}
+
+pub fn turn_state(
+    id: &str,
+    from: pb::TurnState,
+    to: pb::TurnState,
+    reason: Option<&str>,
+) -> pb::DomainEvent {
+    let interrupt = (to == pb::TurnState::Interrupted).then_some(pb::InterruptReason::Crash.into());
+    ev(E::TurnStateChanged(pb::TurnStateChanged {
+        turn_id: id.into(),
+        from: from.into(),
+        to: to.into(),
+        reason: reason.map(Into::into),
+        interrupt_reason: interrupt,
+        from_interrupt_reason: None,
+    }))
+}
+
+pub fn usage(input: u64, output: u64) -> pb::Usage {
+    pb::Usage {
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        cost_usd: None,
+    }
+}
+
+pub fn turn_finished(
+    id: &str,
+    state: pb::TurnState,
+    celebrate: bool,
+    changes: Option<pb::ChangeSummary>,
+) -> pb::DomainEvent {
+    ev(E::TurnFinished(pb::TurnFinished {
+        turn_id: id.into(),
+        state: state.into(),
+        usage: Some(usage(1200, 340)),
+        celebrate,
+        change_summary: changes,
+    }))
+}
+
+pub fn changes(paths: &[&str], insertions: u32, deletions: u32) -> pb::ChangeSummary {
+    pb::ChangeSummary {
+        files_changed: paths.len() as u32,
+        insertions,
+        deletions,
+        paths: paths.iter().map(|p| (*p).into()).collect(),
+    }
+}
+
+pub fn tool_started(turn_id: &str, call_id: &str, tool: &str, summary: &str) -> pb::DomainEvent {
+    ev(E::ToolCallStarted(pb::ToolCallStarted {
+        turn_id: turn_id.into(),
+        tool_call_id: call_id.into(),
+        tool_name: tool.into(),
+        action: Some(command_action(summary)),
+    }))
+}
+
+pub fn tool_finished(turn_id: &str, call_id: &str, ok: bool) -> pb::DomainEvent {
+    ev(E::ToolCallFinished(pb::ToolCallFinished {
+        turn_id: turn_id.into(),
+        tool_call_id: call_id.into(),
+        ok,
+        output_artifact: None,
+    }))
+}
+
+pub fn command_action(raw: &str) -> pb::ActionSummary {
+    let mut argv = raw.split_whitespace().map(String::from);
+    let program = argv.next().unwrap_or_default();
+    pb::ActionSummary {
+        kind: pb::ActionKind::Execute.into(),
+        target: Some(pb::ActionTarget {
+            kind: Some(pb::action_target::Kind::Command(pb::CommandTarget {
+                program: program.clone(),
+                subcommand: None,
+                argv: std::iter::once(program).chain(argv).collect(),
+            })),
+        }),
+        tool_name: "Bash".into(),
+        raw_summary: raw.into(),
+        out_of_bounds: false,
+        bypass_sandbox_requested: false,
+        opaque_script: false,
+        ..Default::default()
+    }
+}
+
+/// 一张待定审批。`remember` 为空表示必问。
+pub fn approval(
+    id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    action: pb::ActionSummary,
+    kind: pb::ApprovalKind,
+    remember: &[pb::RememberScope],
+) -> pb::DomainEvent {
+    ev(E::ApprovalRequested(pb::ApprovalRequested {
+        approval: Some(pb::Approval {
+            id: id.into(),
+            turn_id: turn_id.into(),
+            conversation_id: conversation_id.into(),
+            kind: kind.into(),
+            action: Some(action),
+            matched_rule_ids: vec![],
+            ruleset_version: "2026.11.1".into(),
+            state: pb::ApprovalState::Pending.into(),
+            review: pb::ReviewState::NotReviewed.into(),
+            offered_remember: remember.iter().map(|r| (*r).into()).collect(),
+            remember_label: if remember.is_empty() {
+                String::new()
+            } else {
+                "本项目内同类命令不再问".into()
+            },
+            requested_at: Some(ts(0)),
+            ..Default::default()
+        }),
+    }))
+}
+
+pub fn approval_decided(
+    id: &str,
+    state: pb::ApprovalState,
+    decider: pb::ApprovalDecider,
+) -> pb::DomainEvent {
+    ev(E::ApprovalDecided(pb::ApprovalDecided {
+        approval_id: id.into(),
+        state: state.into(),
+        decider: decider.into(),
+        remember: None,
+    }))
+}
+
+pub fn approval_voided(id: &str, reason: pb::VoidReason) -> pb::DomainEvent {
+    ev(E::ApprovalVoided(pb::ApprovalVoided {
+        approval_id: id.into(),
+        reason: reason.into(),
+    }))
+}
+
+pub fn user_action(
+    id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    command: &str,
+) -> pb::DomainEvent {
+    ev(E::UserActionProposed(pb::UserActionProposed {
+        card: Some(pb::UserActionCard {
+            id: id.into(),
+            turn_id: turn_id.into(),
+            conversation_id: conversation_id.into(),
+            content: Some(pb::user_action_card::Content::Command(
+                pb::CommandProposal {
+                    command: command.into(),
+                    cwd: "~/work/demo".into(),
+                },
+            )),
+            reason: "这条命令要读你的凭据，iWork 不让助手自己执行".into(),
+            proposal_hash: proposal_hash(command),
+            state: pb::UserActionState::Pending.into(),
+            ..Default::default()
+        }),
+    }))
+}
+
+/// 假的提议哈希：命令文字的字节（假后台只比相等）。
+pub fn proposal_hash(command: &str) -> bytes::Bytes {
+    bytes::Bytes::copy_from_slice(command.as_bytes())
+}
+
+pub fn user_action_state(
+    id: &str,
+    state: pb::UserActionState,
+    exit_code: Option<i32>,
+    error: Option<&str>,
+    void: Option<pb::VoidReason>,
+) -> pb::DomainEvent {
+    ev(E::UserActionStateChanged(pb::UserActionStateChanged {
+        card_id: id.into(),
+        state: state.into(),
+        exit: exit_code.map(|c| pb::ExitStatus {
+            kind: Some(pb::exit_status::Kind::Code(c)),
+        }),
+        error: error.map(Into::into),
+        output_artifact: None,
+        void_reason: void.map(Into::into),
+    }))
+}
+
+pub fn conversation_read(conversation_id: &str, last_read_seq: u64) -> pb::DomainEvent {
+    ev(E::ConversationRead(pb::ConversationRead {
+        conversation_id: conversation_id.into(),
+        last_read_seq,
+    }))
+}
+
+pub fn runtime(state: pb::RuntimeState) -> pb::DomainEvent {
+    ev(E::RuntimeUpdated(pb::RuntimeUpdated {
+        runtime: Some(pb::RuntimeStatus {
+            runtime_id: RUNTIME.into(),
+            kind: "claude".into(),
+            display_name: "Claude Code".into(),
+            cli_path: Some("/usr/local/bin/claude".into()),
+            cli_version: Some("2.1.322".into()),
+            adapter_version: "0.1.0".into(),
+            state: state.into(),
+            login: Some(pb::LoginInfo {
+                logged_in: true,
+                auth_method: "subscription".into(),
+                subscription_type: "max".into(),
+                login_expires_at: None,
+            }),
+        }),
+    }))
+}
+
+pub fn quota(used_5h: u32, used_7d: u32) -> pb::DomainEvent {
+    ev(E::QuotaObserved(pb::QuotaObserved {
+        runtime_id: RUNTIME.into(),
+        windows: vec![
+            pb::QuotaWindow {
+                window: "5h".into(),
+                used_pct: used_5h,
+                resets_at: Some(ts(5 * 3600)),
+                observed_at: Some(ts(0)),
+            },
+            pb::QuotaWindow {
+                window: "7d".into(),
+                used_pct: used_7d,
+                resets_at: Some(ts(7 * 86400)),
+                observed_at: Some(ts(0)),
+            },
+        ],
+        observed_at: Some(ts(0)),
+    }))
+}
+
+pub fn settings(playful: bool) -> pb::DomainEvent {
+    ev(E::GlobalSettingsChanged(pb::GlobalSettingsChanged {
+        playful_ui: Some(playful),
+        autostart: Some(false),
+        projects_root: Some("~/iWork/projects".into()),
+    }))
+}
