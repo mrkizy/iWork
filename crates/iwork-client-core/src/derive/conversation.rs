@@ -39,6 +39,18 @@ pub fn window(store: &Store, tl: &Timeline) -> (Vec<(RowKey, String)>, pb::Windo
     (rows, info)
 }
 
+/// 打开的对话用哪个运行时（会话层据此取模型清单）。
+pub fn open_runtime(store: &Store) -> Option<&str> {
+    let tl = store.open.as_ref()?;
+    let conv = conversation(store, tl)?;
+    let id = answering_assistant(store, conv)?
+        .config
+        .as_ref()?
+        .runtime_id
+        .as_str();
+    (!id.is_empty()).then_some(id)
+}
+
 /// 这个对话由哪个助手答（项目对话 M1 是内置 iWork，私聊是那个助手）。
 fn answering_assistant<'a>(store: &'a Store, conv: &pb::Conversation) -> Option<&'a pb::Assistant> {
     match &conv.kind {
@@ -92,7 +104,8 @@ pub fn header(store: &Store, tl: &Timeline) -> pb::ConversationHeader {
         usage_tooltip: text::usage_tooltip(&usage),
         project_selector_label: selector.0,
         project_options: selector.1,
-        notice: None,
+        notice: (store.back_to_latest.as_deref() == Some(tl.conversation_id.as_str()))
+            .then(|| text::BACK_TO_LATEST.to_owned()),
         is_dm,
         project_id,
     }
@@ -156,6 +169,7 @@ pub fn composer(store: &Store, tl: &Timeline) -> pb::ComposerView {
     };
 
     let running = tl.running_turn();
+    let runtime_locked = !tl.turns.is_empty();
     let (block_reason, block_tone, busy, action) = match block {
         Some(b) => (Some(b.reason), b.tone, b.busy, b.action),
         None => (None, pb::Tone::Unspecified, false, None),
@@ -171,7 +185,15 @@ pub fn composer(store: &Store, tl: &Timeline) -> pb::ComposerView {
         running_turn_id: running.map(|t| t.id.clone()),
         runtime_model_label,
         // 对话开始后运行时一节置灰（ui-m1.md 第 2 节第 14 条）。
-        runtime_locked: !tl.turns.is_empty(),
+        runtime_locked,
+        model_menu: Some(super::model_menu::model_menu(
+            store,
+            &super::model_menu::MenuInput {
+                runtime_id: config.map_or("", |c| c.runtime_id.as_str()),
+                model,
+                runtime_locked,
+            },
+        )),
         approval_mode: Some(approval_mode(store, conv, assistant)),
         attach_error: store.attach_error.clone(),
         tray: tray(tl),

@@ -7,6 +7,7 @@
 //! - 网页取帧是一次长等待：没有可交的就挂着，状态变了或到了 16ms 再试。
 
 pub mod dial;
+mod models;
 pub mod reconnect;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -31,6 +32,8 @@ use reconnect::{ReconnectState, Retry};
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 /// `MarkRead` 每秒最多一次（方案 2.7）。
 const MARK_READ_INTERVAL: Duration = Duration::from_secs(1);
+/// 「已重新连接，回到最新」提示显示多久（Q9）。
+const BACK_TO_LATEST_FOR: Duration = Duration::from_secs(4);
 /// 翻页与「全部对话」每批条数。
 pub const PAGE_SIZE: u32 = 50;
 
@@ -91,6 +94,12 @@ enum Internal {
     },
     /// 拖入的附件处理完：错误说明或成功（None）。
     AttachDone(Option<String>),
+    /// 模型清单的附带查询回来了（见 models 模块）。错误为 None 表示连接断了，不算失败。
+    ModelsLoaded {
+        epoch: u64,
+        runtime_id: String,
+        result: Result<pb::ListModelsResult, Option<String>>,
+    },
 }
 
 struct InFlight {
@@ -151,6 +160,8 @@ pub struct Session<D: Dialer> {
     conn_epoch: u64,
     /// 视图查询失败后的退避，按用途种类（审查 1/F-5）。
     query_backoff: HashMap<&'static str, (Instant, Backoff)>,
+    /// 「已重新连接，回到最新」提示到时撤掉的时刻（Q9）。
+    back_to_latest_until: Option<Instant>,
     /// 时钟（方案 2.4 第 10 条：注入）。一轮循环只读一次，service 与 next_deadline 用同一个时刻（审查 2/F-1）。
     clock: Clock,
 }
@@ -215,6 +226,7 @@ impl<D: Dialer> Session<D> {
             stats_tx: None,
             conn_epoch: 0,
             query_backoff: HashMap::new(),
+            back_to_latest_until: None,
             clock,
         }
     }
@@ -280,6 +292,7 @@ impl<D: Dialer> Session<D> {
         if self.waiter.is_some() {
             take(self.frame_due);
         }
+        take(self.back_to_latest_until);
         if self.live() {
             let refresh = self.store.refresh.next_due_at().map(Instant::from_std);
             let blocked = self.backoff_until("summary");
@@ -334,7 +347,15 @@ impl<D: Dialer> Session<D> {
                 }
             }
             self.wanted_queries();
+            self.want_models(now);
             self.mark_read(now);
+        }
+        if self.store.take_back_to_latest_started() {
+            self.back_to_latest_until = Some(now + BACK_TO_LATEST_FOR);
+        }
+        if self.back_to_latest_until.is_some_and(|t| t <= now) {
+            self.back_to_latest_until = None;
+            self.store.clear_back_to_latest();
         }
         self.serve_frame(now);
         self.publish_stats();
@@ -712,6 +733,13 @@ impl<D: Dialer> Session<D> {
     fn on_internal(&mut self, msg: Internal) {
         match msg {
             Internal::CommandDone { command_id, result } => {
+                let accepted = match &result {
+                    Ok(r) => match &r.body {
+                        Some(pb::response::Body::Accepted(a)) => Some((a.first_seq, a.last_seq)),
+                        _ => None,
+                    },
+                    Err(_) => None,
+                };
                 let ack = match result {
                     Err(ClientError::Closed) => {
                         // 连接断了：留在在飞表里，重连后按原 command_id 重发（幂等）。
@@ -721,6 +749,12 @@ impl<D: Dialer> Session<D> {
                     Ok(r) => response_error(&r),
                 };
                 if let Some(f) = self.outbox.remove(&command_id) {
+                    if let (Some(pb::command::Kind::CreateConversation(_)), Some((first, last))) =
+                        (&f.command.kind, accepted)
+                    {
+                        // 新建对话：事件里带对话 id，配上受理的 seq 范围就打开它（store::created）。
+                        self.store.create_accepted(first, last);
+                    }
                     if ack.is_none()
                         && matches!(f.command.kind, Some(pb::command::Kind::RevokeRule(_)))
                     {
@@ -734,6 +768,11 @@ impl<D: Dialer> Session<D> {
                 }
             }
             Internal::AttachDone(e) => self.store.set_attach_error(e),
+            Internal::ModelsLoaded {
+                epoch,
+                runtime_id,
+                result,
+            } => self.on_models(epoch, &runtime_id, result),
             Internal::QueryFailed { epoch, request_id } => {
                 if epoch != self.conn_epoch {
                     // 旧连接上的查询：那条连接关闭时在飞表已整张清空，这里对不上号，不能删新连接的同号项。

@@ -3,6 +3,8 @@
 //! 连接来的数据只经 [`Store::apply`] 写入，吃的是 `iwork_ipc` `Incoming` 给出的全序；网页声明的视图状态经
 //! `set_*` 写入。两者都只往 [`DirtySet`] 记「哪块脏了」，帧在网页来取时才由 `derive` 从当前状态算（方案 2.4）。
 
+pub mod created;
+pub mod models;
 pub mod summary;
 pub mod timeline;
 
@@ -252,8 +254,16 @@ pub struct Store {
     pub quit_requested: bool,
     /// 上一次添加附件被拒的原因（拖入时没有回包可带，放在输入框上方）。
     pub attach_error: Option<String>,
-    /// 最近一次跳转请求（点击系统通知）：(seq, 对话, 行)。
+    /// 最近一次跳转请求（点击系统通知、新建对话后）：(seq, 对话, 行)。
     pub navigate: Option<(u64, String, String)>,
+    /// 本客户端新建的对话：建好就打开（见 created 模块）。
+    pub created: created::CreatedWatch,
+    /// 各运行时的模型清单（ListModels 附带查询的结果，见 models 模块）。
+    pub models: models::ModelCatalog,
+    /// 「已重新连接，回到最新」提示挂在哪个对话上（Q9）；会话层到时撤掉。
+    pub back_to_latest: Option<String>,
+    /// 这一轮刚挂上提示：会话层取走后开始计时。
+    back_to_latest_started: bool,
     subs: BTreeMap<u32, Sub>,
     /// 这次重连以来由快照换过的摘要表（审查 1/F-8）。
     snapshot_tables: BTreeSet<SummaryTable>,
@@ -336,6 +346,14 @@ impl Store {
         self.refresh.abandon_round();
         // 列表页的 loading 留着：它就是「还要再发」的记号，重新 Live 后照样发（审查 1/F-2）。
         self.snapshot_tables.clear();
+        self.models.connection_closed();
+    }
+
+    /// 模型清单取到了：输入框的菜单要重算。
+    pub fn set_models(&mut self, runtime_id: &str, result: pb::ListModelsResult) {
+        self.models.loaded(runtime_id, result);
+        self.dirty.mark(ViewKey::Conversation);
+        self.dirty.conversation.header = true;
     }
 
     // ---------- 本地视图状态 ----------
@@ -426,6 +444,25 @@ impl Store {
         let seq = self.navigate.as_ref().map_or(1, |n| n.0 + 1);
         self.navigate = Some((seq, conversation_id, row_key));
         self.dirty.mark(ViewKey::Navigate);
+    }
+
+    /// 刚挂上「回到最新」提示：返回真一次，会话层据此开始计时。
+    pub fn take_back_to_latest_started(&mut self) -> bool {
+        std::mem::take(&mut self.back_to_latest_started)
+    }
+
+    pub fn clear_back_to_latest(&mut self) {
+        if self.back_to_latest.take().is_some() {
+            self.dirty.mark(ViewKey::Conversation);
+            self.dirty.conversation.header = true;
+        }
+    }
+
+    /// 本客户端的 CreateConversation 受理了（seq 范围来自 CommandAccepted）。
+    pub fn create_accepted(&mut self, first: u64, last: u64) {
+        if let Some(id) = self.created.accepted(first, last) {
+            self.request_navigate(id, String::new());
+        }
     }
 
     pub fn take_dirty(&mut self) -> DirtySet {
@@ -535,6 +572,15 @@ impl Store {
                             .map_or_else(String::new, |x| x.message.clone())
                     });
                     self.dirty.mark(ViewKey::AddProject);
+                }
+            }
+            E::ConversationCreated(e) => {
+                if let Some(id) = e
+                    .conversation
+                    .as_ref()
+                    .and_then(|c| self.created.created(seq, &c.id))
+                {
+                    self.request_navigate(id, String::new());
                 }
             }
             E::ConversationDeleted(e)
@@ -741,8 +787,22 @@ impl Store {
                     && (cid == Some(t.conversation_id.as_str())
                         || matches!(p, Some(QueryPurpose::OlderPage { conversation_id, .. } | QueryPurpose::LatestPage { conversation_id }) if *conversation_id == t.conversation_id))
                 {
+                    // Q9（产品负责人 2026-11-11）：快照重建时用户正在看旧消息 → 回到最新并提示。
+                    // 「在看旧消息」= 网页声明的窗口没顶到最新一行，或时间线已不接着最新。
+                    let reading_old = mode == PageMode::Snapshot
+                        && t.identities().last().is_some_and(|(newest, _)| {
+                            !t.at_tail
+                                || self.window.is_some_and(|(_, last)| last < newest.ordinal())
+                        });
                     let mut c = t.apply_page(&page, mode);
                     c.merge(t.sync_resume_cards(self.summary.resume_cards()));
+                    if reading_old {
+                        // 旧窗口指着重建前的位置；清掉它，下一帧从最新的一页开始。
+                        self.window = None;
+                        self.back_to_latest = Some(t.conversation_id.clone());
+                        self.back_to_latest_started = true;
+                        c.header = true;
+                    }
                     self.dirty.conversation(c);
                 }
             }

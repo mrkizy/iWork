@@ -335,3 +335,43 @@ pub fn quota_tooltip(window: &str, used: u32, reset: Option<String>) -> String {
         None => format!("{window}：已用 {used}%"),
     }
 }
+
+// ---------- 「运行时 · 模型」菜单（ui-m1.md 第 2 节第 14 条） ----------
+
+pub const RUNTIME_LOCKED_TIP: &str = "要换运行时请开新对话";
+pub const RUNTIME_NOT_IN_M1: &str = "M2 接入";
+
+/// 思考强度的显示文字；运行时给的取值不认识就原样显示。
+pub fn effort_label(level: &str) -> String {
+    match level {
+        "low" => "低".into(),
+        "medium" => "中".into(),
+        "high" => "高".into(),
+        "max" | "xhigh" => "最高".into(),
+        other => other.into(),
+    }
+}
+
+// ---------- 这一轮失败（ui-m1.md 2a 第 10 条） ----------
+
+/// 失败说明行：`started` 为假（助手消息为空）是「没能开始」，否则是「中途失败」。
+/// 原因用回合的 state_reason；后台没给就写「运行时没有给出原因」。「详情」是给人核对的技术信息。
+pub fn turn_failure(empty: bool, turn: Option<&pb::Turn>) -> pb::FailureLine {
+    let reason = turn
+        .and_then(|t| t.state_reason.as_deref())
+        .filter(|r| !r.is_empty());
+    let shown = reason.unwrap_or("运行时没有给出原因");
+    let text = if empty {
+        format!("这一轮没能开始：{shown}")
+    } else {
+        format!("这一轮中途失败：{shown}")
+    };
+    let detail = match turn {
+        Some(t) => format!("回合 {}，原因：{}", t.id, reason.unwrap_or("（无）")),
+        None => "这条消息不属于任何回合".to_owned(),
+    };
+    pb::FailureLine { text, detail }
+}
+
+/// 重连走了快照、时间线重建时用户正在看旧消息：回到最新，标题栏下提示（Q9，产品负责人 2026-11-11）。
+pub const BACK_TO_LATEST: &str = "已重新连接，回到最新";

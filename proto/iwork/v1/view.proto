@@ -219,6 +219,30 @@ message ComposerView {
   optional string attach_error = 12;
   // 输入框上方的附件托盘：本对话已上传、还没随消息发出的附件。
   repeated AttachmentChip tray = 13;
+  // 「运行时 · 模型」菜单（ui-m1.md 第 2 节第 14 条）。
+  ModelMenuView model_menu = 14;
+}
+
+// 「运行时 · 模型」菜单：运行时、模型（仅本对话）、思考强度三节。选中项与可否选都由 Rust 侧给。
+message ModelMenuView {
+  repeated MenuChoice runtimes = 1;
+  // 模型列表还在取（运行时的模型清单是一次附带查询，取到前显示转圈）。
+  bool models_loading = 2;
+  repeated MenuChoice models = 3;
+  // 当前模型不在列表里（手填的模型 ID）时它的文字；在列表里时为空。
+  string custom_model = 4;
+  // 运行时不支持思考强度时为空，界面不显示这一节（设计 9.6 第 5 条）。
+  repeated MenuChoice efforts = 5;
+}
+
+// 菜单里的一项：value 原样回传（模型 ID、思考强度、运行时 ID），label 原样显示。
+message MenuChoice {
+  string value = 1;
+  string label = 2;
+  bool selected = 3;
+  bool enabled = 4;
+  // 不可选时的悬停说明（如「M2 接入」）。
+  string tip = 5;
 }
 
 enum Tone {
@@ -307,6 +331,16 @@ message MessageRow {
   repeated AttachmentChip attachments = 9;
   // 正文是制品引用、还没读到。
   bool body_pending = 10;
+  // 这一轮失败的说明行（ui-m1.md 2a 第 10 条）：「这一轮没能开始：…」或「这一轮中途失败：…」。
+  optional FailureLine failure = 11;
+  // 回合一开始就失败、内容为空：不画空气泡，只画说明行。
+  bool bubble_hidden = 12;
+}
+
+message FailureLine {
+  string text = 1;
+  // 「详情」展开后的技术信息。
+  string detail = 2;
 }
 
 message AttachmentChip {

@@ -6,6 +6,7 @@
 pub mod assistant;
 pub mod connection;
 pub mod conversation;
+pub mod model_menu;
 pub mod pending;
 pub mod row;
 pub mod settings;

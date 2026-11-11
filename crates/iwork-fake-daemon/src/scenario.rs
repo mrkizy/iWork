@@ -87,6 +87,12 @@ pub const REGISTRY: &[Scenario] = &[
         focus: Some("c-turn-end"),
     },
     Scenario {
+        name: "turn-failed",
+        about: "回合失败：一开始就失败（空的失败消息）、输出一部分后失败（ui-m1.md 2a 第 10 条）",
+        focus: Some("c-turn-failed"),
+        build: turn_failed,
+    },
+    Scenario {
         name: "resume-card",
         about: "崩溃中断的回合：继续 / 放弃卡片",
         build: resume_card,
@@ -414,6 +420,57 @@ fn turn_end() -> Vec<Step> {
         None,
     )));
     s.push(a(f::turn_finished("t-cancel", T::Cancelled, false, None)));
+    s
+}
+
+fn turn_failed() -> Vec<Step> {
+    let c = "c-turn-failed";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    // 一开始就失败：prompt 没发出去，助手消息是空的、状态为失败（T05 补丁带来的形状）。
+    s.push(a(f::user_message("m-start-u", c, "帮我看看构建为什么挂了")));
+    s.push(a(f::turn_queued("t-start", c, IWORK)));
+    s.push(a(f::turn_state("t-start", T::Queued, T::Running, None)));
+    s.push(a(f::assistant_message(
+        "m-start-a",
+        c,
+        "t-start",
+        IWORK,
+        "iWork",
+    )));
+    s.push(a(f::turn_state(
+        "t-start",
+        T::Running,
+        T::Failed,
+        Some("Claude Code 启动后立刻退出了"),
+    )));
+    s.push(a(f::message_ended(
+        c,
+        "m-start-a",
+        "",
+        pb::MessageStatus::Failed,
+    )));
+    s.push(a(f::turn_finished("t-start", T::Failed, false, None)));
+    // 输出一部分后失败。
+    s.push(a(f::user_message("m-mid-u", c, "再试一次")));
+    s.push(a(f::turn_queued("t-mid", c, IWORK)));
+    s.push(a(f::turn_state("t-mid", T::Queued, T::Running, None)));
+    s.push(a(f::assistant_message(
+        "m-mid-a", c, "t-mid", IWORK, "iWork",
+    )));
+    s.push(a(f::turn_state(
+        "t-mid",
+        T::Running,
+        T::Failed,
+        Some("模型暂时不可用"),
+    )));
+    s.push(a(f::message_ended(
+        c,
+        "m-mid-a",
+        "我先看一下 CI 的日志，第一处报错在",
+        pb::MessageStatus::Failed,
+    )));
+    s.push(a(f::turn_finished("t-mid", T::Failed, false, None)));
     s
 }
 

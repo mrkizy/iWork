@@ -28,7 +28,14 @@ pub fn row(store: &Store, tl: &Timeline, key: RowKey, identity: &str, row: &Row)
                 .as_ref()
                 .map(|c| c.paths.clone())
                 .unwrap_or_default(),
-            outcome_label: text::turn_outcome(t),
+            // 原因已经挂在失败的助手消息上时（2a 第 10 条），回合结束行不再重复。
+            outcome_label: if t.state == pb::TurnState::Failed as i32
+                && has_failed_message(tl, &t.id)
+            {
+                String::new()
+            } else {
+                text::turn_outcome(t)
+            },
             failed: t.state == pb::TurnState::Failed as i32,
         }),
         Row::Resume(r) => V::Resume(pb::ResumeRow {
@@ -63,6 +70,15 @@ pub fn row(store: &Store, tl: &Timeline, key: RowKey, identity: &str, row: &Row)
         key: identity.to_owned(),
         row: Some(v),
     }
+}
+
+/// 这个回合有一条失败的助手消息：失败原因已经挂在那条消息的说明行上（ui-m1.md 2a 第 10 条）。
+fn has_failed_message(tl: &Timeline, turn_id: &str) -> bool {
+    !tl.identities_where(|r| {
+        matches!(r, Row::Message(m) if m.turn_id.as_deref() == Some(turn_id)
+            && m.status == pb::MessageStatus::Failed as i32)
+    })
+    .is_empty()
 }
 
 fn project_name(store: &Store, id: Option<&str>) -> Option<String> {
@@ -110,6 +126,13 @@ fn message(store: &Store, tl: &Timeline, m: &pb::Message) -> pb::MessageRow {
         Some(pb::message_body::Content::Artifact(_))
     );
     let text_now = tl.text(&m.id).unwrap_or_default().to_owned();
+    // 这一轮失败（ui-m1.md 2a 第 10 条）：内容为空 → 不画空气泡，只画「没能开始」；有内容 → 末尾加「中途失败」。
+    let failed = status == pb::MessageStatus::Failed;
+    let bubble_hidden = failed && text_now.is_empty();
+    let failure = failed.then(|| {
+        let turn = m.turn_id.as_deref().and_then(|t| tl.turns.get(t));
+        text::turn_failure(text_now.is_empty(), turn)
+    });
     pb::MessageRow {
         message_id: m.id.clone(),
         speaker: speaker.into(),
@@ -119,7 +142,14 @@ fn message(store: &Store, tl: &Timeline, m: &pb::Message) -> pb::MessageRow {
         body_pending: body_is_artifact && text_now.is_empty(),
         text: text_now,
         streaming: status == pb::MessageStatus::Streaming,
-        status_label: text::message_status(status).into(),
+        // 失败由说明行讲清楚，不再另挂「失败」标签。
+        status_label: if failed {
+            String::new()
+        } else {
+            text::message_status(status).into()
+        },
+        bubble_hidden,
+        failure,
         attachments: m
             .attachment_ids
             .iter()
