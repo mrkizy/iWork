@@ -1,3 +1,0 @@
-2026-11-11T07:21:20.482262Z  INFO iwork.ipc.audit: event="manifest_loaded" path=<work>/PHA/iWork.app/Contents/MacOS/iwork-manifest.json app_version=0.1.0 entries=2 self_listed=true
-self signer=cdhash:83296ac6 exe_dir=<work>/PHA/iWork.app/Contents/MacOS manifest=app_version=0.1.0 entries=2
-handshake=ok welcome_server_version=t04-probe

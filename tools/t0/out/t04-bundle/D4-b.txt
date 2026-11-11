@@ -1,0 +1,3 @@
+self signer=certificate:f415695c exe_dir=<work>/D4/b/iWork.app/Contents/MacOS manifest=none
+running=cdhash:e4c65a670af20176cb54b71dbcffdbe3d411e19d file=cdhash:e4c65a670af20176cb54b71dbcffdbe3d411e19d equal=true
+verify_bundle=Ok(())

@@ -184,11 +184,11 @@
 
 ## 7 T04 生命周期实测（2026-11-11）
 
-为 T04 方案第 8 节 N1–N5 补的实测。脚本在 `tools/t0/iwork-t04-*`，原始输出在 `tools/t0/out/t04-*`（临时目录与家目录已脱敏）。方案要求 N5 最先做、不过就停：**N5 有一项不过（7.1 A1），N1–N4 未做**，等 supervisor 定修法后再继续。
+为 T04 方案第 8 节 N1–N5 补的实测。脚本在 `tools/t0/iwork-t04-*`，原始输出在 `tools/t0/out/t04-*`（临时目录与家目录已脱敏）。N5 先做：第一轮 A1 不通过（7.1），产品负责人定了修法（`check_image_file` 不验包资源）后复测全部通过，再做 N1–N4。
 
 ### 7.1 N5 真实包上完成依据与签名能不能同时成立
 
-环境：macOS 27.2（26B5086k）arm64，测时 loadavg 30–53（提交的输出那一轮）；`pnpm -C client tauri build --bundles app` 的真实产物 + `cargo build --release -p iwork-daemon`。脚本 `tools/t0/iwork-t04-bundle-probe.sh`（macOS）与 `tools/t0/iwork-t04-linux-bundle.sh`（Linux，Docker `rust:1`，Linux 7.0.11 aarch64）。
+环境：macOS 27.2（26B5086k）arm64，测时 loadavg 16–22（提交的输出是修法之后那一轮）；`pnpm -C client tauri build --bundles app` 的真实产物 + `cargo build --release -p iwork-daemon`。脚本 `tools/t0/iwork-t04-bundle-probe.sh`（macOS）与 `tools/t0/iwork-t04-linux-bundle.sh`（Linux，Docker `rust:1`，Linux 7.0.11 aarch64）。
 
 后台现在还是空壳、客户端还不会连后台，所以「握手」与「运行映像身份」两件事用探针冒充两个角色，放在真实包的同一位置、按同样方式签名或登记清单：`iwork-t04-ipcprobe.rs`（依赖 `iwork-ipc`、**不开 dev feature**，走发布构建的 `RequireSigner`，`SelfIdentity::detect` 与对端判定都是 T03 已合入的代码）；`iwork-t04-imgprobe.c`（与 `peer/macos.rs` 同一串 Security 调用）。客户端主程序、资源、`Info.plist` 都是 tauri 的原样产物。两种包形态里「带清单那一行」「整包签名那一行」的判定按方案 2.9 的定义用 shell 写了一遍。
 
@@ -197,18 +197,18 @@
 | 项 | 结果 | 说明 |
 | --- | --- | --- |
 | A1 启动 | 通过 | 真实客户端命令行起、`open` 起，5 秒后都在 |
-| A1 两端互认 | **不通过** | 后台位置 `manifest_loaded{self_listed=true}`；**客户端位置（包的主程序）`SelfIdentity::detect` 失败**：`SecStaticCodeCheckValidity 失败（OSStatus -67056）`，握手无从谈起 |
+| A1 两端互认 | 第一轮**不通过**，修法之后通过 | 第一轮：后台位置 `manifest_loaded{self_listed=true}`，**客户端位置（包的主程序）`SelfIdentity::detect` 失败**：`SecStaticCodeCheckValidity 失败（OSStatus -67056）`。修法之后：两个角色都 `self_listed=true`、握手成功；把客户端换成清单外的映像，后台以 `ImageNotTrusted` 拒 |
 | A2 | 通过 | 真实客户端运行中的 cdhash（`codesign -dvvv <pid>`）= 清单 `cdhash:`；后台位置运行映像 cdhash = 清单 `cdhash:`；两个 `sha256:` = 文件全文哈希 |
 | A3 | 通过 | 完整 → `Complete`；删清单 → `NotThisForm`；后台截断一半 → `Incomplete`；整包签名那一行 → `NotThisForm` |
 | A4（记录） | — | `codesign --verify --deep --strict` 与 `spctl` 都报 `code has no resources but signature indicates they must be present`；带隔离标记时命令行直接起主程序照常运行；双击走 Gatekeeper 弹窗，无人值守没做 |
 | B1 | 通过 | 自签证书整包签名、包里不放清单：`codesign --verify --deep --strict` 与 `SecStaticCodeCheckValidity`（严格 + 嵌套 + 全部架构）都过；整包签名那一行 `Complete`、带清单那一行 `NotThisForm`；对照：两个角色（证书签名）握手成功 |
 | B2 | 通过 | 删资源、截断后台、截断客户端、改 `Info.plist` 一字节、多放一个文件：五种都验签不过、判 `Incomplete` |
 | B3 | 通过 | 后台位置磁盘静态 cdhash = 运行中 cdhash；换构建标记重签后两者都变；真实客户端（证书签名）运行中 = 静态 |
-| B4（记数） | — | 整包验签 20–24 ms（包 10 MB，5 次，高负载） |
+| B4（记数） | — | 整包验签每次 20–84 ms（包 10 MB，两轮各 5 次，高负载下数值波动大） |
 | B5 | 通过 | 签名后加清单 → 验签不过；签名前把清单放进 `Contents/MacOS` 再签 → codesign 直接失败（`In subcomponent: …/iwork-manifest.json`，它把 `MacOS` 下的文件当代码）。两条路都走不通，「有证书的包不放清单」不是可选项 |
 | B6 | 通过 | 拿走一个资源 → `Incomplete`；放回 → `Complete`；三个时刻后台程序与封印文件的 size/mtime/inode 都相同 |
 | C（Linux） | 通过 | 两个二进制 + 清单打 tar 再解开：带清单那一行 `Complete`、截断 → `Incomplete`、删清单 → `NotThisForm`；两端按清单握手成功；启动时的映像身份 = `/proc/self/exe` 的 SHA-256，路径上换文件后每次重取仍是原值；T03 `peer_manifest` 6 条通过 |
-| D1–D3 | 通过 | A、B 两种包、mv 与 rm 两种换法：运行映像 cdhash 都取得到、等于自己路径的静态 cdhash；换文件后重取只会是原值（mv）或 -67034（rm），从不报成新文件；同一张证书签的两个构建取到的值不同；读静态 cdhash 不读全文（文件中部改坏一字节照样取到原值，10 MB 文件 2.5–4.3 ms，与 50 KB 的文件同一量级）；通用二进制取的是本机架构那一片 |
+| D1–D3 | 通过 | A、B 两种包、mv 与 rm 两种换法：运行映像 cdhash 都取得到、等于自己路径的静态 cdhash；换文件后重取只会是原值（mv）或 -67034（rm），从不报成新文件；同一张证书签的两个构建取到的值不同；读静态 cdhash 不读全文（文件中部改坏一字节照样取到原值，10 MB 文件几毫秒到二十几毫秒，与 50 KB 的文件同一量级，不随文件大小增长）；通用二进制取的是本机架构那一片 |
 | E1 | 通过 | A 目录整包换成 B → 清单那一行 `NotThisForm`、签名那一行 `Complete`；反方向对称 |
 | E2（记录） | — | B 合并拷进 A（旧清单残留）→ 两行都 `Incomplete`，验签 -67054；删掉残留清单后签名那一行 `Complete` |
 
@@ -222,8 +222,69 @@
 
 包的主程序的静态代码对象代表整个包：链接器签名没有资源封印，按默认参数就判「签名说有资源、却找不到」。T03 的实测（6.3）只测过散放的二进制，没碰到。影响两个方向：客户端算不出自己的身份、拒绝启动；后台判客户端这个对端时走同一个 `check_image_file`，同样会得到 `Unavailable` 并拒绝。后台（不是主程序）不受影响。
 
-**候选修法的验证**（`A1h`，只在临时副本里改，仓库代码没动）：`check_image_file` 的静态校验带上 `kSecCSDoNotValidateResources`（只跳过包资源，代码页哈希照验；T03 加这一步本来就是为了验「还没调入的页」）。结果：形态 A 两个角色握手成功；形态 B 同样成功；把客户端换成清单外的映像（换签名标识重签，cdhash 必变）→ 后台以 `ImageNotTrusted` 拒绝。注意「在文件末尾追加一字节」造不出清单外的映像：签名之外的尾部不在代码目录覆盖范围内，cdhash 不变。
+**修法**（产品负责人定，提交 `b34b518`）：`check_image_file` 的静态校验带上 `kSecCSDoNotValidateResources`。它只跳过包资源，代码页哈希照样验；T03 加这一步本来就是为了验「还没调入的页」，用 T03 的实测脚本重跑后，这两项仍是 -67061（`tools/t0/out/t04-t03-rerun/`）。代价是握手时不再顺带校验对端包里的资源，资源本来不在信任判据里。修法之后：形态 A、B 两个角色都握手成功；把客户端换成清单外的映像（换签名标识重签，cdhash 必变），后台以 `ImageNotTrusted` 拒绝；平台测试见 `crates/iwork-ipc/tests/peer_bundle_macos.rs`。注意「在文件末尾追加一字节」造不出清单外的映像：签名之外的尾部不在代码目录覆盖范围内，cdhash 不变。
 
-### 7.2 N1–N4
+**D4（修法之后加的复核）**：用 `iwork-ipc` 的正式函数（T04 第 3 步的 `running_image_id`、`file_image_ids`、`verify_bundle`）在真实包里再走一遍：两种包里运行映像 = 自己路径的文件身份 = `codesign` 读的 cdhash；`verify_bundle` 对未封印的 A 包报错、对整包签名的 B 包通过；同一张证书签的两个构建，`SelfIdentity` 的签名者相同、运行映像不同。
 
-未做（N5 不过，按方案停下）。脚本已写好（`tools/t0/iwork-t04-macos-smappservice.sh`、`iwork-t04-smprobe.m`），等 N5 的修法定下后再跑。
+### 7.2 N1 macOS 登录自启：SMAppService 与 LaunchAgent 退路
+
+脚本 `tools/t0/iwork-t04-macos-smappservice.sh` + `iwork-t04-smprobe.m`（一个二进制两种用法：host 调 register/unregister/status，agent 被 launchd 起）。探针在 sleep 模式下每 0.2 秒重读模式文件，模式一变就由正在跑的实例自己结束，不用 `kickstart -k` 换实例。所以「再拉」只数 launchd 的重启。输出 `tools/t0/out/t04-smappservice/`。
+
+| 项 | 结果 |
+| --- | --- |
+| 1–4 能不能注册 | 未签名的 arm64 程序起不来。**链接器签名、不做整包签名（= N5 形态 A）：`register` 失败**，`SMAppServiceErrorDomain` 3「Codesigning failure loading plist … -67056」，和 A1 同一个根因：SMAppService 要求包有资源封印。ad-hoc 整包签名：主程序或包内另一个程序调用都能注册，立刻起一个实例，`unregister` 时实例收到 SIGTERM。自签证书整包签名：注册成功，状态 `Enabled`，但 3 秒内 launchd 停在 `spawn scheduled`、探针没起来（前两轮都这样，没再追） |
+| 5 | `register` 立刻起一个实例；手动起的实例握着锁时，launchd 起的实例停在等锁；手动实例被 kill -9 后，它在毫秒内拿到锁 |
+| 6 `KeepAlive={SuccessfulExit=false}` | exit 0 不再拉；exit 12、20、21、SIGKILL、SIGTERM、SIGSEGV、abort 都在约 10.0–10.1 秒后再拉（`ThrottleInterval=10`）。SMAppService 与退路结果相同 |
+| 6 对照 `KeepAlive={Crashed=true}` | 只有 SIGSEGV、abort 再拉；exit 非零、SIGKILL、SIGTERM 都**不**再拉。这就是方案不用 `Crashed` 的原因 |
+| 7 实例自己注销 | SMAppService `unregister` 与退路的 `launchctl bootout` 都**不返回**：调用后几十毫秒内实例收到 SIGTERM、被结束，任务随之消失，之后不再被拉。从别的进程注销：实例收到 SIGTERM、结束 |
+| N3 第 3 项 | launchd 管着的进程 exec 自己之后 pid 不变、仍是 running；再 kill -9 它，10 秒后照常被拉起，说明它仍归这个任务管（两条路一样） |
+| 9 挪动 .app | `launchctl print` 显示的是包内相对路径（`program identifier = Contents/MacOS/agent`）。挪了位置后，`status` 仍是 `Enabled`，kill 之后照样被拉起（smd 跟着包走）；从新位置 `unregister` 正常 |
+| 10 BundleProgram 与 Program | plist 用 `BundleProgram`、`launchctl bootstrap gui/<uid>`：不管 plist 放在 `~/Library/LaunchAgents` 还是临时目录，链接器签名、ad-hoc 签名、自签证书签名，**都报 rc=5（Input/output error）**。只把这个键换成 `Program`（包内程序的绝对路径），每一格都 rc=0、能起来。结论：`BundleProgram` 只在 plist 放在包里、经 SMAppService 注册时才认（T09 通知探针的观察成立）。例外是链接器签名 + `~/Library/LaunchAgents` 那一格，两轮都报「写入后自己加载=yes」：刚被 SMAppService 注销的同名任务又被 smd 提交了一次，所以 bootstrap 报 5，这一格不算数 |
+| 退路写入 plist | 写进 `~/Library/LaunchAgents` 后系统不会自己加载，要 `bootstrap`。用 `Program` 时三种签名都能起来（自签证书的包走这条路也正常，只有经 SMAppService 时停在 `spawn scheduled`） |
+
+结论：**无证书的包（M1 实际的发布形态）上 SMAppService 用不了**，按 Q3 走退路：`~/Library/LaunchAgents/<label>.plist` + `launchctl bootstrap` / `bootout`，plist 用 `Program = <包内 iwork-daemon 的绝对路径>`，不能用 `BundleProgram`。方案 2.12 关于注册、注销的假设（注册立刻起实例、注销结束正在跑的实例）两条路都成立，对齐表不用改。
+
+清理：每轮结束都核对了：`launchctl print` 查不到这个任务，`~/Library/LaunchAgents` 里没有这个 plist，没有残留探针进程。系统后台项目数据库（BTM）里会留下 T04Probe 的记录，指向的包已经删了，不会再起任何东西。逐条删除要 root，`sfltool resetbtm` 又会清掉所有应用的记录，所以没动。
+
+### 7.3 N2 单调钟在睡眠期间走不走
+
+脚本 `tools/t0/iwork-t04-sleep-clock.sh` + `.rs`。没有让本机真的睡：`pmset schedule wake` 要 root，否则机器睡下去要等人来唤醒。做法是在同一时刻读 `Instant` 和几个系统钟，看 `Instant` 跟哪个钟对得上；再看「计睡眠的钟 − 不计睡眠的钟」。
+
+- macOS：`Instant` 等于 `CLOCK_UPTIME_RAW`（不计睡眠）。开机以来 `CLOCK_MONOTONIC_RAW`（计睡眠，等于 `mach_continuous_time`）比它多 9.5 秒，电源日志记了 4 次短睡眠，对得上。所以 `Instant`（以及建在它上面的 tokio 计时器）在睡眠期间不走。**成立**。
+- Linux（Docker 里的 OrbStack 虚拟机）：`Instant` 等于 `CLOCK_MONOTONIC`。这台虚拟机刚起来、没挂起过，`BOOTTIME − MONOTONIC = 0`，**挂起期间不走这一点没实测到**，只靠内核文档（`CLOCK_MONOTONIC` 不计挂起）。要实测得有能挂起的实体机或虚拟机，跑 `<程序> watch 180` 时挂起 60 秒以上。
+- 想在 macOS 上真睡一次：`<程序> watch 180` 跑着时合盖或 `pmset sleepnow`，看 `wall_minus_instant`。
+
+### 7.4 N3 exec 自行重启
+
+脚本 `tools/t0/iwork-t04-exec-restart.sh` + `.rs`，macOS 与 Linux（Docker）各跑一遍，结果相同：
+
+- 第 1 项：进程持有 `try_lock` 的锁和一个监听中的 socket，exec 自己之后：旧 socket 连接被拒（监听 fd 随 CLOEXEC 关掉了），能重新拿到锁，unlink 后能重新 bind。
+- 第 2 项：exec 之前用 setsid 起的子进程（stdin 是管道）在 10–12 ms 内读到 EOF。
+- 第 3 项：见 7.2（launchd）与 7.5（systemd）。exec 后仍归同一个任务管。
+- 第 4 项：A 握锁，B 阻塞在 `File::lock()`；kill -9 A 之后 B 在 2–9 ms 内拿到锁，再 exec 自己，新映像能再拿到锁。
+
+### 7.5 N4 systemd 用户单元
+
+脚本 `tools/t0/iwork-t04-linux-systemd.sh`：Docker 里起一个以 systemd 为 1 号进程的 ubuntu:24.04 容器（systemd 255），用户 t 开 linger 得到用户实例，跑完删掉容器。单元配置照方案 2.12：`Restart=on-failure`、`RestartSec=10`、`StartLimitIntervalSec=300`、`StartLimitBurst=10`。
+
+| 项 | 结果 |
+| --- | --- |
+| `enable --now` | 立刻起一个实例 |
+| exit 0 | 不再拉 |
+| exit 12、20、21 | 10.1–10.3 秒后再拉 |
+| SIGKILL、SIGSEGV、SIGABRT | 10.1–10.2 秒后再拉 |
+| **SIGTERM** | **不再拉**：systemd 把 SIGTERM（以及 SIGHUP、SIGINT、SIGPIPE）结束的进程当作干净退出（`Result=success`）。和 launchd 不同，见下 |
+| exec 自己 | MainPID 不变、状态 active；之后 kill -9 照常被拉起 |
+| `disable --now` | 正在跑的实例收到 SIGTERM、结束，单元 disabled |
+| 次数上限 | 一直以 20 退出时，125 秒内起 9 次后单元进入 failed，不再拉 |
+
+和方案的差异：方案写的是「非零或被信号结束就再拉」，systemd 默认对 SIGTERM 不再拉。后台自己装了 SIGTERM 处理，按 2.2 写 `Stopping{Signal}` 并报 0，本来就不该再拉，结果一样。只有在装上信号处理之前就被 SIGTERM 结束时，两者才不一样：状态文件停在 `Starting`、判据说 `Yes`，systemd 却不拉，要等客户端按需拉起。要和 launchd 完全一致，单元文件可以加 `RestartForceExitStatus=SIGTERM`。这一点交方案决定。
+
+用真的后台在没有客户端的情况下走一遍（S11c），要等第 4 步有了后台再做，归第 9 步。
+
+### 7.6 实测中踩到的弹框（2026-11-11）
+
+两种操作会在用户的屏幕上弹框，无人值守的脚本里都不能出现：
+
+- **临时钥匙串自动上锁**：`security create-keychain` 建的钥匙串默认 `lock-on-sleep timeout=300s`。脚本开头解锁后，几分钟后才签名的话，codesign 会弹框找人要钥匙串密码。现在的做法是：建好后 `security set-keychain-settings "$KC"`（不带 `-l`、`-t`，实测变成 `no-timeout`），每次签名前再 `security unlock-keychain`，签名都带 `--keychain`。所有签名脚本也加了 `trap 'exit 143' TERM INT`：被 timeout 掐断时也走 cleanup、删掉钥匙串。
+- **`sfltool dumpbtm`**：读后台项目数据库要管理员授权，会弹 SecurityAgent 授权框（用 CGWindowList 抓到了屏幕上的对话框）。脚本里不再调用。

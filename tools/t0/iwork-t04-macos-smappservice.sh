@@ -2,13 +2,14 @@
 # iWork T04 N1（方案第 8 节）：SMAppService 在本项目的构建形态上能不能用；注册、注销对正在跑的进程做了什么；
 # launchd 的 KeepAlive 对各种结束方式的重启语义；退路（~/Library/LaunchAgents + launchctl bootstrap/bootout）同样测一遍。
 # 也顺带做 N3 第 3 项（launchd 管着的进程 exec 自己后仍是同一个任务）与 N5 A5（不做整包签名的 .app 上 SMAppService 可不可用）。
-# 只在 macOS 跑，约 25 分钟。（2026-11-11 写好，还没在本机跑过：N5 不过，按方案停在 N1 之前。）
+# 只在 macOS 跑，约 30 分钟（外面套 timeout 时给 5400 秒以上）。
 #
 # 会装、卸的东西（退出时一律清掉，并在 summary 末尾列出清理后的核对结果）：
 #   - SMAppService 注册项 com.iwork.t04probe（agent，plist 在测试包里）
-#   - ~/Library/LaunchAgents/com.iwork.t04probe.plist（只在退路一节存在）
+#   - ~/Library/LaunchAgents/com.iwork.t04probe.plist（只在退路一节与第 10 节存在）
 #   - launchd 任务 gui/<uid>/com.iwork.t04probe
-# 证书放临时钥匙串（不加进搜索列表），跑完删除。不碰登录钥匙串。
+# 证书放临时钥匙串（不加进搜索列表、关掉自动上锁），跑完删除。不碰登录钥匙串。
+# 全程不该弹任何框：不调 sfltool（要管理员授权）、签名前都先解锁临时钥匙串。
 # 结果：tools/t0/out/t04-smappservice/
 set -euo pipefail
 
@@ -21,6 +22,9 @@ DOMAIN="gui/$(id -u)"
 TARGET="${DOMAIN}/${LABEL}"
 USER_PLIST="$HOME/Library/LaunchAgents/${PLIST_NAME}"
 KC="$WORK/t04.keychain-db"
+# 临时钥匙串：建好后关掉自动上锁（默认空闲 5 分钟、睡眠就锁，之后 codesign 会弹框找人要密码）；
+# 每次签名前再解锁一次。整个过程不该出现要人输密码的框。
+kc_codesign() { security unlock-keychain -p t "$KC"; codesign --keychain "$KC" "$@"; }
 SIGNER="iWork T04 Signer"
 LOG="$WORK/agent.log"
 MODE="$WORK/mode"
@@ -40,18 +44,20 @@ cleanup() {
   rm -rf "$WORK"
 }
 trap cleanup EXIT
+# 被 timeout 或 Ctrl-C 结束时也走 EXIT（bash 对没设 trap 的 TERM 直接退出，不跑 EXIT trap）
+trap 'exit 143' TERM INT
 
-rm -rf "$OUT"; mkdir -p "$OUT"
+rm -rf "$OUT"; mkdir -p "$OUT"; : > "$LOG"
 SUMMARY="$OUT/summary.txt"
 note() { echo "$*" | tee -a "$SUMMARY"; }
 redact() { sed -e "s#/private$WORK#<work>#g" -e "s#$WORK#<work>#g" -e "s#$HOME#<home>#g" -e "s#gui/$(id -u)#gui/<uid>#g"; }
 t0() { date +%s; }
 # 日志里时间戳 > $1 的 start 行
-starts_after() { awk -v t="$1" '$1 > t && /start/' "$LOG" | wc -l | tr -d ' '; }
-first_start_after() { awk -v t="$1" '$1 > t && /start/ {print $1; exit}' "$LOG"; }
-last_line_matching() { grep "$1" "$LOG" | tail -1 | cut -d' ' -f1; }
-job_state() { launchctl print "$TARGET" 2>/dev/null | sed -n 's/^[[:space:]]*state = //p' | head -1; }
-job_pid() { launchctl print "$TARGET" 2>/dev/null | sed -n 's/^[[:space:]]*pid = //p' | head -1; }
+starts_after() { { awk -v t="$1" '$1 > t && /start/' "$LOG" || true; } | wc -l | tr -d ' '; }
+first_start_after() { awk -v t="$1" '$1 > t && /start/ {print $1; exit}' "$LOG" || true; }
+last_line_matching() { { grep "$1" "$LOG" || true; } | tail -1 | cut -d' ' -f1; }
+job_state() { { launchctl print "$TARGET" 2>/dev/null || true; } | sed -n 's/^[[:space:]]*state = //p' | head -1; }
+job_pid() { { launchctl print "$TARGET" 2>/dev/null || true; } | sed -n 's/^[[:space:]]*pid = //p' | head -1; }
 job_exists() { launchctl print "$TARGET" >/dev/null 2>&1 && echo yes || echo no; }
 wait_running() { for _ in $(seq 60); do [ "$(job_state)" = running ] && return 0; sleep 0.5; done; return 1; }
 
@@ -63,6 +69,7 @@ note "开始前：$(job_exists | sed 's/yes/已有同名任务（异常）/;s/no
 # ---------------------------------------------------------------- 探针与证书
 cc -fobjc-arc -framework Foundation -framework ServiceManagement "$ROOT/tools/t0/iwork-t04-smprobe.m" -o "$WORK/smprobe"
 security create-keychain -p t "$KC"; security unlock-keychain -p t "$KC"
+security set-keychain-settings "$KC"
 cat > "$WORK/cert.cnf" <<EOF
 [req]
 distinguished_name=dn
@@ -122,8 +129,8 @@ EOF
   case "$2" in
     linker) ;; # cc 的产物本来就带链接器的 ad-hoc 签名；不做整包签名（等同 N5 的形态 A）
     adhoc) codesign -f -s - "$app/Contents/MacOS/agent" 2>/dev/null; codesign -f -s - "$app" 2>/dev/null ;;
-    cert) codesign -f --keychain "$KC" -s "$SIGNER" -i dev.iwork.t04probe.agent "$app/Contents/MacOS/agent" 2>/dev/null
-          codesign -f --keychain "$KC" -s "$SIGNER" "$app" 2>/dev/null ;;
+    cert) kc_codesign -f -s "$SIGNER" -i dev.iwork.t04probe.agent "$app/Contents/MacOS/agent" 2>/dev/null
+          kc_codesign -f -s "$SIGNER" "$app" 2>/dev/null ;;
     unsigned) codesign --remove-signature "$app/Contents/MacOS/host" "$app/Contents/MacOS/agent" ;;
   esac
   echo "$app"
@@ -146,16 +153,15 @@ for sig in unsigned linker adhoc cert; do
     sleep 1
     s=$(sm "$app" "$caller" status)
     u=$(sm "$app" "$caller" unregister); sleep 2; s2=$(job_exists)
-    note "  $sig/$caller：register→ ${r:-<无输出：程序起不来>}"
-    note "      launchctl print 有任务=$s1 state=${st:-无} agent 启动次数=$started；status→ $s"
-    note "      unregister→ $u；之后有任务=$s2；agent 收到 SIGTERM=$(grep -c 'got SIGTERM' "$LOG" || true)"
+    note "  $sig/${caller}：register→ ${r:-<无输出：程序起不来>}"
+    note "      launchctl print 有任务=$s1 state=${st:-无} agent 启动次数=${started}；status→ $s"
+    note "      unregister→ ${u}；之后有任务=${s2}；agent 收到 SIGTERM=$(grep -c 'got SIGTERM' "$LOG" || true)"
     if [ -z "$WORKING" ] && [ "$caller" = host ] && echo "$r" | grep -q 'ok=1'; then WORKING=$sig; fi
     : > "$LOG"
   done
   launchctl bootout "$TARGET" >/dev/null 2>&1 || true
 done
 note "  → 主程序调用能注册的第一种形态：${WORKING:-无}"
-{ echo "== sfltool dumpbtm（只留本探针相关段落）"; sfltool dumpbtm 2>&1 | grep -B3 -A12 -i t04probe | redact || true; } > "$OUT/btm-after-1-4.txt" 2>&1
 
 # 用于 5–7 的形态：优先 linker（= N5 形态 A，A5 的问题），不行就用能注册的那一种
 SM_SIG=${WORKING:-}
@@ -164,9 +170,18 @@ if [ -n "$SM_SIG" ]; then
 fi
 
 # ---------------------------------------------------------------- 公用：第 5、6、7 步（注册方法作为参数）
-# 注册、注销的两种做法
-do_register() { if [ "$1" = sm ]; then sm "$APP" host register >/dev/null; else launchctl bootstrap "$DOMAIN" "$USER_PLIST"; fi; }
+# 探针在 sleep 时每 0.2 秒重读模式文件，模式一变就由正在跑的那个实例自己行动；测量不用 kickstart -k 换实例。
+do_register() { if [ "$1" = sm ]; then sm "$APP" host register >/dev/null; else launchctl bootstrap "$DOMAIN" "$USER_PLIST" 2>/dev/null || note "    （bootstrap rc=$?）"; fi; }
 do_unregister() { if [ "$1" = sm ]; then sm "$APP" host unregister >/dev/null; else launchctl bootout "$TARGET" 2>/dev/null || true; fi; }
+# 保证有一个 sleep 模式的实例在跑（必要时 kickstart，不带 -k）
+ensure_sleeping() {
+  echo sleep > "$MODE"
+  for _ in 1 2 3; do
+    wait_running && return 0
+    launchctl kickstart "$TARGET" >/dev/null 2>&1 || true
+  done
+  return 0
+}
 
 step5() { # register 是否立刻起一个实例；手动起的实例握着锁时新实例停在等锁
   local how="$1"
@@ -175,64 +190,61 @@ step5() { # register 是否立刻起一个实例；手动起的实例握着锁�
   T04_LOG="$LOG" T04_MODE="$WORK/mode.manual" "$APP/Contents/MacOS/agent" --service --manual & local manual=$!
   sleep 1
   local t; t=$(t0); do_register "$how"; sleep 4
-  note "  5 [$how] register 后 4 秒内 launchd 起的实例数=$(starts_after "$t")；state=$(job_state)；等锁中=$(grep -c 'waiting lock' "$LOG")；拿到锁=$(grep -c 'got lock' "$LOG")"
+  note "  5 [$how] register 后 4 秒内 launchd 起的实例数=$(starts_after "$t")；state=$(job_state)；launchd 实例在等锁=$(awk -v t="$t" '$1 > t && /waiting lock/' "$LOG" | wc -l | tr -d ' ')；已拿到锁=$(awk -v t="$t" '$1 > t && /got lock/' "$LOG" | wc -l | tr -d ' ')"
   local tk; tk=$(t0); kill -9 "$manual"; wait "$manual" 2>/dev/null || true; sleep 2
-  local got; got=$(last_line_matching 'got lock')
-  note "    kill -9 手动实例后：launchd 实例拿到锁=$(grep -c 'got lock' "$LOG")（kill 于 $tk，拿到于 ${got:-无}）"
+  note "    kill -9 手动实例（于 ${tk}）后：launchd 实例拿到锁于 $(last_line_matching 'got lock')"
 }
 
 step6() { # 各种结束方式会不会被再拉、隔多久
   local how="$1" ka="$2"
-  for m in "exit 0" "exit 12" "exit 20" "signal 9" "signal 15" "signal 11" "abort"; do
-    echo sleep > "$MODE"; wait_running || launchctl kickstart "$TARGET" >/dev/null 2>&1; wait_running || true
-    echo "$m" > "$MODE"
-    local t; t=$(t0); launchctl kickstart -k "$TARGET" >/dev/null 2>&1
-    sleep 26
-    local n; n=$(starts_after "$t")
-    # 第一次启动是 kickstart 起的；之后的都是 launchd 再拉的
-    local first second
-    first=$(awk -v t="$t" '$1 > t && /start/ {print $1}' "$LOG" | sed -n 1p)
-    second=$(awk -v t="$t" '$1 > t && /start/ {print $1}' "$LOG" | sed -n 2p)
-    local ended; ended=$(awk -v t="$t" '$1 > t && /(exiting|raising|aborting)/ {print $1; exit}' "$LOG")
-    local gap="-"; [ -n "$second" ] && [ -n "$ended" ] && gap=$(echo "$second - $ended" | bc)
-    note "  6 [$how $ka] $m：26 秒内启动 $n 次（含 kickstart 那一次）；再拉=$([ "$n" -gt 1 ] && echo 是 || echo 否)；结束到再拉 ${gap}s；last exit：$(launchctl print "$TARGET" 2>/dev/null | sed -n 's/^[[:space:]]*last exit code = //p' | head -1)"
+  for m in "exit 0" "exit 12" "exit 20" "exit 21" "signal 9" "signal 15" "signal 11" "abort"; do
+    ensure_sleeping
+    local t; t=$(t0); echo "$m" > "$MODE"
+    sleep 25
+    local ended relaunch n
+    ended=$(awk -v t="$t" '$1 > t && /(exiting|raising|aborting)/ {print $1; exit}' "$LOG")
+    relaunch=$(awk -v e="${ended:-9e18}" '$1 > e && / start / {print $1; exit}' "$LOG")
+    n=$(starts_after "$t")
+    local gap="-"; [ -n "$relaunch" ] && gap=$(awk -v a="$relaunch" -v b="$ended" 'BEGIN{printf "%.1f", a-b}')
+    note "  6 [$how $ka] ${m}：25 秒内再拉起 $n 次；第一次再拉距结束 ${gap}s；last exit：$( { launchctl print "$TARGET" 2>/dev/null || true; } | sed -n 's/^[[:space:]]*last exit code = //p' | head -1)"
   done
-  echo sleep > "$MODE"
+  ensure_sleeping
 }
 
 step7() { # 注销对正在跑的实例做了什么：先从实例自己，再从另一个进程
   local how="$1" self_mode="$2"
-  echo sleep > "$MODE"; wait_running || launchctl kickstart "$TARGET" >/dev/null 2>&1; wait_running || true
-  echo "$self_mode" > "$MODE"; local t; t=$(t0); launchctl kickstart -k "$TARGET" >/dev/null 2>&1; sleep 25
+  ensure_sleeping
+  local t; t=$(t0); echo "$self_mode" > "$MODE"; sleep 25
   local call ret term last
   call=$(awk -v t="$t" '$1 > t && /calling/ {print $1; exit}' "$LOG")
   ret=$(awk -v t="$t" '$1 > t && /returned/ {print $0; exit}' "$LOG" | cut -d' ' -f3-)
   term=$(awk -v t="$t" '$1 > t && /got SIGTERM/ {print $1; exit}' "$LOG")
   last=$(awk -v t="$t" '$1 > t {l=$0} END {print l}' "$LOG" | cut -d' ' -f1,3-)
-  note "  7 [$how] 实例自己注销：调用于 ${call:-无}；返回：${ret:-没返回}；收到 SIGTERM 于 ${term:-没收到}；最后一行：$last；之后任务还在=$(job_exists)；25 秒内再被拉起=$(awk -v t="$t" '$1 > t && /start/' "$LOG" | sed -n '2,$p' | wc -l | tr -d ' ') 次"
-  # 再注册回来，从另一个进程注销
+  note "  7 [$how] 实例自己注销：调用于 ${call:-无}；返回：${ret:-没返回}；收到 SIGTERM 于 ${term:-没收到}；最后一行：${last}；之后任务还在=$(job_exists)；25 秒内再被拉起=$(starts_after "$t") 次"
   echo sleep > "$MODE"; do_register "$how"; wait_running || true
   local pid; pid=$(job_pid); t=$(t0); do_unregister "$how"; sleep 3
   term=$(awk -v t="$t" '$1 > t && /got SIGTERM/ {print $1; exit}' "$LOG")
-  note "  7 [$how] 另一个进程注销：实例 pid ${pid:-?} 收到 SIGTERM 于 ${term:-没收到}（注销于 $t）；之后进程还在=$(kill -0 "${pid:-0}" 2>/dev/null && echo 是 || echo 否)；任务还在=$(job_exists)"
+  note "  7 [$how] 另一个进程注销：实例 pid ${pid:-?} 收到 SIGTERM 于 ${term:-没收到}（注销于 ${t}）；之后进程还在=$(kill -0 "${pid:-0}" 2>/dev/null && echo 是 || echo 否)；任务还在=$(job_exists)"
 }
 
 step_exec() { # N3 第 3 项：launchd 管着的进程 exec 自己之后仍被认作同一个任务
   local how="$1"
-  echo sleep > "$MODE"; wait_running || launchctl kickstart "$TARGET" >/dev/null 2>&1; wait_running || true
-  echo exec > "$MODE"; local t; t=$(t0); launchctl kickstart -k "$TARGET" >/dev/null 2>&1; sleep 4
-  local pid_before pid_after; pid_before=$(awk -v t="$t" '$1 > t && /exec self/ {print $2; exit}' "$LOG" | sed 's/pid=//')
-  pid_after=$(job_pid)
-  note "  N3-3 [$how] exec 自己：exec 前 pid=${pid_before:-?}，exec 后 launchctl 的 pid=${pid_after:-?}，state=$(job_state)，exec 后的映像已启动=$(awk -v t="$t" '$1 > t && /--execd/' "$LOG" | wc -l | tr -d ' ')"
-  local tk; tk=$(t0); kill -9 "${pid_after:-0}" 2>/dev/null || true; sleep 14
-  note "    之后 kill -9 它：14 秒内被 launchd 再拉起=$(awk -v t="$tk" '$1 > t && /start/' "$LOG" | wc -l | tr -d ' ') 次（证明 exec 后仍归这个任务管）"
+  ensure_sleeping
+  local pid_before; pid_before=$(job_pid)
+  local t; t=$(t0); echo exec > "$MODE"; sleep 3
+  local pid_after; pid_after=$(job_pid)
+  note "  N3-3 [$how] exec 自己：exec 前 launchctl 的 pid=${pid_before:-?}，exec 后=${pid_after:-?}，state=$(job_state)，带 --execd 的启动行=$(awk -v t="$t" '$1 > t && /--execd/' "$LOG" | wc -l | tr -d ' ')"
   echo sleep > "$MODE"
+  local tk; tk=$(t0); kill -9 "${pid_after:-0}" 2>/dev/null || true; sleep 14
+  note "    之后 kill -9 它：14 秒内被 launchd 再拉起=$(starts_after "$tk") 次（证明 exec 后仍归这个任务管）"
 }
+
+program_line() { { launchctl print "$TARGET" 2>/dev/null || true; } | grep -iE '^[[:space:]]*(program|bundle|path)' | head -3 | tr -s ' \t' ' ' | redact | tr '\n' ';'; }
 
 # ================================================================ 5–7、9 走 SMAppService
 if [ -n "$SM_SIG" ]; then
   note ""
-  note "## 5–7、9 SMAppService（形态 $SM_SIG）"
+  note "## 5–7、9 SMAppService（形态 ${SM_SIG}，plist 在包里，用 BundleProgram）"
   step5 sm
   step6 sm SuccessfulExit=false
   step_exec sm
@@ -240,16 +252,44 @@ if [ -n "$SM_SIG" ]; then
   note ""
   note "## 9 注册后把 .app 挪个位置"
   echo sleep > "$MODE"; sm "$APP" host register >/dev/null; wait_running || true
-  before=$(launchctl print "$TARGET" 2>/dev/null | sed -n 's/^[[:space:]]*program = //p' | head -1 | redact)
+  before=$(program_line)
   mkdir -p "$WORK/moved"; mv "$d/T04Probe.app" "$WORK/moved/"; APP="$WORK/moved/T04Probe.app"; CUR_APP="$APP"
   sleep 2
-  note "  挪之前 launchctl program：$before"
-  note "  挪之后（从新位置调）status：$(sm "$APP" host status)；launchctl program：$(launchctl print "$TARGET" 2>/dev/null | sed -n 's/^[[:space:]]*program = //p' | head -1 | redact)"
+  note "  挪之前 launchctl：${before}"
+  note "  挪之后（从新位置调）status：$(sm "$APP" host status)；launchctl：$(program_line)"
   pid=$(job_pid); kill -9 "${pid:-0}" 2>/dev/null || true; sleep 14
-  note "  挪之后 kill -9 实例，14 秒内：state=$(job_state)；再拉起=$(tail -3 "$LOG" | grep -c start)；最后一行：$(tail -1 "$LOG" | cut -d' ' -f3-)"
+  note "  挪之后 kill -9 实例，14 秒内：state=$(job_state)；最后一行：$(tail -1 "$LOG" | cut -d' ' -f3-)"
   note "  从新位置 unregister：$(sm "$APP" host unregister)；任务还在=$(job_exists)"
   launchctl bootout "$TARGET" >/dev/null 2>&1 || true
+  CUR_APP=""
 fi
+
+# ================================================================ 10 BundleProgram 与 Program：plist 放哪、怎么加载
+note ""
+note "## 10 LaunchAgent plist：BundleProgram 还是 Program（T09 通知探针报 BundleProgram + bootstrap 得 rc=5）"
+note "  每格：写 plist → 等 3 秒看系统有没有自己加载 → launchctl bootstrap 的 rc → 5 秒后 state → bootout、删 plist"
+for sig in linker adhoc cert; do
+  d10="$WORK/p10-$sig"; mkdir -p "$d10"; app10=$(make_app "$d10" "$sig")
+  for key in BundleProgram Program; do
+    for where in user work; do
+      if [ $key = BundleProgram ]; then line='<key>BundleProgram</key><string>Contents/MacOS/agent</string>'
+      else line="<key>Program</key><string>$app10/Contents/MacOS/agent</string>"; fi
+      if [ $where = user ]; then pl="$USER_PLIST"; else pl="$WORK/$PLIST_NAME"; fi
+      echo sleep > "$MODE"; : > "$LOG"
+      # 先确认干净：上一节 SMAppService 注销后 smd 可能还会再提交一次同名任务
+      launchctl bootout "$TARGET" >/dev/null 2>&1 || true; sleep 2
+      pre=$(job_exists)
+      agent_plist "$KA_SUCCESS" "$line" > "$pl"
+      sleep 3
+      auto=$(job_exists)
+      err=$(launchctl bootstrap "$DOMAIN" "$pl" 2>&1) && rc=0 || rc=$?
+      sleep 5
+      note "  $sig / $key / $( [ $where = user ] && echo '~/Library/LaunchAgents' || echo '临时目录')：写入前已加载=${pre}；写入后自己加载=${auto}；bootstrap rc=${rc}$( [ -n "$err" ] && echo "（$(echo "$err" | tr '\n' ' ' | redact)）")；state=$(job_state)；探针启动=$(grep -c ' start ' "$LOG" || true)"
+      launchctl bootout "$TARGET" >/dev/null 2>&1 || true
+      rm -f "$pl"; sleep 1
+    done
+  done
+done
 
 # ================================================================ 8 退路：~/Library/LaunchAgents + bootstrap / bootout
 note ""
@@ -259,10 +299,12 @@ for ka in SuccessfulExit Crashed; do
   if [ $ka = SuccessfulExit ]; then kad="$KA_SUCCESS"; else kad="$KA_CRASHED"; fi
   agent_plist "$kad" "<key>Program</key><string>$APP/Contents/MacOS/agent</string>" > "$USER_PLIST"
   echo sleep > "$MODE"
+  sleep 3
+  note "  [$ka] 写入 plist 3 秒后系统自己加载了吗：$(job_exists)"
   if [ $ka = SuccessfulExit ]; then
     step5 launchd
   else
-    launchctl bootstrap "$DOMAIN" "$USER_PLIST"; wait_running || true
+    launchctl bootstrap "$DOMAIN" "$USER_PLIST" 2>/dev/null || note "    （bootstrap rc=$?）"; wait_running || true
   fi
   step6 launchd "KeepAlive={$ka}"
   if [ $ka = SuccessfulExit ]; then
@@ -275,7 +317,6 @@ done
 
 # ---------------------------------------------------------------- 清理与核对
 cp "$LOG" "$OUT/agent-last.log" 2>/dev/null || true
-redact < "$OUT/agent-last.log" > "$OUT/agent-last.tmp" 2>/dev/null && mv "$OUT/agent-last.tmp" "$OUT/agent-last.log"
 cleanup_check() {
   [ -n "$CUR_APP" ] && "$CUR_APP/Contents/MacOS/host" host unregister "$PLIST_NAME" >/dev/null 2>&1 || true
   launchctl bootout "$TARGET" >/dev/null 2>&1 || true
@@ -283,11 +324,10 @@ cleanup_check() {
   sleep 1
   note ""
   note "## 清理核对"
-  note "  launchctl print $LABEL：$(job_exists | sed 's/yes/仍存在（未清干净）/;s/no/不存在/')"
+  note "  launchctl print ${LABEL}：$(job_exists | sed 's/yes/仍存在（未清干净）/;s/no/不存在/')"
   note "  ~/Library/LaunchAgents/${PLIST_NAME}：$( [ -e "$USER_PLIST" ] && echo 仍存在 || echo 不存在)"
   note "  探针进程：$(pgrep -f "$WORK/" | wc -l | tr -d ' ') 个"
-  { echo "== sfltool dumpbtm（本探针相关段落）"; sfltool dumpbtm 2>&1 | grep -B3 -A12 -i t04probe | redact || true; } > "$OUT/btm-final.txt" 2>&1
-  note "  BTM 数据库里与本探针相关的段落行数：$(grep -vc '^==' "$OUT/btm-final.txt" || true)（见 btm-final.txt）"
+  # 不读 BTM 数据库：sfltool dumpbtm 要管理员授权，会弹 SecurityAgent 框（2026-11-11 实测）
 }
 cleanup_check
 note "完成。"

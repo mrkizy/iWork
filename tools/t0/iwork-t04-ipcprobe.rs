@@ -5,6 +5,7 @@
 //!   ipcprobe serve <sock> [秒]   SelfIdentity::detect（读清单、打 manifest_loaded 审计）→ 玩具后台 → 监听若干秒
 //!   ipcprobe hello <sock>        SelfIdentity::detect → 连接 → 打印 welcome 或连接错误
 //!   ipcprobe self                打印 SelfIdentity（签名者摘要、安装目录、清单是否读到）
+//!   ipcprobe runid [包路径]      用 iwork-ipc 的 running_image_id / file_image_ids（/ verify_bundle）打印身份
 //!   ipcprobe selfwatch [秒]      每秒重新 SelfIdentity::detect 一次，打印完整的映像身份（换文件后看它变不变）
 //!
 //! 审计日志（iwork.ipc.audit）用 tracing-subscriber 打到 stderr。
@@ -82,6 +83,28 @@ async fn main() -> ExitCode {
             println!("image={}", full(&own.signer));
             ExitCode::SUCCESS
         }
+        ["runid", rest @ ..] => {
+            use iwork_ipc::peer::{Want, file_image_ids, running_image_id};
+            let running = match running_image_id() {
+                Ok(id) => id,
+                Err(e) => {
+                    println!("running_error={e}");
+                    return ExitCode::from(10);
+                }
+            };
+            let exe = std::env::current_exe().unwrap();
+            let file: Vec<String> = file_image_ids(&exe, Want::SameKindAs(&running))
+                .map(|v| v.iter().map(ToString::to_string).collect())
+                .unwrap_or_else(|e| vec![format!("error {e}")]);
+            println!("running={running} file={} equal={}", file.join(","), file == [running.to_string()]);
+            #[cfg(target_os = "macos")]
+            if let Some(app) = rest.first() {
+                println!("verify_bundle={:?}", iwork_ipc::peer::verify_bundle(std::path::Path::new(app)).map_err(|e| e.to_string()));
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = rest;
+            ExitCode::SUCCESS
+        }
         ["selfwatch", rest @ ..] => {
             println!("image={}", full(&own.signer));
             let n: u64 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(5);
@@ -128,7 +151,7 @@ async fn main() -> ExitCode {
             }
         }
         _ => {
-            eprintln!("用法：ipcprobe self | selfwatch [秒] | serve <sock> [秒] | hello <sock>");
+            eprintln!("用法：ipcprobe self | runid [包路径] | selfwatch [秒] | serve <sock> [秒] | hello <sock>");
             ExitCode::from(2)
         }
     }

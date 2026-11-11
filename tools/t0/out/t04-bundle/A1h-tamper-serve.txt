@@ -1,4 +1,4 @@
-2026-11-11T07:21:34.352155Z  INFO iwork.ipc.audit: event="manifest_loaded" path=<work>/PT/iWork.app/Contents/MacOS/iwork-manifest.json app_version=0.1.0 entries=2 self_listed=true
-self signer=cdhash:83296ac6 exe_dir=<work>/PT/iWork.app/Contents/MacOS manifest=app_version=0.1.0 entries=2
+2026-11-11T08:38:46.846300Z  INFO iwork.ipc.audit: event="manifest_loaded" path=<work>/PT/iWork.app/Contents/MacOS/iwork-manifest.json app_version=0.1.0 entries=2 self_listed=true
+self signer=cdhash:b2cad515 exe_dir=<work>/PT/iWork.app/Contents/MacOS manifest=app_version=0.1.0 entries=2
 listening
-2026-11-11T07:21:34.405635Z  WARN iwork.ipc.audit: event="peer_rejected" role="server" pid=74722 user=uid:501 exe=<work>/PT/iWork.app/Contents/MacOS/iwork-client reason=ImageNotTrusted: cdhash:ec080d26 不在安装清单里
+2026-11-11T08:38:46.984712Z  WARN iwork.ipc.audit: event="peer_rejected" role="server" pid=47035 user=uid:501 exe=<work>/PT/iWork.app/Contents/MacOS/iwork-client reason=ImageNotTrusted: cdhash:0e696c40 不在安装清单里

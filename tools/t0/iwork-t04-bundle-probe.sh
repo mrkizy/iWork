@@ -23,6 +23,9 @@ BUILT_CLIENT="$ROOT/target/release/iwork-client"
 BUILT_DAEMON="$ROOT/target/release/iwork-daemon"
 WORK=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/iwork-t04-bundle.XXXXXX")" && pwd -P)  # 规范化（/private/var/…），日志里的路径才脱得掉
 KC="$WORK/t04.keychain-db"
+# 临时钥匙串：建好后关掉自动上锁（默认空闲 5 分钟、睡眠就锁，之后 codesign 会弹框找人要密码）；
+# 每次签名前再解锁一次。整个过程不该出现要人输密码的框。
+kc_codesign() { security unlock-keychain -p t "$KC"; codesign --keychain "$KC" "$@"; }
 SIGNER="iWork T04 Signer"
 CHILDREN=()
 
@@ -34,6 +37,8 @@ cleanup() {
   rm -rf "$WORK"
 }
 trap cleanup EXIT
+# 被 timeout 或 Ctrl-C 结束时也走 EXIT，删掉临时钥匙串
+trap 'exit 143' TERM INT
 
 for f in "$BUILT_APP" "$BUILT_CLIENT" "$BUILT_DAEMON"; do
   [ -e "$f" ] || { echo "缺构建产物：${f}（先跑文件头里的构建命令）" >&2; exit 2; }
@@ -137,18 +142,19 @@ make_a() { # make_a <目标.app> <daemon 二进制> [client 二进制]
   "$ROOT/scripts/write-install-manifest.sh" "$app/Contents/MacOS" >/dev/null
 }
 # 形态 B（有证书）：整包签名，包里不放清单。先签嵌套的后台，再签整包。
-make_b() { # make_b <目标.app> <daemon 二进制> [client 二进制]
+make_b() { # make_b <目标.app> <daemon 二进制> [client 二进制] [后台的签名标识]
   local app="$1"
   cp -R "$BUILT_APP" "$app"
   rm -rf "$app/Contents/_CodeSignature"
   cp "${3:-$BUILT_CLIENT}" "$app/Contents/MacOS/iwork-client"
   cp "$2" "$app/Contents/MacOS/iwork-daemon"
-  codesign -f --keychain "$KC" -s "$SIGNER" -i dev.iwork.daemon "$app/Contents/MacOS/iwork-daemon" 2>>"$OUT/sign.txt"
-  codesign -f --keychain "$KC" -s "$SIGNER" "$app" 2>>"$OUT/sign.txt"
+  kc_codesign -f -s "$SIGNER" -i "${4:-dev.iwork.daemon}" "$app/Contents/MacOS/iwork-daemon" 2>>"$OUT/sign.txt"
+  kc_codesign -f -s "$SIGNER" "$app" 2>>"$OUT/sign.txt"
 }
 
 security create-keychain -p t "$KC"
 security unlock-keychain -p t "$KC"
+security set-keychain-settings "$KC"
 cat > "$WORK/cert.cnf" <<EOF
 [req]
 distinguished_name=dn
@@ -209,39 +215,10 @@ for role in iwork-client iwork-daemon; do
   note "  A1g [$role 位置，未封印的包] $("$RC/Contents/MacOS/$role" selfcheck)"
 done
 note "  A1g [散放的二进制] $("$IMG" selfcheck)"
-# 候选修法（不改仓库代码，只在临时副本里试）：check_image_file 的静态校验带 kSecCSDoNotValidateResources，
-# 形态 A 的两个角色能不能握手
-mkdir -p "$WORK/patched"; cp -R "$ROOT/crates" "$ROOT/proto" "$WORK/patched/"; cp "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$WORK/patched/"
-python3 - "$WORK/patched/crates/iwork-ipc/src/peer/macos.rs" <<'PY'
-import sys
-p = sys.argv[1]; s = open(p, encoding="utf-8").read()
-old = """        SecStaticCodeCheckValidity(
-            image_file.as_ptr(),
-            K_SEC_CS_DEFAULT_FLAGS,"""
-assert old in s
-s = s.replace(old, old.replace("K_SEC_CS_DEFAULT_FLAGS,", "1 << 2, // kSecCSDoNotValidateResources"))
-open(p, "w", encoding="utf-8").write(s)
-PY
-mkdir -p "$WORK/ipcprobe-patched/src"
-sed "s#$ROOT/crates#$WORK/patched/crates#g" "$WORK/ipcprobe/Cargo.toml" > "$WORK/ipcprobe-patched/Cargo.toml"
-cp "$WORK/ipcprobe/src/main.rs" "$WORK/ipcprobe-patched/src/"; cp "$ROOT/Cargo.lock" "$WORK/ipcprobe-patched/"
-(cd "$WORK/ipcprobe-patched" && CARGO_TARGET_DIR="$WORK/ipcprobe-patched/target" cargo build -q --release) 2>"$OUT/ipcprobe-patched-build.txt"
-IPCP="$WORK/ipcprobe-patched/target/release/ipcprobe"
-for form in A B; do
-  PH="$WORK/PH$form/iWork.app"; mkdir -p "$(dirname "$PH")"
-  if [ $form = A ]; then make_a "$PH" "$IPCP" "$IPCP"; else make_b "$PH" "$IPCP" "$IPCP"; fi
-  SOCK="$WORK/p$form.sock"
-  "$PH/Contents/MacOS/iwork-daemon" serve "$SOCK" 6 >"$OUT/A1h-$form-serve.txt" 2>&1 & SP=$!; CHILDREN+=("$SP")
-  for _ in $(seq 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
-  "$PH/Contents/MacOS/iwork-client" hello "$SOCK" >"$OUT/A1h-$form-hello.txt" 2>&1 || true
-  wait "$SP" || true
-  for f in A1h-$form-serve A1h-$form-hello; do redact < "$OUT/$f.txt" > "$OUT/$f.tmp" && mv "$OUT/$f.tmp" "$OUT/$f.txt"; done
-  note "  A1h [候选修法，形态 $form] 握手：$(grep -o 'handshake=[a-z]*' "$OUT/A1h-$form-hello.txt" || echo 无)；后台拒绝对端：$(grep -c peer_rejected "$OUT/A1h-$form-serve.txt" || true)"
-done
-# 候选修法下，清单外的对端仍被拒：形态 A 打好清单后，把客户端位置换成换了签名标识重签的同一个探针（cdhash 必变）。
+# 对照：清单外的对端仍被拒：形态 A 打好清单后，把客户端位置换成换了签名标识重签的同一个探针（cdhash 必变）。
 # 注意不能用「末尾追加一字节」：签名之外的尾部不在代码目录覆盖范围内，cdhash 不变，对端照样是清单里那一个。
-PT="$WORK/PT/iWork.app"; mkdir -p "$WORK/PT"; make_a "$PT" "$IPCP" "$IPCP"
-cp "$IPCP" "$WORK/ipcp-other"; codesign -f -s - -i dev.iwork.t04.other "$WORK/ipcp-other" 2>/dev/null
+PT="$WORK/PT/iWork.app"; mkdir -p "$WORK/PT"; make_a "$PT" "$IPC" "$IPC"
+cp "$IPC" "$WORK/ipcp-other"; codesign -f -s - -i dev.iwork.t04.other "$WORK/ipcp-other" 2>/dev/null
 cp "$WORK/ipcp-other" "$PT/Contents/MacOS/iwork-client"
 note "  A1h 清单外的客户端 cdhash：$(cdhash_file "$PT/Contents/MacOS/iwork-client")；清单里的：$(jq -r '.binaries["iwork-client"][] | select(startswith("cdhash:"))' "$PT/Contents/MacOS/iwork-manifest.json")"
 SOCK="$WORK/pt.sock"
@@ -250,7 +227,7 @@ for _ in $(seq 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
 "$PT/Contents/MacOS/iwork-client" hello "$SOCK" >"$OUT/A1h-tamper-hello.txt" 2>&1 || true
 wait "$SP" || true
 for f in A1h-tamper-serve A1h-tamper-hello; do redact < "$OUT/$f.txt" > "$OUT/$f.tmp" && mv "$OUT/$f.tmp" "$OUT/$f.txt"; done
-note "  A1h [候选修法，客户端换成清单外的映像] 后台拒绝对端：$(grep -o 'reason=[A-Za-z]*' "$OUT/A1h-tamper-serve.txt" | head -1 || echo 无)；客户端：$(grep -o 'handshake=[a-z]*' "$OUT/A1h-tamper-hello.txt" || echo 无)"
+check A1h "（对照）客户端换成清单外的映像，后台拒绝的理由" "$(grep -o 'reason=[A-Za-z]*' "$OUT/A1h-tamper-serve.txt" | head -1)" reason=ImageNotTrusted
 # 对照：B 形态（整包签名）里两个角色握手
 BH="$WORK/BH/iWork.app"; mkdir -p "$WORK/BH"
 note "### A2 清单登记项与运行中进程、文件全文"
@@ -352,8 +329,8 @@ check B5a "签名之后加清单：整包验签" "$("$IMG" verify "$B5/after.app
 mkdir -p "$B5/before"; cp -R "$BUILT_APP" "$B5/before/iWork.app"; app="$B5/before/iWork.app"
 rm -rf "$app/Contents/_CodeSignature"; cp "$BUILT_CLIENT" "$app/Contents/MacOS/iwork-client"; cp "$BUILT_DAEMON" "$app/Contents/MacOS/iwork-daemon"
 "$ROOT/scripts/write-install-manifest.sh" "$app/Contents/MacOS" >/dev/null
-codesign -f --keychain "$KC" -s "$SIGNER" -i dev.iwork.daemon "$app/Contents/MacOS/iwork-daemon" 2>/dev/null
-note "  B5b0 清单放在 Contents/MacOS 里再签整包：$(codesign -f --keychain "$KC" -s "$SIGNER" "$app" 2>&1 | redact | tail -1)"
+kc_codesign -f -s "$SIGNER" -i dev.iwork.daemon "$app/Contents/MacOS/iwork-daemon" 2>/dev/null
+note "  B5b0 清单放在 Contents/MacOS 里再签整包：$(kc_codesign -f -s "$SIGNER" "$app" 2>&1 | redact | tail -1)"
 check B5b "签名之前写清单（若签得上）：整包验签不过或清单对不上" \
   "$({ "$IMG" verify "$app" >/dev/null 2>&1 && [ "$(manifest_form "$app/Contents/MacOS")" = Complete ]; } && echo both-ok || echo not-both)" not-both
 note "  B5c 签名之前写清单：验签 $("$IMG" verify "$app" | cut -d' ' -f1)，清单那一行 $(manifest_form "$app/Contents/MacOS")"
@@ -419,6 +396,27 @@ check D2-universal "通用二进制：运行映像 == 自己路径的静态 cdha
 check D2-universal-arch "取的是本机架构那一片（== codesign 默认架构的 CDHash）" \
   "$(sed -n 's/^running=\([0-9a-f]*\) .*/\1/p' "$OUT/D2-universal.txt")" \
   "$(cdhash_file "$UA/Contents/MacOS/iwork-daemon")"
+
+note "### D4 用 iwork-ipc 的正式函数（running_image_id / file_image_ids / verify_bundle）复核"
+for form in a b; do
+  app="$WORK/D4/$form/iWork.app"; mkdir -p "$(dirname "$app")"
+  if [ $form = a ]; then make_a "$app" "$IPC"; else make_b "$app" "$IPC"; fi
+  "$app/Contents/MacOS/iwork-daemon" runid "$app" > "$OUT/D4-$form.txt" 2>&1 || true
+  check "D4/$form" "运行映像 == 自己路径的文件身份（同一种）" "$(sed -n 's/^running=.* equal=\(.*\)/\1/p' "$OUT/D4-$form.txt")" true
+  check "D4/$form" "running_image_id == codesign 读的 cdhash" "$(sed -n 's/^running=cdhash:\([0-9a-f]*\) .*/\1/p' "$OUT/D4-$form.txt")" "$(cdhash_file "$app/Contents/MacOS/iwork-daemon")"
+done
+check D4/a "verify_bundle（未封印的 A 包）" "$(grep -c 'verify_bundle=Err' "$OUT/D4-a.txt")" 1
+check D4/b "verify_bundle（整包签名的 B 包）" "$(grep -o 'verify_bundle=Ok' "$OUT/D4-b.txt")" verify_bundle=Ok
+# 同一张证书签的两个构建（后台签名标识不同 → cdhash 不同）：运行映像身份不同，SelfIdentity 的叶证书相同
+for v in 1 2; do
+  app="$WORK/D4/cert$v/iWork.app"; mkdir -p "$(dirname "$app")"; make_b "$app" "$IPC" "" "dev.iwork.daemon.build$v"
+  "$app/Contents/MacOS/iwork-daemon" runid > "$OUT/D4-cert$v.txt" 2>&1 || true
+done
+c1=$(sed -n 's/^running=\([^ ]*\) .*/\1/p' "$OUT/D4-cert1.txt"); c2=$(sed -n 's/^running=\([^ ]*\) .*/\1/p' "$OUT/D4-cert2.txt")
+l1=$(sed -n 's/^self signer=\([^ ]*\) .*/\1/p' "$OUT/D4-cert1.txt"); l2=$(sed -n 's/^self signer=\([^ ]*\) .*/\1/p' "$OUT/D4-cert2.txt")
+check D4-cert "同一张证书两个构建：SelfIdentity 的签名者相同、运行映像不同" \
+  "$([ -n "$c1" ] && [ "$c1" != "$c2" ] && [ "$l1" = "$l2" ] && echo "same-signer,different-image" || echo "signer=$l1/$l2 image=$c1/$c2")" "same-signer,different-image"
+note "  签名者 ${l1}；运行映像 $c1 / $c2"
 
 # ================================================================ E 两种形态互换
 note ""

@@ -1,5 +1,5 @@
-verify=0 ms=23.5 
-verify=0 ms=23.3 
-verify=0 ms=21.1 
-verify=0 ms=20.0 
-verify=0 ms=21.2 
+verify=0 ms=66.9 
+verify=0 ms=83.6 
+verify=0 ms=63.3 
+verify=0 ms=41.3 
+verify=0 ms=58.5 

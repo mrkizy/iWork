@@ -1,1 +1,3 @@
-self_error=取本进程身份失败：本进程映像身份取不到：SecStaticCodeCheckValidity 失败（OSStatus -67056）
+2026-11-11T08:38:38.786889Z  INFO iwork.ipc.audit: event="manifest_loaded" path=<work>/AH/iWork.app/Contents/MacOS/iwork-manifest.json app_version=0.1.0 entries=2 self_listed=true
+self signer=cdhash:b2cad515 exe_dir=<work>/AH/iWork.app/Contents/MacOS manifest=app_version=0.1.0 entries=2
+handshake=ok welcome_server_version=t04-probe

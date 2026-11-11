@@ -9,6 +9,9 @@ ROOT=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 OUT="$ROOT/tools/t0/out/t03-macos"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/iwork-t03-macos.XXXXXX")
 KC="$WORK/t03.keychain-db"
+# 临时钥匙串：建好后关掉自动上锁（默认空闲 5 分钟、睡眠就锁，之后 codesign 会弹框找人要密码）；
+# 每次签名前再解锁一次。整个过程不该出现要人输密码的框。
+kc_codesign() { security unlock-keychain -p t "$KC"; codesign --keychain "$KC" "$@"; }
 SOCK="$WORK/probe.sock"
 CHILDREN=()
 
@@ -18,6 +21,8 @@ cleanup() {
   rm -rf "$WORK"
 }
 trap cleanup EXIT
+# 被 timeout 或 Ctrl-C 结束时也走 EXIT，删掉临时钥匙串
+trap 'exit 143' TERM INT
 
 rm -rf "$OUT"; mkdir -p "$OUT"
 SUMMARY="$OUT/summary.txt"
@@ -34,6 +39,7 @@ BIN="$WORK/bin"; mkdir -p "$BIN"
 # ---------------------------------------------------------------- 1. 两张自签代码签名证书 + 临时钥匙串
 security create-keychain -p t "$KC"
 security unlock-keychain -p t "$KC"
+security set-keychain-settings "$KC"
 for who in A B; do
   cat > "$WORK/$who.cnf" <<EOF
 [req]
@@ -63,7 +69,7 @@ note "leaf A sha256=$LEAF_A"
 note "leaf B sha256=$LEAF_B"
 
 # ---------------------------------------------------------------- 2. 被测二进制（都是 peer-probe 的副本）
-sign() { codesign -f --keychain "$KC" -s "iWork T03 Signer $1" -i "$3" "$2" 2>/dev/null; }
+sign() { kc_codesign -f -s "iWork T03 Signer $1" -i "$3" "$2" 2>/dev/null; }
 cp "$PROBE" "$BIN/linker"                                   # 链接器自动做的 ad-hoc（cargo 产物原样）
 cp "$PROBE" "$BIN/adhoc";    codesign -f -s - "$BIN/adhoc" 2>/dev/null
 cp "$PROBE" "$BIN/signedA";  sign A "$BIN/signedA"  t03.probe

@@ -1,2 +1,0 @@
-self signer=certificate:f8447a1b exe_dir=<work>/PHB/iWork.app/Contents/MacOS manifest=none
-listening

@@ -5,5 +5,4 @@
 == 带隔离标记：spctl --assess --type exec
 <work>/Aq.app: code has no resources but signature indicates they must be present
 == 带隔离标记：命令行直接起主程序（不经 LaunchServices）
-tools/t0/iwork-t04-bundle-probe.sh: line 285: 75094 Killed: 9               "$WORK/Aq.app/Contents/MacOS/iwork-client"
-dead
+alive

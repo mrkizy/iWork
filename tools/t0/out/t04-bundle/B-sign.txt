@@ -4,15 +4,15 @@ Identifier=dev.iwork.client
 Format=app bundle with Mach-O thin (arm64)
 CodeDirectory v=20400 size=19657 flags=0x0(none) hashes=608+3 location=embedded
 Hash type=sha256 size=32
-CandidateCDHash sha256=072b817a621e574bda86b29fd12c2c154ab5f09d
-CandidateCDHashFull sha256=072b817a621e574bda86b29fd12c2c154ab5f09de080b512fcc64a5b0d6b750b
+CandidateCDHash sha256=693dfcfd94bc712c9fa57d3928745fe07e4fd6b4
+CandidateCDHashFull sha256=693dfcfd94bc712c9fa57d3928745fe07e4fd6b45c0cb607a29774bd765a5f1c
 Hash choices=sha256
-CMSDigest=072b817a621e574bda86b29fd12c2c154ab5f09de080b512fcc64a5b0d6b750b
+CMSDigest=693dfcfd94bc712c9fa57d3928745fe07e4fd6b45c0cb607a29774bd765a5f1c
 CMSDigestType=2
-CDHash=072b817a621e574bda86b29fd12c2c154ab5f09d
+CDHash=693dfcfd94bc712c9fa57d3928745fe07e4fd6b4
 Signature size=1753
 Authority=iWork T04 Signer
-Signed Time=11 Nov 2026 at 3:21:46 PM
+Signed Time=11 Nov 2026 at 4:38:58 PM
 Info.plist entries=14
 TeamIdentifier=not set
 Sealed Resources version=2 rules=13 files=2
@@ -25,15 +25,15 @@ Identifier=dev.iwork.daemon
 Format=Mach-O thin (arm64)
 CodeDirectory v=20400 size=1033 flags=0x0(none) hashes=27+2 location=embedded
 Hash type=sha256 size=32
-CandidateCDHash sha256=808ce8b541b7feffe0ca9e1a56f4f0be2893638e
-CandidateCDHashFull sha256=808ce8b541b7feffe0ca9e1a56f4f0be2893638e55a9745685aedeaa4fe1eefd
+CandidateCDHash sha256=347cf79c23dba10bc888500132417386e9062b0e
+CandidateCDHashFull sha256=347cf79c23dba10bc888500132417386e9062b0e8c22e3a56e9d979dc758fe95
 Hash choices=sha256
-CMSDigest=808ce8b541b7feffe0ca9e1a56f4f0be2893638e55a9745685aedeaa4fe1eefd
+CMSDigest=347cf79c23dba10bc888500132417386e9062b0e8c22e3a56e9d979dc758fe95
 CMSDigestType=2
-CDHash=808ce8b541b7feffe0ca9e1a56f4f0be2893638e
+CDHash=347cf79c23dba10bc888500132417386e9062b0e
 Signature size=1753
 Authority=iWork T04 Signer
-Signed Time=11 Nov 2026 at 3:21:46 PM
+Signed Time=11 Nov 2026 at 4:38:58 PM
 Info.plist=not bound
 TeamIdentifier=not set
 Sealed Resources=none

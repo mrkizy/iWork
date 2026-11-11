@@ -1,0 +1,20 @@
+# T04 N3 exec 自行重启  2026-11-11 15:45:18
+## macOS 27.2 arm64
+  before pid=58483 child=58549 lock=held listening=<work>/mac/a/d.sock
+  after pid=58483 old_socket=refused relock=ok rebind=ok child_saw_eof=true within_ms=12
+  kill -9 前任 at_ms=1794383121558
+  <work>/run.sh: line 11: 58551 Killed: 9               "$P" hold "$W/b" > "$W/b/hold.txt"
+  holding pid=58551
+  waiting pid=58571 at_ms=1794383120515
+  acquired at_ms=1794383121567
+  after_exec pid=58571 relock=ok
+## Linux（Docker rust:1）
+  Linux 7.0.11-orbstack-00360-gc9bc4d96ac70 aarch64
+  before pid=28 child=29 lock=held listening=/tmp/w/a/d.sock
+  after pid=28 old_socket=refused relock=ok rebind=ok child_saw_eof=true within_ms=10
+  kill -9 前任 at_ms=1794383124028
+  /run.sh: line 11:    31 Killed                  "$P" hold "$W/b" > "$W/b/hold.txt"
+  holding pid=31
+  waiting pid=33 at_ms=1794383123017
+  acquired at_ms=1794383124030
+  after_exec pid=33 relock=ok
