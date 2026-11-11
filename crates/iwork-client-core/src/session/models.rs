@@ -67,17 +67,15 @@ impl<D: Dialer> Session<D> {
             return;
         }
         match result {
-            Ok(m) => self.store.set_models(runtime_id, m),
+            Ok(m) => {
+                self.store.set_models(runtime_id, m);
+                self.query_succeeded(PURPOSE);
+            }
             Err(why) => {
                 self.store.models.failed(runtime_id);
                 if let Some(why) = why {
                     tracing::warn!(target: "iwork_client", runtime_id, why, "模型清单没取到，退避后再取");
-                    let now = self.now();
-                    let entry = self
-                        .query_backoff
-                        .entry(PURPOSE)
-                        .or_insert_with(|| (now, iwork_ipc::client::Backoff::new()));
-                    entry.0 = now + entry.1.next_delay();
+                    self.query_failed(PURPOSE);
                 }
             }
         }

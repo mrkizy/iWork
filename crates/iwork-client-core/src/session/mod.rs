@@ -311,6 +311,24 @@ impl<D: Dialer> Session<D> {
         d
     }
 
+    /// 某种用途的查询失败：退避后再发，界面挂「查询重试中」（视图查询与附带查询共用）。
+    fn query_failed(&mut self, kind: &'static str) {
+        let now = self.now();
+        let entry = self
+            .query_backoff
+            .entry(kind)
+            .or_insert_with(|| (now, Backoff::new()));
+        entry.0 = now + entry.1.next_delay();
+        self.store.set_query_failing(true);
+    }
+
+    /// 某种用途的查询成功：清掉它的退避；没有别的用途还在退避，提示一并清掉。
+    fn query_succeeded(&mut self, kind: &str) {
+        if self.query_backoff.remove(kind).is_some() && self.query_backoff.is_empty() {
+            self.store.set_query_failing(false);
+        }
+    }
+
     fn backoff_until(&self, kind: &str) -> Option<Instant> {
         self.query_backoff.get(kind).map(|(t, _)| *t)
     }
@@ -792,13 +810,7 @@ impl<D: Dialer> Session<D> {
                     if matches!(p, QueryPurpose::OlderPage { .. }) {
                         self.want_older = false;
                     }
-                    let now = self.now();
-                    let entry = self
-                        .query_backoff
-                        .entry(purpose_kind(&p))
-                        .or_insert_with(|| (now, Backoff::new()));
-                    entry.0 = now + entry.1.next_delay();
-                    self.store.set_query_failing(true);
+                    self.query_failed(purpose_kind(&p));
                 }
             }
             Internal::SubscribeFailed { epoch, id, error } => {
@@ -1147,11 +1159,7 @@ impl<D: Dialer> Session<D> {
                 if matches!(purpose, QueryPurpose::OlderPage { .. }) {
                     self.want_older = false;
                 }
-                if self.query_backoff.remove(purpose_kind(&purpose)).is_some()
-                    && self.query_backoff.is_empty()
-                {
-                    self.store.set_query_failing(false);
-                }
+                self.query_succeeded(purpose_kind(&purpose));
                 let refresh = matches!(
                     purpose,
                     QueryPurpose::Summary {

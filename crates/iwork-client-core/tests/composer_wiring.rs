@@ -131,3 +131,27 @@ async fn new_conversation_navigates_once_created() {
     .await;
     assert!(nav.row_key.is_empty(), "停在最新");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn model_catalog_failure_notice_clears_once_it_loads() {
+    let (d, app, mut web, _dir) = start("conversation-basic").await;
+    d.fail_queries(Some(Box::new(|q: &pb::Query| {
+        matches!(q.kind, Some(pb::query::Kind::ListModels(_)))
+    })));
+    visible(&app, Some("c-basic")).await;
+    let notice = |s: &WebState| s.connection.as_ref().and_then(|c| c.query_notice.clone());
+    until(&app, &mut web, "取不到模型清单时挂提示", |s| {
+        notice(s).is_some()
+    })
+    .await;
+    assert!(
+        menu(&web.state).is_some_and(|m| m.models.is_empty()),
+        "对照：确实没取到"
+    );
+    d.fail_queries(None);
+    until(&app, &mut web, "退避后取到清单", |s| {
+        menu(s).is_some_and(|m| !m.models.is_empty())
+    })
+    .await;
+    until(&app, &mut web, "提示清掉", |s| notice(s).is_none()).await;
+}
