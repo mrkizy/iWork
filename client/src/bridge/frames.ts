@@ -7,6 +7,8 @@
 //
 // 只认自定义协议这一条路：收到 transport_fallback、或成功的回包不是 ArrayBuffer，立刻停，不应用，
 // 交给接收方显示固定诊断页，不重试、不接受 JSON 回退。
+// 还是当前代次时出了说不通的事（回包解不开、块上代次不对、被别的取帧顶掉）也一样停下报故障，不悄悄结束循环：
+// 悄悄结束的话界面停在最后一帧，用户看不出已经不更新了。
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
   AttachReplySchema,
@@ -66,7 +68,13 @@ export class FrameBridge {
       this.#fail({ kind: "not_array_buffer" });
       return;
     }
-    const { epoch } = fromBinary(AttachReplySchema, new Uint8Array(reply));
+    let epoch: number;
+    try {
+      ({ epoch } = fromBinary(AttachReplySchema, new Uint8Array(reply)));
+    } catch (e) {
+      this.#fail({ kind: "error", message: `attach 的回包解不开：${String(e)}` });
+      return;
+    }
     this.#gen = { state: "live", epoch };
     this.sink.reset();
     void this.#loop(epoch);
@@ -104,7 +112,11 @@ export class FrameBridge {
           void this.attach();
           return;
         }
-        if (code === ErrorCode.superseded) return;
+        if (code === ErrorCode.superseded) {
+          // 同一代只有这一个循环在取帧，被顶掉说明有别处也在取：不该发生，停下报出来
+          this.#fail({ kind: "error", message: "取帧被同一代的另一次取帧顶掉" });
+          return;
+        }
         this.#fail(failureOf(e));
         return;
       }
@@ -113,8 +125,17 @@ export class FrameBridge {
         this.#fail({ kind: "not_array_buffer" });
         return;
       }
-      const chunk = fromBinary(FrameChunkSchema, new Uint8Array(reply));
-      if (chunk.epoch !== epoch) return;
+      let chunk;
+      try {
+        chunk = fromBinary(FrameChunkSchema, new Uint8Array(reply));
+      } catch (e) {
+        this.#fail({ kind: "error", message: `帧块解不开：${String(e)}` });
+        return;
+      }
+      if (chunk.epoch !== epoch) {
+        this.#fail({ kind: "error", message: `帧块的代次 ${chunk.epoch} 不是当前代次 ${epoch}` });
+        return;
+      }
       if (applied !== undefined && applied.frame === chunk.frame && applied.index === chunk.index) continue;
       if (chunk.index === 0) parts.length = 0;
       parts.push(chunk.data);
@@ -122,7 +143,14 @@ export class FrameBridge {
       if (chunk.last) {
         const bytes = concat(parts);
         parts.length = 0;
-        this.sink.apply(fromBinary(ViewPatchSchema, bytes));
+        let patch;
+        try {
+          patch = fromBinary(ViewPatchSchema, bytes);
+        } catch (e) {
+          this.#fail({ kind: "error", message: `第 ${chunk.frame} 帧解不开：${String(e)}` });
+          return;
+        }
+        this.sink.apply(patch);
       }
     }
   }

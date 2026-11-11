@@ -149,11 +149,43 @@ describe("取帧循环", () => {
     expect(sink.failures).toEqual([]);
   });
 
-  it("块上的代次与循环不符：丢掉并结束这个循环", async () => {
+  it("块上的代次与循环不符：丢掉、结束循环并报故障", async () => {
     await attachAs(3);
     fake.take("next_frame").resolve(chunkReply({ epoch: 9, frame: 1n, index: 0, last: true, data: patchBytes(1n, "别人的") }));
     await settle();
     expect(sink.applied).toHaveLength(0);
+    expect(fake.pending("next_frame")).toBe(0);
+    expect(sink.failures.map((f) => f.kind)).toEqual(["error"]);
+  });
+
+  it("还是当前代次却被顶掉（superseded）：停下报故障，不悄悄结束", async () => {
+    await attachAs(1);
+    fake.take("next_frame").reject("superseded");
+    await settle();
+    expect(sink.failures.map((f) => f.kind)).toEqual(["error"]);
+    expect(fake.pending("next_frame")).toBe(0);
+  });
+
+  it.each([
+    ["帧块", () => fake.take("next_frame").resolve(new Uint8Array([0xff, 0xff, 0xff]).buffer)],
+    [
+      "收齐的帧",
+      () => fake.take("next_frame").resolve(chunkReply({ epoch: 1, frame: 1n, index: 0, last: true, data: new Uint8Array([0xff, 0xff, 0xff]) })),
+    ],
+  ])("%s解不开：停下报故障", async (_what, reply) => {
+    await attachAs(1);
+    reply();
+    await settle();
+    expect(sink.applied).toHaveLength(0);
+    expect(sink.failures.map((f) => f.kind)).toEqual(["error"]);
+    expect(fake.pending("next_frame")).toBe(0);
+  });
+
+  it("attach 的回包解不开：不起循环，报故障", async () => {
+    const p = bridge.attach();
+    fake.take("attach").resolve(new Uint8Array([0xff, 0xff, 0xff]).buffer);
+    await p;
+    expect(sink.failures.map((f) => f.kind)).toEqual(["error"]);
     expect(fake.pending("next_frame")).toBe(0);
   });
 
