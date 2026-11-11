@@ -53,11 +53,15 @@ export function Composer(props: ComposerProps) {
       edit("");
       return;
     }
+    // 受理要等一会儿，期间可能换了对话或接着打字：只清发出的那个对话、且草稿还是发出的那段时才清
+    const key = props.draftKey;
     const ack = await host.act({
       case: "sendMessage",
       value: { conversationId: props.conversationId, text: body, attachmentIds: (c()?.tray ?? []).map((a) => a.attachmentId) },
     });
-    if (!ack.error) edit("");
+    if (ack.error || getDraft(key) !== body) return;
+    setDraft(key, "");
+    if (props.draftKey === key) setText("");
   };
   const stop = () => {
     const t = c()?.runningTurnId;
