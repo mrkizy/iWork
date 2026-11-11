@@ -154,6 +154,8 @@ mod tests {
         (t, a, b)
     }
 
+    // 读持锁中的锁文件内容：Windows 的 LockFileEx 是强制锁，持锁时别的句柄读不了；M1 不支持 Windows（T03）
+    #[cfg(unix)]
     #[test]
     fn second_acquire_is_held_by_other() {
         let (_t, a, b) = dirs();
@@ -170,6 +172,8 @@ mod tests {
         ));
     }
 
+    // 读持锁中的锁文件内容：Windows 的 LockFileEx 是强制锁，持锁时别的句柄读不了；M1 不支持 Windows（T03）
+    #[cfg(unix)]
     #[test]
     fn two_dirs_two_locks() {
         let (_t, a, b) = dirs();
@@ -179,6 +183,8 @@ mod tests {
         assert_eq!(rendezvous::read_lock_info(&b).unwrap().pid, 1);
     }
 
+    // 读持锁中的锁文件内容：Windows 的 LockFileEx 是强制锁，持锁时别的句柄读不了；M1 不支持 Windows（T03）
+    #[cfg(unix)]
     #[test]
     fn same_dir_one_lock() {
         let (_t, a, _b) = dirs();
