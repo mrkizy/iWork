@@ -778,7 +778,7 @@ def g1():
 # ---------- G2「执行前失败即关闭」----------
 OUTCOMES = [("allow", None), ("deny", None), ("silent", None), ("garbage", None), ("exit:1", None), ("exit:2", None), ("crash", None),
             ("sleep-deny:25", 5), ("sleep-allow:25", 5), ("MISSING", None), ("NOHOOK", None)]
-# 第 8 种（方案 16.1 第 1124 行，代码审查 1/F-3）：带 dangerouslyDisableSandbox 的 Bash。它不过沙箱，没有外层保护，只在一次性环境跑；排最后
+# 第 8 种（方案 16.1 分组表「G2 沙箱外重试」一行，代码审查 1/F-3）：带 dangerouslyDisableSandbox 的 Bash。它不过沙箱，没有外层保护，只在一次性环境跑；排最后
 G2_TOOLS = ["bash", "bash-副作用后报错", "bash-清单内（沙箱外）", "write", "read", "mcp", "子代理里的 bash", "bash-沙箱外重试"]
 MCP_TOOL = "mcp__iwork-probe__touch_sentinel"
 # 外层隔离：不依赖被测的 hook。沙箱只许读写工作区；文件工具禁止读写工作目录之外
@@ -2049,7 +2049,7 @@ def selftest():
     assert g2_cell_status("bash", "deny", moded(good_err), hook("t1"), cell, False, "default", "Agent") == ("PASS", "")
     assert g2_cell_status("bash", "deny", moded(good_err, "bypassPermissions"), hook("t1"), cell, False, "default", "Agent")[0] == "INCONCLUSIVE", "G2：权限模式没生效，这格不算数"
     assert g2_cell_status("bash", "deny", moded(good_err), [], cell, False, "default", "Agent")[0] == "INCONCLUSIVE" and g2_cell_status("bash", "deny", moded(good_err), hook("t1"), cell, True, "default", "Agent")[0] == "FAIL"
-    # G2「沙箱外重试」一种（方案 16.1 第 1087 行的四条反例）
+    # G2「沙箱外重试」一种（方案 16.1 判定点表「G2 沙箱外重试的 11 格」一行最后一栏的四条反例）
     U = "touch /w/s; touch /o/s"
     ucell = {"match": lambda n, ti: n == "Bash" and ti.get("command") == U and ti.get("dangerouslyDisableSandbox") is True,
              "parent": "main", "unsandboxed": True}

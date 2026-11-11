@@ -20,3 +20,8 @@ tempfile.workspace = true
 [[bench]]
 name = "cold_start"
 harness = false
+
+# 不用 libtest：这个测试程序带上环境变量时自己就是 panic 探针（重新起自己），stdout 上只有 hook 的结论
+[[test]]
+name = "panic_denies"
+harness = false
