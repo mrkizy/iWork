@@ -178,6 +178,15 @@ impl Drop for Peer {
 }
 
 async fn identify(app: &App, exe: &Path) -> (Peer, PeerIdentity) {
+    identify_after(app, exe, || {}).await
+}
+
+/// 起对端、等它连上；连上之后先调 `while_connected`（动它的可执行文件），再取对端身份。
+async fn identify_after(
+    app: &App,
+    exe: &Path,
+    while_connected: impl FnOnce(),
+) -> (Peer, PeerIdentity) {
     let mut listener = LocalListener::bind(&app.socket).unwrap();
     let peer = Peer(
         child(exe, app.socket.as_os_str())
@@ -190,6 +199,7 @@ async fn identify(app: &App, exe: &Path) -> (Peer, PeerIdentity) {
         .await
         .expect("对端没有连上")
         .unwrap();
+    while_connected();
     let identity = conn.peer().await.unwrap();
     (peer, identity)
 }
@@ -254,4 +264,56 @@ async fn main_executable_outside_manifest_is_rejected_as_not_trusted() {
         ),
         PeerVerdict::Rejected(RejectReason::ImageNotTrusted { image: other })
     );
+}
+
+/// 签名覆盖的代码页数（`codesign -dvvv` 的 `hashes=N+M` 里的 N，每页 4096 字节）：独立于被测代码。
+fn signed_pages(path: &Path) -> u64 {
+    let out = run_ok(Command::new("codesign").arg("-dvvv").arg(path));
+    let text = String::from_utf8_lossy(&out.stderr);
+    let n = text
+        .split_whitespace()
+        .find_map(|w| w.strip_prefix("hashes="))
+        .and_then(|h| h.split('+').next())
+        .unwrap_or_else(|| panic!("codesign 没给出 hashes=：{text}"));
+    n.parse().unwrap()
+}
+
+/// 不验包资源，但代码页照验（第 1 轮审查 1/F-1）：对端连着时，把它可执行文件里签名覆盖范围靠后的一页改一个字节
+/// （这一页它多半还没调入，动态校验看不出来），身份必须是取不到（-67061 = errSecCSSignatureFailed），不能是原来的 cdhash。
+/// 校验参数要是连代码页也不验，这条会变红。
+#[tokio::test]
+async fn tampered_code_page_of_unsealed_app_main_executable_is_unavailable() {
+    let app = App::new();
+    let exe = app.place_main(None);
+    let original = cdhash_by_codesign(&exe);
+    // 签名覆盖范围的 70% 处，对齐到页中间：在代码页里，又远离进程启动时会碰的开头
+    let offset = signed_pages(&exe) * 4096 * 7 / 10 / 4096 * 4096 + 2048;
+    let (_peer, identity) = identify_after(&app, &exe, || {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&exe)
+            .unwrap();
+        let mut b = [0u8; 1];
+        f.seek(SeekFrom::Start(offset)).unwrap();
+        f.read_exact(&mut b).unwrap();
+        f.seek(SeekFrom::Start(offset)).unwrap();
+        f.write_all(&[b[0] ^ 0xff]).unwrap();
+    })
+    .await;
+    match &identity.signer {
+        SignerIdentity::Unavailable { reason } => {
+            assert!(reason.contains("-67061"), "应当是代码页哈希不符：{reason}")
+        }
+        other => panic!("改了代码页的对端应当取不到身份，实际 {other:?}（原 cdhash {original:?}）"),
+    }
+    assert!(matches!(
+        judge_peer(
+            &app.daemon_identity(&original),
+            &identity,
+            TrustPolicy::RequireSigner
+        ),
+        PeerVerdict::Rejected(RejectReason::Unavailable { .. })
+    ));
 }
