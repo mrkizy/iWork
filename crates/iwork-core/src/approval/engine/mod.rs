@@ -458,7 +458,6 @@ where
             let mut bindings = BTreeMap::new();
             let mut plan = Vec::new();
             let f = &inner.folded;
-            let orphans = f.orphans();
             for (cid, conv) in f.conversations() {
                 let mut shared: BTreeMap<TurnId, Option<Arc<SessionKeys>>> = BTreeMap::new();
                 for (id, p) in &conv.pending {
@@ -477,31 +476,10 @@ where
                         );
                     }
                 }
-                let targets = orphans.get(cid).cloned().unwrap_or_default();
-                plan.extend(changes::plan_voids(f, conv, &targets));
-                for (id, p) in &conv.pending {
-                    let orphaned = targets
-                        .iter()
-                        .any(|t| matches!(t, fold::VoidTarget::Approval { id: o, .. } if o == id));
-                    // 同一条既是孤儿又在审查中：只出作废
-                    if let (false, ReviewState::InProgress { review_id }) =
-                        (orphaned, &p.approval.review)
-                    {
-                        let mode = f
-                            .turn_owner(p.approval.turn_id)
-                            .map_or(ApprovalMode::Manual, |o| conv.effective_mode(o.assistant));
-                        plan.extend(
-                            plan_approval(
-                                &p.approval,
-                                ApprovalTrigger::AiReviewAbandoned {
-                                    review_id: *review_id,
-                                },
-                                mode,
-                            )
-                            .expect("Pending + InProgress 可以放弃审查"),
-                        );
-                    }
-                }
+            }
+            // 恢复计划和运行中的清理是同一条常设义务：孤儿作废、失去执行者的审查放弃（启动时没有执行者）
+            for cid in inner.due_conversations() {
+                plan.extend(inner.due(cid));
             }
             inner.bindings = bindings;
             plan

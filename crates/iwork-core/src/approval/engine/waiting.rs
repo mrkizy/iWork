@@ -31,6 +31,60 @@ pub(super) struct Inner {
 }
 
 impl Inner {
+    /// 这条审批的审查在本进程里有没有执行者（发起它的请求 future 还活着）。
+    pub fn reviewing(&self, approval: ApprovalId) -> bool {
+        self.waiting.reviews.contains_key(&approval)
+    }
+
+    /// 有常设义务要做的对话：有孤儿，或有「审查中、但没有执行者」的待审批。
+    pub fn due_conversations(&self) -> Vec<ConversationId> {
+        let mut out: BTreeSet<ConversationId> = self.folded.orphans().into_keys().collect();
+        for (cid, conv) in self.folded.conversations() {
+            if conv.pending.values().any(|p| {
+                matches!(p.approval.review, ReviewState::InProgress { .. })
+                    && !self.reviewing(p.approval.id)
+            }) {
+                out.insert(*cid);
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// 这个对话的常设义务（方案 6.10.6 第 6、10 条；第 9 轮 9/F-1）：孤儿作废；审查中、但本进程里没有
+    /// 执行者的审查放弃（失去执行者，Q9），转问用户。同一条既是孤儿又在审查中时只出作废。
+    /// 只看已提交的状态和等待登记，谁调都一样、调几次都一样。
+    pub fn due(&self, conversation: ConversationId) -> Vec<DomainEvent> {
+        let f = &self.folded;
+        let Some(conv) = f.conversation(conversation) else {
+            return Vec::new();
+        };
+        let targets = f.orphans().remove(&conversation).unwrap_or_default();
+        let mut events = changes::plan_voids(f, conv, &targets);
+        for (id, p) in &conv.pending {
+            let orphaned = targets
+                .iter()
+                .any(|t| matches!(t, super::fold::VoidTarget::Approval { id: o, .. } if o == id));
+            if let (false, ReviewState::InProgress { review_id }) = (orphaned, &p.approval.review)
+                && !self.reviewing(*id)
+            {
+                let mode = f
+                    .turn_owner(p.approval.turn_id)
+                    .map_or(ApprovalMode::Manual, |o| conv.effective_mode(o.assistant));
+                events.extend(
+                    plan_approval(
+                        &p.approval,
+                        ApprovalTrigger::AiReviewAbandoned {
+                            review_id: *review_id,
+                        },
+                        mode,
+                    )
+                    .expect("Pending + InProgress 可以放弃审查"),
+                );
+            }
+        }
+        events
+    }
+
     /// 执行折叠给出的效果：往等待方的通道里发，非阻塞；找不到等待方就算了。
     pub fn run(&mut self, effects: Vec<Effect>) {
         for effect in effects {

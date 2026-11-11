@@ -41,6 +41,8 @@ pub struct MemStore {
     pub fail_read: Arc<AtomicBool>,
     /// 处理过的提交笔数（含空提交、含被拒的）
     pub commits: Arc<AtomicU64>,
+    /// 处理到第几笔（从 1 数，含空提交）时返回 Busy；0 表示不注入
+    pub fail_commit_at: Arc<AtomicU64>,
     /// 处理过的空提交（屏障）笔数
     pub empty_commits: Arc<AtomicU64>,
     pub commit_entered: Arc<AtomicBool>,
@@ -69,7 +71,9 @@ impl MemStore {
         if req.events.is_empty() {
             self.empty_commits.fetch_add(1, Ordering::SeqCst);
         }
-        if self.fail_next.swap(false, Ordering::SeqCst) {
+        if self.fail_next.swap(false, Ordering::SeqCst)
+            || self.fail_commit_at.load(Ordering::SeqCst) == self.commits.load(Ordering::SeqCst)
+        {
             return Err(StorageError::Busy);
         }
         let first = Seq(events.len() as u64 + 1);

@@ -1635,3 +1635,92 @@ async fn conversation_deleted_drops_bindings() {
     .await;
     settle(h).await;
 }
+
+/// 第 9 轮 9/F-1：审查跑完后，收尾那笔（k=1）或结论那笔（k=2）提交碰上一次 Busy。hook 拿到拒绝；
+/// 之后第一次 `sync` 把这条「审查中、但没有执行者」的审查放弃（和清孤儿同一条常设义务），转问用户，
+/// 不会停在审查中直到重启。对照：不调 `sync` 时它确实还在审查中。
+#[tokio::test]
+async fn t_review_busy_never_stays_in_progress() {
+    for k in [1u64, 2] {
+        for pass in [true, false] {
+            let b = Bench::new(Some(Auto)).await;
+            let gate = notify();
+            b.reviewer.push(ReviewScript::SaysAfter(
+                format!("{{\"pass\": {pass}, \"reason\": \"r\"}}"),
+                gate.clone(),
+            ));
+            let h = b.ask(
+                &b.decider(),
+                turn(1),
+                read_req("/home/u/Documents/notes/x.txt"),
+            );
+            let id = b.approval(0).await;
+            until("审查开始", || {
+                b.engine
+                    .pending_approval(id)
+                    .is_some_and(|a| matches!(a.review, ReviewState::InProgress { .. }))
+            })
+            .await;
+            settle_tasks().await;
+            let commits = b.store.commits.load(Ordering::SeqCst);
+            b.store.fail_commit_at.store(commits + k, Ordering::SeqCst);
+            gate.notify_one();
+            let answer = settle(h).await;
+            assert!(
+                matches!(&answer, PermissionDecision::Deny { message } if message.contains("存储繁忙")),
+                "k={k} pass={pass}: {answer:?}"
+            );
+            assert!(
+                matches!(
+                    b.pending(id).await.unwrap().review,
+                    ReviewState::InProgress { .. }
+                ),
+                "对照：没人收敛之前停在审查中"
+            );
+            b.engine.sync().await.unwrap();
+            let a = b.pending(id).await.unwrap();
+            assert!(
+                matches!(
+                    a.review,
+                    ReviewState::Abandoned {
+                        reason: AbandonReason::ExecutorLost,
+                        ..
+                    }
+                ),
+                "k={k} pass={pass}: {:?}",
+                a.review
+            );
+            assert!(a.awaits_user());
+            assert!(no_approved(&b, id));
+        }
+    }
+}
+
+/// 审查还在跑（执行者活着）时 `sync` 不碰它。
+#[tokio::test]
+async fn t_sync_leaves_running_review_alone() {
+    let b = Bench::new(Some(Auto)).await;
+    b.reviewer.push(ReviewScript::Hangs);
+    let h = b.ask(
+        &b.decider(),
+        turn(1),
+        read_req("/home/u/Documents/notes/x.txt"),
+    );
+    let id = b.approval(0).await;
+    until("审查开始", || {
+        b.engine
+            .pending_approval(id)
+            .is_some_and(|a| matches!(a.review, ReviewState::InProgress { .. }))
+    })
+    .await;
+    b.engine.sync().await.unwrap();
+    assert!(matches!(
+        b.pending(id).await.unwrap().review,
+        ReviewState::InProgress { .. }
+    ));
+    // 请求被丢弃（等待上限）：执行者没了，下一次 sync 放弃它
+    h.abort();
+    let _ = h.await;
+    b.engine.sync().await.unwrap();
+    assert!(b.pending(id).await.unwrap().awaits_user());
+}

@@ -3,7 +3,7 @@
 //! 令牌不保护数据，只让同一个对话里「追平 → 计划 → 提交」排队；折叠只认日志。
 //! 屏障：持有者在等提交回执时被取消，令牌放了、那笔还在写队列里。令牌记着「有一笔去向不明」，
 //! 下一位先排一笔空提交，等它回来（写线程按入队顺序处理，那笔一定有了结果）再读。
-use super::fold::{FoldError, VoidTarget};
+use super::fold::FoldError;
 use super::lock::OwnedAsyncGuard;
 use super::*;
 use iwork_ports::store::{EventFilter, StreamSelector};
@@ -165,17 +165,15 @@ where
         }
     }
 
-    /// 把孤儿作废掉。谁调都一样，调几次都一样；中途被丢弃，剩下的还在 `orphans()` 里，下一位接着清。
-    /// 前提：手里没有任何令牌、不在存储的写线程上。一个对话失败不挡别的对话，返回第一个错误。
+    /// 做常设义务：孤儿作废、失去执行者的审查放弃（`Inner::due`）。谁调都一样，调几次都一样；
+    /// 中途被丢弃，剩下的还在，下一位接着做。前提：手里没有任何令牌、不在存储的写线程上。
+    /// 一个对话失败不挡别的对话，返回第一个错误。
     pub async fn sweep_orphans(&self) -> Result<(), EngineError> {
-        let conversations: Vec<ConversationId> = {
-            let inner = lock_std(&self.inner);
-            inner.folded.orphans().into_keys().collect()
-        };
+        let conversations = lock_std(&self.inner).due_conversations();
         let mut first_error = None;
         for conversation in conversations {
             if let Err(error) = self.sweep_conversation(conversation).await {
-                tracing::error!(%conversation, %error, "清孤儿失败");
+                tracing::error!(%conversation, %error, "清孤儿 / 放弃无人执行的审查失败");
                 first_error.get_or_insert(error);
             }
         }
@@ -186,16 +184,10 @@ where
         for _ in 0..REPLAN_ATTEMPTS {
             let mut token = self.acquire(conversation).await?;
             self.catch_up().await?;
-            let events = {
-                let inner = lock_std(&self.inner);
-                let f = &inner.folded;
-                let targets: Vec<VoidTarget> =
-                    f.orphans().remove(&conversation).unwrap_or_default();
-                match f.conversation(conversation) {
-                    Some(conv) if !targets.is_empty() => changes::plan_voids(f, conv, &targets),
-                    _ => return Ok(()),
-                }
-            };
+            let events = lock_std(&self.inner).due(conversation);
+            if events.is_empty() {
+                return Ok(());
+            }
             match self
                 .commit_under(&mut [&mut token], ENGINE_ACTOR, events)
                 .await
