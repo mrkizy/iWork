@@ -1,6 +1,9 @@
 //! `OsPathResolver` 在真实文件系统上的行为（T07 验收 5、方案 S5），以及与 `FakeFs` 的对拍：
 //! 同一组目录与链接在两边搭一遍，同一组输入的解析结果必须相同——核心的测试全部用 `FakeFs`，
 //! 它的行为由这里证明与真实文件系统一致。
+//!
+//! 整个文件只在 Unix 上跑：M1 不支持 Windows（T03）；Windows 上的路径对拍等支持 Windows 时补。
+#![cfg(unix)]
 
 #[path = "../../iwork-ports/tests/fake_fs/mod.rs"]
 mod fake_fs;
@@ -24,7 +27,6 @@ struct Layout {
 impl Drop for Layout {
     /// 恢复权限，临时目录才删得掉。
     fn drop(&mut self) {
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(
@@ -77,7 +79,6 @@ impl Layout {
         }
         // 没有搜索权限的目录（查不清）：真实文件系统上 chmod 000，假的标 Denied
         mkdir(&mut fake, "ws/gate/root");
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(root.join("ws/gate"), std::fs::Permissions::from_mode(0o000))
@@ -108,15 +109,8 @@ impl Layout {
     }
 }
 
-#[cfg(unix)]
 fn symlink(target: &Path, at: &Path) {
     std::os::unix::fs::symlink(target, at).unwrap();
-}
-
-#[cfg(windows)]
-fn symlink(target: &Path, at: &Path) {
-    // 目录链接；没有开发者模式时建不出来，测试按失败报出（CI 的 Windows 作业有权限）
-    std::os::windows::fs::symlink_dir(target, at).unwrap();
 }
 
 #[test]
@@ -240,12 +234,10 @@ fn fake_fs_agrees_with_os() {
         "loop1",
         "",
         "/",
+        "src/a.rs/x",
+        "gate/root",
+        "gate",
     ];
-    // Windows 上普通文件后再接分量报「找不到」而不是「不是目录」，权限也没有 chmod 000：只在 unix 对拍
-    #[cfg(unix)]
-    let raws = [raws.as_slice(), &["src/a.rs/x", "gate/root", "gate"]].concat();
-    #[cfg(not(unix))]
-    let raws = raws.to_vec();
     for raw in raws {
         let os = l.os.resolve(&l.ws(), raw);
         let fake = l.fake.resolve(&l.ws(), raw);
@@ -296,7 +288,6 @@ fn trailing_slash_follows_last_link() {
 fn not_a_directory_and_permission_are_classified() {
     use iwork_ports::fs::ResolveCertainty;
     let l = Layout::new();
-    #[cfg(unix)]
     {
         let e = l.os.resolve(&l.ws(), "src/a.rs/x").unwrap_err();
         assert!(matches!(e, PathResolveError::NotADirectory { .. }), "{e:?}");
