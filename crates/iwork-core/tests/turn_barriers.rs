@@ -1698,20 +1698,26 @@ async fn recovery_keeps_denial_memory_and_grants<J: Judge>() {
     );
     if J::DENIAL_MEMORY {
         let c = w.ctl.ask("C", "rm -rf build");
+        let asked = || {
+            w.store
+                .all()
+                .iter()
+                .filter(|e| {
+                    matches!(e, DomainEvent::ApprovalRequested(r)
+                    if r.approval.action.raw_summary.contains("rm -rf build"))
+                })
+                .count()
+        };
+        // 没有拒绝记忆时会再问一次、一直等用户：两样谁先到都停下来判，不靠超时
+        wait_until("C 有结论或又问了用户", || {
+            c.is_finished() || asked() > 1
+        })
+        .await;
+        assert_eq!(asked(), 1, "自动拒绝，没有再问用户");
         assert!(
             matches!(c.await.unwrap(), PermissionDecision::Deny { .. }),
             "新会话里同一动作仍被拒"
         );
-        let asked = w
-            .store
-            .all()
-            .iter()
-            .filter(|e| {
-                matches!(e, DomainEvent::ApprovalRequested(r)
-                if r.approval.action.raw_summary.contains("rm -rf build"))
-            })
-            .count();
-        assert_eq!(asked, 1, "自动拒绝，没有再问用户");
     }
     w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
     assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Completed);
