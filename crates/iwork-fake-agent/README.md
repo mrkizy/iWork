@@ -11,6 +11,7 @@ iwork-fake-agent --script <脚本.json> [--record <记录.jsonl>]
   - 启动时先写自己的进程号：`{"started_pid": <进程号>}`；
   - 收到的请求与通知：`{"method": "initialize" | "session/new" | "session/load" | "session/prompt" | "session/cancel", "params": {...}}`，`params` 是 ACP 原样参数；
   - 每次权限答复：`{"permission_response": {...}}`；
+  - 客户端发来的每一行在读到时（派发之前）就记一条到达记录：`{"arrived": "<方法名>"}`，权限答复记成 `{"arrived": "permission_response <工具调用 id> <选项 id 或 cancelled>"}`。记录文件里到达记录的先后就是到达 stdin 的先后，测试用它比「答复在取消之前」；
   - 启动的子进程：`{"spawned_child": <进程号>}`。
 
 ## 脚本格式
@@ -94,6 +95,7 @@ iwork-fake-agent --script <脚本.json> [--record <记录.jsonl>]
 | `tool_call` | `id`、`name`、`title`（默认同 `name`）、`input`（任意 JSON，作为 `rawInput`） | 发 `tool_call`，状态 `in_progress` |
 | `tool_result` | `id`、`ok`、`output` | 发 `tool_call_update`，状态 `completed` 或 `failed`，`output` 作为文字内容 |
 | `permission` | `tool_call_id`、`cwd`（可选）、`allowed`（步骤数组）、`denied`（步骤数组） | 发 `session/request_permission`（带上同 id 的 `tool_call` 步骤给出的名字、标题与输入；给了 `cwd` 就放进请求的 `_meta.iwork.cwd`；选项：允许一次 `allow-once`、拒绝一次 `reject-once`），**一直等到客户端答复**；选了允许走 `allowed`，选了拒绝走 `denied`，答「已取消」按取消结束 |
+| `parallel_permissions` | `tool_call_ids`（字符串数组） | 同时为这几次工具调用发 `session/request_permission`（选项同上），全部有了答复再往下走；每个答复记 `{"tool_call_id": …, "permission_response": {…}}` |
 | `sleep` | `ms` | 等待；可被取消打断 |
 | `crash` | `exit_code`（默认 101） | 等 200ms 让已发出的消息写完，然后退出进程，不回任何响应（模拟输出到一半时崩溃） |
 | `hang` | 无 | 永不结束，也不理会取消，只能被结束进程（测试取消的 3 秒强制结束） |

@@ -608,3 +608,111 @@ async fn report_on_a_text_update_keeps_both() {
     );
     session.close().await.unwrap();
 }
+
+// ---------- T06 S2：权限任务只转发处理方的返回值；cancel() 先等答复写出去 ----------
+
+/// 处理方：进来一次记一次，等测试放行后拒绝；`release` 一直不放就一直不返回。
+#[derive(Default, Clone)]
+struct Releasable {
+    entered: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl PermissionHandler for Releasable {
+    async fn on_permission(&self, _req: PermissionRequest) -> PermissionDecision {
+        self.entered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.release.notified().await;
+        PermissionDecision::Deny {
+            message: "测试拒绝".into(),
+        }
+    }
+}
+
+fn waiting_permission_turn() -> serde_json::Value {
+    json!({ "turns": [{ "steps": [
+        { "type": "tool_call", "id": "t1", "name": "Bash", "input": { "command": "rm -rf build" } },
+        { "type": "permission", "tool_call_id": "t1" },
+        { "type": "sleep", "ms": 600000 }
+    ] }] })
+}
+
+async fn entered(handler: &Releasable) {
+    let start = std::time::Instant::now();
+    while handler.entered.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "权限请求没到处理方"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// 处理方一直不返回时，取消不会让权限任务自己答「已取消」：运行时收不到任何权限答复，
+/// `session/cancel` 照样在上限之后发出，回合以结束进程树收尾。
+#[tokio::test(flavor = "multi_thread")]
+async fn permission_task_forwards_handler_result_only() {
+    let fake = Fake::new(&waiting_permission_turn());
+    let handler = Releasable::default();
+    let session = AcpRuntime::new(fake.launch.clone())
+        .open_session(spec(fake.dir.path()), handler.clone())
+        .await
+        .unwrap();
+    let updates = session.prompt(text("hi")).await.unwrap();
+    entered(&handler).await;
+    session.cancel().await.unwrap();
+    let got = drain(updates).await;
+    assert_eq!(
+        got.last(),
+        Some(&AgentUpdate::Finished(TurnOutcome::Cancelled))
+    );
+    let arrivals = fake.arrivals();
+    assert!(
+        arrivals.iter().any(|a| a == "session/cancel"),
+        "对照：取消发出去了：{arrivals:?}"
+    );
+    assert!(
+        !arrivals
+            .iter()
+            .any(|a| a.starts_with("permission_response")),
+        "适配器没有替处理方答复：{arrivals:?}"
+    );
+    session.close().await.unwrap();
+}
+
+/// `cancel()` 先等这条会话上的权限任务把答复写出去，再发 `session/cancel`：处理方返回之前没有取消，
+/// 返回之后答复排在取消之前。
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_waits_for_permission_responses() {
+    let fake = Fake::new(&waiting_permission_turn());
+    let handler = Releasable::default();
+    let session = std::sync::Arc::new(
+        AcpRuntime::new(fake.launch.clone())
+            .open_session(spec(fake.dir.path()), handler.clone())
+            .await
+            .unwrap(),
+    );
+    let updates = session.prompt(text("hi")).await.unwrap();
+    entered(&handler).await;
+    let cancelling = {
+        let session = session.clone();
+        tokio::spawn(async move { session.cancel().await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!cancelling.is_finished(), "处理方还没返回，cancel() 在等");
+    assert!(
+        !fake.arrivals().iter().any(|a| a == "session/cancel"),
+        "{:?}",
+        fake.arrivals()
+    );
+    handler.release.notify_one();
+    cancelling.await.unwrap().unwrap();
+    drain(updates).await;
+    let arrivals = fake.arrivals();
+    let pos = |x: &str| arrivals.iter().position(|a| a == x).unwrap_or(usize::MAX);
+    assert!(
+        pos("permission_response t1 reject-once") < pos("session/cancel")
+            && pos("session/cancel") != usize::MAX,
+        "{arrivals:?}"
+    );
+}

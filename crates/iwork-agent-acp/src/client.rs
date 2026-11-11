@@ -4,11 +4,13 @@
 //! - 运行时的 `session/update` 在连接的派发循环里**同步**转成 [`AgentUpdate`] 放进当前回合的队列；
 //! - `session/request_permission` 在派发循环外的任务里交给 [`PermissionHandler`]，不占住派发循环，
 //!   所以等审批期间其他消息照常处理，而且转给处理方之前，它之前到达的更新都已进了队列（顺序保证，
-//!   编排核心据此把「工具调用开始」排在「等待审批」之前）；
+//!   编排核心据此把「工具调用开始」排在「等待审批」之前）。权限任务只转发处理方的返回值，自己不选
+//!   「已取消」：回合停下时让挂起的请求返回是处理方的约定（编排停止受理，T06 方案 2.6 第 3、5 条）；
 //! - prompt 响应到达时推最后一条（结束或失败），然后关闭队列；
 //! - 等任何请求的响应时都同时等进程退出：进程的后代可能还拿着 stdout，读端收不到 EOF，
 //!   不能只靠连接断开发现崩溃；
-//! - 取消：发 `session/cancel`，等 prompt 结束（最多 3 秒），然后**总是**结束整棵进程树并确认清空，
+//! - 取消：先等这条会话上的权限任务都把答复写出去（最多 3 秒），再发 `session/cancel`：已交付的「允许」
+//!   因此排在取消之前到达运行时。然后等 prompt 结束（最多 3 秒），**总是**结束整棵进程树并确认清空，
 //!   才推「已取消」。运行时配合取消时它起的子进程也可能还在跑，取消的完成条件是整棵树没了；
 //!   会话随之失效，下一回合按运行时会话 id 续接；
 //! - 运行时的上报（用量、额度、实际模型）挂在 `session/update` 通知的 `_meta` 上，解出来进当前回合；
@@ -398,8 +400,8 @@ impl ConnectionHandle {
 struct Shared {
     /// 当前回合的账；收尾方由它的锁决定（见 [`crate::turns`]）
     turns: TurnBook,
-    /// 每次取消加一；挂起的权限请求看到它变化就以「已取消」答复运行时
-    cancel_epoch: watch::Sender<u64>,
+    /// 还没把答复写出去的权限任务数。`cancel()` 等它归零再发 `session/cancel`
+    permission_tasks: watch::Sender<usize>,
     raw: RawLog,
     /// 连接层发现的致命错误（如消息超长），优先于「进程退出」报给上层
     fatal: Mutex<Option<String>>,
@@ -408,6 +410,22 @@ struct Shared {
 impl Shared {
     fn fatal(&self) -> Option<String> {
         self.fatal.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+}
+
+/// 一个还没把答复写出去的权限任务：登记时加一，丢弃（答复已写出或任务结束）时减一。
+struct PermissionTask(watch::Sender<usize>);
+
+impl PermissionTask {
+    fn start(count: &watch::Sender<usize>) -> Self {
+        count.send_modify(|n| *n += 1);
+        Self(count.clone())
+    }
+}
+
+impl Drop for PermissionTask {
+    fn drop(&mut self) {
+        self.0.send_modify(|n| *n -= 1);
     }
 }
 
@@ -521,13 +539,14 @@ async fn start_connection<H: PermissionHandler + 'static>(
                         RequestPermissionOutcome::Cancelled,
                     ));
                 };
-                let mut epoch = on_request.cancel_epoch.subscribe();
-                epoch.mark_unchanged();
+                // 在派发循环里登记：之后才调的 cancel() 一定等得到它
+                let in_flight = PermissionTask::start(&on_request.permission_tasks);
                 // 在派发循环里取：此前到达的更新都已进了队列，这个数就是它们的条数
                 let updates_before = on_request.turns.emitted();
                 let shared = on_request.clone();
                 // 不在派发循环里等审批：等待期间其他消息要照常处理
                 cx.spawn(async move {
+                    let _in_flight = in_flight;
                     let request = match convert::permission_request(&req, updates_before) {
                         Ok(request) => request,
                         // 约定项读不懂：不交给处理方，按拒绝答复运行时（失败即关闭）
@@ -538,15 +557,9 @@ async fn start_connection<H: PermissionHandler + 'static>(
                                 .respond(convert::permission_response(&req.options, &deny));
                         }
                     };
-                    let decision = tokio::select! {
-                        d = handler.on_permission(request) => Some(d),
-                        _ = epoch.changed() => None,
-                    };
-                    let response = match decision {
-                        Some(d) => convert::permission_response(&req.options, &d),
-                        None => RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
-                    };
-                    responder.respond(response)
+                    // 处理方返回什么就答什么：回执已经发出的结论没有第二个地方能把它换掉
+                    let decision = handler.on_permission(request).await;
+                    responder.respond(convert::permission_response(&req.options, &decision))
                 })
             },
             agent_client_protocol::on_receive_request!(),
@@ -674,7 +687,10 @@ impl AgentSession for AcpSession {
         let Some((turn_id, mut prompt_done)) = self.conn.shared.turns.request_cancel() else {
             return Ok(());
         };
-        self.conn.shared.cancel_epoch.send_modify(|e| *e += 1);
+        // 先让权限任务把答复写出去：调用方（编排）此前已停止受理，它们都已有结论、不再等编排；
+        // GRACE_PERIOD 只是处理方不守约定时的上限
+        let mut tasks = self.conn.shared.permission_tasks.subscribe();
+        let _ = tokio::time::timeout(GRACE_PERIOD, tasks.wait_for(|n| *n == 0)).await;
         let notified = self
             .conn
             .cx
@@ -705,13 +721,20 @@ impl AgentSession for AcpSession {
     }
 
     async fn terminate(&self) -> Result<(), AgentError> {
+        let pid = self.conn.process.pid();
+        tracing::debug!(pid, "terminate: enter");
         self.conn.cx.stop();
-        terminate_tree(self.conn.process.as_ref()).await
+        let result = terminate_tree(self.conn.process.as_ref()).await;
+        tracing::debug!(pid, ok = result.is_ok(), "terminate: exit");
+        result
     }
 
     async fn close(self) -> Result<(), AgentError> {
+        let pid = self.conn.process.pid();
+        tracing::debug!(pid, "close: enter");
         self.conn.cx.stop();
         self.conn.process.shutdown().await;
+        tracing::debug!(pid, "close: exit");
         Ok(())
     }
 }

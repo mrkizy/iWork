@@ -176,13 +176,17 @@ impl SupervisedProcess {
 
     /// 结束整棵树并等它消失，最多等 [`TREE_CLEAR_LIMIT`]。返回是否确认已清空。
     pub async fn kill_tree_and_wait(&self) -> bool {
+        let pid = self.pid();
+        tracing::debug!(pid, "kill_tree_and_wait: enter");
         self.tree.kill();
         let deadline = tokio::time::Instant::now() + TREE_CLEAR_LIMIT;
         loop {
             if matches!(self.tree.is_empty(), Ok(true)) {
+                tracing::debug!(pid, cleared = true, "kill_tree_and_wait: exit");
                 return true;
             }
             if tokio::time::Instant::now() >= deadline {
+                tracing::debug!(pid, cleared = false, "kill_tree_and_wait: exit");
                 return false;
             }
             // 组里还有进程（含刚被结束、尚未回收的），再补一次信号
@@ -193,9 +197,13 @@ impl SupervisedProcess {
 
     /// 先请进程退出，等 [`GRACE_PERIOD`]，再结束整棵树（组长退出后，组里可能还有它的子进程）。
     pub async fn shutdown(&self) {
+        let pid = self.pid();
+        tracing::debug!(pid, "shutdown: enter");
         self.tree.terminate();
-        self.wait_exit(GRACE_PERIOD).await;
-        self.kill_tree_and_wait().await;
+        let exited = self.wait_exit(GRACE_PERIOD).await.is_some();
+        tracing::debug!(pid, exited, "shutdown: waited for exit");
+        let cleared = self.kill_tree_and_wait().await;
+        tracing::debug!(pid, cleared, "shutdown: exit");
     }
 
     /// 整棵树是否已经没有进程（Unix 查进程组，Windows 查 Job 里的活动进程数）。

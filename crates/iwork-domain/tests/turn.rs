@@ -38,7 +38,7 @@ fn turn_in(state: TurnState) -> Turn {
 fn turn_table_forward() {
     assert_eq!(
         TURN_TRANSITIONS.len(),
-        19,
+        21,
         "对照：表行数，防止表被清空后正向检查空转"
     );
     assert_eq!(check_forward(turn::next, TURN_TRANSITIONS), vec![]);
@@ -268,4 +268,21 @@ fn triggers_that_void_pending_approvals() {
     );
     // 对照：等待上限中断不作废
     assert_eq!(T::WaitLimitReached.void_reason(), None);
+}
+
+/// 中断的回合可以失败（两种原因都行），失败作废审批；中断的回合不能「完成」。手写期望。
+#[test]
+fn interrupted_can_fail() {
+    for reason in [Crash, ApprovalWaitLimit] {
+        assert_eq!(
+            turn::next(S::Interrupted { reason }, T::Failed),
+            Ok(S::Failed)
+        );
+    }
+    assert_eq!(
+        T::Failed.void_reason(),
+        Some(iwork_domain::approval::VoidReason::TurnFailed)
+    );
+    // 对照：中断之后不能直接「完成」
+    assert!(turn::next(S::Interrupted { reason: Crash }, T::Completed).is_err());
 }
