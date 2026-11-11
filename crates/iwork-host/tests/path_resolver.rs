@@ -38,7 +38,7 @@ impl Drop for Layout {
 impl Layout {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
+        let root = without_verbatim(dir.path().canonicalize().unwrap());
         let ci = OsPathResolver::detect_case_insensitive(&root).unwrap();
         let home = root.join("home");
         let mut fake = FakeFs::new(&home, ci);
@@ -105,6 +105,14 @@ impl Layout {
         } else {
             CanonicalPath(p)
         }
+    }
+}
+
+/// 期望值的写法与解析器的输出一致：Windows 上去掉 `canonicalize` 带的 `\\?\` 前缀（解析器的约定）。
+fn without_verbatim(p: PathBuf) -> PathBuf {
+    match p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => p,
     }
 }
 
