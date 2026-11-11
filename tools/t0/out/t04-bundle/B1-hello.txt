@@ -1,0 +1,2 @@
+self signer=certificate:f8447a1b exe_dir=<work>/BH/iWork.app/Contents/MacOS manifest=none
+handshake=ok welcome_server_version=t04-probe

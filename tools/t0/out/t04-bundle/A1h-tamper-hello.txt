@@ -1,0 +1,3 @@
+2026-11-11T07:21:34.400252Z  WARN iwork.ipc.audit: event="manifest_loaded" path=<work>/PT/iWork.app/Contents/MacOS/iwork-manifest.json app_version=0.1.0 entries=2 self_listed=false
+self signer=cdhash:ec080d26 exe_dir=<work>/PT/iWork.app/Contents/MacOS manifest=app_version=0.1.0 entries=2
+handshake=error 后台服务在握手完成前关闭了连接

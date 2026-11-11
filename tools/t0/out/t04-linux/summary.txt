@@ -1,0 +1,18 @@
+# T04 N5 C 组 Linux  2026-11-11 07:05:40
+Linux 7.0.11-orbstack-00360-gc9bc4d96ac70 aarch64；rustc 1.99.1 (58cf8f9c3 2026-10-13)
+## C 带清单那一行
+  PASS C1a 真实后台 + 客户端位置的探针，tar 解开后：Complete
+  PASS C1b 后台截断一半：Incomplete
+  PASS C1c 删掉清单：NotThisForm
+## C 两端握手（两端都是探针，按清单互认）
+  PASS C2a 后台 manifest_loaded self_listed：1
+  PASS C2b 客户端 manifest_loaded self_listed：1
+  PASS C2c 握手：handshake=ok
+## C 运行映像身份
+  PASS C3a 启动时的映像身份 == /proc/self/exe 所指文件的 SHA-256：sha256:828c060df2e7096bb264170bb05b13c3435dcdbe4a422a21fd2fc14c1c93eeeb
+  PASS C3b 路径上换成别的文件后，每次重取仍是原值：0
+  换文件后重取：tick=0 image=<原值>;tick=1 image=<原值>;tick=2 image=<原值>;tick=3 image=<原值>;tick=4 image=<原值>;
+## C T03 的 peer_manifest 测试
+  PASS C4 cargo test -p iwork-ipc --test peer_manifest：ok
+  test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.61s
+FAIL 共 0 项

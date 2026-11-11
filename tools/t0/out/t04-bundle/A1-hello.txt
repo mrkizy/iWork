@@ -1,0 +1,1 @@
+self_error=取本进程身份失败：本进程映像身份取不到：SecStaticCodeCheckValidity 失败（OSStatus -67056）

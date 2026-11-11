@@ -1,0 +1,5 @@
+== rm-resource: verify=-67054 ms=27.4 The operation couldn’t be completed. (OSStatus error -67054.)
+== trunc-daemon: verify=-67045 ms=20.8 The operation couldn’t be completed. (OSStatus error -67045.)
+== trunc-client: verify=-67045 ms=3.8 The operation couldn’t be completed. (OSStatus error -67045.)
+== plist-byte: verify=-67030 ms=8.6 The operation couldn’t be completed. (OSStatus error -67030.)
+== extra-file: verify=-67054 ms=22.6 The operation couldn’t be completed. (OSStatus error -67054.)

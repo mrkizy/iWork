@@ -181,3 +181,49 @@
 - 两个方向都存在：冒充客户端（exec 被信任的客户端）、冒充后台（exec 出来的后台往继承的 fd 写日志）。
 - 前提：攻击者是同用户、能在本机运行代码。这比方案已知限制 L2（能在后台启动前改安装目录）门槛低，不需要改任何文件。
 - 实现里没有为它加任何机制（安全设计原则：不擅自加机制）。可选方向（未实现、未评估）：macOS 记下判定通过时的完整审计令牌，之后每帧前再读一次比对，变了就断开；Linux 没有等价的「最后读写者」信息。产品负责人已决定记为已知限制、不另加机制（需求第 9 章，v1.73）。
+
+## 7 T04 生命周期实测（2026-11-11）
+
+为 T04 方案第 8 节 N1–N5 补的实测。脚本在 `tools/t0/iwork-t04-*`，原始输出在 `tools/t0/out/t04-*`（临时目录与家目录已脱敏）。方案要求 N5 最先做、不过就停：**N5 有一项不过（7.1 A1），N1–N4 未做**，等 supervisor 定修法后再继续。
+
+### 7.1 N5 真实包上完成依据与签名能不能同时成立
+
+环境：macOS 27.2（26B5086k）arm64，测时 loadavg 30–53（提交的输出那一轮）；`pnpm -C client tauri build --bundles app` 的真实产物 + `cargo build --release -p iwork-daemon`。脚本 `tools/t0/iwork-t04-bundle-probe.sh`（macOS）与 `tools/t0/iwork-t04-linux-bundle.sh`（Linux，Docker `rust:1`，Linux 7.0.11 aarch64）。
+
+后台现在还是空壳、客户端还不会连后台，所以「握手」与「运行映像身份」两件事用探针冒充两个角色，放在真实包的同一位置、按同样方式签名或登记清单：`iwork-t04-ipcprobe.rs`（依赖 `iwork-ipc`、**不开 dev feature**，走发布构建的 `RequireSigner`，`SelfIdentity::detect` 与对端判定都是 T03 已合入的代码）；`iwork-t04-imgprobe.c`（与 `peer/macos.rs` 同一串 Security 调用）。客户端主程序、资源、`Info.plist` 都是 tauri 的原样产物。两种包形态里「带清单那一行」「整包签名那一行」的判定按方案 2.9 的定义用 shell 写了一遍。
+
+**第 0 项：tauri build 没配签名身份时不做整包签名。** 包里没有 `Contents/_CodeSignature`，主程序只有链接器的 ad-hoc 签名（`flags=0x20002(adhoc,linker-signed)`），与 `target/release/iwork-client` 逐字节相同。所以无证书形态不用额外去掉整包签名。
+
+| 项 | 结果 | 说明 |
+| --- | --- | --- |
+| A1 启动 | 通过 | 真实客户端命令行起、`open` 起，5 秒后都在 |
+| A1 两端互认 | **不通过** | 后台位置 `manifest_loaded{self_listed=true}`；**客户端位置（包的主程序）`SelfIdentity::detect` 失败**：`SecStaticCodeCheckValidity 失败（OSStatus -67056）`，握手无从谈起 |
+| A2 | 通过 | 真实客户端运行中的 cdhash（`codesign -dvvv <pid>`）= 清单 `cdhash:`；后台位置运行映像 cdhash = 清单 `cdhash:`；两个 `sha256:` = 文件全文哈希 |
+| A3 | 通过 | 完整 → `Complete`；删清单 → `NotThisForm`；后台截断一半 → `Incomplete`；整包签名那一行 → `NotThisForm` |
+| A4（记录） | — | `codesign --verify --deep --strict` 与 `spctl` 都报 `code has no resources but signature indicates they must be present`；带隔离标记时命令行直接起主程序照常运行；双击走 Gatekeeper 弹窗，无人值守没做 |
+| B1 | 通过 | 自签证书整包签名、包里不放清单：`codesign --verify --deep --strict` 与 `SecStaticCodeCheckValidity`（严格 + 嵌套 + 全部架构）都过；整包签名那一行 `Complete`、带清单那一行 `NotThisForm`；对照：两个角色（证书签名）握手成功 |
+| B2 | 通过 | 删资源、截断后台、截断客户端、改 `Info.plist` 一字节、多放一个文件：五种都验签不过、判 `Incomplete` |
+| B3 | 通过 | 后台位置磁盘静态 cdhash = 运行中 cdhash；换构建标记重签后两者都变；真实客户端（证书签名）运行中 = 静态 |
+| B4（记数） | — | 整包验签 20–24 ms（包 10 MB，5 次，高负载） |
+| B5 | 通过 | 签名后加清单 → 验签不过；签名前把清单放进 `Contents/MacOS` 再签 → codesign 直接失败（`In subcomponent: …/iwork-manifest.json`，它把 `MacOS` 下的文件当代码）。两条路都走不通，「有证书的包不放清单」不是可选项 |
+| B6 | 通过 | 拿走一个资源 → `Incomplete`；放回 → `Complete`；三个时刻后台程序与封印文件的 size/mtime/inode 都相同 |
+| C（Linux） | 通过 | 两个二进制 + 清单打 tar 再解开：带清单那一行 `Complete`、截断 → `Incomplete`、删清单 → `NotThisForm`；两端按清单握手成功；启动时的映像身份 = `/proc/self/exe` 的 SHA-256，路径上换文件后每次重取仍是原值；T03 `peer_manifest` 6 条通过 |
+| D1–D3 | 通过 | A、B 两种包、mv 与 rm 两种换法：运行映像 cdhash 都取得到、等于自己路径的静态 cdhash；换文件后重取只会是原值（mv）或 -67034（rm），从不报成新文件；同一张证书签的两个构建取到的值不同；读静态 cdhash 不读全文（文件中部改坏一字节照样取到原值，10 MB 文件 2.5–4.3 ms，与 50 KB 的文件同一量级）；通用二进制取的是本机架构那一片 |
+| E1 | 通过 | A 目录整包换成 B → 清单那一行 `NotThisForm`、签名那一行 `Complete`；反方向对称 |
+| E2（记录） | — | B 合并拷进 A（旧清单残留）→ 两行都 `Incomplete`，验签 -67054；删掉残留清单后签名那一行 `Complete` |
+
+**A1 不通过的根因**（`A1g`）：同一个探针放在三处，对自己的运行映像做 `peer/macos.rs` `check_image_file` 那一步（`SecCodeCopyStaticCode` → `SecStaticCodeCheckValidity`）：
+
+| 位置 | 默认参数 | `kSecCSDoNotValidateResources` | 动态校验 |
+| --- | --- | --- | --- |
+| 未封印 .app 的主程序（`CFBundleExecutable`） | **-67056**（`errSecCSResourcesNotFound`） | 0 | 0 |
+| 未封印 .app 的 `Contents/MacOS` 里另一个程序 | 0 | 0 | 0 |
+| 散放的二进制（T03 实测的形态） | 0 | 0 | 0 |
+
+包的主程序的静态代码对象代表整个包：链接器签名没有资源封印，按默认参数就判「签名说有资源、却找不到」。T03 的实测（6.3）只测过散放的二进制，没碰到。影响两个方向：客户端算不出自己的身份、拒绝启动；后台判客户端这个对端时走同一个 `check_image_file`，同样会得到 `Unavailable` 并拒绝。后台（不是主程序）不受影响。
+
+**候选修法的验证**（`A1h`，只在临时副本里改，仓库代码没动）：`check_image_file` 的静态校验带上 `kSecCSDoNotValidateResources`（只跳过包资源，代码页哈希照验；T03 加这一步本来就是为了验「还没调入的页」）。结果：形态 A 两个角色握手成功；形态 B 同样成功；把客户端换成清单外的映像（换签名标识重签，cdhash 必变）→ 后台以 `ImageNotTrusted` 拒绝。注意「在文件末尾追加一字节」造不出清单外的映像：签名之外的尾部不在代码目录覆盖范围内，cdhash 不变。
+
+### 7.2 N1–N4
+
+未做（N5 不过，按方案停下）。脚本已写好（`tools/t0/iwork-t04-macos-smappservice.sh`、`iwork-t04-smprobe.m`），等 N5 的修法定下后再跑。

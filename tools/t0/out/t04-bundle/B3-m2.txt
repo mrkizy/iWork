@@ -1,0 +1,3 @@
+pid=75722 mark=iwork-t04-imgprobe-mark-2
+running=7b0a94ab51894936f6085482ac593a42b0b901b3 status=0 path=<work>/B3/m2/iWork.app/Contents/MacOS/iwork-daemon
+static=7b0a94ab51894936f6085482ac593a42b0b901b3 status=0 equal=yes
