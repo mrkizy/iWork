@@ -426,7 +426,11 @@ fn dispatch_child() {
     });
 }
 
+/// 子进程走到停点的时限：编译好的二进制起库、跑到停点只要几百毫秒，留足机器繁忙时的余量
+const CHILD_DEADLINE: Duration = Duration::from_secs(60);
+
 /// 起子进程跑到 `mode` 停住，返回它报告的那一行（去掉 `AT <mode> `），然后 `kill -9`。
+/// 超时或子进程提前退出都先杀掉它，再点名卡在哪个停点。
 fn crash_at(root: &Path, mode: &str) -> String {
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args([
@@ -443,19 +447,32 @@ fn crash_at(root: &Path, mode: &str) -> String {
         .expect("起子进程");
     let stdout = BufReader::new(child.stdout.take().unwrap());
     let prefix = format!("AT {mode} ");
-    let mut seen = None;
-    for line in stdout.lines() {
-        let line = line.expect("读子进程输出");
-        // libtest 先在同一行打出「test dispatch_child ... 」，标记不在行首
-        if let Some(at) = line.find(&prefix) {
-            seen = Some(line[at + prefix.len()..].to_owned());
-            break;
+    let (tx, rx) = std::sync::mpsc::channel();
+    // 读输出放在线程里，主线程才能限时等
+    std::thread::spawn(move || {
+        for line in stdout.lines() {
+            let Ok(line) = line else { break };
+            // libtest 先在同一行打出「test dispatch_child ... 」，标记不在行首
+            if let Some(at) = line.find(&prefix) {
+                let _ = tx.send(line[at + prefix.len()..].to_owned());
+                return;
+            }
         }
-    }
+        // 输出结束还没见到标记：发送端随线程丢弃，主线程收到 Disconnected
+    });
+    let seen = rx.recv_timeout(CHILD_DEADLINE);
     // Unix 上是 SIGKILL，Windows 上是 TerminateProcess：不给进程任何收尾的机会
     child.kill().expect("杀子进程");
     child.wait().expect("等子进程退出");
-    seen.unwrap_or_else(|| panic!("子进程没走到 {mode} 就退出了"))
+    match seen {
+        Ok(seen) => seen,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("子进程 {CHILD_DEADLINE:?} 内没走到停点 {mode}，已杀掉")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("子进程没走到停点 {mode} 就退出了")
+        }
+    }
 }
 
 fn data_root() -> (tempfile::TempDir, PathBuf) {

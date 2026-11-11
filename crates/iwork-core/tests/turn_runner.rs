@@ -52,6 +52,13 @@ struct Ctl {
     closes: AtomicUsize,
     /// 为真时更新流永远就绪（不停输出文字），直到收到取消
     flood: AtomicBool,
+    /// 调过几次 prompt（含返回错误的）
+    prompt_calls: AtomicUsize,
+    /// 依次给接下来的 prompt 调用返回这些错误；空了就正常受理
+    prompt_errors: Mutex<VecDeque<AgentError>>,
+    /// 设了就让下一次 open_session 返回它
+    fail_next_open: Mutex<Option<AgentError>>,
+    opens: AtomicUsize,
 }
 
 impl Ctl {
@@ -100,6 +107,10 @@ impl AgentPort for FakeAgent {
         _spec: SessionSpec,
         on_permission: H,
     ) -> Result<FakeSession, AgentError> {
+        self.0.opens.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = self.0.fail_next_open.lock().unwrap().take() {
+            return Err(error);
+        }
         let h = Arc::new(on_permission);
         let handler: Handler = Arc::new(move |req| {
             let h = h.clone();
@@ -118,6 +129,10 @@ impl AgentSession for FakeSession {
     }
 
     async fn prompt(&self, _blocks: Vec<ContentBlock>) -> Result<FakeUpdates, AgentError> {
+        self.0.prompt_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = self.0.prompt_errors.lock().unwrap().pop_front() {
+            return Err(error);
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         *self.0.updates.lock().unwrap() = Some(tx);
         self.0.sent.store(0, Ordering::SeqCst);
@@ -207,6 +222,42 @@ struct Store {
 }
 
 impl Store {
+    /// 某个回合的状态、会话绑定、助手消息与结束事件，渲染成便于比对的短文本。
+    fn trail_of(&self, turn: TurnId) -> Vec<String> {
+        let events = self.events.lock().unwrap();
+        // MessageCompleted 不带回合，按本回合追加的助手消息认
+        let messages: Vec<MessageId> = events
+            .iter()
+            .filter_map(|e| match e {
+                DomainEvent::MessageAppended(m) if m.message.turn_id == Some(turn) => {
+                    Some(m.message.id)
+                }
+                _ => None,
+            })
+            .collect();
+        events
+            .iter()
+            .filter_map(|e| match e {
+                DomainEvent::TurnSessionBound(b) if b.turn_id == turn => {
+                    Some(format!("bound {}", b.runtime_session_id))
+                }
+                DomainEvent::TurnStateChanged(c) if c.turn_id == turn => {
+                    Some(format!("{:?} -> {:?}", c.from, c.to))
+                }
+                DomainEvent::MessageAppended(m) if m.message.turn_id == Some(turn) => {
+                    Some(format!("message {:?}", m.message.status))
+                }
+                DomainEvent::MessageCompleted(m) if messages.contains(&m.message_id) => {
+                    Some(format!("completed {:?}", m.status))
+                }
+                DomainEvent::TurnFinished(f) if f.turn_id == turn => {
+                    Some(format!("finished {:?}", f.state))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// 某个回合最后一次状态变化后的状态。
     fn state_of(&self, turn: TurnId) -> Option<TurnState> {
         self.events
@@ -707,4 +758,100 @@ async fn trailing_text_is_checkpointed_without_further_updates() {
     // 判定方此时才答复：回合已结束，运行时拿到拒绝
     b.decider.answer(PermissionDecision::Allow);
     assert_eq!(ask.await.unwrap(), gone());
+}
+
+// ---------- 回合已进 Running、prompt 发不出去：按失败收尾 ----------
+
+/// 提交了「开始执行」之后 prompt 才失败，回合从 Running 收尾为 Failed（不再是 Queued -> Failed）。
+fn failed_after_start() -> Vec<String> {
+    [
+        "bound fake",
+        "Queued -> Running",
+        "message Streaming",
+        "Running -> Failed",
+        "completed Failed",
+        "finished Failed",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
+fn exited() -> AgentError {
+    AgentError::ProcessExited {
+        message: "退出了".into(),
+    }
+}
+
+/// 先跑完一个回合，让会话线留着一条会话（下一回合沿用它）。
+async fn line_with_session(b: &Arc<Bench>) -> Line {
+    let (line, _) = b.line();
+    let task = b.spawn(line, b.plan());
+    b.wait_prompts(1).await;
+    b.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+    let (result, line) = task.await.unwrap();
+    assert_eq!(result.unwrap(), TurnState::Completed);
+    assert!(line.session().is_some(), "对照：会话留着");
+    line
+}
+
+/// ① 新开的会话上 prompt 报进程退出：不重试，回合失败；会话丢掉，续接 ID 留着。
+#[tokio::test(flavor = "multi_thread")]
+async fn prompt_failure_on_new_session_fails_running_turn() {
+    let b = Bench::new();
+    b.ctl.prompt_errors.lock().unwrap().push_back(exited());
+    let (line, _) = b.line();
+    let plan = b.plan();
+    let t = plan.turn.id;
+    let (result, line) = b.spawn(line, plan).await.unwrap();
+    assert_eq!(result.unwrap(), TurnState::Failed);
+    assert_eq!(b.store.trail_of(t), failed_after_start());
+    assert_eq!(b.ctl.prompt_calls.load(Ordering::SeqCst), 1, "新会话不重试");
+    assert_eq!(b.ctl.opens.load(Ordering::SeqCst), 1);
+    assert!(line.session().is_none(), "进程退出的会话丢掉");
+    assert_eq!(line.resume_id(), Some("fake"), "下一回合还能续接");
+}
+
+/// ② 沿用的会话进程已退出，续接时 open_session 失败：回合失败，没有第二次 prompt。
+#[tokio::test(flavor = "multi_thread")]
+async fn reopen_failure_after_exited_session_fails_running_turn() {
+    let b = Bench::new();
+    let line = line_with_session(&b).await;
+    let calls_before = b.ctl.prompt_calls.load(Ordering::SeqCst);
+    b.ctl.prompt_errors.lock().unwrap().push_back(exited());
+    *b.ctl.fail_next_open.lock().unwrap() = Some(exited());
+    let plan = b.plan();
+    let t = plan.turn.id;
+    let (result, line) = b.spawn(line, plan).await.unwrap();
+    assert_eq!(result.unwrap(), TurnState::Failed);
+    assert_eq!(b.store.trail_of(t), failed_after_start());
+    assert_eq!(
+        b.ctl.prompt_calls.load(Ordering::SeqCst) - calls_before,
+        1,
+        "只在死掉的会话上试过一次"
+    );
+    assert_eq!(b.ctl.opens.load(Ordering::SeqCst), 2, "续接试了一次");
+    assert!(line.session().is_none());
+    assert_eq!(line.resume_id(), Some("fake"));
+}
+
+/// ③ 续接成功，第二次 prompt 仍报进程退出：回合失败，不再续接第三次。
+#[tokio::test(flavor = "multi_thread")]
+async fn second_prompt_failure_after_reopen_fails_running_turn() {
+    let b = Bench::new();
+    let line = line_with_session(&b).await;
+    let calls_before = b.ctl.prompt_calls.load(Ordering::SeqCst);
+    b.ctl
+        .prompt_errors
+        .lock()
+        .unwrap()
+        .extend([exited(), exited()]);
+    let plan = b.plan();
+    let t = plan.turn.id;
+    let (result, line) = b.spawn(line, plan).await.unwrap();
+    assert_eq!(result.unwrap(), TurnState::Failed);
+    assert_eq!(b.store.trail_of(t), failed_after_start());
+    assert_eq!(b.ctl.prompt_calls.load(Ordering::SeqCst) - calls_before, 2);
+    assert_eq!(b.ctl.opens.load(Ordering::SeqCst), 2);
+    assert!(line.session().is_none());
+    assert_eq!(line.resume_id(), Some("fake"));
 }
