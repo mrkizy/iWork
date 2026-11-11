@@ -74,7 +74,7 @@ pub enum Effect {
     CardSettled { card: UserActionId, message: String },
     /// 回合结束：外壳丢掉这个回合名下剩下的会话绑定
     TurnClosed { turn: TurnId },
-    /// 对话整条没了：外壳丢掉这个对话的绑定与令牌
+    /// 对话整条没了：外壳丢掉这个对话的绑定（令牌不丢：丢了会出现同一对话两把令牌）
     ConversationGone { conversation: ConversationId },
 }
 
@@ -336,9 +336,12 @@ impl Folded {
                 effects.push(Effect::TurnClosed { turn: e.turn_id });
             }
             E::ApprovalDelivered(e) => {
-                // 被拒绝的审批交付时也有这条事件：不在等交付里就什么都不做
+                // 交付过就是用掉了：等交付里的删，放行里的也删（批准 → 中断 → 交付这个次序今天造不出来，
+                // 编排中断后清票；守住它是为了 T06 接等待上限时次序写反也不会「批一次执行两次」，9/F-6）。
+                // 被拒绝的审批交付时也有这条事件：两处都没有就什么都不做
                 if let Some(conv) = self.turn_conversation_mut(e.turn_id) {
                     conv.awaiting_delivery.remove(&e.approval_id);
+                    conv.grants.remove(&e.approval_id);
                 }
             }
             E::ApprovalRequested(e) => {

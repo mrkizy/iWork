@@ -337,6 +337,26 @@ fn delivered_removes_awaiting_and_ignores_others() {
     assert!(f.grant(apid(1)).is_none());
 }
 
+/// 9/F-6：批准 → 中断（挪进放行）→ 交付同一条：交付过就是用掉了，放行不留。
+#[test]
+fn delivered_after_interrupt_drops_grant() {
+    let (f, _) = fold(&with(&[
+        e_requested(approval(1, 20, 10, "a")),
+        e_allowed(1),
+        e_interrupted(20),
+    ]));
+    assert!(f.grant(apid(1)).is_some(), "对照：中断时挪进了放行");
+    let (f, _) = fold(&with(&[
+        e_requested(approval(1, 20, 10, "a")),
+        e_allowed(1),
+        e_interrupted(20),
+        e_delivered(1, 20),
+    ]));
+    assert!(f.grant(apid(1)).is_none());
+    assert!(f.awaiting_delivery(apid(1)).is_none());
+    assert!(f.turns_to_resume().is_empty());
+}
+
 #[test]
 fn turn_finished_closes_and_keeps_owner() {
     let (f, effects) = fold(&with(&[
