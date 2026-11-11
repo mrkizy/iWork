@@ -1167,3 +1167,10 @@ pub fn ev_recovery_completed() -> DomainEvent {
         interrupted_turn_ids: vec![s(TURN)],
     }))
 }
+
+pub fn ev_turn_session_bound() -> DomainEvent {
+    ev(E::TurnSessionBound(TurnSessionBound {
+        turn_id: s(TURN),
+        runtime_session_id: s("sess-1"),
+    }))
+}

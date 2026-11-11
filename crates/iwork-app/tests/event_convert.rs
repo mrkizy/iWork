@@ -13,7 +13,7 @@ use support::arb::event_strategies;
 use support::oneof_fields;
 
 /// 任意 domain 事件 → proto → domain，等于原值；再经二进制编码一次也一样。
-/// 逐个变体跑，保证 52 个变体每个都被测到（混在一个 oneof 里随机抽可能漏）。
+/// 逐个变体跑，保证 53 个变体每个都被测到（混在一个 oneof 里随机抽可能漏）。
 #[test]
 fn domain_event_proto_roundtrip() {
     let strategies = event_strategies();
@@ -68,7 +68,7 @@ fn domain_event_kinds_match_proto_oneof() {
         .into_iter()
         .map(|(_, name)| name)
         .collect();
-    assert_eq!(proto.len(), 52, "对照：proto 事件数");
+    assert_eq!(proto.len(), 53, "对照：proto 事件数");
     assert_eq!(proto, DomainEvent::KINDS);
 }
 

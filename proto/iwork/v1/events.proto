@@ -57,6 +57,7 @@ message DomainEvent {
     TurnModelReported turn_model_reported = 83;
     ToolCallStarted tool_call_started = 84;
     ToolCallFinished tool_call_finished = 85;
+    TurnSessionBound turn_session_bound = 86;
 
     // 审批 110–129
     ApprovalRequested approval_requested = 110;
@@ -292,6 +293,15 @@ message TurnFinished {
 message TurnModelReported {
   string turn_id = 1;
   ModelSelection model = 2;
+}
+
+// 流：turn（turn_id）。回合跑在哪条运行时会话上：发 prompt 之前、与回合进 Running 同一次提交，
+// 后台服务崩溃后「继续」靠它续接原会话（需求 12）。
+// 新事件种类（M1 补丁 2026-11-10 加）：按 PD6 算「带迁移」，只能向前修。旧程序读到这种事件起不来，
+// 写过它的库不能靠装回不带它的版本回退。
+message TurnSessionBound {
+  string turn_id = 1;
+  string runtime_session_id = 2;
 }
 
 // 流：turn（turn_id）。ui-m1.md 第 04 页「工具活动」。

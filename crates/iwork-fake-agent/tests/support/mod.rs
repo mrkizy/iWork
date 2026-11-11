@@ -224,6 +224,7 @@ pub fn describe(e: &DomainEvent) -> String {
             format!("tool finished {} ok={}", t.tool_call_id.0, t.ok)
         }
         DomainEvent::TurnFinished(t) => format!("turn finished {:?}", t.state),
+        DomainEvent::TurnSessionBound(b) => format!("session bound {}", b.runtime_session_id),
         other => other.kind().to_string(),
     }
 }

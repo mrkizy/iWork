@@ -2,7 +2,8 @@
 
 use iwork_domain::common::Usage;
 use iwork_domain::event::{
-    ToolCallFinished, ToolCallStarted, TurnModelReported, TurnQueued, TurnStateChanged,
+    ToolCallFinished, ToolCallStarted, TurnModelReported, TurnQueued, TurnSessionBound,
+    TurnStateChanged,
 };
 use iwork_domain::id::TurnId;
 use iwork_domain::turn::{Turn, TurnState};
@@ -81,9 +82,28 @@ pub(super) fn model_reported<C: EventCodec + ?Sized>(
     cx: &Cx<'_, C>,
     e: &TurnModelReported,
 ) -> Result<(), StorageError> {
-    let id = e.turn_id.to_string();
+    update_snapshot(cx, e.turn_id, |t| t.model = e.model.clone())
+}
+
+/// 会话 ID 只在快照里：读模型返回的 `Turn` 从快照解出，没有单独的查询按它过滤。
+pub(super) fn session_bound<C: EventCodec + ?Sized>(
+    cx: &Cx<'_, C>,
+    e: &TurnSessionBound,
+) -> Result<(), StorageError> {
+    update_snapshot(cx, e.turn_id, |t| {
+        t.runtime_session_id = Some(e.runtime_session_id.clone())
+    })
+}
+
+/// 只改快照里状态以外的字段：`state`、`ended_at`、`interrupted_seq` 归 `TurnStateChanged`，原样保留。
+fn update_snapshot<C: EventCodec + ?Sized>(
+    cx: &Cx<'_, C>,
+    turn_id: TurnId,
+    change: impl FnOnce(&mut Turn),
+) -> Result<(), StorageError> {
+    let id = turn_id.to_string();
     let mut t = load(cx, &id)?;
-    t.model = e.model.clone();
+    change(&mut t);
     let interrupted_seq: Option<i64> = cx
         .conn
         .query_row(
