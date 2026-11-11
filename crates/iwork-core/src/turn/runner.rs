@@ -412,12 +412,11 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
                 }
             },
         };
-        let recovered = replaced.is_some();
-        run.started(first, self.resume.clone(), replaced, assistant_name)
-            .await?;
-        if recovered {
+        if replaced.is_some() {
             self.mark_bound(run.turn.id);
         }
+        run.started(first, self.resume.clone(), replaced, assistant_name)
+            .await?;
         let mut updates = match self.prompt(agent, spec, blocks, reused, &mut run).await? {
             Ok(updates) => {
                 // 摘要已送到新会话：新编号从此算数
@@ -493,7 +492,8 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         Ok(run.turn.state)
     }
 
-    /// 用摘要新开的会话的编号已经提交到回合上（新会话报得出编号时才有那条绑定）。
+    /// 用摘要新开的会话的编号要提交到回合上了（新会话报得出编号时才有那条绑定）。在提交**之前**记：提交在途时
+    /// future 被丢掉，那笔照样可能落盘；提交失败时多补记一条旧编号，没有害处。
     fn mark_bound(&mut self, turn_id: TurnId) {
         if self.resume.is_some()
             && let Some(pending) = self.unconfirmed.as_mut()
@@ -644,11 +644,10 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
                 Err(reason) => return Ok(Err(End::Unrecovered(reason))),
             },
         };
-        let recovered = replaced.is_some();
-        run.bind_session(self.resume.clone(), replaced).await?;
-        if recovered {
+        if replaced.is_some() {
             self.mark_bound(run.turn.id);
         }
+        run.bind_session(self.resume.clone(), replaced).await?;
         let session = self.session.as_ref().expect("刚开好会话");
         Ok(session.prompt(blocks).await.map_err(End::Failed))
     }

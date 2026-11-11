@@ -1718,6 +1718,95 @@ async fn dropped_run_is_settled_at_next_entry() {
     );
 }
 
+/// prompt 那条路（沿用的进程已退出、重开时记录用不了）恢复后，第二次 prompt 也失败：回合 Failed，
+/// 这个回合最后绑定的是旧编号（审查 3/F-1）。
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_path_failure_after_recovery_rebinds_old_id() {
+    let first = queued_turn(1);
+    let w = W::<Reference>::new(&first).await;
+    let task = w.running(first).await;
+    w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+    let (_, line) = task.await.unwrap();
+
+    let second = queued_turn_seeded(&w, 2);
+    w.history.set(history());
+    w.ctl.prompt_errors.lock().unwrap().extend([
+        AgentError::ProcessExited {
+            message: "退出了".into(),
+        },
+        AgentError::Protocol {
+            message: "发不出去".into(),
+        },
+    ]);
+    w.ctl
+        .open_errors
+        .lock()
+        .unwrap()
+        .push_back(lost(SessionLostReason::NotFound));
+    w.ctl.fresh_ids.lock().unwrap().push_back(NEW_ID.into());
+    let (result, line) = w.spawn(line, w.plan(second.clone())).await.unwrap();
+    assert_eq!(result.unwrap(), TurnState::Failed);
+    assert_eq!(line.resume_id(), Some("fake"));
+    let bound: Vec<_> = bindings(&w.store, second.id)
+        .into_iter()
+        .map(|b| b.runtime_session_id)
+        .collect();
+    assert_eq!(bound, ["fake", NEW_ID, "fake"], "最后一条是旧编号");
+}
+
+/// 绑定那笔提交还在途时 future 被丢掉：那笔照样落盘，下一次入口仍补记旧编号（审查 3/F-2）。
+#[tokio::test(flavor = "current_thread")]
+async fn run_dropped_during_binding_commit_still_rebinds() {
+    let turn = queued_turn(1);
+    let w = W::<Reference>::new(&turn).await;
+    w.history.set(history());
+    w.ctl
+        .open_errors
+        .lock()
+        .unwrap()
+        .push_back(lost(SessionLostReason::NotFound));
+    w.ctl.fresh_ids.lock().unwrap().push_back(NEW_ID.into());
+    // 这一轮的第一笔提交就是绑定 + 进 Running：让它入队后停在处理之前
+    let gate = Arc::new(Notify::new());
+    *w.store.before_commit.lock().unwrap() = Some(gate.clone());
+    let mut line: Line<Reference> = SessionLine::new(w.decider.clone(), Some(OLD_ID.into()));
+    {
+        let agent = FakeAgent(w.ctl.clone());
+        let ports = TurnPorts {
+            store: &w.store,
+            clock: &w.clock,
+            ids: &w.ids,
+            live: &NoLive,
+            timer: &w.timer,
+            history: &w.history,
+        };
+        let run = line.run_turn(&agent, ports, w.plan(turn));
+        tokio::pin!(run);
+        tokio::select! {
+            r = &mut run => panic!("绑定还没落盘时回合不该结束：{r:?}"),
+            () = wait_until("绑定那笔停在处理之前", || {
+                w.store.commit_entered.load(Ordering::SeqCst)
+            }) => {}
+        }
+    } // future 丢掉，那笔已入队
+    gate.notify_one();
+    wait_until("那笔落了盘", || {
+        !bindings(&w.store, turn_id(1)).is_empty()
+    })
+    .await;
+    assert_eq!(
+        bindings(&w.store, turn_id(1))[0].runtime_session_id,
+        NEW_ID,
+        "对照：新编号落了盘"
+    );
+
+    next_turn_recovers(&w, line).await;
+    assert_eq!(
+        bindings(&w.store, turn_id(1)).last().unwrap(),
+        &rebound(turn_id(1))
+    );
+}
+
 /// 接住 poll 里的 panic，变成 `Err`。
 async fn catch_panic<F: Future>(fut: F) -> Result<F::Output, ()> {
     let mut fut = std::pin::pin!(fut);
