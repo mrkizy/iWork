@@ -34,6 +34,8 @@ use tokio::sync::{mpsc, oneshot};
 
 mod support;
 
+use support::history::FakeHistory;
+
 // ---------- 假运行时 ----------
 
 type Handler = Arc<
@@ -577,12 +579,14 @@ impl Bench {
     ) -> tokio::task::JoinHandle<(Result<TurnState, TurnRunError>, Line)> {
         let b = self.clone();
         tokio::spawn(async move {
+            let history = FakeHistory::default();
             let ports = TurnPorts {
                 store: &b.store,
                 clock: &b.clock,
                 ids: &b.ids,
                 live: &b.live,
                 timer: &b.timer,
+                history: &history,
             };
             let result = line.run_turn(&FakeAgent(b.ctl.clone()), ports, plan).await;
             (result, line)
@@ -1215,12 +1219,14 @@ mod delivery_gate {
             let b = b.clone();
             let store = store.clone();
             tokio::spawn(async move {
+                let history = FakeHistory::default();
                 let ports = TurnPorts {
                     store: &store,
                     clock: &b.clock,
                     ids: &b.ids,
                     live: &b.live,
                     timer: &b.timer,
+                    history: &history,
                 };
                 line.run_turn(&FakeAgent(b.ctl.clone()), ports, plan).await
             })

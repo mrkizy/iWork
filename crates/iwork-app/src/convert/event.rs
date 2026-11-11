@@ -176,6 +176,10 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
         DomainEvent::TurnSessionBound(e) => P::TurnSessionBound(pb::TurnSessionBound {
             turn_id: e.turn_id.to_string(),
             runtime_session_id: e.runtime_session_id.clone(),
+            replaced: e.replaced.as_ref().map(|r| pb::SessionReplaced {
+                old_runtime_session_id: r.old_runtime_session_id.clone(),
+                reason: session_lost_reason_to_proto(r.reason),
+            }),
         }),
         DomainEvent::ApprovalRequested(e) => P::ApprovalRequested(pb::ApprovalRequested {
             approval: Some(approval_to_proto(&e.approval)?),
@@ -709,6 +713,19 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
         P::TurnSessionBound(e) => ev::TurnSessionBound {
             turn_id: parse_id("TurnSessionBound", "turn_id", &e.turn_id)?,
             runtime_session_id: e.runtime_session_id,
+            replaced: e
+                .replaced
+                .map(|r| -> R<_> {
+                    Ok(ev::SessionReplaced {
+                        old_runtime_session_id: r.old_runtime_session_id,
+                        reason: session_lost_reason_from_proto(
+                            "SessionReplaced",
+                            "reason",
+                            r.reason,
+                        )?,
+                    })
+                })
+                .transpose()?,
         }
         .into(),
         P::ApprovalRequested(e) => ev::ApprovalRequested {

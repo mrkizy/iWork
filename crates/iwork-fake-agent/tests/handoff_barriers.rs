@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use core_support::engine_fakes::MemStore;
+use core_support::history::FakeHistory;
 use core_support::judges::*;
 use iwork_agent_acp::AcpRuntime;
 use iwork_core::turn::{SessionLine, TurnCanceller, TurnPlan, TurnPorts, TurnRunError};
@@ -163,12 +164,14 @@ impl<J: Judge> W<J> {
                 inner: AcpRuntime::new(w.fake.launch.clone()),
                 hold: w.hold.clone(),
             };
+            let history = FakeHistory::default();
             let ports = TurnPorts {
                 store: &w.store,
                 clock: &w.clock,
                 ids: &w.ids,
                 live: &w.live,
                 timer: &w.timer,
+                history: &history,
             };
             line.run_turn(&runtime, ports, plan).await
         });

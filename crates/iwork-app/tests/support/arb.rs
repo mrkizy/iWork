@@ -31,6 +31,7 @@ use iwork_domain::runtime::{
     LocalConfigItem, LocalConfigKind, LoginInfo, QuotaWindow, Runtime, RuntimeKind, RuntimeState,
 };
 use iwork_domain::security_list::SecurityList;
+use iwork_domain::session::SessionLostReason;
 use iwork_domain::turn::{Turn, TurnKind, TurnState};
 use iwork_domain::user_action::{ExitStatus, Proposal, UserActionCard, UserActionState};
 use proptest::prelude::*;
@@ -1177,10 +1178,13 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
         (
             "turn_session_bound",
             boxed(
-                (turn_id(), text()).prop_map(|(turn_id, runtime_session_id)| TurnSessionBound {
-                    turn_id,
-                    runtime_session_id,
-                }),
+                (turn_id(), text(), prop::option::of(session_replaced())).prop_map(
+                    |(turn_id, runtime_session_id, replaced)| TurnSessionBound {
+                        turn_id,
+                        runtime_session_id,
+                        replaced,
+                    },
+                ),
             ),
         ),
         (
@@ -1604,4 +1608,19 @@ pub fn boundary_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> 
             ),
         ),
     ]
+}
+
+fn session_replaced() -> impl Strategy<Value = SessionReplaced> {
+    (
+        text(),
+        select(vec![
+            SessionLostReason::NotFound,
+            SessionLostReason::Corrupt,
+            SessionLostReason::Incompatible,
+        ]),
+    )
+        .prop_map(|(old_runtime_session_id, reason)| SessionReplaced {
+            old_runtime_session_id,
+            reason,
+        })
 }

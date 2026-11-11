@@ -26,6 +26,12 @@ use iwork_ports::store::{
 use tokio::sync::mpsc;
 
 /// 假会话：prompt 时把 `n` 条正文片段和结束一次性放进队列。
+// 回合编排读历史消息的假读模型：这里的回合不走续接失败那条路，被读到就 panic
+#[path = "../../iwork-core/tests/support/history.rs"]
+#[allow(dead_code, reason = "基准只用它的默认值")]
+mod history;
+use history::FakeHistory;
+
 struct Flood(u64);
 struct FloodSession(u64);
 struct Updates(mpsc::UnboundedReceiver<AgentUpdate>);
@@ -241,12 +247,14 @@ fn main() {
         let ns = rt.block_on(async {
             let mut line = SessionLine::new(Arc::new(StubDecider::allow_all()), None);
             let clock = RealClock(Instant::now());
+            let history = FakeHistory::default();
             let ports = TurnPorts {
                 store: &Store,
                 clock: &clock,
                 ids: &Ids::default(),
                 live: &Live,
                 timer: &TokioTimer,
+                history: &history,
             };
             let started = Instant::now();
             let state = line

@@ -10,6 +10,11 @@
 //! ID 时除外）。第 1、2 步之间崩溃：回合还是 `Queued`、没有 ID，运行时只开了会话、没收到 prompt，
 //! 重启后照常派发是安全的。prompt 发不出去（如进程已退出且续接失败）时回合已是 `Running`，按失败收尾。
 //!
+//! **续接失败**（T06 方案 5.2a；需求第 12 章 v1.78）：带着旧会话 id 开会话、运行时回 `SessionLost`（记录不在、
+//! 坏了、版本不认）时，放下旧 id、用同一份 spec 新开一次，只试这一次；开成了就用 iWork 存的对话拼摘要，接在这一轮
+//! 第一条输入的前面，`TurnSessionBound.replaced` 记下旧编号与原因。新开也失败才判回合失败。开会话的两处
+//! （回合开头、沿用的进程已退出后重开）都经 [`SessionLine::open_session`] 这一个函数。
+//!
 //! **续接**（T06 方案 2.6 第 4 条）：`TurnPlan.turn` 处于 `Interrupted` 时，第一步用 `Resume` 而不是
 //! `Started`，另起一条助手消息（同一个回合）；说明文字由调用方用 [`super::resume_note`] 生成放进 `blocks`。
 //! 入口完全由回合状态决定，不另设字段。
@@ -51,11 +56,12 @@ use iwork_domain::approval::VoidReason;
 use iwork_domain::common::{Actor, Usage};
 use iwork_domain::event::{
     ApprovalDelivered, DomainEvent, MessageAppended, MessageCompleted, QuotaObserved,
-    ToolCallFinished, ToolCallStarted, TurnFinished, TurnModelReported, TurnSessionBound,
-    TurnStateChanged, UsageReported,
+    SessionReplaced, ToolCallFinished, ToolCallStarted, TurnFinished, TurnModelReported,
+    TurnSessionBound, TurnStateChanged, UsageReported,
 };
 use iwork_domain::id::{CommandId, MessageId, ProjectId, TurnId};
 use iwork_domain::message::{Author, Message, MessageBody, MessageStatus};
+use iwork_domain::session::SessionLostReason;
 use iwork_domain::turn::{Turn, TurnIllegal, TurnState, TurnTrigger};
 use iwork_ports::agent::{
     AgentError, AgentPort, AgentSession, AgentUpdate, ContentBlock, SessionSpec, TurnOutcome,
@@ -63,12 +69,14 @@ use iwork_ports::agent::{
 };
 use iwork_ports::clock::{Clock, IdGenerator, MonotonicInstant, Timer};
 use iwork_ports::live::{LivePublisher, MessageDelta};
+use iwork_ports::read_model::ReadModelPort;
 use iwork_ports::store::{CommitRequest, StorageError, StoragePort};
 
 use super::binding::{Rebind, mismatch_reason, rebind};
 use super::permission::{
     AcceptedAt, PermissionDecider, PermissionGate, Ticket, TurnSlot, VoidPlanError,
 };
+use super::resume_summary::{SummaryLimits, request_reminder, resume_summary};
 use super::scheduler::{Input, Scheduler};
 
 /// 回合编排写入的事件以它为 actor：这些事件由后台服务按运行时的输出产生，不是用户的命令。
@@ -116,14 +124,19 @@ impl Voiding {
 /// 动作摘要最多保留的字符数。
 const SUMMARY_CHARS: usize = 200;
 
+/// 拼续接摘要时最多取这么多条此前的消息（T06 方案 5.2a）；再多也装不进摘要的字数上限。
+pub const SUMMARY_RECENT_LIMIT: u32 = 100;
+
 /// 回合编排用到的端口。
 #[derive(Debug)]
-pub struct TurnPorts<'a, S, C, I, L, T> {
+pub struct TurnPorts<'a, S, C, I, L, T, H> {
     pub store: &'a S,
     pub clock: &'a C,
     pub ids: &'a I,
     pub live: &'a L,
     pub timer: &'a T,
+    /// 读这条会话线此前的对话：只在续接失败、用摘要新开会话时读一次（T06 方案 5.2a）
+    pub history: &'a H,
 }
 
 /// 一个回合要做什么。`turn` 处于 `Queued`（新回合，`TurnQueued` 已由受理命令的一方写入）或
@@ -240,10 +253,10 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
     }
 
     /// 跑一个回合，返回它停在的状态。返回 `Err` 时交接表已撤，会话已丢掉（清不掉的记着，见模块文档）。
-    pub async fn run_turn<S, C, I, L, T>(
+    pub async fn run_turn<S, C, I, L, T, H>(
         &mut self,
         agent: &A,
-        ports: TurnPorts<'_, S, C, I, L, T>,
+        ports: TurnPorts<'_, S, C, I, L, T, H>,
         plan: TurnPlan,
     ) -> Result<TurnState, TurnRunError>
     where
@@ -252,6 +265,7 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         I: IdGenerator,
         L: LivePublisher,
         T: Timer,
+        H: ReadModelPort,
     {
         let result = self.run_turn_inner(agent, ports, plan).await;
         if result.is_err() {
@@ -262,10 +276,10 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         result
     }
 
-    async fn run_turn_inner<S, C, I, L, T>(
+    async fn run_turn_inner<S, C, I, L, T, H>(
         &mut self,
         agent: &A,
-        ports: TurnPorts<'_, S, C, I, L, T>,
+        ports: TurnPorts<'_, S, C, I, L, T, H>,
         plan: TurnPlan,
     ) -> Result<TurnState, TurnRunError>
     where
@@ -274,6 +288,7 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         I: IdGenerator,
         L: LivePublisher,
         T: Timer,
+        H: ReadModelPort,
     {
         let TurnPlan {
             turn,
@@ -292,27 +307,27 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         let _guard = SlotGuard(&slot);
         let decider = self.decider.clone();
         let timer = ports.timer;
-        let mut run = TurnRun::new(turn, ports, &*decider, &slot);
+        let mut run = TurnRun::new(turn, ports, &*decider, &slot, context_project_id);
 
-        let reused = match self.ensure_session(agent, &spec).await {
-            Ok(reused) => reused,
+        let (reused, replaced) = match self.ensure_session(agent, &spec).await {
+            Ok(Ensured::Reused) => (true, None),
+            Ok(Ensured::Opened { replaced }) => (false, replaced),
             Err(reason) => {
                 run.fail_before_start(reason).await?;
                 return Ok(run.turn.state);
             }
         };
-        run.started(
-            first,
-            self.resume.clone(),
-            assistant_name,
-            context_project_id,
-        )
-        .await?;
+        let blocks = match replaced {
+            Some(_) => run.with_summary(blocks).await?,
+            None => blocks,
+        };
+        run.started(first, self.resume.clone(), replaced, assistant_name)
+            .await?;
         let mut updates = match self.prompt(agent, spec, blocks, reused, &mut run).await? {
             Ok(updates) => updates,
-            Err(e) => {
-                let process_gone = matches!(e, AgentError::ProcessExited { .. });
-                run.finish(End::Failed(e)).await?;
+            Err(end) => {
+                let process_gone = matches!(end, End::Failed(AgentError::ProcessExited { .. }));
+                run.finish(end).await?;
                 if process_gone {
                     let _ = self.retire().await;
                 }
@@ -399,12 +414,12 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         Ok(())
     }
 
-    /// 确保有会话：已有且绑定项相同就沿用（返回 `true`），否则按记下的 ID 续接或新开（返回 `false`）。
+    /// 确保有会话：已有且绑定项相同就沿用，否则按记下的 ID 续接或新开。
     async fn ensure_session(
         &mut self,
         agent: &A,
         spec: &SessionSpec,
-    ) -> Result<bool, StartRefused> {
+    ) -> Result<Ensured, StartRefused> {
         if let Some(reason) = self.unclean.clone() {
             self.retire().await.map_err(|e| {
                 format!("上一棵运行时进程树没能确认清空（{reason}），不开新会话：{e}")
@@ -419,16 +434,49 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             }
         }
         if self.session.is_some() {
-            return Ok(true);
+            return Ok(Ensured::Reused);
         }
-        self.open_session(agent, spec.clone())
+        let replaced = self
+            .open_session(agent, spec.clone())
             .await
             .map_err(|e| e.to_string())?;
-        Ok(false)
+        Ok(Ensured::Opened { replaced })
     }
 
-    async fn open_session(&mut self, agent: &A, mut spec: SessionSpec) -> Result<(), AgentError> {
-        spec.resume = self.resume.clone();
+    /// 开会话，带着记下的旧 id 续接（没有就新开）。续接时运行时回 `SessionLost`：放下旧 id、用同一份 spec 新开
+    /// 一次，只试这一次（T06 方案 5.2a），开成了返回被换掉的那条。新开也失败时旧 id 留着：记录已经用不了，
+    /// 下一回合会再走这条路、再拼一次摘要，而不是不带上文悄悄新开。
+    async fn open_session(
+        &mut self,
+        agent: &A,
+        spec: SessionSpec,
+    ) -> Result<Option<SessionReplaced>, OpenError> {
+        let old = self.resume.clone();
+        let lost = match self.open_with(agent, spec.clone(), old.clone()).await {
+            Ok(()) => return Ok(None),
+            Err(AgentError::SessionLost { reason }) => reason,
+            Err(error) => return Err(OpenError::Agent(error)),
+        };
+        // 没带旧 id 也报「记录用不了」是适配器的错，按普通失败处理
+        let Some(old) = old else {
+            return Err(OpenError::Agent(AgentError::SessionLost { reason: lost }));
+        };
+        match self.open_with(agent, spec, None).await {
+            Ok(()) => Ok(Some(SessionReplaced {
+                old_runtime_session_id: old,
+                reason: lost,
+            })),
+            Err(error) => Err(OpenError::Unrecovered { lost, error }),
+        }
+    }
+
+    async fn open_with(
+        &mut self,
+        agent: &A,
+        mut spec: SessionSpec,
+        resume: Option<String>,
+    ) -> Result<(), AgentError> {
+        spec.resume = resume;
         let gate = PermissionGate {
             slot: self.slot.clone(),
             decider: self.decider.clone(),
@@ -442,22 +490,23 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
     }
 
     /// 发 prompt（回合已提交为 `Running`）。沿用的会话进程已经退出（崩溃、取消时被结束）时，
-    /// prompt 没送到：丢掉旧会话、续接一次，先把新会话的绑定落盘，再发。外层错误是编排自己的错误，
-    /// 内层是运行时的错误（回合按失败收尾）。
-    async fn prompt<S, C, I, L, T>(
+    /// prompt 没送到：丢掉旧会话、续接一次（记录用不了就用摘要新开，同 [`Self::open_session`]），先把新会话的
+    /// 绑定落盘，再发。外层错误是编排自己的错误，内层是回合的失败结局。
+    async fn prompt<S, C, I, L, T, H>(
         &mut self,
         agent: &A,
         spec: SessionSpec,
         blocks: Vec<ContentBlock>,
         reused: bool,
-        run: &mut TurnRun<'_, S, C, I, L, T, D>,
-    ) -> Result<Result<<A::Session as AgentSession>::Updates, AgentError>, TurnRunError>
+        run: &mut TurnRun<'_, S, C, I, L, T, H, D>,
+    ) -> Result<Result<<A::Session as AgentSession>::Updates, End>, TurnRunError>
     where
         S: StoragePort,
         C: Clock,
         I: IdGenerator,
         L: LivePublisher,
         T: Timer,
+        H: ReadModelPort,
     {
         let session = self
             .session
@@ -465,17 +514,72 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             .expect("ensure_session 成功后一定有会话");
         let first = session.prompt(blocks.clone()).await;
         if !(reused && matches!(first, Err(AgentError::ProcessExited { .. }))) {
-            return Ok(first);
+            return Ok(first.map_err(End::Failed));
         }
         if let Err(e) = self.retire().await {
-            return Ok(Err(e));
+            return Ok(Err(End::Failed(e)));
         }
-        if let Err(e) = self.open_session(agent, spec).await {
-            return Ok(Err(e));
-        }
-        run.bind_session(self.resume.clone()).await?;
+        let replaced = match self.open_session(agent, spec).await {
+            Ok(replaced) => replaced,
+            Err(e) => return Ok(Err(e.into())),
+        };
+        let blocks = match replaced {
+            Some(_) => run.with_summary(blocks).await?,
+            None => blocks,
+        };
+        run.bind_session(self.resume.clone(), replaced).await?;
         let session = self.session.as_ref().expect("刚开好会话");
-        Ok(session.prompt(blocks).await)
+        Ok(session.prompt(blocks).await.map_err(End::Failed))
+    }
+}
+
+/// `ensure_session` 的结果。
+enum Ensured {
+    /// 沿用已开着的会话
+    Reused,
+    /// 开了会话；`replaced`：续接时记录用不了、换成了新会话（T06 方案 5.2a）
+    Opened { replaced: Option<SessionReplaced> },
+}
+
+/// 开会话失败。
+#[derive(Debug)]
+enum OpenError {
+    Agent(AgentError),
+    /// 续接时记录用不了（`lost`），用摘要新开的那一次也没成（`error`）。只试一次，回合失败
+    Unrecovered {
+        lost: SessionLostReason,
+        error: AgentError,
+    },
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Agent(error) => error.fmt(f),
+            Self::Unrecovered { lost, error } => write!(
+                f,
+                "续接失败（{}），用摘要新开会话也没成：{error}",
+                lost_label(*lost)
+            ),
+        }
+    }
+}
+
+impl From<OpenError> for End {
+    fn from(e: OpenError) -> Self {
+        match e {
+            OpenError::Agent(error) => End::Failed(error),
+            unrecovered => End::Unrecovered(unrecovered.to_string()),
+        }
+    }
+}
+
+/// 回合失败原因里怎么说这三类。
+fn lost_label(reason: SessionLostReason) -> &'static str {
+    match reason {
+        SessionLostReason::NotFound => "会话记录不存在",
+        SessionLostReason::Corrupt => "会话记录损坏",
+        SessionLostReason::Incompatible => "会话记录版本不兼容",
     }
 }
 
@@ -483,12 +587,18 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
 enum End {
     Finished(TurnOutcome),
     Failed(AgentError),
+    /// 用摘要新开会话也没成：原因两段都在这句话里
+    Unrecovered(String),
 }
 
 /// 一个进行中的回合：状态、正文、用量都在这里，只有它写事件。
-struct TurnRun<'a, S, C, I, L, T, D> {
+struct TurnRun<'a, S, C, I, L, T, H, D> {
     turn: Turn,
-    ports: TurnPorts<'a, S, C, I, L, T>,
+    ports: TurnPorts<'a, S, C, I, L, T, H>,
+    /// 这条会话线的项目（助手私聊里按「助手 × 项目」分线）：写进助手消息，读摘要时按它筛
+    line: Option<ProjectId>,
+    /// 这一轮是中断后续接的（入口是 `Resume`）
+    resuming: bool,
     decider: &'a D,
     /// 这个回合的交接表：在途的权限请求只记在这里
     slot: &'a TurnSlot,
@@ -499,24 +609,28 @@ struct TurnRun<'a, S, C, I, L, T, D> {
     checkpointed_len: usize,
 }
 
-impl<'a, S, C, I, L, T, D> TurnRun<'a, S, C, I, L, T, D>
+impl<'a, S, C, I, L, T, H, D> TurnRun<'a, S, C, I, L, T, H, D>
 where
     S: StoragePort,
     C: Clock,
     I: IdGenerator,
     L: LivePublisher,
     T: Timer,
+    H: ReadModelPort,
     D: PermissionDecider,
 {
     fn new(
         turn: Turn,
-        ports: TurnPorts<'a, S, C, I, L, T>,
+        ports: TurnPorts<'a, S, C, I, L, T, H>,
         decider: &'a D,
         slot: &'a TurnSlot,
+        line: Option<ProjectId>,
     ) -> Self {
         Self {
+            resuming: matches!(turn.state, TurnState::Interrupted { .. }),
             turn,
             ports,
+            line,
             decider,
             slot,
             message_id: None,
@@ -635,9 +749,19 @@ where
             .await
     }
 
-    /// 会话 ID 与回合上记着的不同时，返回要写的绑定事件，并记到回合上。
-    fn session_binding(&mut self, runtime_session_id: Option<String>) -> Option<DomainEvent> {
-        let id = runtime_session_id?;
+    /// 会话 ID 与回合上记着的不同时，返回要写的绑定事件，并记到回合上。`replaced`：这条会话是续接失败后
+    /// 新开的，旧编号与原因随绑定一起记下（审计）。
+    fn session_binding(
+        &mut self,
+        runtime_session_id: Option<String>,
+        replaced: Option<SessionReplaced>,
+    ) -> Option<DomainEvent> {
+        let Some(id) = runtime_session_id else {
+            if replaced.is_some() {
+                tracing::warn!(turn = %self.turn.id, "用摘要新开的会话没报会话 id，换会话的审计记不下来");
+            }
+            return None;
+        };
         if self.turn.runtime_session_id.as_deref() == Some(id.as_str()) {
             return None;
         }
@@ -646,17 +770,43 @@ where
             TurnSessionBound {
                 turn_id: self.turn.id,
                 runtime_session_id: id,
+                replaced,
             }
             .into(),
         )
+    }
+
+    /// 续接失败、用摘要新开了会话：这一轮的第一条输入前面接上摘要；续接的回合再接上这一轮用户的请求
+    /// （它不在摘要里，原来的 `blocks` 只有续接说明）。顺序固定：摘要、请求、原来的 `blocks`。
+    async fn with_summary(
+        &self,
+        blocks: Vec<ContentBlock>,
+    ) -> Result<Vec<ContentBlock>, TurnRunError> {
+        let source = self
+            .ports
+            .history
+            .summary_source(self.turn.id, self.line, SUMMARY_RECENT_LIMIT)
+            .await?;
+        let mut first: Vec<ContentBlock> = resume_summary(&source, SummaryLimits::DEFAULT)
+            .map(ContentBlock::Text)
+            .into_iter()
+            .collect();
+        if self.resuming
+            && let Some(request) = &source.request
+        {
+            first.push(ContentBlock::Text(request_reminder(request)));
+        }
+        first.extend(blocks);
+        Ok(first)
     }
 
     /// 回合换了会话（续接时运行时给了新 ID）：发 prompt 之前单独落盘。
     async fn bind_session(
         &mut self,
         runtime_session_id: Option<String>,
+        replaced: Option<SessionReplaced>,
     ) -> Result<(), TurnRunError> {
-        if let Some(event) = self.session_binding(runtime_session_id) {
+        if let Some(event) = self.session_binding(runtime_session_id, replaced) {
             self.commit_and_nudge(vec![event], None).await?;
         }
         Ok(())
@@ -668,13 +818,13 @@ where
         &mut self,
         first: TurnTrigger,
         runtime_session_id: Option<String>,
+        replaced: Option<SessionReplaced>,
         assistant_name: String,
-        context_project_id: Option<ProjectId>,
     ) -> Result<(), TurnRunError> {
         let message_id = MessageId::from_raw(self.ports.ids.next());
         self.message_id = Some(message_id);
         let mut events: Vec<DomainEvent> = self
-            .session_binding(runtime_session_id)
+            .session_binding(runtime_session_id, replaced)
             .into_iter()
             .collect();
         events.push(self.step(first, None)?);
@@ -687,7 +837,7 @@ where
             conversation_id: self.turn.conversation_id,
             status: MessageStatus::initial_for(&author),
             author,
-            context_project_id,
+            context_project_id: self.line,
             body: MessageBody::Inline(String::new()),
             attachments: Vec::new(),
             created_at: self.ports.clock.now(),
@@ -931,6 +1081,10 @@ where
         self.slot.stop_accepting();
         let mut triggers = Vec::new();
         let state = self.turn.state;
+        let failed = match state {
+            TurnState::Cancelling => TurnTrigger::ProcessEnded,
+            _ => TurnTrigger::Failed,
+        };
         match end {
             // 已因等待上限中断：业务状态不再随更新流变，只把助手消息收尾。失败原因不进事件，记一条日志
             // （进程退出由 run_turn_inner 去清树，那里会再见到它）
@@ -957,13 +1111,8 @@ where
                 }
                 triggers.push((TurnTrigger::ProcessEnded, None));
             }
-            End::Failed(error) => {
-                let trigger = match state {
-                    TurnState::Cancelling => TurnTrigger::ProcessEnded,
-                    _ => TurnTrigger::Failed,
-                };
-                triggers.push((trigger, Some(error.to_string())));
-            }
+            End::Failed(error) => triggers.push((failed, Some(error.to_string()))),
+            End::Unrecovered(reason) => triggers.push((failed, Some(reason))),
         }
         let mut events = Vec::new();
         let mut void = None;

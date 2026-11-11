@@ -11,6 +11,7 @@
 //! `session/cancel`。它不设上限（真适配器的上限是 GRACE_PERIOD）：编排不守「先停止受理」的约定时，
 //! 用例会卡住、由 `wait_until` 的 5 秒报出来，而不是悄悄等满一个期限。
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -18,15 +19,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iwork_core::turn::{
-    ResumeReason, SessionLine, TREE_NOT_CLEARED, TURN_GONE_MESSAGE, TurnPlan, TurnPorts,
-    TurnRunError, resume_note,
+    ResumeReason, SUMMARY_HEADER, SUMMARY_RECENT_LIMIT, SessionLine, TREE_NOT_CLEARED,
+    TURN_GONE_MESSAGE, TurnPlan, TurnPorts, TurnRunError, resume_note,
 };
 use iwork_domain::action::ToolRef;
 use iwork_domain::approval::ApprovalState;
 use iwork_domain::common::{ModelId, ModelSelection};
-use iwork_domain::event::DomainEvent;
+use iwork_domain::event::{DomainEvent, SessionReplaced, TurnSessionBound};
 use iwork_domain::id::{RawUlid, TurnId};
 use iwork_domain::message::MessageStatus;
+use iwork_domain::session::SessionLostReason;
 use iwork_domain::turn::{InterruptReason, Turn, TurnState};
 use iwork_ports::agent::{
     AgentError, AgentPort, AgentSession, AgentUpdate, ContentBlock, PermissionDecision,
@@ -35,11 +37,13 @@ use iwork_ports::agent::{
 };
 use iwork_ports::clock::IdGenerator;
 use iwork_ports::live::{LivePublisher, MessageDelta};
+use iwork_ports::read_model::{SummaryLine, SummarySource, SummaryText, SummaryWho};
 use tokio::sync::{Notify, mpsc, watch};
 
 mod support;
 
 use support::engine_fakes::MemStore;
+use support::history::FakeHistory;
 use support::judges::*;
 
 /// 假运行时声明的权限等待上限。
@@ -81,6 +85,14 @@ struct Ctl {
     opens: AtomicUsize,
     specs: Mutex<Vec<SessionSpec>>,
     prompts: AtomicUsize,
+    /// 每次 prompt 收到的输入
+    inputs: Mutex<Vec<Vec<ContentBlock>>>,
+    /// 接下来几次开会话的结局，排空后一律成功
+    open_errors: Mutex<VecDeque<AgentError>>,
+    /// 接下来几次 prompt 的错误，排空后一律成功
+    prompt_errors: Mutex<VecDeque<AgentError>>,
+    /// 不带 resume 新开的会话依次用这些 id，排空后用 `fake`；带 resume 的沿用那个 id
+    fresh_ids: Mutex<VecDeque<String>>,
 }
 
 impl Default for Ctl {
@@ -99,6 +111,10 @@ impl Default for Ctl {
             opens: AtomicUsize::new(0),
             specs: Mutex::default(),
             prompts: AtomicUsize::new(0),
+            inputs: Mutex::default(),
+            open_errors: Mutex::default(),
+            prompt_errors: Mutex::default(),
+            fresh_ids: Mutex::default(),
         }
     }
 }
@@ -147,7 +163,8 @@ impl Ctl {
 }
 
 struct FakeAgent(Arc<Ctl>);
-struct FakeSession(Arc<Ctl>);
+/// 第二个字段是运行时会话 id。
+struct FakeSession(Arc<Ctl>, String);
 struct FakeUpdates(mpsc::UnboundedReceiver<AgentUpdate>);
 
 impl AgentPort for FakeAgent {
@@ -163,14 +180,25 @@ impl AgentPort for FakeAgent {
         on_permission: H,
     ) -> Result<FakeSession, AgentError> {
         self.0.opens.fetch_add(1, Ordering::SeqCst);
-        self.0.specs.lock().unwrap().push(spec);
+        self.0.specs.lock().unwrap().push(spec.clone());
+        if let Some(error) = self.0.open_errors.lock().unwrap().pop_front() {
+            return Err(error);
+        }
+        let id = spec.resume.unwrap_or_else(|| {
+            self.0
+                .fresh_ids
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| "fake".into())
+        });
         let h = Arc::new(on_permission);
         let handler: Handler = Arc::new(move |req| {
             let h = h.clone();
             Box::pin(async move { h.on_permission(req).await })
         });
         *self.0.handler.lock().unwrap() = Some(handler);
-        Ok(FakeSession(self.0.clone()))
+        Ok(FakeSession(self.0.clone(), id))
     }
 }
 
@@ -178,7 +206,7 @@ impl AgentSession for FakeSession {
     type Updates = FakeUpdates;
 
     fn runtime_session_id(&self) -> Option<&str> {
-        Some("fake")
+        Some(&self.1)
     }
 
     fn permission_wait_limit(&self) -> Option<Duration> {
@@ -189,7 +217,11 @@ impl AgentSession for FakeSession {
         SandboxStatus::Enforced
     }
 
-    async fn prompt(&self, _blocks: Vec<ContentBlock>) -> Result<FakeUpdates, AgentError> {
+    async fn prompt(&self, blocks: Vec<ContentBlock>) -> Result<FakeUpdates, AgentError> {
+        if let Some(error) = self.0.prompt_errors.lock().unwrap().pop_front() {
+            return Err(error);
+        }
+        self.0.inputs.lock().unwrap().push(blocks);
         let (tx, rx) = mpsc::unbounded_channel();
         *self.0.updates.lock().unwrap() = Some(tx);
         self.0.sent.store(0, Ordering::SeqCst);
@@ -265,6 +297,7 @@ struct W<J: Judge> {
     clock: ManualClock,
     timer: ManualTimer,
     ids: Ids,
+    history: FakeHistory,
 }
 
 impl<J: Judge> W<J> {
@@ -282,6 +315,7 @@ impl<J: Judge> W<J> {
             clock: ManualClock::default(),
             timer: ManualTimer::default(),
             ids: Ids::default(),
+            history: FakeHistory::default(),
         })
     }
 
@@ -308,6 +342,7 @@ impl<J: Judge> W<J> {
                 ids: &w.ids,
                 live: &NoLive,
                 timer: &w.timer,
+                history: &w.history,
             };
             let result = line.run_turn(&FakeAgent(w.ctl.clone()), ports, plan).await;
             (result, line)
@@ -993,6 +1028,330 @@ async fn resume_failure_fails_interrupted_turn() {
             && why[2].starts_with("Interrupted { reason: ApprovalWaitLimit } -> Failed (上一棵"),
         "{why:?}"
     );
+}
+
+// ---------- 续接失败用摘要新开（T06 方案 5.2a；需求第 12 章 v1.78） ----------
+
+const OLD_ID: &str = "old-1";
+const NEW_ID: &str = "new-1";
+
+fn user_line(text: &str) -> SummaryLine {
+    SummaryLine {
+        who: SummaryWho::User,
+        text: SummaryText::Inline(text.into()),
+        attachments: Vec::new(),
+    }
+}
+
+/// 布景里的历史：第一句、一条助手回复，这一轮的请求单独给。
+fn history() -> SummarySource {
+    SummarySource {
+        first_user: Some(user_line("第一句")),
+        earlier: vec![SummaryLine {
+            who: SummaryWho::Assistant {
+                name: "小助手".into(),
+            },
+            text: SummaryText::Inline("做完了".into()),
+            attachments: Vec::new(),
+        }],
+        unfetched: 0,
+        request: Some(user_line("这一轮的请求")),
+    }
+}
+
+fn lost(reason: SessionLostReason) -> AgentError {
+    AgentError::SessionLost { reason }
+}
+
+fn text(block: &ContentBlock) -> &str {
+    match block {
+        ContentBlock::Text(t) => t,
+        other => panic!("不是文字块：{other:?}"),
+    }
+}
+
+/// 这个回合的 `TurnSessionBound`。
+fn bindings(store: &MemStore, turn: TurnId) -> Vec<TurnSessionBound> {
+    store
+        .all()
+        .into_iter()
+        .filter_map(|e| match e {
+            DomainEvent::TurnSessionBound(b) if b.turn_id == turn => Some(b),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 把回合布成「崩溃后中断」，返回续接用的回合。
+fn interrupted_turn<J: Judge>(w: &W<J>, mut turn: Turn) -> Turn {
+    w.store.seed(vec![
+        iwork_domain::event::TurnStateChanged {
+            turn_id: turn.id,
+            from: TurnState::Queued,
+            to: TurnState::Running,
+            reason: None,
+        }
+        .into(),
+        iwork_domain::event::TurnStateChanged {
+            turn_id: turn.id,
+            from: TurnState::Running,
+            to: TurnState::Interrupted {
+                reason: InterruptReason::Crash,
+            },
+            reason: None,
+        }
+        .into(),
+    ]);
+    turn.state = TurnState::Interrupted {
+        reason: InterruptReason::Crash,
+    };
+    turn
+}
+
+/// 续接时记录用不了（三类各一遍）：回合不失败；第二次开会话不带旧编号；`TurnSessionBound` 记新编号、
+/// `replaced` 里是旧编号与原因，与回合进 `Running` 同一笔；第一条输入开头是摘要；没有给用户看的消息或卡片。
+#[tokio::test(flavor = "current_thread")]
+async fn resume_of_missing_session_recovers_with_summary() {
+    for reason in [
+        SessionLostReason::NotFound,
+        SessionLostReason::Corrupt,
+        SessionLostReason::Incompatible,
+    ] {
+        let turn = queued_turn(1);
+        let t = turn.id;
+        let w = W::<Reference>::new(&turn).await;
+        w.history.set(history());
+        w.ctl.open_errors.lock().unwrap().push_back(lost(reason));
+        w.ctl.fresh_ids.lock().unwrap().push_back(NEW_ID.into());
+        let line = SessionLine::new(w.decider.clone(), Some(OLD_ID.into()));
+        let task = w.spawn(line, w.plan(turn));
+        wait_until("prompt", || w.ctl.prompts.load(Ordering::SeqCst) == 1).await;
+        w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+        let (result, line) = task.await.unwrap();
+        assert_eq!(result.unwrap(), TurnState::Completed, "{reason:?}");
+
+        let specs = w.ctl.specs.lock().unwrap().clone();
+        assert_eq!(specs.len(), 2, "{reason:?}");
+        assert_eq!(specs[0].resume.as_deref(), Some(OLD_ID));
+        assert_eq!(specs[1].resume, None, "放下旧编号新开");
+        assert_eq!(
+            bindings(&w.store, t),
+            [TurnSessionBound {
+                turn_id: t,
+                runtime_session_id: NEW_ID.into(),
+                replaced: Some(SessionReplaced {
+                    old_runtime_session_id: OLD_ID.into(),
+                    reason,
+                }),
+            }]
+        );
+        let events = w.store.all();
+        let at = events
+            .iter()
+            .position(|e| matches!(e, DomainEvent::TurnSessionBound(_)))
+            .unwrap();
+        assert!(
+            matches!(&events[at + 1], DomainEvent::TurnStateChanged(c)
+                if c.from == TurnState::Queued && c.to == TurnState::Running),
+            "绑定与进 Running 同一笔"
+        );
+        assert_eq!(line.resume_id(), Some(NEW_ID));
+        assert_eq!(w.history.calls(), [(t, None, SUMMARY_RECENT_LIMIT)]);
+
+        let inputs = w.ctl.inputs.lock().unwrap().clone();
+        let first = &inputs[0];
+        assert_eq!(first.len(), 2, "新回合：摘要 + 原本的输入，不另给请求");
+        assert!(text(&first[0]).starts_with(SUMMARY_HEADER), "{first:?}");
+        assert!(text(&first[0]).contains("第一句") && text(&first[0]).contains("做完了"));
+        assert!(!text(&first[0]).contains("这一轮的请求"));
+        assert_eq!(text(&first[1]), "hi");
+
+        // 界面不提示：唯一新增的消息是这一轮的助手消息，没有审批、卡片
+        let shown: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    DomainEvent::MessageAppended(_)
+                        | DomainEvent::ApprovalRequested(_)
+                        | DomainEvent::UserActionProposed(_)
+                )
+            })
+            .collect();
+        assert!(
+            matches!(shown.as_slice(), [DomainEvent::MessageAppended(m)] if m.message.turn_id == Some(t)),
+            "{shown:?}"
+        );
+    }
+}
+
+/// 续接的回合记录用不了：第一条输入 = 摘要 + 这一轮的请求原文 + 续接说明，顺序固定。
+#[tokio::test(flavor = "current_thread")]
+async fn lost_session_on_resume_recovers_interrupted_turn() {
+    let turn = queued_turn(1);
+    let t = turn.id;
+    let w = W::<Reference>::new(&turn).await;
+    let turn = interrupted_turn(&w, turn);
+    w.history.set(history());
+    w.ctl
+        .open_errors
+        .lock()
+        .unwrap()
+        .push_back(lost(SessionLostReason::NotFound));
+    w.ctl.fresh_ids.lock().unwrap().push_back(NEW_ID.into());
+    let mut plan = w.plan(turn);
+    let note = resume_note(&ResumeReason::Interrupted);
+    plan.blocks = vec![ContentBlock::Text(note.clone())];
+    let task = w.spawn(
+        SessionLine::new(w.decider.clone(), Some(OLD_ID.into())),
+        plan,
+    );
+    wait_until("prompt", || w.ctl.prompts.load(Ordering::SeqCst) == 1).await;
+    w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+    assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Completed);
+    assert_eq!(
+        trail(&w.store, t),
+        [
+            "Queued -> Running",
+            "Running -> Interrupted { reason: Crash }",
+            "Interrupted { reason: Crash } -> Running",
+            "Running -> Completed",
+            "finished Completed",
+        ]
+    );
+    let first = w.ctl.inputs.lock().unwrap()[0].clone();
+    assert_eq!(first.len(), 3, "{first:?}");
+    assert!(text(&first[0]).starts_with(SUMMARY_HEADER));
+    assert_eq!(text(&first[1]), "[iWork] 这一轮用户的请求是：这一轮的请求");
+    assert_eq!(text(&first[2]), note);
+    assert_eq!(bindings(&w.store, t)[0].runtime_session_id, NEW_ID);
+}
+
+/// 用摘要新开也失败：开会话恰好两次，回合 `Failed`，原因两段都在；不再重试，旧编号留着给下一回合。
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_fails_once_then_turn_fails() {
+    let turn = queued_turn(1);
+    let t = turn.id;
+    let w = W::<Reference>::new(&turn).await;
+    let turn = interrupted_turn(&w, turn);
+    w.ctl.open_errors.lock().unwrap().extend([
+        lost(SessionLostReason::Corrupt),
+        AgentError::ProcessExited {
+            message: "起不来".into(),
+        },
+    ]);
+    let (result, line) = w
+        .spawn(
+            SessionLine::new(w.decider.clone(), Some(OLD_ID.into())),
+            w.plan(turn),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.unwrap(), TurnState::Failed);
+    assert_eq!(w.ctl.opens.load(Ordering::SeqCst), 2, "只试一次新开");
+    assert_eq!(w.ctl.prompts.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        trail(&w.store, t)[2..],
+        [
+            "Interrupted { reason: Crash } -> Failed (续接失败（会话记录损坏），用摘要新开会话也没成：运行时进程意外退出：起不来)",
+            "finished Failed",
+        ]
+    );
+    assert!(bindings(&w.store, t).is_empty());
+    assert!(w.history.calls().is_empty(), "没开成就不读历史");
+    assert_eq!(line.resume_id(), Some(OLD_ID));
+}
+
+/// 对照：只有三类原因才走这条路。续接回进程退出或别的错误、没带旧编号的新会话报「记录用不了」，都不新开，
+/// 回合 `Failed`。
+#[tokio::test(flavor = "current_thread")]
+async fn unclassified_resume_failure_still_fails() {
+    let cases = [
+        (
+            Some(OLD_ID),
+            AgentError::ProcessExited {
+                message: "退出了".into(),
+            },
+        ),
+        (
+            Some(OLD_ID),
+            AgentError::Protocol {
+                message: "运行时报告了错误（unknown）".into(),
+            },
+        ),
+        (None, lost(SessionLostReason::NotFound)),
+    ];
+    for (resume, error) in cases {
+        let turn = queued_turn(1);
+        let t = turn.id;
+        let w = W::<Reference>::new(&turn).await;
+        w.ctl.open_errors.lock().unwrap().push_back(error.clone());
+        let line = SessionLine::new(w.decider.clone(), resume.map(str::to_owned));
+        let (result, _) = w.spawn(line, w.plan(turn)).await.unwrap();
+        assert_eq!(result.unwrap(), TurnState::Failed, "{error:?}");
+        assert_eq!(w.ctl.opens.load(Ordering::SeqCst), 1, "{error:?}");
+        assert_eq!(trail(&w.store, t)[0], format!("Queued -> Failed ({error})"));
+    }
+}
+
+/// 开会话的另一处：沿用的会话进程已退出、发 prompt 前重开时记录也用不了，同样用摘要新开、记下旧编号。
+#[tokio::test(flavor = "current_thread")]
+async fn lost_session_after_process_exit_recovers() {
+    let first = queued_turn(1);
+    let w = W::<Reference>::new(&first).await;
+    let task = w.running(first).await;
+    w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+    let (_, line) = task.await.unwrap();
+
+    let second = queued_turn_seeded(&w, 2);
+    let t = second.id;
+    w.history.set(history());
+    w.ctl
+        .prompt_errors
+        .lock()
+        .unwrap()
+        .push_back(AgentError::ProcessExited {
+            message: "退出了".into(),
+        });
+    w.ctl
+        .open_errors
+        .lock()
+        .unwrap()
+        .push_back(lost(SessionLostReason::NotFound));
+    w.ctl.fresh_ids.lock().unwrap().push_back(NEW_ID.into());
+    let task = w.spawn(line, w.plan(second));
+    wait_until("prompt", || w.ctl.prompts.load(Ordering::SeqCst) == 2).await;
+    w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+    assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Completed);
+    let specs = w.ctl.specs.lock().unwrap().clone();
+    assert_eq!(
+        specs
+            .iter()
+            .map(|s| s.resume.as_deref())
+            .collect::<Vec<_>>(),
+        [None, Some("fake"), None]
+    );
+    assert_eq!(
+        bindings(&w.store, t),
+        [
+            TurnSessionBound {
+                turn_id: t,
+                runtime_session_id: "fake".into(),
+                replaced: None,
+            },
+            TurnSessionBound {
+                turn_id: t,
+                runtime_session_id: NEW_ID.into(),
+                replaced: Some(SessionReplaced {
+                    old_runtime_session_id: "fake".into(),
+                    reason: SessionLostReason::NotFound,
+                }),
+            },
+        ]
+    );
+    let input = w.ctl.inputs.lock().unwrap()[1].clone();
+    assert!(text(&input[0]).starts_with(SUMMARY_HEADER));
+    assert_eq!(text(&input[1]), "hi");
 }
 
 /// 布景里再排一个回合。

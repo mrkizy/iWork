@@ -29,6 +29,7 @@ use iwork_domain::runtime::{
     LocalConfigItem, LocalConfigKind, LoginInfo, QuotaWindow, Runtime, RuntimeKind, RuntimeState,
 };
 use iwork_domain::security_list::SecurityList;
+use iwork_domain::session::SessionLostReason;
 use iwork_domain::turn::{InterruptReason, Turn, TurnKind, TurnState};
 use iwork_domain::user_action::{ExitStatus, Proposal, UserActionCard, UserActionState};
 use iwork_proto::pb;
@@ -62,6 +63,11 @@ enum_pair!(remember_scope_to_proto, remember_scope_from_proto, RememberScope, pb
 enum_pair!(interrupt_reason_to_proto, interrupt_reason_from_proto, InterruptReason, pb::InterruptReason, {
     InterruptReason::Crash => pb::InterruptReason::Crash,
     InterruptReason::ApprovalWaitLimit => pb::InterruptReason::ApprovalWaitLimit,
+});
+enum_pair!(session_lost_reason_to_proto, session_lost_reason_from_proto, SessionLostReason, pb::SessionLostReason, {
+    SessionLostReason::NotFound => pb::SessionLostReason::NotFound,
+    SessionLostReason::Corrupt => pb::SessionLostReason::Corrupt,
+    SessionLostReason::Incompatible => pb::SessionLostReason::Incompatible,
 });
 enum_pair!(decider_to_proto, decider_from_proto, Decider, pb::ApprovalDecider, {
     Decider::User => pb::ApprovalDecider::User,

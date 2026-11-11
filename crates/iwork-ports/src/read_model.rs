@@ -92,6 +92,47 @@ pub struct Unsettled {
     pub cards: Vec<UserActionCard>,
 }
 
+/// 拼续接摘要用的原料（T06 方案 5.2a）：一条会话线上、某一轮请求之前的对话正文。只有用户消息与助手回复；
+/// 工具输出、审批与卡片、系统消息、附件内容都不在这里。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SummarySource {
+    /// 这条会话线上的第一条用户消息；它就是这一轮的请求时为 `None`
+    pub first_user: Option<SummaryLine>,
+    /// `first_user` 之后、这一轮的请求之前的用户消息与助手回复，**从最新往前排**，最多 `recent_limit` 条
+    pub earlier: Vec<SummaryLine>,
+    /// `first_user` 与 `earlier` 之间还有多少条没取（超出 `recent_limit` 的那些）
+    pub unfetched: u32,
+    /// 这一轮用户的请求；认不出（这一轮不是由用户消息触发的）时为 `None`
+    pub request: Option<SummaryLine>,
+}
+
+/// 摘要里的一条消息。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryLine {
+    pub who: SummaryWho,
+    pub text: SummaryText,
+    /// 附件只留文件名，不带内容
+    pub attachments: Vec<String>,
+}
+
+/// 谁说的。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SummaryWho {
+    User,
+    /// `name`：发言时的名字
+    Assistant {
+        name: String,
+    },
+}
+
+/// 消息正文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SummaryText {
+    Inline(String),
+    /// 正文太长、存成了制品：摘要不去读它
+    Stored,
+}
+
 /// 查询模型。
 pub trait ReadModelPort: Send + Sync {
     fn conversation(
@@ -118,6 +159,15 @@ pub trait ReadModelPort: Send + Sync {
     fn settings(&self) -> impl Future<Output = Result<GlobalSettings, StorageError>> + Send;
     /// 上次运行没收尾的回合、流式消息与卡片。各自按 id 升序。
     fn unsettled(&self) -> impl Future<Output = Result<Unsettled, StorageError>> + Send;
+    /// 续接失败、用摘要新开会话时取这一轮之前的对话（T06 方案 5.2a）。只取回合 `turn` 所在对话里
+    /// `context_project_id == line` 的消息（助手私聊按「助手 × 项目」各是一条会话线）。「这一轮的请求」是
+    /// 和这个回合的 `TurnQueued` 同一次提交写下的那条用户消息。回合不存在时报 `NotFound`。
+    fn summary_source(
+        &self,
+        turn: TurnId,
+        line: Option<ProjectId>,
+        recent_limit: u32,
+    ) -> impl Future<Output = Result<SummarySource, StorageError>> + Send;
     /// `ReadArtifact` 的范围校验：引用是否被某条消息、工具调用、附件或卡片引用。
     fn artifact_is_referenced(
         &self,

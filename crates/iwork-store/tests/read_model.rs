@@ -3,15 +3,20 @@
 mod support;
 
 use iwork_domain::approval::ReviewState;
+use iwork_domain::attachment::AttachmentOrigin;
 use iwork_domain::common::{ArtifactArea, Timestamp};
 use iwork_domain::event::*;
 use iwork_domain::id::ReviewId;
+use iwork_domain::message::{Author, Message};
 use iwork_domain::message::{MessageBody, MessageStatus};
 use iwork_domain::rule::{RuleLayer, RuleScope};
 use iwork_domain::runtime::QuotaWindow;
 use iwork_domain::turn::{InterruptReason, TurnState};
 use iwork_domain::user_action::UserActionState;
-use iwork_ports::read_model::{MessagePage, PendingItem, ReadModelPort};
+use iwork_ports::read_model::{
+    MessagePage, PendingItem, ReadModelPort, SummaryLine, SummarySource, SummaryText, SummaryWho,
+};
+use iwork_ports::store::CommitRequest;
 use iwork_ports::store::StoragePort;
 use support::*;
 
@@ -553,4 +558,165 @@ fn unsettled_is_empty_when_nothing_in_flight() {
         u.turns.is_empty() && u.streaming.is_empty() && u.cards.is_empty(),
         "{u:?}"
     );
+}
+
+// ---------- 续接摘要的原料（T06 方案 5.2a） ----------
+
+/// 用户发一条消息、同一次提交排一个回合（受理 `SendMessage` 的形状）。
+fn send(n: u128, msg: Message, turn_n: u128, conv: u128) -> CommitRequest {
+    cmd(
+        n,
+        vec![
+            MessageAppended { message: msg }.into(),
+            TurnQueued {
+                turn: turn(turn_n, conv),
+            }
+            .into(),
+        ],
+    )
+}
+
+/// 一条结束了的助手回复。
+fn reply(n: u128, conv: u128, turn_n: u128, text: &str, line: Option<u128>) -> Vec<DomainEvent> {
+    let mut m = assistant_message(n, conv, turn_n);
+    m.context_project_id = line.map(pid);
+    vec![
+        MessageAppended { message: m }.into(),
+        MessageCompleted {
+            conversation_id: cid(conv),
+            message_id: mid(n),
+            body: MessageBody::Inline(text.into()),
+            status: MessageStatus::Completed,
+        }
+        .into(),
+    ]
+}
+
+fn said(text: &str) -> SummaryLine {
+    SummaryLine {
+        who: SummaryWho::User,
+        text: SummaryText::Inline(text.into()),
+        attachments: vec![],
+    }
+}
+
+fn answered(text: &str) -> SummaryLine {
+    SummaryLine {
+        who: SummaryWho::Assistant {
+            name: "iWork".into(),
+        },
+        text: SummaryText::Inline(text.into()),
+        attachments: vec![],
+    }
+}
+
+#[test]
+fn summary_source_finds_first_user_and_request() {
+    let (_env, store) = setup();
+    block(store.commit(send(2, user_message(101, 10, "第一句"), 21, 10))).unwrap();
+    block(store.commit(cmd(3, reply(102, 10, 21, "回复一", None)))).unwrap();
+    // 系统消息、正文为空的助手消息都不取
+    let mut system = user_message(103, 10, "系统说明");
+    system.author = Author::System;
+    let mut empty = assistant_message(104, 10, 21);
+    empty.status = MessageStatus::Failed;
+    block(store.commit(cmd(
+        4,
+        vec![
+            MessageAppended { message: system }.into(),
+            MessageAppended { message: empty }.into(),
+        ],
+    )))
+    .unwrap();
+    let mut with_file = user_message(105, 10, "第二句");
+    with_file.attachments = vec![atid(1)];
+    block(store.commit(cmd(
+        5,
+        vec![AttachmentStored {
+            attachment: attachment(1, 10, AttachmentOrigin::RepoPath("a.txt".into())),
+        }
+        .into()],
+    )))
+    .unwrap();
+    block(store.commit(send(6, with_file, 22, 10))).unwrap();
+    block(store.commit(cmd(7, reply(106, 10, 22, "回复二", None)))).unwrap();
+    block(store.commit(send(8, user_message(107, 10, "这一轮"), 23, 10))).unwrap();
+    // 这一轮之后的不取（续接时这一轮自己已经吐出的半截回复）
+    block(store.commit(cmd(9, reply(108, 10, 23, "半截", None)))).unwrap();
+
+    let rm = read_model(&store);
+    let got = block(rm.summary_source(tid(23), None, 100)).unwrap();
+    let mut second = said("第二句");
+    second.attachments = vec!["a.txt".into()];
+    assert_eq!(
+        got,
+        SummarySource {
+            first_user: Some(said("第一句")),
+            earlier: vec![answered("回复二"), second.clone(), answered("回复一")],
+            unfetched: 0,
+            request: Some(said("这一轮")),
+        }
+    );
+    // 条数上限：只取最新的，余下的记数
+    let capped = block(rm.summary_source(tid(23), None, 2)).unwrap();
+    assert_eq!(capped.earlier, vec![answered("回复二"), second]);
+    assert_eq!(capped.unfetched, 1);
+    assert_eq!(capped.first_user, Some(said("第一句")));
+}
+
+/// 助手私聊里按「助手 × 项目」分线：别的项目段（含私聊段）的消息不取。
+#[test]
+fn summary_source_filters_by_session_line() {
+    let (_env, store) = setup();
+    block(store.commit(cmd(
+        2,
+        vec![ConversationCreated { conversation: dm(11, 1) }.into()],
+    )))
+    .unwrap();
+    let in_line = |n: u128, text: &str, line: Option<u128>| {
+        let mut m = user_message(n, 11, text);
+        m.context_project_id = line.map(pid);
+        m
+    };
+    block(store.commit(send(3, in_line(201, "私聊段", None), 31, 11))).unwrap();
+    block(store.commit(send(4, in_line(202, "项目一第一句", Some(1)), 32, 11))).unwrap();
+    block(store.commit(cmd(5, reply(203, 11, 32, "项目一回复", Some(1))))).unwrap();
+    block(store.commit(send(6, in_line(204, "项目二", Some(2)), 33, 11))).unwrap();
+    block(store.commit(send(7, in_line(205, "项目一这一轮", Some(1)), 34, 11))).unwrap();
+
+    let rm = read_model(&store);
+    let got = block(rm.summary_source(tid(34), Some(pid(1)), 100)).unwrap();
+    assert_eq!(got.first_user, Some(said("项目一第一句")));
+    assert_eq!(got.earlier, vec![answered("项目一回复")]);
+    assert_eq!(got.request, Some(said("项目一这一轮")));
+    // 对照：私聊段那条线上只有它自己
+    let dm_line = block(rm.summary_source(tid(34), None, 100)).unwrap();
+    assert_eq!(dm_line.first_user, Some(said("私聊段")));
+    assert!(dm_line.earlier.is_empty());
+}
+
+/// 这一轮就是第一句：此前什么都没有；回合不存在报 NotFound。
+#[test]
+fn summary_source_of_first_turn_is_empty() {
+    let (_env, store) = setup();
+    block(store.commit(send(2, user_message(301, 10, "第一句"), 41, 10))).unwrap();
+    let rm = read_model(&store);
+    assert_eq!(
+        block(rm.summary_source(tid(41), None, 100)).unwrap(),
+        SummarySource {
+            request: Some(said("第一句")),
+            ..SummarySource::default()
+        }
+    );
+    // 不是由用户消息触发的回合（setup 里单独排的那个）：认不出请求
+    assert_eq!(
+        block(rm.summary_source(tid(20), None, 100))
+            .unwrap()
+            .request,
+        None
+    );
+    assert!(matches!(
+        block(rm.summary_source(tid(99), None, 100)),
+        Err(iwork_ports::store::StorageError::NotFound { entity: "turn", .. })
+    ));
 }
