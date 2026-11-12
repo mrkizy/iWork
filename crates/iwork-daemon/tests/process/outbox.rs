@@ -42,6 +42,9 @@ fn outbox_redelivered_once_at_receiver() {
             ("IWORK_DEV_PAUSE_AT", "outbox-after-dispatch"),
         ],
     );
+    // 先等就绪（按启动进展计时）再计暂停点的时限：后台没起来之前道还没开工，慢机器上启动本身就可能吃掉大半个
+    // START（CI run 43147398429）。就绪在起各条道之后同步写下，道停在暂停点不妨碍它。
+    sb.wait_ready(a.pid(), START);
     let deadline = Instant::now() + START;
     while a
         .stderr()
