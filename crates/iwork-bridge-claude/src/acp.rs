@@ -207,8 +207,21 @@ pub async fn serve<T>(config: BridgeConfig, transport: T) -> Result<(), String>
 where
     T: agent_client_protocol::ConnectTo<agent_client_protocol::Agent> + 'static,
 {
+    serve_with(config, transport, Arc::new(Mutex::new(Slot::default()))).await
+}
+
+/// 次序约定（审查 S6-4 1/F-1）：会改会话状态的消息（开会话占位、prompt 入队、cancel 入队）都在处理函数里
+/// **同步**做完，处理函数按 ACP 收到的次序被调用，所以会话任务看到的次序就是收到的次序；只有「等结果」
+/// （开会话的握手、等这一轮的答复）放进 `cx.spawn` 的任务里。
+async fn serve_with<T>(
+    config: BridgeConfig,
+    transport: T,
+    slot: Arc<Mutex<Slot>>,
+) -> Result<(), String>
+where
+    T: agent_client_protocol::ConnectTo<agent_client_protocol::Agent> + 'static,
+{
     let config = Arc::new(config);
-    let slot = Arc::new(Mutex::new(Slot::default()));
     let (c1, c2, c3) = (config.clone(), config.clone(), config.clone());
     let (s1, s2, s3, s4) = (slot.clone(), slot.clone(), slot.clone(), slot.clone());
     Agent
@@ -223,6 +236,9 @@ where
         .on_receive_request(
             async move |req: NewSessionRequest, responder, cx: Conn| {
                 let (config, slot) = (c2.clone(), s1.clone());
+                if let Err(e) = claim(&slot) {
+                    return responder.respond_with_result(Err(e));
+                }
                 cx.clone().spawn(async move {
                     let session_id = new_session_id();
                     let opened = open(
@@ -248,6 +264,9 @@ where
         .on_receive_request(
             async move |req: LoadSessionRequest, responder, cx: Conn| {
                 let (config, slot) = (c3.clone(), s2.clone());
+                if let Err(e) = claim(&slot) {
+                    return responder.respond_with_result(Err(e));
+                }
                 cx.clone().spawn(async move {
                     let opened = open(
                         &config,
@@ -272,9 +291,14 @@ where
         .on_receive_request(
             async move |req: PromptRequest, responder, cx: Conn| {
                 let slot = s3.clone();
+                // 先按收到的次序入队（同步），再把等答复交给任务：紧跟着的 cancel 一定排在它后面
+                let queued = enqueue_prompt(&slot, &req.prompt);
                 cx.spawn(async move {
-                    let result = prompt(&slot, &req.prompt).await.map(PromptResponse::new);
-                    responder.respond_with_result(result)
+                    let result = match queued {
+                        Ok(answer) => wait_prompt(&slot, answer).await,
+                        Err(e) => Err(e),
+                    };
+                    responder.respond_with_result(result.map(PromptResponse::new))
                 })
             },
             agent_client_protocol::on_receive_request!(),
@@ -379,13 +403,6 @@ async fn open(
     system_prompt: String,
     start: Start,
 ) -> Result<(), agent_client_protocol::Error> {
-    {
-        let mut slot = slot.lock().expect("锁没有中毒");
-        if slot.opened {
-            return Err(named_error("setup_invalid", Some("session")));
-        }
-        slot.opened = true;
-    }
     let meta = meta.map(|m| Value::Object(m.clone()));
     let setup =
         setup::from_meta(meta.as_ref()).map_err(|e| named_error("setup_invalid", Some(e.field)))?;
@@ -445,28 +462,47 @@ async fn open(
     Ok(())
 }
 
-/// 把 prompt 交给会话任务，等这一轮结束。
-async fn prompt(
+/// 一个桥接进程只开一次会话：在处理函数里同步占位（两条开会话的请求连着到时，次序就是收到的次序）。
+fn claim(slot: &Mutex<Slot>) -> Result<(), agent_client_protocol::Error> {
+    let mut slot = slot.lock().expect("锁没有中毒");
+    if slot.opened {
+        return Err(named_error("setup_invalid", Some("session")));
+    }
+    slot.opened = true;
+    Ok(())
+}
+
+/// prompt 的答复。
+type Answer = oneshot::Receiver<Result<StopReason, agent_client_protocol::Error>>;
+
+/// 把 prompt 交给会话任务（同步，在处理函数里调），返回等答复的一端。
+fn enqueue_prompt(
     slot: &Mutex<Slot>,
     blocks: &[ContentBlock],
-) -> Result<StopReason, agent_client_protocol::Error> {
+) -> Result<Answer, agent_client_protocol::Error> {
     let blocks = blocks
         .iter()
         .map(input_block)
         .collect::<Result<Vec<_>, _>>()?;
-    let commands = {
-        let slot = slot.lock().expect("锁没有中毒");
-        match (&slot.commands, slot.opened) {
-            (Some(c), _) => c.clone(),
-            (None, true) => return Err(slot.ended_error()),
-            (None, false) => return Err(named_error("setup_invalid", Some("session"))),
-        }
+    let slot = slot.lock().expect("锁没有中毒");
+    let commands = match (&slot.commands, slot.opened) {
+        (Some(c), _) => c,
+        (None, true) => return Err(slot.ended_error()),
+        (None, false) => return Err(named_error("setup_invalid", Some("session"))),
     };
-    let (done, result) = oneshot::channel();
-    if commands.send(Command::Prompt { blocks, done }).is_err() {
-        return Err(slot.lock().expect("锁没有中毒").ended_error());
-    }
-    match result.await {
+    let (done, answer) = oneshot::channel();
+    commands
+        .send(Command::Prompt { blocks, done })
+        .map_err(|_| slot.ended_error())?;
+    Ok(answer)
+}
+
+/// 等这一轮结束。
+async fn wait_prompt(
+    slot: &Mutex<Slot>,
+    answer: Answer,
+) -> Result<StopReason, agent_client_protocol::Error> {
+    match answer.await {
         Ok(r) => r,
         // 会话任务没回就结束了：拿它记下的原因
         Err(_) => Err(slot.lock().expect("锁没有中毒").ended_error()),
@@ -1003,6 +1039,8 @@ fn backend_answer(
 mod tests {
     use agent_client_protocol::v1::schema::SelectedPermissionOutcome;
 
+    use crate::launch::BridgeEnv;
+
     use super::*;
 
     /// 审查 2/F-1：开会话失败的每一种都带上该带的东西。握手时权限模式不符、没有那个键、等不到响应（三种都是
@@ -1030,6 +1068,119 @@ mod tests {
         ] {
             let f = SessionFatal::from(e);
             assert_eq!((f.code, f.reason, f.plugin), (code, None, None));
+        }
+    }
+
+    /// 接线交错（审查 S6-4 1/F-1）：`TurnGate` 的属性测试只管状态机，管不到「ACP 收到的次序 → 进会话任务的
+    /// 次序」这一层。这里把随机的 prompt / cancel 序列一口气写进真实的 `serve_with` 处理函数（中间不等任何回应），
+    /// 断言会话任务收到的命令次序和写进去的次序一样。prompt 要是在 `cx.spawn` 里才入队，`[Prompt, Cancel]`
+    /// 就会变成先 Cancel 后 Prompt（取消被状态机当成空闲时的取消丢掉）。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Sent {
+        Prompt,
+        Cancel,
+    }
+
+    fn sent() -> impl proptest::strategy::Strategy<Value = Sent> {
+        proptest::prop_oneof![
+            proptest::strategy::Just(Sent::Prompt),
+            proptest::strategy::Just(Sent::Cancel)
+        ]
+    }
+
+    /// 写进去的一串消息，会话任务这一侧收到的命令次序。
+    fn received_order(seq: &[Sent]) -> Vec<Sent> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let slot = Arc::new(Mutex::new(Slot {
+                commands: Some(tx),
+                opened: true,
+                ended: None,
+            }));
+            let config = BridgeConfig {
+                data_dir: "/nonexistent".into(),
+                bridge: BridgeEnv {
+                    cli: "/nonexistent/claude".into(),
+                    hook_program: "/nonexistent/hook".into(),
+                    inherited: crate::launch::env::LaunchEnv::from_vars(Vec::new()),
+                },
+                hook_timeout: Duration::from_secs(60),
+                startup_limit: Duration::from_secs(1),
+            };
+            let (client, bridge) = tokio::io::duplex(1 << 16);
+            let (bridge_read, _bridge_write) = tokio::io::split(bridge);
+            let incoming = futures::stream::unfold(BufReader::new(bridge_read).lines(), |mut l| async {
+                match l.next_line().await {
+                    Ok(Some(line)) => Some((Ok(line), l)),
+                    Ok(None) => None,
+                    Err(e) => Some((Err(e), l)),
+                }
+            });
+            let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+            let outgoing = futures::sink::unfold(out_tx, |tx, line: String| async move {
+                tx.send(line).map_err(std::io::Error::other)?;
+                Ok::<_, std::io::Error>(tx)
+            });
+            let serving = tokio::spawn(serve_with(
+                config,
+                Lines::new(Box::pin(outgoing), Box::pin(incoming)),
+                slot,
+            ));
+            let (_r, mut w) = tokio::io::split(client);
+            w.write_all(
+                format!("{}\n", json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize",
+                    "params": { "protocolVersion": 1, "clientCapabilities": {} } }))
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+            // 握手完成才能发会话方法
+            loop {
+                let line = out_rx.recv().await.unwrap();
+                if serde_json::from_str::<Value>(&line).unwrap()["id"] == 0 {
+                    break;
+                }
+            }
+            let mut batch = String::new();
+            for (i, m) in seq.iter().enumerate() {
+                let v = match m {
+                    Sent::Prompt => json!({ "jsonrpc": "2.0", "id": i + 1, "method": "session/prompt",
+                        "params": { "sessionId": "s", "prompt": [{ "type": "text", "text": "x" }] } }),
+                    Sent::Cancel => json!({ "jsonrpc": "2.0", "method": "session/cancel",
+                        "params": { "sessionId": "s" } }),
+                };
+                batch.push_str(&format!("{v}\n"));
+            }
+            w.write_all(batch.as_bytes()).await.unwrap();
+            let mut got = Vec::new();
+            // prompt 的回复通道攥着不丢，免得处理函数那边提前收尾
+            let mut held = Vec::new();
+            while got.len() < seq.len() {
+                match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+                    Ok(Some(Command::Prompt { done, .. })) => {
+                        held.push(done);
+                        got.push(Sent::Prompt);
+                    }
+                    Ok(Some(Command::Cancel)) => got.push(Sent::Cancel),
+                    Ok(None) | Err(_) => break,
+                }
+            }
+            serving.abort();
+            got
+        })
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn acp_receive_order_is_queue_order(seq in proptest::collection::vec(sent(), 1..8)) {
+            proptest::prop_assert_eq!(received_order(&seq), seq);
         }
     }
 
