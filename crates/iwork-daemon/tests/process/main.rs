@@ -11,6 +11,7 @@ mod support;
 mod fixtures;
 mod seed;
 
+mod autostart;
 mod boot;
 mod install;
 mod instance;

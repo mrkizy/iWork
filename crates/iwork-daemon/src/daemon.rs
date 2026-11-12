@@ -25,6 +25,7 @@ use crate::boot::{
 };
 use crate::dev;
 use crate::exit::{exited, process_status};
+use crate::handler::lifecycle::autostart_handler;
 use crate::handler::{DaemonHandler, Gate, NotWired};
 use crate::instance::{self, LockOutcome, StandbyAction};
 use crate::logging::{self, AuditSignal, LogGuard};
@@ -35,7 +36,9 @@ use crate::stop::{self, StopHooks, StopStep, StopSwitch};
 use crate::supervisor::{RestartPolicy, Supervisor, TaskSpec};
 use crate::tasks::outbox::{self, OutboxRoute};
 use crate::tasks::signals::{self, Signals};
-use crate::tasks::{install_watch, maintenance, publish_check, sleep_watch, store_health};
+use crate::tasks::{
+    autostart_align, install_watch, maintenance, publish_check, sleep_watch, store_health,
+};
 use crate::time::{MonotonicIds, SystemClock};
 use crate::work::{NoWork, RunningWork};
 
@@ -406,6 +409,52 @@ async fn wait_stop_reason(supervisor: &mut Supervisor, stop: &StopSwitch) -> Sto
     }
 }
 
+type Autostart = iwork_host::autostart::Platform;
+
+/// 本机的自启实现：注册项里写本进程的程序路径。开发构建可用 `IWORK_DEV_AUTOSTART_TOOL` 换掉
+/// `launchctl` / `systemctl`（真进程测试的替身；同时不检查 systemd 用户实例）。
+fn autostart_port(id: &Identity) -> Autostart {
+    #[allow(unused_mut)]
+    let mut cfg = iwork_host::autostart::AutostartConfig {
+        program: id.exe.clone(),
+        home: std::env::home_dir().unwrap_or_default(),
+        tool: None,
+        assume_supported: false,
+    };
+    #[cfg(feature = "dev")]
+    if let Some(tool) = std::env::var_os("IWORK_DEV_AUTOSTART_TOOL") {
+        cfg.tool = Some(PathBuf::from(tool));
+        cfg.assume_supported = true;
+    }
+    iwork_host::autostart::for_current_user(cfg)
+}
+
+/// 启动表第 9a 步。
+async fn unregister_if_disabled(port: &Autostart, store: &Arc<Store>) {
+    use iwork_ports::autostart::{AutostartPort, AutostartState};
+    use iwork_ports::read_model::ReadModelPort;
+    let intent = match store.read_model(boot::read_defaults()).settings().await {
+        Ok(s) => s.autostart,
+        Err(e) => {
+            tracing::warn!(error = %e, "读设置失败，跳过自启注销");
+            return;
+        }
+    };
+    if intent {
+        return;
+    }
+    match port.state().await {
+        Ok(AutostartState::Registered { .. }) => {
+            tracing::info!("自启已关而本托管实例还注册着：注销（服务管理器会结束本进程）");
+            if let Err(e) = port.set(false).await {
+                tracing::warn!(error = %e, "注销自启失败，继续启动");
+            }
+        }
+        Ok(AutostartState::NotRegistered) => {}
+        Err(e) => tracing::warn!(error = %e, "查自启注册状态失败，继续启动"),
+    }
+}
+
 #[cfg(not(feature = "dev"))]
 fn install_timing() -> install_watch::Timing {
     install_watch::Timing::REAL
@@ -485,6 +534,7 @@ async fn serve_with<W: RunningWork>(
     if !enter(&board, Step::Server) {
         return fail(&board, boot::injected(Step::Server));
     }
+    let autostart = Arc::new(autostart_port(&id));
     let gate = Arc::new(Gate::default());
     let stop_switch = StopSwitch::new();
     let mut cfg = ServerConfig::new(VERSION);
@@ -492,7 +542,8 @@ async fn serve_with<W: RunningWork>(
     let (server, publisher) = Server::new(
         cfg,
         id.own.clone(),
-        DaemonHandler::new(gate.clone(), NotWired, work.clone(), stop_switch.clone()),
+        DaemonHandler::new(gate.clone(), NotWired, work.clone(), stop_switch.clone())
+            .with_autostart(autostart_handler(autostart.clone(), store.clone())),
         StoreSource::new(store.clone(), SnapshotNotWired),
     );
     let publishing = PublishState::new();
@@ -512,6 +563,13 @@ async fn serve_with<W: RunningWork>(
         if let Err(e) = p.start(&store).await {
             return fail(&board, boot::read_error(Step::Server, e));
         }
+    }
+
+    // 第 9a 步：托管实例 + 已提交的设置是关 → 查到自己还注册着就注销。注销会结束本进程——这正是要的：
+    // 这时还没 bind、没有客户端、没有回合在跑（方案 2.12）。失败只记 warn，继续启动
+    if args.service {
+        board.set_phase(starting(Step::AutostartOff));
+        unregister_if_disabled(autostart.as_ref(), &store).await;
     }
 
     // 第 10 步：绑定
@@ -588,6 +646,20 @@ async fn serve_with<W: RunningWork>(
         TaskSpec::restartable("sleep-watch", {
             let (clock, woke) = (clock.clone(), woke.clone());
             move || sleep_watch::run(clock.clone(), woke.clone(), sleep_watch::INTERVAL)
+        }),
+        TaskSpec::restartable("autostart-align", {
+            let read = Arc::new(store.read_model(boot::read_defaults()));
+            let (port, wake) = (autostart.clone(), publishing.autostart.clone());
+            let (managed, program) = (args.service, id.exe.clone());
+            move || {
+                autostart_align::run(
+                    port.clone(),
+                    read.clone(),
+                    managed,
+                    program.clone(),
+                    wake.clone(),
+                )
+            }
         }),
         TaskSpec::restartable("install-watch", {
             let disk = Arc::new(install_watch::RealDisk {

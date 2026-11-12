@@ -1,5 +1,5 @@
-//! 生命周期命令的受理（T04 方案 2.8）：`ShutdownDaemon`。判定是 `iwork_app::lifecycle` 的纯函数，这里只接线。
-//! `SetAutostart` 在组 3（方案第 11 节第 9 步）。
+//! 生命周期命令的受理（T04 方案 2.8、2.12）：`ShutdownDaemon`、`SetAutostart`。判定与受理在 `iwork_app::lifecycle`，
+//! 这里只接线、把结果变成响应。
 
 use iwork_app::details;
 use iwork_app::lifecycle::{ShutdownDecision, decide_shutdown};
@@ -67,6 +67,96 @@ pub fn shutdown(
                     replayed: false,
                 })),
             }
+        }
+    }
+}
+
+/// `SetAutostart` 的受理（装配时由端口与存储造出，见 [`autostart_handler`]）。
+pub type AutostartHandler = std::sync::Arc<
+    dyn Fn(
+            u64,
+            String,
+            bool,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = pb::Response> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// 造 `SetAutostart` 的受理：只提交意图（`iwork_app::lifecycle::set_autostart`），不碰系统。
+pub fn autostart_handler<A, St>(
+    port: std::sync::Arc<A>,
+    store: std::sync::Arc<St>,
+) -> AutostartHandler
+where
+    A: iwork_ports::autostart::AutostartPort + 'static,
+    St: iwork_ports::store::StoragePort + Send + Sync + 'static,
+{
+    std::sync::Arc::new(move |request_id, command_id, enabled| {
+        let (port, store) = (port.clone(), store.clone());
+        Box::pin(async move {
+            set_autostart(
+                port.as_ref(),
+                store.as_ref(),
+                request_id,
+                &command_id,
+                enabled,
+            )
+            .await
+        })
+    })
+}
+
+/// 受理一次 `SetAutostart`，结果变成响应。
+pub async fn set_autostart<A, St>(
+    port: &A,
+    store: &St,
+    request_id: u64,
+    command_id: &str,
+    enabled: bool,
+) -> pb::Response
+where
+    A: iwork_ports::autostart::AutostartPort,
+    St: iwork_ports::store::StoragePort,
+{
+    use iwork_app::lifecycle::SetAutostartError;
+    let Ok(id) = command_id.parse::<iwork_domain::id::CommandId>() else {
+        return error_response(
+            request_id,
+            pb::ErrorCode::InvalidArgument,
+            &format!("command_id 不是合法的 ULID：{command_id:?}"),
+            false,
+        );
+    };
+    match iwork_app::lifecycle::set_autostart(
+        port,
+        store,
+        id,
+        iwork_domain::common::Actor("user".into()),
+        enabled,
+    )
+    .await
+    {
+        Ok(r) => pb::Response {
+            request_id,
+            body: Some(pb::response::Body::Accepted(pb::CommandAccepted {
+                first_seq: r.first_seq.0,
+                last_seq: r.last_seq.0,
+                replayed: r.replayed,
+            })),
+        },
+        Err(SetAutostartError::Unsupported(reason)) => error_response(
+            request_id,
+            pb::ErrorCode::PreconditionFailed,
+            &reason,
+            false,
+        ),
+        Err(SetAutostartError::Storage(e)) => {
+            let code = if e.retryable() {
+                pb::ErrorCode::Unavailable
+            } else {
+                pb::ErrorCode::Internal
+            };
+            error_response(request_id, code, &e.to_string(), e.retryable())
         }
     }
 }

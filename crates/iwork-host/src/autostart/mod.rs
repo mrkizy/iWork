@@ -1,0 +1,166 @@
+//! 登录自启的实现（T04 方案 2.12；`AutostartPort`）。
+//!
+//! | 平台 | 做法 | 服务管理器的重启配置 |
+//! | --- | --- | --- |
+//! | macOS | `~/Library/LaunchAgents/com.iwork.daemon.plist` + `launchctl bootstrap` / `bootout`。plist 写 `Program`
+//! |       | （包内后台程序的绝对路径；`BundleProgram` 用 bootstrap 加载一律失败，N1 第 10 项）。不用 `SMAppService`（N1） | `KeepAlive = { SuccessfulExit = false }`、`ThrottleInterval = 10` |
+//! | Linux | `$XDG_CONFIG_HOME/systemd/user/iwork-daemon.service` + `systemctl --user` | `Restart=on-failure`、`RestartSec=10`；不加 `RestartForceExitStatus`（N4） |
+//!
+//! 两边表达的是同一条约定：非零退出（或被信号结束）就再拉，零就不拉；报零还是非零由后台自己决定（`--service`）。
+//! 两份实现都只读写文件、调外部命令，所以在所有 Unix 上都编译（两边的测试本机都能跑）；`for_current_user` 按平台选。
+//! 外部命令的路径可以注入（测试用记录参数的假命令替身）。
+
+use std::path::{Path, PathBuf};
+
+use iwork_ports::autostart::AutostartError;
+
+pub mod linux;
+pub mod macos;
+
+/// 服务管理器起后台时带的参数（后台据此知道自己是托管实例，按 2.2 的角色表报退出状态）。
+pub const SERVICE_ARG: &str = "--service";
+
+/// 一份自启实现的配置。
+#[derive(Debug, Clone)]
+pub struct AutostartConfig {
+    /// 后台程序的绝对路径（包内的 `iwork-daemon`）。
+    pub program: PathBuf,
+    /// 用户主目录。
+    pub home: PathBuf,
+    /// 换掉 `launchctl` / `systemctl`（测试用的替身）。
+    pub tool: Option<PathBuf>,
+    /// 不检查 systemd 用户实例在不在（测试用）。
+    pub assume_supported: bool,
+}
+
+/// 按当前平台选实现。
+#[cfg(target_os = "macos")]
+pub type Platform = macos::LaunchAgent;
+#[cfg(target_os = "linux")]
+pub type Platform = linux::UserUnit;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub type Platform = Unsupported;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn for_current_user(cfg: AutostartConfig) -> Platform {
+    Platform::new(cfg)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn for_current_user(_cfg: AutostartConfig) -> Platform {
+    Unsupported
+}
+
+/// M1 不支持的平台（Windows，Q2 已决定）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Unsupported;
+
+impl iwork_ports::autostart::AutostartPort for Unsupported {
+    async fn state(&self) -> Result<iwork_ports::autostart::AutostartState, AutostartError> {
+        Ok(iwork_ports::autostart::AutostartState::NotRegistered)
+    }
+    fn supported(&self) -> Result<(), AutostartError> {
+        Err(AutostartError::Unsupported {
+            reason: "M1 暂不支持这个平台的登录自启".into(),
+        })
+    }
+    async fn set(&self, _enabled: bool) -> Result<(), AutostartError> {
+        Err(self.supported().unwrap_err())
+    }
+}
+
+/// 跑一个外部命令；非零退出 → `Failed`，带上命令与输出。
+async fn run(tool: &Path, args: &[&str]) -> Result<std::process::Output, AutostartError> {
+    let out = tokio::process::Command::new(tool)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .map_err(|e| AutostartError::Failed {
+            message: format!("运行 {} 失败：{e}", tool.display()),
+        })?;
+    Ok(out)
+}
+
+fn failed(tool: &Path, args: &[&str], out: &std::process::Output) -> AutostartError {
+    AutostartError::Failed {
+        message: format!(
+            "{} {} 退出状态 {}：{}{}",
+            tool.display(),
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim(),
+            String::from_utf8_lossy(&out.stdout).trim()
+        ),
+    }
+}
+
+/// 写文件：临时文件 + 改名，目录不存在就建。
+fn write_atomically(path: &Path, text: &str) -> Result<(), AutostartError> {
+    let io = |e: std::io::Error| AutostartError::Failed {
+        message: format!("写 {} 失败：{e}", path.display()),
+    };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(io)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text).map_err(io)?;
+    std::fs::rename(&tmp, path).map_err(io)
+}
+
+fn remove(path: &Path) -> Result<(), AutostartError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(AutostartError::Failed {
+            message: format!("删 {} 失败：{e}", path.display()),
+        }),
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_tool {
+    //! 记录参数的假命令替身：每次调用往日志追加一行参数；`FAIL_ON` 文件里写的词出现在参数里时以 1 退出。
+
+    use std::path::{Path, PathBuf};
+
+    pub struct FakeTool {
+        pub dir: tempfile::TempDir,
+    }
+
+    impl FakeTool {
+        pub fn new() -> FakeTool {
+            let dir = tempfile::tempdir().unwrap();
+            let script = format!(
+                "#!/bin/sh\necho \"$@\" >> '{log}'\nif [ -f '{fail}' ]; then for a in \"$@\"; do grep -qx -- \"$a\" '{fail}' && exit 1; done; fi\nexit 0\n",
+                log = dir.path().join("calls.log").display(),
+                fail = dir.path().join("fail_on").display(),
+            );
+            let path = dir.path().join("tool");
+            std::fs::write(&path, script).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            FakeTool { dir }
+        }
+
+        pub fn path(&self) -> PathBuf {
+            self.dir.path().join("tool")
+        }
+
+        pub fn calls(&self) -> Vec<String> {
+            std::fs::read_to_string(self.dir.path().join("calls.log"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+
+        pub fn fail_on(&self, word: &str) {
+            std::fs::write(self.dir.path().join("fail_on"), format!("{word}\n")).unwrap();
+        }
+
+        pub fn home(&self) -> &Path {
+            self.dir.path()
+        }
+    }
+}

@@ -1,0 +1,43 @@
+//! 登录自启（T04 方案 2.12）：让系统的服务管理器在用户登录时起后台服务，并在它异常退出时再拉。
+//! 实现在 `iwork-host::autostart`（macOS 是 LaunchAgent plist + `launchctl`，Linux 是 systemd 用户单元）。
+//!
+//! 设置是意图、注册项是实际状态：受理 `SetAutostart` 只提交事件，从不调这个端口的 `set`；全进程只有后台服务的
+//! 对齐任务调 `set`，让系统跟上已提交的设置。
+
+use std::future::Future;
+use std::path::PathBuf;
+
+/// 系统里现在的注册状态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutostartState {
+    /// 已注册，`program` 是注册项里写的后台程序路径。
+    Registered {
+        program: PathBuf,
+    },
+    NotRegistered,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AutostartError {
+    /// 这个平台或环境做不了自启（如 Linux 没有 systemd 用户实例；M1 的 Windows）。
+    #[error("这台机器上做不了登录自启：{reason}")]
+    Unsupported { reason: String },
+    #[error("登录自启的注册或注销失败：{message}")]
+    Failed { message: String },
+}
+
+impl AutostartError {
+    pub fn retryable(&self) -> bool {
+        matches!(self, Self::Failed { .. })
+    }
+}
+
+pub trait AutostartPort: Send + Sync {
+    fn state(&self) -> impl Future<Output = Result<AutostartState, AutostartError>> + Send;
+    /// 这个平台能不能做自启。只读，不改任何东西。
+    fn supported(&self) -> Result<(), AutostartError>;
+    /// 幂等：已是目标状态时什么都不做。
+    /// `set(true)` 会让服务管理器**立刻**起一个托管实例（它撞锁后等锁接班）。
+    /// `set(false)` 会**结束**服务管理器名下正在跑的那个实例——可能就是调用者自己。
+    fn set(&self, enabled: bool) -> impl Future<Output = Result<(), AutostartError>> + Send;
+}

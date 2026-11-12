@@ -79,6 +79,8 @@ pub struct PublishState {
     pub routes: Arc<MessageRoutes>,
     /// 每有一批新写入的 outbox 条目就加一（各条道各持一个接收端，取到取不到为止后等它变）。
     pub outbox: watch::Sender<u64>,
+    /// 提交了自启设置（`GlobalSettingsChanged{autostart: Some(_)}`）就叫醒对齐任务。
+    pub autostart: Arc<tokio::sync::Notify>,
 }
 
 impl PublishState {
@@ -88,6 +90,7 @@ impl PublishState {
             baseline: Arc::new(AtomicU64::new(0)),
             routes: Arc::new(MessageRoutes::default()),
             outbox: watch::Sender::new(0),
+            autostart: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -133,6 +136,12 @@ impl<S: PublishSink> CommitObserver for PublishObserver<S> {
                 panic!("提交的事件 {} 转换失败：{err}", e.seq.0)
             });
             self.state.routes.observe(&e.event, &r.routes);
+            if let DomainEvent::GlobalSettingsChanged(c) = &e.event
+                && c.autostart.is_some()
+            {
+                // 非阻塞：只存一个许可，对齐任务醒来自己读最新的已提交设置
+                self.state.autostart.notify_one();
+            }
             self.sink.publish(Published::Persisted(Arc::new(r)));
             self.state.last_published.store(e.seq.0, Ordering::SeqCst);
         }
@@ -182,6 +191,7 @@ mod tests {
     use iwork_domain::id::Seq;
     use iwork_domain::message::MessageBody;
     use iwork_ports::store::StoredEvent;
+    use std::time::Duration;
 
     #[derive(Default)]
     struct Recorder(Mutex<Vec<Published>>);
@@ -280,6 +290,37 @@ mod tests {
         }
         assert_eq!(state.last_published(), 3);
         assert!(state.routes.is_empty());
+    }
+
+    /// 提交了自启设置就叫醒对齐任务；别的设置变化不叫。
+    #[tokio::test]
+    async fn autostart_setting_wakes_alignment() {
+        use iwork_domain::event::GlobalSettingsChanged;
+        let rec = Arc::new(Recorder::default());
+        let state = PublishState::new();
+        let mut obs = PublishObserver::new(rec, state.clone());
+        let change = |autostart| -> DomainEvent {
+            GlobalSettingsChanged {
+                playful_ui: Some(true),
+                autostart,
+                projects_root: None,
+            }
+            .into()
+        };
+        obs.committed(CommittedBatch {
+            events: &[stored(1, change(None))],
+            outbox_added: 0,
+        });
+        let woke =
+            tokio::time::timeout(Duration::from_millis(50), state.autostart.notified()).await;
+        assert!(woke.is_err(), "别的设置不叫醒");
+        obs.committed(CommittedBatch {
+            events: &[stored(2, change(Some(false)))],
+            outbox_added: 0,
+        });
+        tokio::time::timeout(Duration::from_millis(50), state.autostart.notified())
+            .await
+            .expect("提交了自启设置应叫醒");
     }
 
     #[test]

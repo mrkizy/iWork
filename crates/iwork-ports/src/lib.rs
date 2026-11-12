@@ -13,6 +13,7 @@
 
 pub mod agent;
 pub mod artifact;
+pub mod autostart;
 pub mod clock;
 pub mod discovery;
 pub mod exec;

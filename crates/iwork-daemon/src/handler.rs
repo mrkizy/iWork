@@ -153,6 +153,7 @@ pub struct DaemonHandler<I, W> {
     inner: I,
     work: Arc<W>,
     stop: StopSwitch,
+    autostart: Option<lifecycle::AutostartHandler>,
 }
 
 impl<I: RequestHandler, W: RunningWork> DaemonHandler<I, W> {
@@ -162,7 +163,14 @@ impl<I: RequestHandler, W: RunningWork> DaemonHandler<I, W> {
             inner,
             work,
             stop,
+            autostart: None,
         }
+    }
+
+    /// 接上 `SetAutostart` 的受理（没接时它交给内层，T04 的内层回「未接入」）。
+    pub fn with_autostart(mut self, h: lifecycle::AutostartHandler) -> Self {
+        self.autostart = Some(h);
+        self
     }
 }
 
@@ -192,6 +200,17 @@ impl<I: RequestHandler, W: RunningWork> RequestHandler for DaemonHandler<I, W> {
         {
             let _e = span.enter();
             return lifecycle::shutdown(ctx, request_id, cmd, self.work.as_ref(), &self.stop);
+        }
+        if let (
+            Some(pb::request::Body::Command(pb::Command {
+                command_id,
+                kind: Some(pb::command::Kind::SetAutostart(cmd)),
+            })),
+            Some(h),
+        ) = (&req.body, &self.autostart)
+        {
+            let fut = h(request_id, command_id.clone(), cmd.enabled);
+            return tracing::Instrument::instrument(fut, span).await;
         }
         tracing::Instrument::instrument(self.inner.handle(ctx, req), span).await
     }
