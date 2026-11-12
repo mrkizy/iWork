@@ -508,15 +508,17 @@ fn identity_failure_on_settled_install_exits_zero() {
 
 /// S7g（1/F-8）：升级 `exec` 的那一瞬间接手的新进程，冷却从它自己的启动算起。三个入口共用的后半段：
 /// 新进程 X 走完第 1 步、停在起任务之前（`IWORK_DEV_PAUSE_AT=tasks`）时把磁盘换成装齐的 C 版，再放它走 →
-/// X 的安装检查一上来就判「要重启」，但自己启动不到冷却时间（加速后 3s）不动，到点才重启成 C。
+/// X 的安装检查一上来就判「要重启」，但自己启动不到冷却时间（加速后 6s）不动，到点才重启成 C。
+/// 这三条加速得少一些（除以 5，不是 10）：冷却要明显长于「X 起到放行」，CI 上才分得开有没有冷却。
 /// （不在第 1 步里换：macOS 上程序文件在第 1 步期间被换，取身份就失败，那是 S11f 的情形。）
 mod cooldown {
     use super::*;
     use crate::support::{rt, spawn_in};
     use std::sync::{Arc, Mutex};
 
-    /// 加速后的冷却（30s / 10）。
-    const COOLDOWN_MS: u64 = 3000;
+    const FAST5: (&str, &str) = ("IWORK_DEV_INSTALL_FAST", "5");
+    /// 加速后的冷却（30s / 5）。
+    const COOLDOWN_MS: u64 = 6000;
     const PAUSE_TASKS: (&str, &str) = ("IWORK_DEV_PAUSE_AT", "tasks");
 
     fn now_ms() -> u64 {
@@ -553,7 +555,7 @@ mod cooldown {
             &inst.daemon(),
             &[],
             &[
-                FAST,
+                FAST5,
                 ("IWORK_DEV_PAUSE_AT", "upgrade-exec"),
                 ("IWORK_DEV_RESUME_FILE", resume_d.to_str().unwrap()),
             ],
@@ -573,7 +575,7 @@ mod cooldown {
     /// X 的环境：停在起任务之前，`resume_x` 出现才往下走。
     fn x_env(resume_x: &Path) -> Vec<(String, String)> {
         vec![
-            (FAST.0.into(), FAST.1.into()),
+            (FAST5.0.into(), FAST5.1.into()),
             (PAUSE_TASKS.0.into(), PAUSE_TASKS.1.into()),
             (
                 "IWORK_DEV_RESUME_FILE".into(),
@@ -603,7 +605,7 @@ mod cooldown {
         let resumed_at = now_ms();
         // 没有冷却的话，放它走之后马上就重启；要和「冷却到点」分得开，放它走的时刻得明显早于 t0 + 冷却
         assert!(
-            resumed_at < t0 + COOLDOWN_MS - 1000,
+            resumed_at < t0 + COOLDOWN_MS - 2000,
             "X 起到放行用了 {}ms，区分不出有没有冷却",
             resumed_at - t0
         );
@@ -645,13 +647,15 @@ mod cooldown {
     struct SpawnInSandbox {
         home: PathBuf,
         env: Vec<(String, String)>,
-        spawned: Arc<Mutex<Vec<Daemon>>>,
+        /// 每个拉起的进程与拉起前的时刻（毫秒）：进程的启动不早于它
+        spawned: Arc<Mutex<Vec<(u64, Daemon)>>>,
     }
 
     impl iwork_client_core::launcher::Spawn for SpawnInSandbox {
         fn spawn(&self, exe: &Path, args: &[&str]) -> std::io::Result<()> {
+            let at = now_ms();
             let d = spawn_in(&self.home, exe, args, &as_refs(&self.env));
-            self.spawned.lock().unwrap().push(d);
+            self.spawned.lock().unwrap().push((at, d));
             Ok(())
         }
     }
@@ -666,7 +670,7 @@ mod cooldown {
         let inst = installed(&sb, "A");
         let (resume_d, resume_x) = (sb.home.join("resume-d"), sb.home.join("resume-x"));
         let d = start_d(&sb, &inst, &resume_d);
-        let t0 = upgrade_until_before_exec(&sb, &inst, &d);
+        upgrade_until_before_exec(&sb, &inst, &d);
         let spawned = Arc::new(Mutex::new(Vec::new()));
         let ep = iwork_ipc::LocalEndpoint::in_run_dir(&sb.run_dir()).unwrap();
         let mut cfg =
@@ -685,7 +689,7 @@ mod cooldown {
             },
             LaunchConfig {
                 daemon_exe: inst.daemon(),
-                budget: Duration::from_secs(1),
+                budget: Duration::from_millis(200),
                 run_dir: Some(sb.run_dir()),
                 endpoint: Ok(sb.run_dir().join("d.sock")),
                 args: vec![],
@@ -695,7 +699,8 @@ mod cooldown {
         let r = rt().block_on(launcher.connect_or_launch());
         assert!(matches!(r, Err(LaunchError::NotReady(_))), "{:?}", r.err());
         assert_eq!(spawned.lock().unwrap().len(), 1, "客户端拉起了一个");
-        let x_stderr = || spawned.lock().unwrap()[0].stderr();
+        let t0 = spawned.lock().unwrap()[0].0;
+        let x_stderr = || spawned.lock().unwrap()[0].1.stderr();
         assert_cooldown_holds(&sb, &inst, x_stderr, &resume_x, t0);
     }
 
