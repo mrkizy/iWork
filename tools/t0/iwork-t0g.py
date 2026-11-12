@@ -361,23 +361,40 @@ def base_argv(settings=None, extra_args=(), iso=True, stream_input=False, prompt
     return argv + list(extra_args)
 
 
+# 账号类的键：不管出现在哪个事件、哪一层，一律删掉（审查 1/F-3）。2.1.322 实测 initialize 控制请求的响应体里有 account
+# （下面带 email、organization 等）；位置换一层、换个事件，都不能原样落盘。AGENTS.md 安全不变量：邮箱等不落盘、不进日志。
+ACCOUNT_KEYS = {"account", "email", "organization"}
+ACCOUNT_KEY_TEXT = re.compile(r'"(?:account|email|organization)"', re.I)
+REDACTED_LINE = json.dumps({"iwork_t0g_redacted": "这一行解析不了，又带账号类的键名，整行没存"})
+
+
 def redact_event(o):
-    """去掉事件里的账号信息，别的原样返回。纯函数。
-    initialize 控制请求的响应带登录账号（2.1.322 实测：control_response.response.response.account）。
-    AGENTS.md 安全不变量：邮箱等不落盘、不进日志。所以它在进内存里的事件表和落盘之前就删掉，后面谁都拿不到。"""
-    outer = o.get("response") if o.get("type") == "control_response" else None
-    inner = outer.get("response") if isinstance(outer, dict) else None
-    if not (isinstance(inner, dict) and "account" in inner): return o
-    return {**o, "response": {**outer, "response": {k: v for k, v in inner.items() if k != "account"}}}
+    """去掉任意深度上的账号类键（ACCOUNT_KEYS，不分大小写），别的原样返回。纯函数。
+    什么都没删时返回同一个对象，调用方据此判断这一行要不要重新序列化。"""
+    if isinstance(o, dict):
+        out, changed = {}, False
+        for k, v in o.items():
+            if isinstance(k, str) and k.lower() in ACCOUNT_KEYS: changed = True; continue
+            nv = redact_event(v)
+            changed |= nv is not v
+            out[k] = nv
+        return out if changed else o
+    if isinstance(o, list):
+        items = [redact_event(v) for v in o]
+        return items if any(a is not b for a, b in zip(items, o)) else o
+    return o
 
 
 def redact_line(line):
-    """一行 stream-json 去掉账号信息。不是 JSON 的行原样返回；删了东西才重新序列化，别的行一个字不动。"""
+    """一行输出（stream-json 或 stderr）去掉账号信息。纯函数。
+    能解析的 JSON：删掉账号类的键，删了东西才重新序列化，别的行一个字不动。
+    解析不了的（半截行、普通文字）：带账号类键名（带引号的 "account" 之类）就整行换成占位，否则原样。"""
+    nl = "\n" if line.endswith("\n") else ""
     try: o = json.loads(line)
-    except Exception: return line
-    if not isinstance(o, dict): return line
+    except Exception:
+        return REDACTED_LINE + nl if ACCOUNT_KEY_TEXT.search(line) else line
     clean = redact_event(o)
-    return line if clean is o else json.dumps(clean) + ("\n" if line.endswith("\n") else "")
+    return line if clean is o else json.dumps(clean) + nl
 
 
 def redact_stream(text):
@@ -441,7 +458,7 @@ def claude(name, prompt, settings=None, extra_args=(), iso=True, cwd=None, env=N
     """一次性运行。返回结构化证据 + exit / timed_out / secs。"""
     t0 = time.time()
     out, err, code, timed_out = run_instance(base_argv(settings, extra_args, iso, prompt=prompt), name, cwd, env, timeout)
-    out = redact_stream(out)
+    out, err = redact_stream(out), redact_stream(err)
     open(os.path.join(R.out, f"{name}-stream.jsonl"), "w").write(scrub(out))
     open(os.path.join(R.out, f"{name}-stderr.txt"), "w").write(scrub(err))
     r = parse_stream(out)
@@ -559,9 +576,20 @@ def evidence(r, match, parent="main", hook_rows=None, exit_ok=(0,), many=False):
     return ev
 
 
+# CLI 不过 hook、自己就判了失败的调用（2.1.322 实测两种，都没执行任何东西）：调了这个会话里没有的工具；
+# Bash 的内置拦截（如前台的 `sleep 61; …`）。结果都标了错误，文字是下面两种开头的 tool_use_error。
+CLI_REJECTED = re.compile(r"^\s*<tool_use_error>\s*(Error:\s*No such tool available|Blocked:)")
+
+
+def cli_rejected(res):
+    """这个工具结果是不是 CLI 自己判的失败（没到执行那一步）。要标了错误、文字是登记的那两种开头。"""
+    return res["is_error"] and bool(CLI_REJECTED.match(res["text"]))
+
+
 def all_errors(ev):
-    """每一次目标调用的结果都明确是报错。"""
-    return bool(ev["results"]) and all(res["is_error"] for res in ev["results"])
+    """每一次目标调用的结果都明确是报错，而且报错来自被测的那一层，不是 CLI 自己判的（cli_rejected：没这个工具、
+    Bash 内置拦截）。CLI 自己判的失败说明不了 hook 或沙箱拦住了什么，不能当「没执行」的证据（审查 1/F-8）。"""
+    return bool(ev["results"]) and all(res["is_error"] and not cli_rejected(res) for res in ev["results"])
 
 
 def decide(ev, executed, want_executed):
@@ -676,9 +704,14 @@ def bash_exact(r, cmd):
     return bash_ev(r, cmd)["ok"]
 
 
+def denied_ev(r, cmd, rows=None):
+    """「被拒的这条命令」的证据（负向结论：允许重发，每一次都要有证据）。结论和说明都从这一份取（审查 1/F-9）。"""
+    return bash_ev(r, cmd, rows, many=True)
+
+
 def denied_verdict(r, cmd, executed, rows=None):
     """「被拒的这条命令没执行」（G5 的被拒命令、G9d）。只经 decide：要目标调用的正面证据、每一次结果都明确是报错；有执行的痕迹就是 FAIL。"""
-    return decide(bash_ev(r, cmd, rows, many=True), executed, False)
+    return decide(denied_ev(r, cmd, rows), executed, False)
 
 
 def resume_verdict(first, second, sid, same_session, also=True, extra_proofs=None):
@@ -709,8 +742,8 @@ def observed(case_id, body):
         if os.path.exists(p): os.remove(p)
     cmd = f"( {body} ) > {shlex.quote(out)} 2>&1; echo $? > {shlex.quote(rc)}"
     def read():
-        if not os.path.exists(rc): return None
-        return {"rc": open(rc).read().strip(), "out": open(out).read() if os.path.exists(out) else ""}
+        code = read_obs_path(rc)
+        return None if code is None else {"rc": code.strip(), "out": read_obs_path(out) or ""}
     return cmd, read
 
 
@@ -761,16 +794,6 @@ def g1_shapes(runs, calls_by_probe):
 def g1_export_verdict(valid_runs, items, need=6):
     """G1a、G1e（导出类）：来源的运行得有效；导出的条目够数才算。"""
     return affirm({"来源的运行有效": valid_runs > 0}, items >= need)
-
-
-# CLI 不过 hook、自己就判了失败的调用（2.1.322 实测两种，都没执行任何东西）：调了这个会话里没有的工具；
-# Bash 的内置拦截（如前台的 `sleep 61; …`）。结果都标了错误，文字是下面两种开头的 tool_use_error。
-CLI_REJECTED = re.compile(r"^\s*<tool_use_error>\s*(Error:\s*No such tool available|Blocked:)")
-
-
-def cli_rejected(res):
-    """这个工具结果是不是 CLI 自己判的失败（没到执行那一步）。要标了错误、文字是登记的那两种开头。"""
-    return res["is_error"] and bool(CLI_REJECTED.match(res["text"]))
 
 
 def g1_hooked_verdict(runs, hooked_ids):
@@ -850,7 +873,7 @@ def g1():
     r = claude("g1-cwd", g1_cwd_prompt(c_cd, c_pwd), settings=s2)
     ev_cd, ev_pwd = bash_ev(r, c_cd), bash_ev(r, c_pwd)
     row = hook_row(ev_pwd, hook_calls(logdir2))
-    actual = open(pwd_out).read().strip() if os.path.exists(pwd_out) else None
+    actual = (read_obs_path(pwd_out) or "").strip() or None
     settle("G1c hook 的 cwd 与命令真实所在目录一致（cd 之后）", g1_cwd_verdict(ev_cd, ev_pwd, row, actual),
            f"真实 pwd={scrub(str(actual))} hook cwd={scrub(str(((row or {}).get('input') or {}).get('cwd')))} "
            f"cd 是否跨调用保留={bool(actual) and os.path.realpath(actual) == os.path.realpath(sub)}")
@@ -1008,8 +1031,8 @@ def cell_verdict(tool, outcome, r, rows, match, parent, executed):
       主代理的那一次子代理工具调用有正面证据、子代理里一个调用都没有。结论仍由 decide 给：要它的结果明确是报错。"""
     want = (outcome == "allow")
     if outcome not in ("MISSING", "NOHOOK"):
-        return decide(evidence(r, match, parent, hook_rows=rows, many=True), executed, want)
-    ev = evidence(r, match, parent, many=True)
+        return decide(evidence(r, match, parent, hook_rows=rows, many=not want), executed, want)     # 只有负向结论允许重发（审查 1/F-5）
+    ev = evidence(r, match, parent, many=not want)                   # 这两种结局 want 恒为假，写成同一条规则
     if not ev["ok"] and tool == "子代理里的 bash" and not any(u["parent"] is not None for u in r["tool_uses"]):
         ev = evidence(r, lambda n, ti: n in AGENT_TOOLS, "main", many=True)
     return decide(ev, executed, want)
@@ -1076,7 +1099,7 @@ def outer_guards(cfg):
     cmd = (f"touch {ctl}; echo $? > {rc(1)}; touch {out_w}; echo $? > {rc(2)}; cat {out_secret} > {got} 2>/dev/null; echo $? > {rc(3)}")
     s, _ = guard_settings(tag + "-b", expect(bash=[cmd]), cfg, g2_settings_extra(cfg))
     rb = claude(tag + "-b", ask_bash(cmd), settings=s, extra_args=cfg["flags"] + ["--tools", "Bash"], timeout=180)
-    val = lambda p: open(p).read().strip() if os.path.exists(p) else None
+    val = lambda p: (lambda t: None if t is None else t.strip())(read_obs_path(p))
     g.update(bash_guard_verdict(bash_exact(rb, cmd), val(rc(1)), os.path.exists(ctl), val(rc(2)), os.path.exists(out_w), val(rc(3)), secret in (val(got) or "")))
     # 文件工具：工作目录里写得进（对照），工作目录外写不进、读不到
     in_w, out_fw = os.path.join(R.obs, tag + "-fw-ctl"), os.path.join(R.outside, tag + "-fw")
@@ -1342,7 +1365,8 @@ def g4():
 # ④ excludedCommands 对拍（1/F-7）：读 T07 导出的原样格式，不改命令、不改清单；用 PATH 里的替身观察它在沙箱内还是外
 CORPUS_PLACEMENTS = {"inside", "outside", "ambiguous"}
 # 替身每被调起一次记一行：在哪（能写沙箱外的位置 = outside）、父进程号、自己的名字、完整参数，以制表符分隔。
-# 记参数是为了分得清是谁调的（S-7）：S0 里推测 CLI 自己在沙箱外调了 git，命中替身，每一行都多出一笔 outside。
+# 判定靠参数分清是谁调的（S-7）：S0 里推测 CLI 自己在沙箱外调了 git，命中替身，每一行都多出一笔 outside。
+# 父进程号判定不用，只留作事后核对。
 # 整行先拼好再一次写出，同一条命令里两个替身（如管道）同时写也不会把行交错。
 STUB_SRC = '''#!/bin/sh
 # 命令替身：不做任何事，只记下这一笔调起。
@@ -1389,9 +1413,8 @@ def corpus_runnable(command):
 def stub_calls(row_id):
     """一行语料下替身的全部调起记录：[{place, ppid, name, args}]。没有记录文件是空表。"""
     path = os.path.join(R.obs, f"corpus-{row_id}.calls")
-    if not os.path.exists(path): return []
     calls = []
-    for line in open(path).read().split("\n"):
+    for line in (read_obs_path(path) or "").split("\n"):
         f = line.split("\t")
         if len(f) >= 3 and f[0] in ("inside", "outside"):
             calls.append({"place": f[0], "ppid": f[1], "name": f[2], "args": f[3:]})
@@ -1406,15 +1429,24 @@ def command_words(command):
     except ValueError: return None
 
 
+SHELL_OPERATOR = re.compile(r"[();<>|&]+")
+
+
 def stub_call_matches(words, call):
-    """这一笔调起是不是这条命令发起的：「名字 + 完整参数」在命令的词里连续出现。纯函数。
-    CLI 自己调同名程序（参数对不上）不算；命令里有变量、通配被展开了，参数也对不上，这一行就保持没测成。"""
+    """这一笔调起是不是这条命令里的一段简单命令发起的：「名字 + 完整参数」恰好是命令词里的一整段，
+    前面是开头或 shell 操作符（; | && 之类），后面是结尾或 shell 操作符。纯函数。
+    只比前缀不够（审查 1/F-4）：别人调的一笔 `git log` 会冒充 `git log --oneline -5`，不带参数的 `git` 会冒充任何一条 git 命令。
+    CLI 自己调同名程序（参数对不上）不算；命令里有变量、通配被展开了，或者有 `2>&1` 这类写法，参数也对不上，这一行保持没测成。"""
     want = [call["name"]] + call["args"]
-    return any(words[i:i + len(want)] == want for i in range(len(words) - len(want) + 1))
+    edge = lambda j: j < 0 or j >= len(words) or bool(SHELL_OPERATOR.fullmatch(words[j]))
+    return any(words[i:i + len(want)] == want and edge(i - 1) and edge(i + len(want)) for i in range(len(words) - len(want) + 1))
 
 
-def corpus_placement(row_id, command):
-    """一行语料的实测结果：只认参数与这一行命令对得上的调起。返回 (inside / outside / None, 没结论的原因)。"""
+def corpus_placement(row_id, command, ev):
+    """一行语料的实测结果。先要这一行的 Bash 目标调用有正面证据（ev：模型确实发了这条命令、结果回来了），
+    再只认参数与这一行命令对得上的调起。模型没发命令时，CLI 自己调的一笔同名命令不能算成这一行的。
+    返回 (inside / outside / None, 没结论的原因)。"""
+    if not ev["ok"]: return None, f"这一行的 Bash 目标调用没有正面证据：{ev['why']}"
     calls = stub_calls(row_id)
     if not calls: return None, "替身没有运行（命令没执行，或 PATH 没传到）"
     words = command_words(command)
@@ -1442,11 +1474,13 @@ def g4_corpus():
                 p = os.path.join(R.stubs, n)
                 if not os.path.exists(p):
                     open(p, "w").write(STUB_SRC); os.chmod(p, 0o755)
-            s, _ = make_settings(f"g4-corpus{i}", "allow", expect(bash=[row["command"]]),
+            # allow-sandboxed：模型自己给调用加 dangerouslyDisableSandbox 的一律拒绝，不然替身会被记成 outside，
+            # 而那不是 CLI 按 excludedCommands 判的（审查 1/F-4）。目标调用也只认不带这个参数的那一次
+            s, _ = make_settings(f"g4-corpus{i}", "allow-sandboxed", expect(bash=[row["command"]]),
                                  extra=sandbox_settings(excluded=[pattern_text(p) for p in row["excluded_commands"]]))
             env = {"PATH": R.stubs + os.pathsep + os.environ.get("PATH", ""), "IWORK_T0G_ROW": str(i), "IWORK_T0G_OBS": R.obs, "IWORK_T0G_OUTSIDE": R.outside}
-            claude(f"g4-corpus{i}", ask_bash(row["command"]), settings=s, env=env)
-            result, note = corpus_placement(i, row["command"])
+            r = claude(f"g4-corpus{i}", ask_bash(row["command"]), settings=s, env=env)
+            result, note = corpus_placement(i, row["command"], evidence(r, bash_match(row["command"], sandboxed_only=True)))
         tested += result is not None
         filled.append({**row, "claude": result if result is not None else row["claude"], "claude_note": note or "实测"})
     json.dump(filled, open(os.path.join(R.out, "g4-corpus-filled.json"), "w"), ensure_ascii=False, indent=1)
@@ -1488,7 +1522,7 @@ def g5_case(f):
     r_sandbox / c_sandbox / obs / outside_exists（工作区外那一笔写）；mode；
     project_start_ran / project_pretool_ran（仓库两个 hook 各自的哨兵）；control_ok（阳性对照）。"""
     parts = {"被 iWork 拒绝的命令没执行": denied_verdict(f["r_deny"], f["c_denied"], f["denied_exists"]),
-             "iWork 的 hook 在这次调用上被调起": hooked_verdict(bash_ev(f["r_deny"], f["c_denied"], many=True), f["deny_rows"])[0],
+             "iWork 的 hook 在这次调用上被调起": hooked_verdict(denied_ev(f["r_deny"], f["c_denied"]), f["deny_rows"])[0],
              "权限模式是给定值": mode_verdict(f["r_deny"], f["mode"])[0],
              "沙箱仍在（工作区外写不进）": obs_verdict(bash_ev(f["r_sandbox"], f["c_sandbox"]), f["obs"], False)}
     traces = {"仓库 SessionStart hook 跑了": bool(f["project_start_ran"]), "仓库 PreToolUse hook 跑了": bool(f["project_pretool_ran"]),
@@ -1910,7 +1944,7 @@ def g9():
     calls = hook_calls(logdir)
     ev = bash_ev(r, cmd)
     settle("G9a CLI 把自己的环境变量传给 hook", g9_env_verdict(ev, hook_row(ev, calls), token), ev["why"])
-    text = lambda p: open(p).read() if os.path.exists(p) else None
+    text = read_obs_path
     settle("G9b credentials.envVars deny 后沙箱里的命令看不到这个变量（对照变量看得到）", g9_deny_verdict(ev, text(out_denied), text(out_control)),
            f"对照变量可见={text(out_control) == CONTROL_VALUE}")
     record("INFO", "G9c hook 进程的父进程与进程组（只记录）", f"{[(c['pid'], c['ppid'], c['pgid']) for c in calls[:2]]}")
@@ -1920,7 +1954,7 @@ def g9():
                                 session_start=True)
     r2 = claude("g9-safe", ask_bash(c_safe), settings=s2, extra_args=["--tools", "Bash"], env={"CLAUDE_CODE_SAFE_MODE": "1"})
     settle("G9d 环境里有 CLAUDE_CODE_SAFE_MODE=1：被拒的命令仍不执行", denied_verdict(r2, c_safe, os.path.exists(sentinel)),
-           f"{bash_ev(r2, c_safe)['why']} hook 被调用={bool(hook_calls(logdir2))}（没被调用而命令也没执行 = 靠 CLI 自己的默认拒绝守住）")
+           f"{denied_ev(r2, c_safe)['why']} hook 被调用={bool(hook_calls(logdir2))}（没被调用而命令也没执行 = 靠 CLI 自己的默认拒绝守住）")
 
 
 GROUPS = {"G1": g1, "G2": g2, "G3": g3, "G4": g4, "G5": g5, "G6": g6, "G7": g7, "G8": g8, "G9": g9}
@@ -1978,10 +2012,27 @@ def withheld_hint(text):
             "提到没登录": "not logged" in low}
 
 
-def read_obs_file(path):
-    """读一个观测文件，不跟符号链接、不收有别的硬链接的文件，最多 OBS_MAX_BYTES。
-    观测目录在工作区里，沙箱里的命令写得进去，能摆一个指向凭据的链接，所以不能照常打开。读不了返回 None。"""
-    try: fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+OBS_MAX_FILES = 1000
+
+
+def open_dir_under(root, rel):
+    """从 root 起逐级打开 rel 的每一段目录，返回最后一级的目录描述符。每一段都是相对上一级描述符的
+    O_DIRECTORY|O_NOFOLLOW：哪一段被换成了链接或不是目录就抛 OSError。O_NOFOLLOW 只管路径最后一段，
+    所以不能把整条路径交给一次 open（审查 1/F-1）。root 是本次运行 mkdtemp 建的，沙箱里写不到它。"""
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in rel.split(os.sep):
+            nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd); fd = nfd
+        return fd
+    except BaseException:
+        os.close(fd); raise
+
+
+def read_obs_file(dir_fd, name):
+    """读观测目录里的一个文件，只经目录描述符，不跟符号链接、不收有别的硬链接的文件、不收 FIFO 之类（O_NONBLOCK：
+    打开 FIFO 不会卡住），最多 OBS_MAX_BYTES。观测目录在工作区里，沙箱里的命令写得进去，什么都可能摆。读不了返回 None。"""
+    try: fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except OSError: return None
     try:
         st = os.fstat(fd)
@@ -1991,20 +2042,46 @@ def read_obs_file(path):
         os.close(fd)
 
 
-def collect_obs(src, dst):
-    """把观测目录里该进结果包的文件拷到 dst（家目录换成 ~）。返回拷了几个。"""
-    os.makedirs(dst, exist_ok=True)
-    n = 0
-    for name in sorted(os.listdir(src)):
-        if not OBS_PACKED.search(name): continue
-        text = read_obs_file(os.path.join(src, name))
-        if text is None: continue
-        if name in OBS_PRIVATE_OUTPUT:
-            json.dump(withheld_hint(text), open(os.path.join(dst, name + ".withheld.json"), "w"), ensure_ascii=False)
-        else:
-            open(os.path.join(dst, name), "w").write(scrub(text))
-        n += 1
-    return n
+def read_obs_path(path):
+    """运行中读工作区里的观测文件（命令写下的输出、退出码、替身记录），和收结果包走同一套：从本次根目录起逐级不跟链接
+    打开目录、不跟链接打开文件、只收普通文件、O_NONBLOCK。观测目录沙箱里写得进：被换成链接，内容会进 summary；
+    被换成 FIFO，脚本会卡死（审查 1/F-1、1/F-2 的同类）。读不了（不存在、是链接、不是普通文件）返回 None。"""
+    rel = os.path.relpath(os.path.dirname(path), R.root)
+    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel): raise ValueError(f"观测文件不在本次根目录里：{path}")
+    try: dir_fd = open_dir_under(R.root, rel)
+    except OSError: return None
+    try: return read_obs_file(dir_fd, os.path.basename(path))
+    finally: os.close(dir_fd)
+
+
+def collect_obs(root, rel, dst, max_files=OBS_MAX_FILES):
+    """把 root/rel 这个观测目录里该进结果包的文件拷到 dst（家目录换成 ~）。最多收 max_files 个。
+    返回 (拷了几个, 说明)。目录某一段是链接、目录没了，抛 OSError（调用方 pack_obs 接住）。"""
+    dir_fd = open_dir_under(root, rel)
+    try:
+        names = sorted(n for n in os.listdir(dir_fd) if OBS_PACKED.search(n))
+        os.makedirs(dst, exist_ok=True)
+        n = 0
+        for name in names[:max_files]:
+            text = read_obs_file(dir_fd, name)
+            if text is None: continue
+            if name in OBS_PRIVATE_OUTPUT:
+                json.dump(withheld_hint(text), open(os.path.join(dst, name + ".withheld.json"), "w"), ensure_ascii=False)
+            else:
+                open(os.path.join(dst, name), "w").write(scrub(text))
+            n += 1
+    finally:
+        os.close(dir_fd)
+    return n, (f"候选 {len(names)} 个，超过上限只收了前 {max_files} 个" if len(names) > max_files else "")
+
+
+def pack_obs(root, rel, dst):
+    """收观测文件进结果包，出什么错都不往外抛：它坏了不能连累整次运行的结果包（审查 1/F-2）。返回给 summary 的一行。"""
+    try:
+        n, note = collect_obs(root, rel, dst)
+        return f"观测文件进结果包：{n} 个" + (f"；{note}" if note else "")
+    except Exception as e:
+        return f"观测文件没收进结果包（结果包照常写）：{e!r}"
 
 
 def write_results(parent):
@@ -2018,18 +2095,27 @@ def write_results(parent):
 
 # ---------- 自测（不调用 claude）----------
 def selftest_account_not_stored():
-    """S-9：initialize 响应里的账号信息不落盘、不进 summary。走真的 Live（假会话程序）与 G7c 那一行，查落盘的两个文件。"""
+    """S-9、1/F-3：账号信息不落盘、不进 summary。走真的 Live（假会话程序）与 G7c 那一行，查落盘的文件。
+    假会话除了实测的那个位置，还发审查给的几种反例：少一层、键名大小写不同、别的事件里带、最后一行只写了半截。"""
     marker = "acct-" + secrets.token_hex(6) + "@example.invalid"
     fake = ("import json,sys\n"
+            "M = sys.argv[1]\n"
             "for line in sys.stdin:\n"
             "    m = json.loads(line)\n"
-            "    body = {'models': [{'value': 'm1'}], 'current_permission_mode': 'default', 'account': {'email': sys.argv[1], 'organization': sys.argv[1]}}\n"
-            "    print(json.dumps({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': m['request_id'], 'response': body}}), flush=True)\n")
+            "    body = {'models': [{'value': 'm1'}], 'current_permission_mode': 'default', 'account': {'email': M, 'organization': M}}\n"
+            "    print(json.dumps({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': m['request_id'], 'response': body}}), flush=True)\n"
+            "    print(json.dumps({'type': 'control_response', 'response': {'subtype': 'success', 'Account': {'Email': M}}}), flush=True)\n"
+            "    print(json.dumps({'type': 'system', 'subtype': 'status', 'user': [{'email': M}], 'keep': 'k1'}), flush=True)\n"
+            "    sys.stdout.write(json.dumps({'type': 'x', 'account': {'email': M}})[:-3]); sys.stdout.flush()\n"
+            "    break\n")
     live = Live("selftest-account", None, argv=[sys.executable, "-c", fake, marker])
     try:
         live.control("c0", {"subtype": "initialize"})
-        got = live.wait(lambda o: o.get("type") == "control_response", 10)
-        assert got is not None, "假会话没回 initialize 响应"
+        assert live.wait(lambda o: o.get("subtype") == "status", 10) is not None, "假会话没发完"
+        live.proc.wait(timeout=10)                          # 它发完半截行就退出；读到结束，半截行才交给读线程
+        deadline = time.time() + 5
+        while time.time() < deadline and len(live.raw) < 4: time.sleep(0.05)
+        assert len(live.raw) == 4, live.raw
         evs, _ = live.snapshot()
         record("INFO", "selftest G7c", g7c_detail(evs))
     finally:
@@ -2037,11 +2123,13 @@ def selftest_account_not_stored():
     stored = open(os.path.join(R.out, "selftest-account-stream.jsonl")).read()
     summary = open(os.path.join(R.out, "summary.txt")).read()
     assert marker not in stored and marker not in summary, "账号信息落盘了"
-    assert '"current_permission_mode"' in stored and "m1" in summary and "current_permission_mode" in summary, "对照：响应里别的键照样留着"
-    assert '"account"' not in stored and "'account'" not in summary and '"account"' not in summary, "连键名也不留"
-    # redact_event 只动那一个位置，别的事件原样返回（同一个对象）
+    assert '"current_permission_mode"' in stored and "m1" in summary and "current_permission_mode" in summary and '"k1"' in stored, "对照：别的键照样留着"
+    assert not re.search(r"account|email|organization", stored + summary, re.I), "连键名也不留"
+    assert "iwork_t0g_redacted" in stored, "半截行整行换成了占位"
+    # 纯函数：没东西可删时返回同一个对象；stderr 这种普通文字照样过一遍
     plain = {"type": "assistant", "message": {"content": [{"type": "text", "text": "account"}]}}
-    assert redact_event(plain) is plain and redact_line("not json\n") == "not json\n"
+    assert redact_event(plain) is plain and redact_line("not json\n") == "not json\n" and redact_line("please log in to your account\n") == "please log in to your account\n"
+    assert marker not in redact_stream(f'warn: {{"email": "{marker}"\nok\n') and redact_stream("a\nb") == "a\nb"
 
 
 def selftest():
@@ -2062,25 +2150,40 @@ def selftest():
     stub = os.path.join(R.stubs, "git"); open(stub, "w").write(STUB_SRC); os.chmod(stub, 0o755)
     env = lambda row: {**os.environ, "IWORK_T0G_ROW": row, "IWORK_T0G_OBS": R.obs, "IWORK_T0G_OUTSIDE": R.outside}
     subprocess.run([stub, "pull"], env=env("7"), check=True)
-    assert corpus_placement(7, "git pull") == ("outside", ""), corpus_placement(7, "git pull")
-    assert corpus_placement(8, "git pull")[0] is None
+    # 这一行的 Bash 目标调用的证据：照 g4_corpus 的取法（不带 dangerouslyDisableSandbox 的那一次，恰好一次）
+    def sent(cmd, flagged=False):
+        r = {"init": {}, "timed_out": False, "exit": 0, "tool_results": {"c1": {"is_error": False, "text": ""}},
+             "tool_uses": [{"id": "c1", "name": "Bash", "input": {"command": cmd, **({"dangerouslyDisableSandbox": True} if flagged else {})}, "parent": None}]}
+        return evidence(r, bash_match(cmd, sandboxed_only=True))
+    cp = lambda row, cmd: corpus_placement(row, cmd, sent(cmd))
+    assert cp(7, "git pull") == ("outside", ""), cp(7, "git pull")
+    assert cp(8, "git pull")[0] is None
     assert stub_calls(7)[0]["ppid"] == str(os.getpid()), "替身记下了父进程号"
     os.chmod(R.outside, 0o500)
     try:
         subprocess.run([stub, "pull"], env=env("9"), check=True)
-        assert corpus_placement(9, "git pull") == ("inside", ""), corpus_placement(9, "git pull")
+        assert cp(9, "git pull") == ("inside", ""), cp(9, "git pull")
     finally:
         os.chmod(R.outside, 0o700)
     # S-7：同一行里别的调用（参数对不上，如 CLI 自己在沙箱外调的 git）不算这一行的
     subprocess.run([stub, "rev-parse", "--show-toplevel"], env=env("9"), check=True)          # 这一笔在沙箱「外」
-    assert corpus_placement(9, "git pull") == ("inside", ""), "参数对不上的那笔 outside 不掺进来（S0 里 27 行就是这样没测成的）"
-    assert corpus_placement(9, "git rev-parse --show-toplevel") == ("outside", ""), "对照：认得出参数对得上的那一笔"
+    assert cp(9, "git pull") == ("inside", ""), "参数对不上的那笔 outside 不掺进来（S0 里 27 行就是这样没测成的）"
+    assert cp(9, "git rev-parse --show-toplevel") == ("outside", ""), "对照：认得出参数对得上的那一笔"
     subprocess.run([stub, "status"], env=env("10"), check=True)
-    assert corpus_placement(10, "git pull")[0] is None, "只有对不上的调起：没测成，不是 outside"
+    assert cp(10, "git pull")[0] is None, "只有对不上的调起：没测成，不是 outside"
     subprocess.run([stub, "commit", "-m", "a b"], env=env("11"), check=True)
-    assert corpus_placement(11, 'git commit -m "a b" && git push')[0] == "outside", "引号里的参数按 shell 词对"
-    assert corpus_placement(11, "git commit -m a b")[0] is None and corpus_placement(11, "git commit -m 'a c'")[0] is None, "参数切法或内容不同：不算"
+    assert cp(11, 'git commit -m "a b" && git push')[0] == "outside", "引号里的参数按 shell 词对"
+    assert cp(11, "git commit -m a b")[0] is None and cp(11, "git commit -m 'a c'")[0] is None, "参数切法或内容不同：不算"
     assert command_words('git log | head') == ["git", "log", "|", "head"] and command_words('echo "x') is None
+    # 1/F-4 审查给的三个反例：别人调的一笔前缀相同的命令、不带参数的同名程序、模型根本没发命令
+    subprocess.run([stub, "log"], env=env("12"), check=True)
+    subprocess.run([stub], env=env("12"), check=True)
+    assert cp(12, "git log --oneline -5")[0] is None, "一笔 `git log`（和一笔不带参数的 `git`）冒充不了 `git log --oneline -5`"
+    assert cp(12, "git log | head")[0] == "outside" and cp(12, "git")[0] == "outside", "对照：一整段对得上（后面是操作符或结尾）照样认"
+    assert cp(12, "echo git log")[0] is None, "前面不是开头或操作符：不是这条命令调起的"
+    assert corpus_placement(7, "git pull", sent("git pull", flagged=True))[0] is None, "模型自己加了 dangerouslyDisableSandbox：不算目标调用"
+    assert corpus_placement(7, "git pull", evidence({"init": {}, "timed_out": False, "exit": 0, "tool_uses": [], "tool_results": {}}, bash_match("git pull")))[0] is None, \
+        "模型没发这条命令，CLI 自己调了一笔参数一样的：不算实测"
     # 方案 3.2：G2 的格子与预检用的设置带着产品固定写的项，预检与格子只差被测的 hook
     for cfg in g2_configs():
         sp, _ = make_settings("st-cell", "deny", expect(), timeout=HOOK_TIMEOUT_SECS, on_failure=cfg["on_failure"],
@@ -2195,7 +2298,14 @@ def selftest():
     assert twice({"b1": err, "b2": err}, hook("b1", "b2"), executed=True) == "FAIL", "有痕迹就是 FAIL，几次都一样"
     main2 = run([main_use, {**main_use, "id": "m2"}], {"m1": err, "m2": err})
     assert cell_verdict("bash", "deny", main2, hook("m1", "m2"), m, "main", False) == "PASS"
-    assert cell_verdict("bash", "allow", run([main_use, {**main_use, "id": "m2"}], {"m1": err, "m2": fine}), hook("m1", "m2"), m, "main", True) == "PASS", "该执行：有痕迹就 PASS"
+    assert cell_verdict("bash", "allow", run([main_use, {**main_use, "id": "m2"}], {"m1": err, "m2": fine}), hook("m1", "m2"), m, "main", True) == "INCONCLUSIVE", \
+        "该执行（正向结论）：重发了就是没测成，不放宽（1/F-5）"
+    assert cell_verdict("bash", "allow", run([main_use], {"m1": fine}), hook("m1"), m, "main", True) == "PASS", "对照：恰好一次、有痕迹"
+    # 1/F-8：CLI 自己判的失败（没这个工具、Bash 内置拦截）不是「拦住了」的证据
+    no_such = {"is_error": True, "text": "<tool_use_error>Error: No such tool available: Bash</tool_use_error>"}
+    for oc in ("NOHOOK", "MISSING", "deny"):
+        assert cell_verdict("bash", oc, run([main_use], {"m1": no_such}), hook("m1"), m, "main", False) == "INCONCLUSIVE", oc
+    assert not blocked(evidence(run([main_use], {"m1": no_such}), m, many=True), False), "外层保护的预检同样不认"
     assert cell_verdict("bash", "NOHOOK", main2, [], m, "main", False) == "PASS" and \
         cell_verdict("bash", "NOHOOK", run([main_use, {**main_use, "id": "m2"}], {"m1": err, "m2": fine}), [], m, "main", False) == "INCONCLUSIVE"
     assert sub("NOHOOK", run([agent_use, {**agent_use, "id": "a2"}], {"a1": err, "a2": err}), []) == "PASS", "回落到父工具时同样允许重发"
@@ -2399,6 +2509,8 @@ def selftest():
     assert denied_verdict(good_err, T, False) == "PASS"
     assert denied_verdict(good_ok, T, False) == "INCONCLUSIVE", "G5 / G9d（审查复现的反例）：只有「调用发生了 + 没有文件」，结果不是报错"
     assert denied_verdict(run([], {}), T, False) == "INCONCLUSIVE" and denied_verdict(run([], {}), T, True) == "FAIL"
+    # 1/F-9：G9d 的说明与结论同一份证据。重发两次都报错时，说明里不能出现「不止一次」而结论是 PASS
+    assert denied_verdict(two_err, T, False) == "PASS" and denied_ev(two_err, T)["why"] == "" and "不止一次" in bash_ev(two_err, T)["why"]
     # 下面几组都直接调各格实际用的那个函数（6/F-3），喂假的运行与记录，不在这里重拼判断式
     moded = lambda r, m="default": {**r, "init": {"permissionMode": m}}
     assert st(hooked_verdict(ev_ok, hook("t1"))) == "PASS" and st(hooked_verdict(ev_ok, hook("zz"))) == "FAIL" and st(hooked_verdict(ev_none, hook("t1"))) == "INCONCLUSIVE"
@@ -2443,6 +2555,9 @@ def selftest():
     assert g5f(project_start_ran=True) == "FAIL" and g5f(outside_exists=True, control_ok=False) == "FAIL" and g5f(denied_exists=True) == "FAIL"
     assert g5f(r_deny=moded(good_ok)) == "INCONCLUSIVE", "G5：被拒的那条命令结果不是报错"
     assert g5f(deny_rows=[]) == "FAIL", "G5：iWork 的 hook 没在这次调用上被调起"
+    # 被拒的命令是负向结论，允许重发；hook 被调起要每一次都有记录（hooked_verdict 用同一份 denied_ev）
+    assert g5f(r_deny=moded(two_err), deny_rows=hook("t1", "t2")) == "PASS"
+    assert g5f(r_deny=moded(two_err), deny_rows=hook("t1")) == "FAIL", "G5：重发的那一次 hook 没被调起"
     assert g5f(mode="dontAsk") == "FAIL" and g5f(obs=None) == "INCONCLUSIVE" and g5f(obs=o("0")) == "FAIL"
     assert g5f(r_sandbox={**sb_run, "exit": 1}) == "INCONCLUSIVE", "G5：沙箱那次运行无效"
     assert g5_control_ok(good_ok, True) and not g5_control_ok(good_ok, False) and not g5_control_ok({**good_ok, "timed_out": True}, True), "对照：运行有效且哨兵出现才算"
@@ -2530,12 +2645,37 @@ def selftest():
     open(os.path.join(src, "notes.txt"), "w").write("not packed")
     os.symlink(precious, os.path.join(src, "evil.out"))
     os.link(precious, os.path.join(src, "evil2.out"))
-    assert collect_obs(src, dst) == 4
+    os.mkfifo(os.path.join(src, "fifo.out"))                   # 1/F-2：FIFO 不能把收集卡住
+    old_alarm = signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(AssertionError("收集卡在 FIFO 上")))
+    signal.alarm(10)
+    try: assert collect_obs(R.root, "work/obs-st", dst) == (4, "")
+    finally: signal.alarm(0); signal.signal(signal.SIGALRM, old_alarm)
     packed = sorted(os.listdir(dst))
     assert packed == ["corpus-3.calls", "g4-1e.out", "g4-1e.rc", "g4-7b.out.withheld.json"], packed
     assert HOME not in open(os.path.join(dst, "g4-1e.out")).read() and "~/x" in open(os.path.join(dst, "g4-1e.out")).read(), "家目录换成 ~"
     assert "someone" not in open(os.path.join(dst, "g4-7b.out.withheld.json")).read(), "gh 的输出不带原文"
     assert not any("PRECIOUS" in open(os.path.join(dst, f)).read() for f in packed), "符号链接、硬链接指向的文件没被拷进来"
+    # 1/F-1：观测目录本身、或路径中间的一段被换成链接（指向一个放着同名文件的地方），一个都不收
+    lure = R.p("outside", "lure"); os.makedirs(lure); open(os.path.join(lure, "g4-1e.out"), "w").write("PRECIOUS-lure")
+    os.symlink(lure, R.p("work", "obs-link")); os.symlink(R.outside, R.p("work", "mid-link"))
+    for rel in ("work/obs-link", "work/mid-link/lure"):
+        dst_l = R.p("out", "obs-" + rel.replace("/", "-"))
+        note = pack_obs(R.root, rel, dst_l)
+        assert "没收进结果包" in note and not os.path.exists(dst_l), (rel, note)
+    assert collect_obs(R.root, "outside/lure", R.p("out", "obs-lure-ctl"))[0] == 1, "对照：真目录照样收"
+    # 同类：运行中读观测文件（observed、G1c、预检、G9b、替身记录）也不跟链接、不卡在 FIFO 上
+    assert read_obs_path(os.path.join(src, "g4-1e.rc")) == "1\n", "对照：普通文件读得到"
+    assert read_obs_path(os.path.join(src, "evil.out")) is None and read_obs_path(os.path.join(src, "evil2.out")) is None, "链接、硬链接不读"
+    signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(AssertionError("读观测文件卡在 FIFO 上"))); signal.alarm(10)
+    try: assert read_obs_path(os.path.join(src, "fifo.out")) is None
+    finally: signal.alarm(0); signal.signal(signal.SIGALRM, old_alarm)
+    assert read_obs_path(R.p("work", "obs-link", "g4-1e.out")) is None and read_obs_path(R.p("work", "mid-link", "lure", "g4-1e.out")) is None, "目录被换成链接：不读"
+    try: read_obs_path(os.path.join(R.parent, "x.out"))
+    except ValueError: pass
+    else: raise AssertionError("根目录外的路径应当报错")
+    # 1/F-2：目录没了不抛；文件个数有上限
+    assert "没收进结果包" in pack_obs(R.root, "work/no-such-obs", R.p("out", "obs-none"))
+    assert collect_obs(R.root, "work/obs-st", R.p("out", "obs-cap"), max_files=2) == (1, "候选 7 个，超过上限只收了前 2 个"), "上限按候选算：前两个是 corpus-3.calls 与被拒的链接 evil.out"
     # 完整性核对：改了原有的同名文件要被发现；结果包不覆盖
     victim = os.path.join(R.parent, "iwork-t0g-selftest-victim-" + secrets.token_hex(3)); open(victim, "w").write("a")
     try:
@@ -2618,7 +2758,7 @@ def main():
                 record(status, "运行前后原有文件核对", f"原有 {len(before)} 项，逐项比过没变" if before else "原来没有可核对的条目（没有同名前缀的文件，也没有 ~/.npmrc）")
             if not A.selftest:
                 log(f"合计：{COUNTS}（FAIL 或 INCONCLUSIVE 不为 0 的组不能当作已验证）")
-                collect_obs(R.obs, os.path.join(R.out, "obs"))
+                log(pack_obs(R.root, os.path.relpath(R.obs, R.root), os.path.join(R.out, "obs")))
                 result_path = write_results(R.parent)
         finally:
             R.remove()
