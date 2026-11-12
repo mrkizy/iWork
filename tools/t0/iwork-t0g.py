@@ -5986,17 +5986,23 @@ def selftest_owned_dirs():
     k = [k for k in items if k.endswith("g5-work")][0]
     assert not items[k]["清理候选"] and items[k]["说明"] == LEFTOVERS_UNVERIFIED and not items[k + "/memory"]["清理候选"]
     assert {n["名字"]: n["来源"] for n in items[k + "/memory"]["里面"]}["cli-wrote.md"] == "运行期间出现、来源未核实"
-    # 审查 repo 5/F-1：照用的 memory（本来就在）、第一笔 O_EXCL 就失败：子目录拿不到核对结果，上级的随机项目目录也不是候选
+    # 审查 repo 5/F-1、6/F-1：随机项目目录是本次新建、认领的；它下面的 memory 在认领之前就有了 MEMORY.md（照用），第一笔 O_EXCL 就失败
+    # → memory 拿不到核对结果（没有清单项），上级的随机项目目录必须有清单项、而且不是候选
     root_ = fake_root("reused-mem")
     enc = f"-x-{T}-g5-work"
-    os.makedirs(os.path.join(root_, "projects", enc, "memory")); open(os.path.join(root_, "projects", enc, "memory", "MEMORY.md"), "w").write("keep")
     chain = open_config_chain(root_, ["projects"])
     owned = {"proj": OwnedDir(chain[-1], enc, os.path.join(root_, "projects", enc), "maybe", rel=["projects", enc], token=T)}
+    assert owned["proj"].created and not owned["proj"].baseline
+    os.makedirs(os.path.join(owned["proj"].path, "memory")); open(os.path.join(owned["proj"].path, "memory", "MEMORY.md"), "w").write("keep")
     owned["mem"] = OwnedDir(owned["proj"].fd, "memory", os.path.join(owned["proj"].path, "memory"), "maybe", rel=["projects", enc, "memory"])
     try: owned["mem"].write_secret("MEMORY.md", "t0g-x")
     except FileExistsError: pass
-    items = g5_release(chain, owned, root_)
-    assert not any(it["清理候选"] for it in items) and open(os.path.join(root_, "projects", enc, "memory", "MEMORY.md")).read() == "keep", items
+    else: raise AssertionError("第一笔 O_EXCL 应当撞上已有的 MEMORY.md")
+    items = by_path(g5_release(chain, owned, root_))
+    k = [k for k in items if k.endswith("g5-work")]
+    assert k and items[k[0]]["清理候选"] is False and items[k[0]]["说明"] == LEFTOVERS_UNVERIFIED, items
+    assert not any(key.endswith("/memory") for key in items), "照用的 memory 没有清单项（拿不到核对结果）"
+    assert open(os.path.join(owned["proj"].path, "memory", "MEMORY.md")).read() == "keep"
     # ① 目录建出之后被挪走、名字下换成别人的目录：路径核不上，不是候选
     root_ = fake_root("swapped")
     chain, owned = g5_like(root_)
