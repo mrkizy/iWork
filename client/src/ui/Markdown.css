@@ -1,0 +1,76 @@
+.iw-md {
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  color: var(--tx);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.iw-md > :first-child {
+  margin-top: 0;
+}
+.iw-md > :last-child {
+  margin-bottom: 0;
+}
+.iw-md p,
+.iw-md ul,
+.iw-md ol,
+.iw-md pre,
+.iw-md blockquote,
+.iw-md table {
+  margin: 0 0 10px;
+}
+.iw-md h1,
+.iw-md h2,
+.iw-md h3,
+.iw-md h4 {
+  margin: 14px 0 6px;
+  font-size: var(--fs-lg);
+  line-height: 1.4;
+}
+.iw-md ul,
+.iw-md ol {
+  padding-left: 22px;
+}
+.iw-md code {
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  background: var(--tag);
+  font-size: 0.9em;
+}
+.iw-md pre {
+  padding: 10px 12px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-md);
+  background: var(--surf2);
+  overflow-x: auto;
+  font-size: var(--fs-sm2);
+  line-height: 1.6;
+}
+.iw-md pre code {
+  padding: 0;
+  background: none;
+}
+.iw-md blockquote {
+  padding-left: 12px;
+  border-left: 3px solid var(--bd2);
+  color: var(--tx2);
+}
+.iw-md table {
+  border-collapse: collapse;
+  font-size: var(--fs-md);
+}
+.iw-md th,
+.iw-md td {
+  padding: 4px 10px;
+  border: 1px solid var(--bd);
+}
+.iw-md hr {
+  border: none;
+  border-top: 1px solid var(--bd);
+  margin: 12px 0;
+}
+.iw-md__link {
+  color: var(--brand);
+  text-decoration: underline;
+  cursor: pointer;
+}

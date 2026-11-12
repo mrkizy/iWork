@@ -21,19 +21,79 @@ pub enum Step {
     Sleep(Duration),
     /// 关掉全部连接（模拟后台重启），日志与表保留。
     DisconnectAll,
+    /// 关掉全部连接，之后重连一律给快照、不重放（模拟断得太久：落后超过重放上限）。
+    DisconnectForSnapshot,
+    /// 停止监听：客户端连不上，一直在重连（「断线」状态）。之后的 DisconnectAll 恢复监听。
+    StopListening,
+    /// 只在录像里有意义：客户端在这里打开 focus 对话（并做场景的 `client` 动作），之后的步骤是增量。
+    /// 没有这个标记时切点由 [`Scenario::split_at_focus`] 推算。跑场景时跳过。
+    OpenHere,
     /// 只给测试场景用：直接改折叠表，不产生事件。
     Mutate(Box<dyn FnOnce(&mut Tables) + Send>),
 }
 
+/// 打开对话之后最多实时跑多少步（见 [`Scenario::split_at_focus`]）。
+pub const LIVE_TAIL: usize = 200;
+
 pub struct Scenario {
     pub name: &'static str,
     pub about: &'static str,
+    /// 录像与预览页打开的对话；没有就停在首页（录像只记侧栏、待处理、设置）。
+    pub focus: Option<&'static str>,
+    /// 只给录像与预览：助手 id → 形象 id（client-core `Options::characters`）。
+    /// M1 没有选形象的入口，正式运行时内置 iWork 画标志、其余一律圆团子；阿森、林岚、老周只在这里出现。
+    pub characters: &'static [(&'static str, &'static str)],
+    /// 只给录像与预览：打开对话之后、跑剩下的事件之前，客户端要做的事。有些状态要用户先动一下才出现
+    /// （往上翻、停在旧消息、拖入超大文件），假后台的事件造不出来。
+    pub client: &'static [ClientAct],
+    /// 只给录像与预览：客户端时间线行数上限（调小才翻得出「回到最新（N）」）；None 用默认。
+    pub timeline_cap: Option<usize>,
     build: fn() -> Vec<Step>,
+}
+
+/// 录像时客户端的动作（见 [`Scenario::client`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientAct {
+    /// 往上翻一页（LoadOlder）。
+    LoadOlder,
+    /// 可见窗口停在最老的几行上（在看旧消息）。
+    ReadOldest,
+    /// 拖入一个超过 20MB 的文件（输入框上方出现原因）。
+    DropOversized,
 }
 
 impl Scenario {
     pub fn steps(&self) -> Vec<Step> {
         (self.build)()
+    }
+
+    /// 切成「打开对话之前」与「打开之后」两段：前一段跑完、客户端打开对话拿到快照，再跑后一段，
+    /// 后一段的事件才会作为增量进时间线（对拍要比的是增量，不是两份快照）。没有 focus 时前一段为空。
+    /// 切点在建出 focus 对话之后；后一段最多留 [`LIVE_TAIL`] 步，更早的在打开前跑完
+    /// （history-100k 若十万条都在打开后实时推，对拍要跑好几分钟，增量也不需要那么多）。
+    pub fn split_at_focus(&self) -> (Vec<Step>, Vec<Step>) {
+        let mut steps = self.steps();
+        if let Some(at) = steps.iter().position(|s| matches!(s, Step::OpenHere)) {
+            let mut rest = steps.split_off(at);
+            rest.remove(0);
+            return (steps, rest);
+        }
+        let Some(focus) = self.focus else {
+            return (Vec::new(), steps);
+        };
+        let at = steps.iter().position(|s| match s {
+            Step::Append(e) => matches!(
+                &e.event,
+                Some(pb::domain_event::Event::ConversationCreated(c))
+                    if c.conversation.as_ref().is_some_and(|c| c.id == focus)
+            ),
+            _ => false,
+        });
+        let at = at
+            .unwrap_or_else(|| panic!("场景 {} 里没有建出 focus 对话 {focus} 的那一步", self.name));
+        let cut = (at + 1).max(steps.len().saturating_sub(LIVE_TAIL));
+        let rest = steps.split_off(cut);
+        (steps, rest)
     }
 }
 
@@ -46,81 +106,297 @@ pub const REGISTRY: &[Scenario] = &[
         name: "empty",
         about: "只有基础世界",
         build: empty,
+        focus: None,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "conversation-basic",
         about: "一问一答、工具活动、回合结束印章",
         build: conversation_basic,
+        focus: Some("c-basic"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "streaming",
         about: "一条助手消息分 20 段流式到达",
         build: streaming,
+        focus: Some("c-stream"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "approval-states",
         about: "审批：待定、已允许、已拒绝、已作废、切档放行、必问、沙箱外",
         build: approval_states,
+        focus: Some("c-approval"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "user-action-states",
         about: "亲手执行：待定、执行中、已执行、已忽略、失败、已作废、结果未知",
         build: user_action_states,
+        focus: Some("c-user-action"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "user-action-unknown-deleting",
         about: "结果未知的卡片挡住删除，对话停在删除中",
         build: user_action_unknown_deleting,
+        focus: Some("c-ua-deleting"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "turn-end",
         about: "回合结束：搞定印章、失败、取消",
         build: turn_end,
+        focus: Some("c-turn-end"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "turn-failed",
+        about: "回合失败：一开始就失败（空的失败消息）、输出一部分后失败（ui-m1.md 2a 第 10 条）",
+        focus: Some("c-turn-failed"),
+        build: turn_failed,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "resume-card",
         about: "崩溃中断的回合：继续 / 放弃卡片",
         build: resume_card,
+        focus: Some("c-resume"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "sidebar-dots",
         about: "侧栏圆点四种状态与未读",
         build: sidebar_dots,
+        focus: None,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "assistants-20",
         about: "20 个助手，部分有最近动态",
         build: assistants_20,
+        focus: None,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "quota-missing",
         about: "额度取不到",
         build: quota_missing,
+        focus: None,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "stream-16x100",
         about: "16 个对话各 100 条流式消息（基准用）",
         build: stream_16x100,
+        focus: Some("c-s00"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "history-100k",
         about: "一个对话十万条消息",
         build: history_100k,
+        focus: Some("c-history"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "xss-corpus",
         about: "正文、标题、文件名、工具输出里的脚本与链接",
         build: xss_corpus,
+        focus: Some("c-xss"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "reconnect-basic",
         about: "中途断开全部连接后继续",
         build: reconnect_basic,
+        focus: Some("c-reconnect"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "dm-project-switch",
+        about: "助手私聊换项目：「已切换为」说明、项目分隔线；打开后两个项目都改名",
+        build: dm_project_switch,
+        focus: Some(IWORK_DM),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "characters-preview-only",
+        about: "测试专用：阿森、林岚、老周与圆团子的形象和表情（工作中、等你、出错、空闲）。M1 没有选形象的入口，形象由场景按助手 id 映射",
+        build: characters_preview_only,
+        focus: Some("c-dm-laozhou"),
+        characters: &[
+            ("as-asen", "asen"),
+            ("as-linlan", "linlan"),
+            ("as-laozhou", "laozhou"),
+        ],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "characters-sorry-preview-only",
+        about: "测试专用：阿森、林岚、老周最近一轮都失败了，三个都显示出错表情（sorry）。M1 没有选形象的入口，形象由场景按助手 id 映射",
+        build: characters_sorry_preview_only,
+        focus: Some("c-dm-asen"),
+        characters: &[
+            ("as-asen", "asen"),
+            ("as-linlan", "linlan"),
+            ("as-laozhou", "laozhou"),
+        ],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "switch-rows",
+        about: "私聊里切项目、切模型、切档位：打开前一轮（快照重建出的分隔线、模型切换行），打开后一轮（实时的当次说明）",
+        build: switch_rows,
+        focus: Some(IWORK_DM),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "back-to-latest-notice",
+        about: "Q9：停在旧消息上时断线、重连给的是快照：回到最新并提示「已重新连接，回到最新」",
+        build: back_to_latest_notice,
+        focus: Some("c-q9"),
+        characters: &[],
+        client: &[ClientAct::ReadOldest],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "new-below-count",
+        about: "往上翻到超出时间线上限后来了新消息：「回到最新（N）」",
+        build: new_below_count,
+        focus: Some("c-scrolled"),
+        characters: &[],
+        client: &[ClientAct::LoadOlder],
+        timeline_cap: Some(40),
+    },
+    Scenario {
+        name: "composer-path-missing",
+        about: "输入框上方：项目找不到路径（警示色 +「重新定位」）",
+        build: composer_path_missing,
+        focus: Some("c-block"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "composer-verifying",
+        about: "输入框上方：运行时验证中（转圈，发送禁用）",
+        build: composer_verifying,
+        focus: Some("c-block"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "composer-incompatible",
+        about: "输入框上方：运行时验证未通过（警示色 +「查看详情」）",
+        build: composer_incompatible,
+        focus: Some("c-block"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "composer-not-installed",
+        about: "输入框上方：运行时未安装（「查看详情」）",
+        build: composer_not_installed,
+        focus: Some("c-block"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "composer-not-logged-in",
+        about: "输入框上方：运行时未登录（「查看详情」）",
+        build: composer_not_logged_in,
+        focus: Some("c-block"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "composer-offline",
+        about: "输入框上方：后台连不上（断线，发送禁用）",
+        build: composer_offline,
+        focus: Some("c-block"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "attachments-tray",
+        about: "附件托盘两个文件；拖入超过 20MB 的文件，输入框上方说明原因",
+        build: attachments_tray,
+        focus: Some("c-attach"),
+        characters: &[],
+        client: &[ClientAct::DropOversized],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "projects-sidebar",
+        about: "侧栏项目：置顶、找不到路径、未读超过 99（「99+」）；右键项目看菜单",
+        build: projects_sidebar,
+        focus: None,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "tool-output",
+        about: "工具行：输出分段到达，点开看输出（当文字显示）",
+        build: tool_output,
+        focus: Some("c-tool"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
     Scenario {
         name: "rename-via-summary-refresh-until-t10",
         about: "测试专用：直接改摘要里的标题，再发一条落在侧栏订阅上的已有事件触发摘要失效。T10 补上 ConversationRenamed 后换成真事件",
         build: rename_via_summary_refresh_until_t10,
+        focus: Some("c-rename"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
     },
 ];
 
@@ -136,6 +412,8 @@ pub fn get(name: &str) -> Option<&'static Scenario> {
 
 pub const PROJECT: &str = "p-demo";
 pub const IWORK_DM: &str = "c-dm-iwork";
+/// 第二个项目：只有需要两个项目的场景才建。
+pub const OTHER_PROJECT: &str = "p-web";
 
 fn a(e: pb::DomainEvent) -> Step {
     Step::Append(Box::new(e))
@@ -399,6 +677,57 @@ fn turn_end() -> Vec<Step> {
     s
 }
 
+fn turn_failed() -> Vec<Step> {
+    let c = "c-turn-failed";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    // 一开始就失败：prompt 没发出去，助手消息是空的、状态为失败（T05 补丁带来的形状）。
+    s.push(a(f::user_message("m-start-u", c, "帮我看看构建为什么挂了")));
+    s.push(a(f::turn_queued("t-start", c, IWORK)));
+    s.push(a(f::turn_state("t-start", T::Queued, T::Running, None)));
+    s.push(a(f::assistant_message(
+        "m-start-a",
+        c,
+        "t-start",
+        IWORK,
+        "iWork",
+    )));
+    s.push(a(f::turn_state(
+        "t-start",
+        T::Running,
+        T::Failed,
+        Some("Claude Code 启动后立刻退出了"),
+    )));
+    s.push(a(f::message_ended(
+        c,
+        "m-start-a",
+        "",
+        pb::MessageStatus::Failed,
+    )));
+    s.push(a(f::turn_finished("t-start", T::Failed, false, None)));
+    // 输出一部分后失败。
+    s.push(a(f::user_message("m-mid-u", c, "再试一次")));
+    s.push(a(f::turn_queued("t-mid", c, IWORK)));
+    s.push(a(f::turn_state("t-mid", T::Queued, T::Running, None)));
+    s.push(a(f::assistant_message(
+        "m-mid-a", c, "t-mid", IWORK, "iWork",
+    )));
+    s.push(a(f::turn_state(
+        "t-mid",
+        T::Running,
+        T::Failed,
+        Some("模型暂时不可用"),
+    )));
+    s.push(a(f::message_ended(
+        c,
+        "m-mid-a",
+        "我先看一下 CI 的日志，第一处报错在",
+        pb::MessageStatus::Failed,
+    )));
+    s.push(a(f::turn_finished("t-mid", T::Failed, false, None)));
+    s
+}
+
 fn resume_card() -> Vec<Step> {
     let c = "c-resume";
     let mut s = base();
@@ -624,6 +953,341 @@ fn reconnect_basic() -> Vec<Step> {
     s.push(Step::DisconnectAll);
     s.extend(exchange(c, "r2", "第二问", "第二答"));
     s.push(a(f::turn_finished("t-r2", T::Completed, false, None)));
+    s
+}
+
+/// 私聊里的当次说明与分隔线都按项目 id 现查项目名（derive::row::project_name）：
+/// 先切到 demo（出「已切换为 demo」），聊一轮；再来一轮上下文是 web 的消息，中间没有切换说明，出分隔线；
+/// 最后两个项目都改名，说明与分隔线要跟着变（项目表变化要标脏这两种行）。
+fn dm_project_switch() -> Vec<Step> {
+    let c = IWORK_DM;
+    let mut s = base();
+    s.push(a(f::project(OTHER_PROJECT, "web", "~/work/web")));
+    s.push(a(f::dm_project_switched(c, Some(PROJECT))));
+    for (n, project, q, ans) in [
+        ("dm1", PROJECT, "demo 的测试怎么跑", "pnpm test"),
+        ("dm2", OTHER_PROJECT, "web 呢", "也是 pnpm test"),
+    ] {
+        let turn = format!("t-{n}");
+        let reply = format!("m-{n}-a");
+        s.push(a(f::in_project(
+            f::user_message(&format!("m-{n}-u"), c, q),
+            project,
+        )));
+        s.push(a(f::turn_queued(&turn, c, IWORK)));
+        s.push(a(f::turn_state(&turn, T::Queued, T::Running, None)));
+        s.push(a(f::in_project(
+            f::assistant_message(&reply, c, &turn, IWORK, "iWork"),
+            project,
+        )));
+        s.push(a(f::message_completed(c, &reply, ans)));
+        s.push(a(f::turn_finished(&turn, T::Completed, false, None)));
+    }
+    // 隔开几帧再改名：说明与分隔线先按旧名字推出去，改名才是对这两行的增量
+    s.push(Step::Sleep(Duration::from_millis(100)));
+    s.push(a(f::project_renamed(PROJECT, "demo-改名")));
+    s.push(a(f::project_renamed(OTHER_PROJECT, "web-改名")));
+    s
+}
+
+/// 四个助手各停在一种状态：阿森工作中（浮动）、林岚等你（有待审批）、老周最近一轮失败（sorry）、
+/// 圆团子（没换形象、配置里的颜色）空闲。打开老周的私聊，消息头像也是 sorry。
+fn characters_preview_only() -> Vec<Step> {
+    let mut s = base();
+    for (id, name) in [
+        ("as-asen", "阿森"),
+        ("as-linlan", "林岚"),
+        ("as-laozhou", "老周"),
+        ("as-blob", "小团"),
+    ] {
+        s.push(a(f::assistant(id, name, false)));
+        s.push(a(f::dm(&format!("c-dm-{}", &id[3..]), id)));
+    }
+    // 阿森：回合在跑
+    s.push(a(f::user_message("m-asen-u", "c-dm-asen", "把测试补上")));
+    s.push(a(f::turn_queued("t-asen", "c-dm-asen", "as-asen")));
+    s.push(a(f::turn_state("t-asen", T::Queued, T::Running, None)));
+    // 林岚：等你批一条命令
+    s.push(a(f::user_message(
+        "m-linlan-u",
+        "c-dm-linlan",
+        "清一下构建目录",
+    )));
+    s.push(a(f::turn_queued("t-linlan", "c-dm-linlan", "as-linlan")));
+    s.push(a(f::turn_state("t-linlan", T::Queued, T::Running, None)));
+    s.push(a(f::approval(
+        "ap-linlan",
+        "c-dm-linlan",
+        "t-linlan",
+        f::command_action("rm -rf target"),
+        pb::ApprovalKind::Ask,
+        &[],
+    )));
+    s.push(a(f::turn_state(
+        "t-linlan",
+        T::Running,
+        T::WaitingApproval,
+        None,
+    )));
+    // 老周：最近一轮失败
+    s.push(a(f::user_message(
+        "m-laozhou-u",
+        "c-dm-laozhou",
+        "看看为什么挂了",
+    )));
+    s.push(a(f::turn_queued("t-laozhou", "c-dm-laozhou", "as-laozhou")));
+    s.push(a(f::turn_state("t-laozhou", T::Queued, T::Running, None)));
+    s.push(a(f::assistant_message(
+        "m-laozhou-a",
+        "c-dm-laozhou",
+        "t-laozhou",
+        "as-laozhou",
+        "老周",
+    )));
+    s.push(a(f::turn_state(
+        "t-laozhou",
+        T::Running,
+        T::Failed,
+        Some("模型暂时不可用"),
+    )));
+    s.push(a(f::message_ended(
+        "c-dm-laozhou",
+        "m-laozhou-a",
+        "我先看一下日志",
+        pb::MessageStatus::Failed,
+    )));
+    s.push(a(f::turn_finished("t-laozhou", T::Failed, false, None)));
+    s
+}
+
+/// 三个形象各自的私聊里最近一轮都失败：侧栏三个头像、阿森私聊里的消息头像都是 sorry。
+/// 失败放在打开对话之后，录像里有「工作中 → 出错」的增量。
+fn characters_sorry_preview_only() -> Vec<Step> {
+    let mut s = base();
+    let who = [
+        ("as-asen", "阿森", "c-dm-asen"),
+        ("as-linlan", "林岚", "c-dm-linlan"),
+        ("as-laozhou", "老周", "c-dm-laozhou"),
+    ];
+    for (id, name, dm) in who {
+        s.push(a(f::assistant(id, name, false)));
+        s.push(a(f::dm(dm, id)));
+        let t = format!("t-{id}");
+        let m = format!("m-{id}");
+        s.push(a(f::user_message(&format!("{m}-u"), dm, "看看为什么挂了")));
+        s.push(a(f::turn_queued(&t, dm, id)));
+        s.push(a(f::turn_state(&t, T::Queued, T::Running, None)));
+        s.push(a(f::assistant_message(&m, dm, &t, id, name)));
+    }
+    s.push(Step::OpenHere);
+    for (id, _, dm) in who {
+        let t = format!("t-{id}");
+        let m = format!("m-{id}");
+        s.push(a(f::turn_state(
+            &t,
+            T::Running,
+            T::Failed,
+            Some("模型暂时不可用"),
+        )));
+        s.push(a(f::message_ended(
+            dm,
+            &m,
+            "我先看一下日志",
+            pb::MessageStatus::Failed,
+        )));
+        s.push(a(f::turn_finished(&t, T::Failed, false, None)));
+    }
+    s
+}
+
+/// 私聊里的一轮：上下文项目、回合用的模型都可指定。
+fn dm_round(n: &str, project: &str, model: &str, q: &str, ans: &str) -> Vec<Step> {
+    let c = IWORK_DM;
+    let turn = format!("t-{n}");
+    let reply = format!("m-{n}-a");
+    vec![
+        a(f::in_project(
+            f::user_message(&format!("m-{n}-u"), c, q),
+            project,
+        )),
+        a(f::with_model(f::turn_queued(&turn, c, IWORK), model)),
+        a(f::turn_state(&turn, T::Queued, T::Running, None)),
+        a(f::in_project(
+            f::assistant_message(&reply, c, &turn, IWORK, "iWork"),
+            project,
+        )),
+        a(f::message_completed(c, &reply, ans)),
+        a(f::turn_finished(&turn, T::Completed, false, None)),
+    ]
+}
+
+/// 切项目、切模型、切档位各两次。打开对话前那一轮的当次说明随快照重建丢掉，留下的是重建得出的行
+/// （相邻消息项目不同 → 分隔线；相邻回合模型不同 → 模型切换行；档位没有重建得出的行）；
+/// 打开后那一轮是实时的当次说明（它们在，重建得出的同类行就不再贴）。
+fn switch_rows() -> Vec<Step> {
+    let c = IWORK_DM;
+    let mut s = base();
+    s.push(a(f::project(OTHER_PROJECT, "web", "~/work/web")));
+    // 打开前：demo · fake-large → web · fake-small，中间切了档位
+    s.extend(dm_round(
+        "sw1",
+        PROJECT,
+        "fake-large",
+        "demo 怎么跑",
+        "pnpm dev",
+    ));
+    s.push(a(f::dm_project_switched(c, Some(OTHER_PROJECT))));
+    s.push(a(f::model_changed(c, "fake-small")));
+    s.push(a(f::approval_mode_changed(c, pb::ApprovalMode::Auto)));
+    s.extend(dm_round(
+        "sw2",
+        OTHER_PROJECT,
+        "fake-small",
+        "web 呢",
+        "也是 pnpm dev",
+    ));
+    s.push(Step::OpenHere);
+    // 打开后：切回 demo · fake-large、档位切回手动
+    s.push(a(f::dm_project_switched(c, Some(PROJECT))));
+    s.push(a(f::model_changed(c, "fake-large")));
+    s.push(a(f::approval_mode_changed(c, pb::ApprovalMode::Manual)));
+    s.extend(dm_round("sw3", PROJECT, "fake-large", "回到 demo", "好"));
+    s
+}
+
+/// 一段对话历史：n 轮一问一答（都已结束）。
+fn history(c: &str, tag: &str, n: usize) -> Vec<Step> {
+    let mut s = Vec::new();
+    for i in 0..n {
+        let id = format!("{tag}{i}");
+        s.extend(exchange(
+            c,
+            &id,
+            &format!("第 {i} 问"),
+            &format!("第 {i} 答"),
+        ));
+        s.push(a(f::turn_finished(
+            &format!("t-{id}"),
+            T::Completed,
+            false,
+            None,
+        )));
+    }
+    s
+}
+
+fn back_to_latest_notice() -> Vec<Step> {
+    let c = "c-q9";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(history(c, "q9-", 30));
+    s.push(Step::OpenHere);
+    // 客户端停在最老的几行上（场景的 client 动作），这时断线、重连拿到的是快照
+    s.push(Step::DisconnectForSnapshot);
+    s.extend(history(c, "q9-new-", 1));
+    s
+}
+
+fn new_below_count() -> Vec<Step> {
+    let c = "c-scrolled";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(history(c, "nb-", 40));
+    s.push(Step::OpenHere);
+    // 客户端往上翻了一页、超出上限，不再接着最新：新消息只计数
+    s.extend(history(c, "nb-new-", 2));
+    s
+}
+
+/// 输入框被挡住的几种情形：先有一轮对话，打开后再变。
+fn composer_block(change: Step) -> Vec<Step> {
+    let c = "c-block";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(history(c, "blk-", 1));
+    s.push(Step::OpenHere);
+    s.push(change);
+    s
+}
+
+fn composer_path_missing() -> Vec<Step> {
+    composer_block(a(f::project_path_status(PROJECT, pb::PathStatus::Missing)))
+}
+
+fn composer_verifying() -> Vec<Step> {
+    composer_block(a(f::runtime(pb::RuntimeState::ReadyUnverified)))
+}
+
+fn composer_incompatible() -> Vec<Step> {
+    composer_block(a(f::runtime(pb::RuntimeState::Incompatible)))
+}
+
+fn composer_not_installed() -> Vec<Step> {
+    composer_block(a(f::runtime(pb::RuntimeState::Missing)))
+}
+
+fn composer_not_logged_in() -> Vec<Step> {
+    composer_block(a(f::runtime(pb::RuntimeState::NotLoggedIn)))
+}
+
+fn composer_offline() -> Vec<Step> {
+    composer_block(Step::StopListening)
+}
+
+fn attachments_tray() -> Vec<Step> {
+    let c = "c-attach";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(history(c, "att-", 1));
+    s.push(Step::OpenHere);
+    s.push(a(f::attachment("att-1", c, "设计稿.png", 345_678)));
+    s.push(a(f::attachment("att-2", c, "接口说明.pdf", 2_345_678)));
+    s
+}
+
+/// 侧栏项目三种样子：置顶、找不到路径、未读多（超过 99 写「99+」）。停在首页。
+fn projects_sidebar() -> Vec<Step> {
+    let mut s = base();
+    s.push(a(f::project("p-legacy", "legacy-app", "~/work/legacy")));
+    s.push(a(f::project("p-busy", "busy-service", "~/work/busy")));
+    s.push(a(f::project_pinned(PROJECT, true)));
+    s.push(a(f::project_path_status(
+        "p-legacy",
+        pb::PathStatus::Missing,
+    )));
+    let c = "c-busy";
+    s.push(a(f::project_conversation(c, "p-busy")));
+    s.push(a(f::turn_queued("t-busy", c, IWORK)));
+    s.push(a(f::turn_state("t-busy", T::Queued, T::Running, None)));
+    for i in 0..120 {
+        let m = format!("m-busy-{i}");
+        s.push(a(f::assistant_message(&m, c, "t-busy", IWORK, "iWork")));
+        s.push(a(f::message_completed(c, &m, &format!("进度 {i}"))));
+    }
+    s.push(a(f::turn_finished("t-busy", T::Completed, false, None)));
+    s
+}
+
+fn tool_output() -> Vec<Step> {
+    let c = "c-tool";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(exchange(c, "tool", "跑一下测试", "好，我来跑。"));
+    s.push(a(f::tool_started("t-tool", "tc-out", "Bash", "cargo test")));
+    s.push(Step::OpenHere);
+    let lines = [
+        "   Compiling iwork v0.1.0\n",
+        "    Finished test profile in 3.2s\n",
+        "running 12 tests\n",
+        "test result: ok. 12 passed; 0 failed\n",
+    ];
+    let mut offset = 0;
+    for l in lines {
+        s.push(Step::Transient(f::tool_output("tc-out", offset, l)));
+        offset += l.len() as u64;
+    }
+    s.push(a(f::tool_finished("t-tool", "tc-out", true)));
+    s.push(a(f::turn_finished("t-tool", T::Completed, false, None)));
     s
 }
 

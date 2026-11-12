@@ -24,6 +24,7 @@ pub struct WebState {
     pub notice: Option<String>,
     pub rows: BTreeMap<String, pb::RowView>,
     pub navigate: Option<pb::NavigatePatch>,
+    pub home: Option<pb::HomeView>,
 }
 
 #[derive(Debug, Default)]
@@ -90,6 +91,7 @@ impl Web {
                 C::Connection(p) => s.connection.clone_from(&p.view),
                 C::ConversationList(p) => s.list.clone_from(&p.view),
                 C::Navigate(p) => s.navigate = Some(p.clone()),
+                C::Home(p) => s.home.clone_from(&p.view),
                 C::Conversation(p) => {
                     if p.reset || s.conversation_id.as_deref() != Some(p.conversation_id.as_str()) {
                         s.rows.clear();
@@ -103,11 +105,14 @@ impl Web {
                     }
                     for a in &p.appends {
                         let row = s.rows.get_mut(&a.message_id).expect("追加的行网页已有");
-                        let Some(pb::row_view::Row::Message(m)) = row.row.as_mut() else {
-                            panic!("追加只给消息行")
+                        // 消息行追加到正文，工具行追加到输出（与 client/src/state/store.ts 一致）
+                        let text = match row.row.as_mut() {
+                            Some(pb::row_view::Row::Message(m)) => &mut m.text,
+                            Some(pb::row_view::Row::Tool(t)) => &mut t.output,
+                            other => panic!("追加只给消息行与工具行：{other:?}"),
                         };
-                        assert_eq!(m.text.len() as u64, a.offset, "追加前长度对得上");
-                        m.text.push_str(&a.text);
+                        assert_eq!(text.len() as u64, a.offset, "追加前长度对得上");
+                        text.push_str(&a.text);
                     }
                     s.header.clone_from(&p.header);
                     s.composer.clone_from(&p.composer);

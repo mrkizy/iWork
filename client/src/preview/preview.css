@@ -1,0 +1,64 @@
+.iw-preview-index {
+  height: 100%;
+  overflow: auto;
+  padding: 32px 48px;
+  user-select: text;
+}
+.iw-preview-index h1 {
+  margin: 0 0 6px;
+  font-size: var(--fs-title);
+}
+.iw-preview-index p {
+  margin: 0 0 18px;
+  color: var(--tx2);
+}
+.iw-preview-index table {
+  border-collapse: collapse;
+}
+.iw-preview-index td {
+  padding: 6px 14px 6px 0;
+  border-bottom: 1px solid var(--bd);
+  vertical-align: top;
+}
+.iw-preview-index a {
+  color: var(--brand);
+}
+.iw-preview-log {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 400;
+  max-width: 420px;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  background: var(--tx);
+  color: var(--bg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  opacity: 0.85;
+  pointer-events: none;
+}
+/* 回放控制条：只在预览页，放右下角，不挡侧栏与输入框的主要部分 */
+.iw-preview-player {
+  position: fixed;
+  right: 8px;
+  bottom: 8px;
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-sm);
+  background: var(--surf);
+  color: var(--tx2);
+  font-size: var(--fs-xs);
+  box-shadow: var(--shadow-tip);
+}
+.iw-preview-player button {
+  padding: 2px 8px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--tx);
+}

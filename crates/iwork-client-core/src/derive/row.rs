@@ -1,9 +1,25 @@
 //! 时间线一行 → `RowView`（行登记表的每一种行一臂）。
+//!
+//! **行外读取与标脏**：一行的视图模型读了行外的状态，那份状态变了这一行就得重发，否则网页停在旧值上。
+//! 下面是这里全部的行外读取，每一处都有对应的标脏方（`tests/row_dependencies.rs` 逐行一条用例）；
+//! 新加一处行外读取，就在这张表加一行、在那里加一条用例：
+//!
+//! | 读的什么 | 用在哪 | 标脏方 |
+//! | --- | --- | --- |
+//! | 连接状态（`commands_enabled`） | 审批、亲手执行、继续卡片的按钮 | `Store::set_connection` |
+//! | 回合状态与原因（`tl.turns`） | 消息表情、失败说明行 | 时间线 `TurnStateChanged` / `TurnFinished`（`messages_of_turn`） |
+//! | 同回合消息的 status（`has_failed_message`） | 回合结束行要不要说原因 | 时间线 `MessageCompleted`（`end:<turn_id>`） |
+//! | 对话是否在删除中（`tl.conversation.state`） | 亲手执行卡片的说明 | 时间线 `ConversationDeleting`（全部亲手执行卡片行） |
+//! | 助手表（`avatar`） | 消息头像 | `Store` 应用 `ListAssistants`（内容变了才标） |
+//! | 项目表（`project_name`） | 分隔线、当次说明 | `Store` 应用 `ListProjects`（内容变了才标） |
+//! | 附件表（`tl.attachments`） | 消息的附件 | 时间线 `AttachmentStored` / `AttachmentConfirmed` |
+//! | 流式正文、工具输出（`tl.text`） | 各自本行 | 增量事件本身（追加或整行） |
 
 use iwork_proto::pb;
 use pb::row_view::Row as V;
 
-use super::{avatar, commands_enabled, expression_of_turn, text};
+use super::avatar::{avatar, state_of_turn};
+use super::{commands_enabled, text};
 use crate::store::Store;
 use crate::store::timeline::{NoteText, Row, RowKey, Timeline, tool_identity};
 
@@ -28,7 +44,14 @@ pub fn row(store: &Store, tl: &Timeline, key: RowKey, identity: &str, row: &Row)
                 .as_ref()
                 .map(|c| c.paths.clone())
                 .unwrap_or_default(),
-            outcome_label: text::turn_outcome(t),
+            // 原因已经挂在失败的助手消息上时（2a 第 10 条），回合结束行不再重复。
+            outcome_label: if t.state == pb::TurnState::Failed as i32
+                && has_failed_message(tl, &t.id)
+            {
+                String::new()
+            } else {
+                text::turn_outcome(t)
+            },
             failed: t.state == pb::TurnState::Failed as i32,
         }),
         Row::Resume(r) => V::Resume(pb::ResumeRow {
@@ -46,23 +69,34 @@ pub fn row(store: &Store, tl: &Timeline, key: RowKey, identity: &str, row: &Row)
         Row::Divider { project_id } => V::Divider(pb::NoteRow {
             text: text::switched_project(project_name(store, project_id.as_deref()).as_deref()),
         }),
-        Row::Note { text: t, .. } => V::Note(pb::NoteRow {
-            text: match t {
-                NoteText::ApprovalMode(m) => {
-                    text::switched_mode(m.and_then(|m| pb::ApprovalMode::try_from(m).ok()))
-                }
-                NoteText::Model(m) => text::switched_model(m),
-                NoteText::DmProject(p) => {
-                    text::switched_project(project_name(store, p.as_deref()).as_deref())
-                }
-            },
-        }),
+        // 视图种类按「说的是什么」选，不按行从哪来（当次说明还是重建得出）：同一件事一个样子（审查 2a 2/F-4，
+        // 画布 09 的项目切换只有分隔线一种）。
+        Row::Note { text: t, .. } => match t {
+            NoteText::ApprovalMode(m) => V::Note(pb::NoteRow {
+                text: text::switched_mode(m.and_then(|m| pb::ApprovalMode::try_from(m).ok())),
+            }),
+            NoteText::Model(m) => V::ModelSwitch(pb::NoteRow {
+                text: text::switched_model(m),
+            }),
+            NoteText::DmProject(p) => V::Divider(pb::NoteRow {
+                text: text::switched_project(project_name(store, p.as_deref()).as_deref()),
+            }),
+        },
     };
     pb::RowView {
         ordinal: key.ordinal(),
         key: identity.to_owned(),
         row: Some(v),
     }
+}
+
+/// 这个回合有一条失败的助手消息：失败原因已经挂在那条消息的说明行上（ui-m1.md 2a 第 10 条）。
+fn has_failed_message(tl: &Timeline, turn_id: &str) -> bool {
+    !tl.identities_where(|r| {
+        matches!(r, Row::Message(m) if m.turn_id.as_deref() == Some(turn_id)
+            && m.status == pb::MessageStatus::Failed as i32)
+    })
+    .is_empty()
 }
 
 fn project_name(store: &Store, id: Option<&str>) -> Option<String> {
@@ -77,7 +111,7 @@ fn project_name(store: &Store, id: Option<&str>) -> Option<String> {
 
 fn message(store: &Store, tl: &Timeline, m: &pb::Message) -> pb::MessageRow {
     use pb::author::Kind as A;
-    let (speaker, name, av, expression) = match m.author.as_ref().and_then(|a| a.kind.as_ref()) {
+    let (speaker, name, av) = match m.author.as_ref().and_then(|a| a.kind.as_ref()) {
         Some(A::Assistant(a)) => {
             let state = m
                 .turn_id
@@ -87,22 +121,11 @@ fn message(store: &Store, tl: &Timeline, m: &pb::Message) -> pb::MessageRow {
             (
                 pb::Speaker::Assistant,
                 a.name_snapshot.clone(),
-                Some(avatar(store, &a.assistant_id)),
-                expression_of_turn(state),
+                Some(avatar(store, &a.assistant_id, state_of_turn(state))),
             )
         }
-        Some(A::System(_)) => (
-            pb::Speaker::System,
-            text::SYSTEM_NAME.to_owned(),
-            None,
-            pb::Expression::Unspecified,
-        ),
-        Some(A::User(_)) | None => (
-            pb::Speaker::User,
-            text::USER_NAME.to_owned(),
-            None,
-            pb::Expression::Unspecified,
-        ),
+        Some(A::System(_)) => (pb::Speaker::System, text::SYSTEM_NAME.to_owned(), None),
+        Some(A::User(_)) | None => (pb::Speaker::User, text::USER_NAME.to_owned(), None),
     };
     let status = pb::MessageStatus::try_from(m.status).unwrap_or_default();
     let body_is_artifact = matches!(
@@ -110,16 +133,29 @@ fn message(store: &Store, tl: &Timeline, m: &pb::Message) -> pb::MessageRow {
         Some(pb::message_body::Content::Artifact(_))
     );
     let text_now = tl.text(&m.id).unwrap_or_default().to_owned();
+    // 这一轮失败（ui-m1.md 2a 第 10 条）：内容为空 → 不画空气泡，只画「没能开始」；有内容 → 末尾加「中途失败」。
+    let failed = status == pb::MessageStatus::Failed;
+    let bubble_hidden = failed && text_now.is_empty();
+    let failure = failed.then(|| {
+        let turn = m.turn_id.as_deref().and_then(|t| tl.turns.get(t));
+        text::turn_failure(text_now.is_empty(), turn)
+    });
     pb::MessageRow {
         message_id: m.id.clone(),
         speaker: speaker.into(),
         author_name: name,
         avatar: av,
-        expression: expression.into(),
         body_pending: body_is_artifact && text_now.is_empty(),
         text: text_now,
         streaming: status == pb::MessageStatus::Streaming,
-        status_label: text::message_status(status).into(),
+        // 失败由说明行讲清楚，不再另挂「失败」标签。
+        status_label: if failed {
+            String::new()
+        } else {
+            text::message_status(status).into()
+        },
+        bubble_hidden,
+        failure,
         attachments: m
             .attachment_ids
             .iter()
@@ -210,6 +246,7 @@ pub(crate) fn approval(a: &pb::Approval, live: bool) -> pb::ApprovalRow {
                         pb::RememberScope::try_from(*s).unwrap_or_default(),
                     )
                     .into(),
+                    ..Default::default()
                 })
                 .collect()
         } else {

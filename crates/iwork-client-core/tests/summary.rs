@@ -86,8 +86,12 @@ fn read_event_alone_clears_both_badges() {
         ],
     ));
     let before = derive::sidebar::sidebar(&s, ctx());
-    assert_eq!(before.projects[0].unread, 3, "对照：读之前有徽标");
-    assert_eq!(before.projects[0].recent[0].unread, 3);
+    assert_eq!(
+        badge(&before.projects[0].unread_badge),
+        "3",
+        "对照：读之前有徽标"
+    );
+    assert_eq!(badge(&before.projects[0].recent[0].unread_badge), "3");
 
     s.apply(persisted(
         6,
@@ -99,7 +103,10 @@ fn read_event_alone_clears_both_badges() {
     ));
     assert!(s.refresh.is_stale(), "命中侧栏订阅就失效，不挑事件类型");
     // 失效还没重查时，徽标仍是后台上一次给的值（客户端不自己清）。
-    assert_eq!(derive::sidebar::sidebar(&s, ctx()).projects[0].unread, 3);
+    assert_eq!(
+        badge(&derive::sidebar::sidebar(&s, ctx()).projects[0].unread_badge),
+        "3"
+    );
     run_round(
         &mut s,
         7,
@@ -108,8 +115,8 @@ fn read_event_alone_clears_both_badges() {
         t,
     );
     let after = derive::sidebar::sidebar(&s, ctx());
-    assert_eq!(after.projects[0].unread, 0);
-    assert_eq!(after.projects[0].recent[0].unread, 0);
+    assert_eq!(after.projects[0].unread_badge, None);
+    assert_eq!(after.projects[0].recent[0].unread_badge, None);
     assert!(!s.refresh.is_stale());
 }
 
@@ -310,6 +317,29 @@ fn with_summary(
     s
 }
 
+/// 内置 iWork 在助手分区排第一（ui-m1 第 2 节第 1 条），不管后台给的顺序；其余保持后台的顺序。
+#[test]
+fn builtin_assistant_comes_first_whatever_the_backend_order() {
+    let s = with_summary(
+        vec![project(0)],
+        vec![],
+        vec![
+            assistant("a-asen", "阿森", false),
+            assistant("a-blob", "小团", false),
+            assistant("a-iwork", "iWork", true),
+            assistant("a-lao", "老周", false),
+        ],
+        vec![],
+        vec![],
+    );
+    let names: Vec<_> = derive::sidebar::sidebar(&s, ctx())
+        .assistants
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    assert_eq!(names, ["iWork", "阿森", "小团", "老周"]);
+}
+
 /// 助手未读只算它那条私聊（2a 第 3 条）：项目对话里的未读不算到助手上。
 #[test]
 fn assistant_unread_is_dm_only() {
@@ -321,7 +351,7 @@ fn assistant_unread_is_dm_only() {
         vec![],
     );
     let v = derive::sidebar::sidebar(&s, ctx());
-    assert_eq!(v.assistants[0].unread, 2);
+    assert_eq!(badge(&v.assistants[0].unread_badge), "2");
     assert_eq!(v.assistants[0].dm_conversation_id, "d1");
 }
 
@@ -469,4 +499,9 @@ fn quota_dash_and_tooltip() {
     let cell = &derive::sidebar::sidebar(&s, ctx()).quota[0];
     assert_eq!(cell.value_text, "37%");
     assert_eq!(cell.tooltip, "5 小时：已用 37% · 约 2 小时后重置");
+}
+
+/// 徽标上的字；没有徽标时为空串。
+fn badge(b: &Option<pb::CountBadge>) -> &str {
+    b.as_ref().map_or("", |b| b.text.as_str())
 }

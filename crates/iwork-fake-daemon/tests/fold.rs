@@ -39,7 +39,12 @@ impl World {
                     self.push(*e);
                 }
                 Step::Mutate(m) => m(&mut self.tables),
-                Step::Transient(_) | Step::Sleep(_) | Step::DisconnectAll => {}
+                Step::Transient(_)
+                | Step::Sleep(_)
+                | Step::DisconnectAll
+                | Step::DisconnectForSnapshot
+                | Step::StopListening
+                | Step::OpenHere => {}
             }
         }
     }

@@ -4,10 +4,8 @@ use std::collections::BTreeSet;
 
 use iwork_proto::pb;
 
-use super::{
-    Ctx, avatar, can_rename, conversation_title, expression_of_turn, pending_conversation, text,
-    to_system_time,
-};
+use super::avatar::{AvatarState, avatar, state_of_turn};
+use super::{Ctx, can_rename, conversation_title, pending_conversation, text, to_system_time};
 use crate::store::Store;
 
 /// 侧栏每个项目下显示的对话数。
@@ -22,16 +20,25 @@ pub fn sidebar(store: &Store, ctx: Ctx) -> pb::SidebarView {
         .map(|p| project_row(store, &waiting, ctx, p))
         .collect();
     pb::SidebarView {
-        pending_count: u32::try_from(store.summary.pending.len()).unwrap_or(u32::MAX),
+        pending_badge: text::pending_badge(
+            u32::try_from(store.summary.pending.len()).unwrap_or(u32::MAX),
+        ),
         projects,
-        assistants: store
-            .summary
-            .assistants
-            .iter()
+        assistants: assistants_in_order(store)
             .map(|a| assistant_row(store, a))
             .collect(),
         quota: quota_cells(store, ctx),
+        title_max_chars: u32::try_from(crate::intent::TITLE_MAX_CHARS).unwrap_or(u32::MAX),
     }
+}
+
+/// 助手分区的顺序：内置 iWork 排第一（ui-m1.md 第 2 节第 1 条），其余照后台给的顺序。
+/// 不信后台的顺序：查询结果怎么排是后台的事，「iWork 第一」是界面规则，在这里保证。
+fn assistants_in_order(store: &Store) -> impl Iterator<Item = &pb::Assistant> {
+    let all = &store.summary.assistants;
+    all.iter()
+        .filter(|a| a.builtin)
+        .chain(all.iter().filter(|a| !a.builtin))
 }
 
 /// 在待处理表里有项的对话。
@@ -71,7 +78,7 @@ pub(crate) fn conversation_item(
         dot_label: text::dot_label(dot).into(),
         can_rename: can_rename(c),
         can_delete: super::is_project_conversation(c),
-        unread: c.unread,
+        unread_badge: text::unread_badge(c.unread),
         selected: store.visible.conversation_id.as_deref() == Some(c.id.as_str()),
         last_message_first_line: c.last_message_first_line.clone(),
         last_active_label: c
@@ -106,7 +113,7 @@ fn project_row(
     pb::ProjectRow {
         project_id: p.id.clone(),
         name: p.name.clone(),
-        unread: p.unread,
+        unread_badge: text::unread_badge(p.unread),
         pinned: p.pinned,
         path_missing,
         path_missing_label: if path_missing {
@@ -131,10 +138,10 @@ fn assistant_row(store: &Store, a: &pb::Assistant) -> pb::AssistantRow {
         .activities
         .iter()
         .find(|x| x.assistant_id == a.id);
-    let expression = match activity.and_then(|x| pb::AssistantActivityKind::try_from(x.kind).ok()) {
-        Some(pb::AssistantActivityKind::Waiting) => pb::Expression::Waiting,
-        Some(pb::AssistantActivityKind::Running) => pb::Expression::Working,
-        _ => expression_of_turn(dm.and_then(|c| c.last_turn_state)),
+    let state = match activity.and_then(|x| pb::AssistantActivityKind::try_from(x.kind).ok()) {
+        Some(pb::AssistantActivityKind::Waiting) => AvatarState::Waiting,
+        Some(pb::AssistantActivityKind::Running) => AvatarState::Working,
+        _ => state_of_turn(dm.and_then(|c| c.last_turn_state)),
     };
     pb::AssistantRow {
         assistant_id: a.id.clone(),
@@ -143,11 +150,10 @@ fn assistant_row(store: &Store, a: &pb::Assistant) -> pb::AssistantRow {
             .as_ref()
             .map(|c| c.name.clone())
             .unwrap_or_default(),
-        avatar: Some(avatar(store, &a.id)),
-        expression: expression.into(),
+        avatar: Some(avatar(store, &a.id, state)),
         activity_line: activity.and_then(|x| activity_line(store, x)),
         // 助手未读 = 它那条私聊的未读（2a 第 3 条）。
-        unread: dm.map_or(0, |c| c.unread),
+        unread_badge: text::unread_badge(dm.map_or(0, |c| c.unread)),
         can_delete: !a.builtin,
         dm_conversation_id: dm.map(|c| c.id.clone()).unwrap_or_default(),
         builtin: a.builtin,
@@ -203,10 +209,12 @@ fn quota_cells(store: &Store, ctx: Ctx) -> Vec<pb::QuotaCell> {
                     runtime_label: label,
                     value_text: text::QUOTA_MISSING.into(),
                     tooltip: text::QUOTA_MISSING_TIP.into(),
+                    used_pct: None,
                 },
                 Some(top) => pb::QuotaCell {
                     runtime_label: label,
                     value_text: format!("{}%", top.used_pct),
+                    used_pct: Some(top.used_pct.min(100)),
                     tooltip: windows
                         .iter()
                         .map(|w| {

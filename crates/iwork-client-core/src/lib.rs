@@ -35,6 +35,8 @@ pub struct Options {
     pub timeline_cap: usize,
     /// 时钟（方案 2.4 第 10 条）；默认 tokio 时间。
     pub clock: Clock,
+    /// 只给录像与预览：按助手 id 换形象（阿森、林岚、老周）。M1 没有选形象的入口，正式运行时为空。
+    pub characters: derive::avatar::CharacterOverrides,
 }
 
 impl std::fmt::Debug for Options {
@@ -52,6 +54,7 @@ impl Default for Options {
             chunk_max: frame::FRAME_CHUNK_MAX,
             timeline_cap: store::timeline::TIMELINE_CAP,
             clock: tokio_clock(),
+            characters: Default::default(),
         }
     }
 }
@@ -69,6 +72,7 @@ impl App {
             opts.clock,
             effects_tx,
         )
+        .with_characters(opts.characters)
         .with_stats(stats_tx);
         tokio::spawn(session.run(rx));
         (

@@ -378,6 +378,50 @@ fn model_switch_between_turns_and_note_suppresses_it() {
     assert!(matches!(tl.row("note:15"), Some(Row::Note { .. })));
 }
 
+/// 同一件事一个样子（审查 2a 2/F-4）：切了项目、切了模型，不管是当次说明（事件带来的）还是重建得出的那一行，
+/// 网页拿到的视图种类都一样（分隔线、模型切换行）；只有档位切换是普通说明行。
+#[test]
+fn switch_notes_render_like_their_rebuilt_rows() {
+    let mut s = live_store();
+    queue_turn(&mut s, 10, "t1", "opus");
+    s.apply(persisted(
+        15,
+        &[CONV],
+        E::ConversationModelChanged(pb::ConversationModelChanged {
+            conversation_id: CID.into(),
+            model: Some(pb::ModelSelection {
+                model_id: "sonnet".into(),
+                effort: None,
+            }),
+        }),
+    ));
+    s.apply(persisted(
+        16,
+        &[CONV],
+        E::DmProjectSwitched(pb::DmProjectSwitched {
+            conversation_id: CID.into(),
+            project_id: Some(PID.into()),
+        }),
+    ));
+    s.apply(persisted(
+        17,
+        &[CONV],
+        E::ApprovalModeChanged(pb::ApprovalModeChanged {
+            target: Some(pb::ApprovalModeTarget {
+                kind: Some(pb::approval_mode_target::Kind::ConversationId(CID.into())),
+            }),
+            mode: Some(pb::ApprovalMode::Auto as i32),
+            cause: pb::ApprovalModeChangeCause::User as i32,
+        }),
+    ));
+    assert!(matches!(view(&s, "note:15"), V::ModelSwitch(_)), "切了模型");
+    assert!(matches!(view(&s, "note:16"), V::Divider(_)), "切了项目");
+    assert!(
+        matches!(view(&s, "note:17"), V::Note(_)),
+        "对照：切档位是说明行"
+    );
+}
+
 #[test]
 fn resume_row_from_pending_table() {
     let mut s = live_store();
