@@ -17,9 +17,11 @@ pub const MCP: &str = "mcp.json";
 pub const OWNER: &str = "owner";
 
 /// 随机部分的字节数（十六进制后 12 个字符）。
+#[cfg(unix)]
 const RANDOM_BYTES: usize = 6;
 
 /// 重名时最多换几次名字。
+#[cfg(unix)]
 const CREATE_ATTEMPTS: usize = 8;
 
 /// Unix socket 路径的上限（字节，不含结尾的 NUL）。

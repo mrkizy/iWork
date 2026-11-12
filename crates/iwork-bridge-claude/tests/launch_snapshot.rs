@@ -135,6 +135,23 @@ fn cases() -> Vec<(&'static str, LaunchPlan)> {
     ]
 }
 
+/// 键按字典序重排：serde_json 开没开 `preserve_order`（全量构建时被别的 crate 打开）都得到同一份文字。
+fn sorted(v: &Value) -> Value {
+    match v {
+        Value::Object(m) => {
+            let mut keys: Vec<_> = m.keys().collect();
+            keys.sort();
+            Value::Object(
+                keys.into_iter()
+                    .map(|k| (k.clone(), sorted(&m[k])))
+                    .collect(),
+            )
+        }
+        Value::Array(a) => Value::Array(a.iter().map(sorted).collect()),
+        other => other.clone(),
+    }
+}
+
 fn render(p: &LaunchPlan) -> String {
     let v = json!({
         "program": p.program,
@@ -144,7 +161,7 @@ fn render(p: &LaunchPlan) -> String {
         "settings": p.settings,
         "mcp": p.mcp,
     });
-    format!("{}\n", serde_json::to_string_pretty(&v).unwrap())
+    format!("{}\n", serde_json::to_string_pretty(&sorted(&v)).unwrap())
 }
 
 fn snapshot_path(name: &str) -> PathBuf {

@@ -1,0 +1,8 @@
+Control(ControlResponse { request_id: Some("init-1"), success: true, current_permission_mode: Some("dontAsk") })
+Report(Model { id: "claude-haiku-5-5", effort: "low" })
+ToolCall { id: "toolu_iwork0001", name: "Bash", raw_input: Object {"command": String("echo iwork-sample-ok"), "description": String("Echo sample marker string")} }
+Report(Quota([QuotaWindow { window: "seven_day", used_pct: 74, resets_at_secs: Some(1794855600) }]))
+ToolCallUpdate { id: "toolu_iwork0001", failed: false, content: "iwork-sample-ok" }
+Text("DONE")
+Report(Usage(Usage { input_tokens: 4, output_tokens: 90, cache_read_tokens: 35935, cache_write_tokens: 6876, cost_usd: Some(0.0017799500000000002) }))
+End(Completed)
