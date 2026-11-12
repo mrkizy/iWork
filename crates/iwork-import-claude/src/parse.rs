@@ -421,22 +421,25 @@ impl<'de> Deserialize<'de> for InstallRecord {
                 f.write_str("an installation object")
             }
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<InstallRecord, A::Error> {
-                let mut record = InstallRecord {
-                    user_scope: false,
-                    install_path: None,
-                };
+                // scope 必须有（审查 2/F-1）：缺了或拼错了是形状不对，不当成「不是 user」静默跳过。installPath 可选
+                let mut user_scope = None;
+                let mut install_path = None;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
-                        "scope" => record.user_scope = map.next_value::<String>()? == "user",
+                        "scope" => user_scope = Some(map.next_value::<String>()? == "user"),
                         "installPath" => {
-                            record.install_path = Some(PathBuf::from(map.next_value::<String>()?))
+                            install_path = Some(PathBuf::from(map.next_value::<String>()?))
                         }
                         _ => {
                             map.next_value::<IgnoredAny>()?;
                         }
                     }
                 }
-                Ok(record)
+                let user_scope = user_scope.ok_or_else(|| de::Error::missing_field("scope"))?;
+                Ok(InstallRecord {
+                    user_scope,
+                    install_path,
+                })
             }
         }
         d.deserialize_map(V)

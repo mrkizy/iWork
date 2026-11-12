@@ -721,6 +721,49 @@ fn registry_without_plugins_field_is_malformed() {
     }
 }
 
+/// 安装记录必须有 scope（T10f A 审查 2/F-1）：缺了或拼错了是形状不对，报 Malformed，不当成「不是 user」静默跳过。
+/// 对照：明确写了别的范围（local）的照常跳过；installPath 仍是可选的。
+#[test]
+fn install_record_without_scope_is_malformed() {
+    let registry = |body: &str| {
+        FakeFiles::default().file(&format!("{CFG}/plugins/installed_plugins.json"), body)
+    };
+    for body in [
+        r#"{"plugins": {"p@m": [{"installPath": "/x"}]}}"#,
+        r#"{"plugins": {"p@m": [{"scop": "user", "installPath": "/x"}]}}"#,
+        r#"{"plugins": {"p@m": [{"scope": "local"}, {"installPath": "/x"}]}}"#,
+    ] {
+        let err = discover(registry(body)).0.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LocalImportError::Malformed {
+                    source: SourceRef::PluginRegistry,
+                    line: 1,
+                    ..
+                }
+            ),
+            "{body}: {err:?}"
+        );
+    }
+    assert_eq!(
+        ok(registry(
+            r#"{"plugins": {"p@m": [{"scope": "local", "installPath": "/x"}]}}"#
+        ))
+        .0
+        .len(),
+        0,
+        "对照：明确不是 user 的照常跳过"
+    );
+    assert_eq!(
+        ok(registry(r#"{"plugins": {"p@m": [{"scope": "user"}]}}"#))
+            .0
+            .len(),
+        1,
+        "对照：installPath 可选"
+    );
+}
+
 #[test]
 fn missing_source_is_empty_not_error() {
     // 什么都没有：查询成功、列表为空
