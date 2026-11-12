@@ -89,7 +89,8 @@
 - T10f A：92e3827 已推，ad7b3f77 审（任务 2026-11-13-m1-t10f-a）；`b57765cc` 开 script6。
 - T04p 第 3 版 8fd61b2，9a5980a0 审第 3 轮（最后一轮）。T10a 表第 2 版 7a531fc，8036b426 审。
 - 待转设计窗口：tokens.css 259 行 --sidebar-w-max 注释「主区域至少 480」与 12b 的 568 不一致；P4 沙箱依赖缺失时的提示文案。
-- 小卡待排：iwork-ipc slow_consumer 延迟阈值在高负载下偶发；CI 主干 rust-cache 常 miss。
+- 小卡待排：iwork-ipc slow_consumer 延迟阈值在高负载下偶发；iwork-agent-acp `process::tests::slow_scan_does_not_block_the_async_thread`（process.rs:567，最长停顿 <150ms）在 CI macOS 偶发（T06 侧，2026-11-13 T09 2b CI 撞到一次）；CI 主干 rust-cache 常 miss；macOS runner 容量紧，job 没分到 runner 被取消时只重跑那个 job。
+- 2026-11-13 夜：T10a 方案 9 轮定稿（677d5f4 定稿后小改），组 A 开工（c87fefd6 步 1、e6a27582 步 2）；S6-4 第 1 轮 3 条交 4ea1efca；T09 2b 第 9 轮 e036441c 在审；script6 第一批 6 轮通过、第二批第 1 轮 8 条交 b57765cc，分支 CI 等 macOS 重跑。
 
 **23:15 进展（最新，冲突以这里为准）**：
 - 合入：S6-1（e949487）、T04 组 3（139b6f2，1/F-7 拆到新卡 T04p）、CI 余量（d7ac6bc）、偶发修复 replan（287529e）、S6-2（13b1d6c）。main CI 43228979354 绿。
