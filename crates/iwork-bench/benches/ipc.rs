@@ -1,7 +1,7 @@
 //! ipc 热路径基准（T03 方案第 6 节）。`cargo bench -p iwork-bench --bench ipc`。
 //!
 //! 全部跑在进程内传输上，量的是 ipc 自身（编码、入队、写、解码、交接），不含存储读取（归 T02）与真实 socket。
-//! `IWORK_BENCH_FANOUT_SECS` 调推送扇出的时长（默认 10 秒，方案的设定）。
+//! `IWORK_BENCH_FANOUT_SECS` 调推送扇出与慢消费者对照的时长（默认 10 秒，方案的设定）。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -139,17 +139,17 @@ struct Bench {
 
 impl Bench {
     fn start() -> Bench {
+        Bench::start_with(ServerConfig::new("bench"))
+    }
+
+    fn start_with(cfg: ServerConfig) -> Bench {
         let log: Log = Arc::default();
         let handler = Handler {
             log: log.clone(),
             query_delay: Arc::default(),
         };
-        let (server, publisher) = Server::new(
-            ServerConfig::new("bench"),
-            own(1),
-            handler.clone(),
-            Source { log: log.clone() },
-        );
+        let (server, publisher) =
+            Server::new(cfg, own(1), handler.clone(), Source { log: log.clone() });
         let (listener, connector) =
             memory::endpoint("bench", identity(2), Arc::new(|_| identity(1)));
         tokio::spawn(server.serve(listener, tokio_util::sync::CancellationToken::new()));
@@ -163,14 +163,14 @@ impl Bench {
     }
 
     async fn connect(&self) -> (Client, Incoming) {
-        Client::connect(
-            &self.connector,
-            &self.endpoint,
-            &own(2),
-            ClientConfig::new(pb::ClientKind::Desktop, "bench"),
-        )
-        .await
-        .unwrap()
+        self.connect_with(ClientConfig::new(pb::ClientKind::Desktop, "bench"))
+            .await
+    }
+
+    async fn connect_with(&self, cfg: ClientConfig) -> (Client, Incoming) {
+        Client::connect(&self.connector, &self.endpoint, &own(2), cfg)
+            .await
+            .unwrap()
     }
 
     /// 先提交后发布，与 daemon 的写线程一样。只提交不发布不行：`serve` 启动时读 head 作发布水位基线，
@@ -301,6 +301,123 @@ async fn ipc_publish_fanout(conns: usize, secs: u64) {
     );
 }
 
+/// 慢消费者对照（T03 方案 S6，P95 < 5ms 的阈值在这里量）：A、B 两条连接订阅同一范围，写线程按 1600/s 发布，
+/// 量 B 的推送延迟。`a_stalled` 为 false 时 A 也持续读（对照组），为 true 时 A 订阅后一直不读。两组同条件：
+/// 预算和集成测试 `slow_consumer` 一样调小（服务端 256KiB / 保底 32KiB，客户端收件 64KiB），让停读的 A 在
+/// 几秒内堆满、被服务端按 QueueFull 关掉，量的是「A 堆满到被关的整个过程」里 B 受没受影响。
+async fn ipc_slow_consumer(a_stalled: bool, secs: u64) {
+    let mut cfg = ServerConfig::new("bench");
+    cfg.budget_limit = 256 * 1024;
+    cfg.replay_reserve = 32 * 1024;
+    let b = Bench::start_with(cfg);
+    let client_cfg = || {
+        let mut c = ClientConfig::new(pb::ClientKind::Desktop, "bench");
+        c.incoming_limit = 64 * 1024;
+        c
+    };
+    let sent: Arc<Mutex<Vec<Instant>>> = Arc::default();
+    let total = 1600 * secs;
+    let (a, mut a_inc) = b.connect_with(client_cfg()).await;
+    a.subscribe(1, scope(), 0).await.unwrap();
+    subscribed(&mut a_inc).await;
+    let (bc, mut b_inc) = b.connect_with(client_cfg()).await;
+    bc.subscribe(1, scope(), 0).await.unwrap();
+    subscribed(&mut b_inc).await;
+    // A：对照组持续读到收齐或被关；停读组先原样留着，发布结束后再看它是不是被关了
+    let a_reader = if a_stalled {
+        Err((a, a_inc))
+    } else {
+        Ok(tokio::spawn(async move {
+            let _keep = a;
+            let mut n = 0u64;
+            while n < total {
+                match a_inc.next().await {
+                    Some(IncomingItem::Event(_)) => n += 1,
+                    Some(IncomingItem::Closed(_)) | None => return false,
+                    Some(_) => {}
+                }
+            }
+            true
+        }))
+    };
+    let b_reader = {
+        let sent = sent.clone();
+        tokio::spawn(async move {
+            let _keep = bc;
+            let mut lat = Vec::with_capacity(total as usize);
+            while (lat.len() as u64) < total {
+                match b_inc.next().await {
+                    Some(IncomingItem::Event(e)) => {
+                        if let Some(pb::event::Body::Persisted(p)) = &e.body {
+                            let t0 = sent.lock().unwrap()[p.seq as usize - 1];
+                            lat.push(t0.elapsed());
+                        }
+                    }
+                    Some(IncomingItem::Closed(r)) => panic!("B 被关了：{r:?}"),
+                    None => panic!("B 的收件流结束了"),
+                    Some(_) => {}
+                }
+            }
+            lat
+        })
+    };
+    let (log, publisher, sent2) = (b.log.clone(), b.publisher.clone(), sent.clone());
+    let writer = std::thread::spawn(move || {
+        let start = Instant::now();
+        for i in 0..total {
+            let e = {
+                let mut l = log.lock().unwrap();
+                let e = Arc::new(RoutedEvent::new(
+                    pb::PersistedEvent {
+                        seq: l.len() as u64 + 1,
+                        actor: "x".repeat(200),
+                        ..Default::default()
+                    },
+                    vec![StreamKey::one("conversation", "c1")],
+                ));
+                l.push(e.clone());
+                e
+            };
+            sent2.lock().unwrap().push(Instant::now());
+            publisher.publish(Published::Persisted(e));
+            let due = start + Duration::from_micros(625 * (i + 1));
+            if let Some(w) = due.checked_duration_since(Instant::now()) {
+                std::thread::sleep(w);
+            }
+        }
+    });
+    let mut lat = b_reader.await.unwrap();
+    writer.join().unwrap();
+    let a_state = match a_reader {
+        Ok(r) => {
+            if r.await.unwrap() {
+                "A 收齐"
+            } else {
+                "A 被关"
+            }
+        }
+        Err((a, mut a_inc)) => {
+            // 停读组：现在才读 A，看排着的事件后面是不是 Closed
+            let closed = loop {
+                match tokio::time::timeout(Duration::from_secs(5), a_inc.next()).await {
+                    Ok(Some(IncomingItem::Closed(_))) | Ok(None) => break true,
+                    Ok(Some(_)) => {}
+                    Err(_) => break false,
+                }
+            };
+            drop(a);
+            if closed { "A 被关" } else { "A 未被关" }
+        }
+    };
+    report(
+        &format!(
+            "ipc_slow_consumer（A {}，B 的延迟，{a_state}）",
+            if a_stalled { "停止读" } else { "在读" }
+        ),
+        &mut lat,
+    );
+}
+
 async fn ipc_replay_10k() {
     let b = Bench::start();
     for _ in 0..10_000 {
@@ -412,6 +529,8 @@ fn main() {
         connect_handshake_latency().await;
         ipc_publish_fanout(1, secs).await;
         ipc_publish_fanout(4, secs).await;
+        ipc_slow_consumer(false, secs).await;
+        ipc_slow_consumer(true, secs).await;
         ipc_replay_10k().await;
         ipc_scope_change_snapshot().await;
         ipc_view_query_handover(5).await;
