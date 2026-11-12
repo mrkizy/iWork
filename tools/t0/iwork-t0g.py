@@ -887,7 +887,7 @@ def pass_literal_sites(src):
 
 
 # 计数表的键、自测里的期望值、检查函数自己拿来比较的那一个；别的只许出现在 VERDICT_FUNCS 登记的函数里
-PASS_LITERAL_ALLOWED = {"COUNTS", "selftest", "selftest_g2_matrix", "selftest_g5_isolation", "selftest_recheck_and_p4", "pass_literal_sites"}
+PASS_LITERAL_ALLOWED = {"COUNTS", "selftest", "selftest_g2_matrix", "selftest_g5_isolation", "selftest_recheck_and_p4", "selftest_cfgdir_isolation", "pass_literal_sites"}
 
 
 def live_seen(events, alive, results_needed):
@@ -4170,11 +4170,19 @@ def cfgdir_layout(home, token):
     return out
 
 
+def mcp_list_names(output):
+    """`claude mcp list` 输出里列出的服务名：形如「名字: 命令或地址 - 状态」的行，取冒号前那段。纯函数。"""
+    return [m.group(1) for m in re.finditer(r"^(\S[^\n:]*?): .+ - .+$", output, re.M)]
+
+
 def cfgdir_verdict(code, timed_out, output, names, want):
     """一种情况的结论。纯函数。names：{份: 条目名}；want：该读到的那一份。
     命令报错、超时、输出里一个合成条目名都认不出 → INCONCLUSIVE；列出的恰好是该读的那一份 → PASS；
     列出了别的份（不管该读的那份在不在）→ FAIL。返回 (状态, 说明)。"""
     if timed_out or code != 0: return "INCONCLUSIVE", f"命令没正常结束（退出码={code} 超时={timed_out}）"
+    listed = mcp_list_names(output)
+    foreign = sorted(set(listed) - set(names.values()))
+    if foreign: return "INCONCLUSIVE", f"输出里有三个合成条目之外的服务 {len(foreign)} 个：隔离被污染（比如还登录着、或环境里带进了别的配置），这一格不下结论"
     seen = sorted(k for k, n in names.items() if n in output)
     if not seen: return "INCONCLUSIVE", "输出里认不出任何一份合成配置的条目"
     facts = f"命中 {seen}（{len(seen)} 份），退出码 {code}"
@@ -4182,19 +4190,41 @@ def cfgdir_verdict(code, timed_out, output, names, want):
     return "FAIL", f"该读的是 {want}；{facts}"
 
 
+# 这一格的子进程里去掉的变量（审查 2/F-2）：一切 CLAUDE*、ANTHROPIC* 开头的（认证、账号、代理、配置目录、安全存储位置都在这两类里），
+# 以及几个云厂商的认证变量。只看变量名，不读值。去掉之后再按格子设 HOME、CLAUDE_SECURESTORAGE_CONFIG_DIR 与 CLAUDE_CONFIG_DIR
+CFGDIR_DROP_PREFIXES = ("CLAUDE", "ANTHROPIC")
+CFGDIR_DROP_NAMES = ("AWS_BEARER_TOKEN_BEDROCK", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE",
+                     "GOOGLE_APPLICATION_CREDENTIALS")
+
+
+def cfgdir_env(inherited_names, home, secure_dir, setting, custom_dir):
+    """cfgdir 一种情况的子进程环境：返回 (要设的, 要去掉的)。纯函数（只看变量名）。
+    HOME 换成临时目录；CLAUDE_SECURESTORAGE_CONFIG_DIR 指到本次的临时目录（2.1.322 程序：它只决定凭据文件目录与钥匙串条目名，
+    设了就把这个目录的哈希拼进钥匙串名，碰不到用户原来的登录；.claude.json 的路径另走 CLAUDE_CONFIG_DIR || homedir()）；
+    CLAUDE_CONFIG_DIR 照这一格的情况设（None 是不设、"" 是空串）。继承来的认证类变量一律去掉。"""
+    drop = sorted(n for n in inherited_names if n.startswith(CFGDIR_DROP_PREFIXES) or n in CFGDIR_DROP_NAMES)
+    extra = {"HOME": home, "CLAUDE_SECURESTORAGE_CONFIG_DIR": secure_dir}
+    if setting == "empty": extra["CLAUDE_CONFIG_DIR"] = ""
+    elif setting == "default": extra["CLAUDE_CONFIG_DIR"] = os.path.join(home, ".claude")
+    elif setting == "custom": extra["CLAUDE_CONFIG_DIR"] = custom_dir
+    skip = tuple(n for n in drop if n not in extra) + (("CLAUDE_CONFIG_DIR",) if setting is None else ())
+    return extra, skip
+
+
 def r2x_cfgdir():
     home = R.p("cfgdir-home"); os.mkdir(home)
+    secure = R.p("cfgdir-securestorage"); os.mkdir(secure)
     layout = cfgdir_layout(home, secrets.token_hex(3))
     names = {k: n for k, (_, n) in layout.items()}
     for label, (setting, want) in CFGDIR_CASES.items():
-        extra = {"HOME": home}
-        if setting == "empty": extra["CLAUDE_CONFIG_DIR"] = ""
-        elif setting == "default": extra["CLAUDE_CONFIG_DIR"] = os.path.join(home, ".claude")
-        elif setting == "custom": extra["CLAUDE_CONFIG_DIR"] = os.path.dirname(layout["custom"][0])
-        skip = ("CLAUDE_CONFIG_DIR",) if setting is None else ()
+        extra, skip = cfgdir_env(list(os.environ), home, secure, setting, os.path.dirname(layout["custom"][0]))
         out, err, code, timed_out, _ = run_instance(["claude", "mcp", "list"], f"cfgdir-{setting or 'unset'}", env=extra, env_skip=skip, timeout=120)
         status, why = cfgdir_verdict(code, timed_out, out + err, names, want)
         settle(f"R2X cfgdir {label}：CLI 读哪一份 .claude.json（不起模型）", status, why)
+
+
+# 不起模型、不碰真实账号的格：只选它们时开跑前的准备一个都不做（run_selected）
+MODEL_FREE_CELLS = {"cfg"}
 
 
 # R2X 的格子表（审查 1/F-5）：部分 → {格名: 处理器}。--part 的可选值、每部分跑哪几格、按格名分派都只从这里来
@@ -5383,8 +5413,67 @@ def selftest_recheck_and_p4():
         child.kill(); child.wait()
 
 
+def selftest_cfgdir_isolation():
+    """cfgdir 那一格（审查 2/F-1、2/F-2）：只选它时开跑前不起任何 claude；四条命令都是 `claude mcp list`（没有 -p），
+    都在隔离的环境里：HOME、安全存储目录是本次的临时目录，继承来的认证与存储变量都去掉了。走真的 run_selected，claude 换成记录替身。"""
+    calls_log = R.p("out", "st-claude-calls.jsonl")
+    stub_dir = R.p("st-claude-stub"); os.mkdir(stub_dir)
+    stub = os.path.join(stub_dir, "claude")
+    open(stub, "w").write(f"""#!{sys.executable}
+import json, os, sys
+keep = ("HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR")
+with open({calls_log!r}, "a") as f:
+    f.write(json.dumps({{"argv": sys.argv[1:], "env": {{k: os.environ.get(k) for k in keep}}, "has_config_dir": "CLAUDE_CONFIG_DIR" in os.environ,
+                        "names": sorted(k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC", "AWS_")))}}) + "\\n")
+""")
+    os.chmod(stub, 0o755)
+    planted = {"ANTHROPIC_API_KEY": "planted-not-a-key", "CLAUDE_CODE_OAUTH_TOKEN": "planted-login", "CLAUDE_SECURESTORAGE_CONFIG_DIR": "/planted/real-store",
+               "CLAUDE_CONFIG_DIR": "/planted/real-config", "AWS_BEARER_TOKEN_BEDROCK": "planted"}
+    saved_env = {k: os.environ.get(k) for k in [*planted, "PATH"]}
+    saved_a = (A.only, A.part, A.cells)
+    try:
+        os.environ.update(planted)
+        os.environ["PATH"] = stub_dir + os.pathsep + saved_env["PATH"]
+        A.only, A.part, A.cells = "R2X", "cfgdir", None
+        assert model_free_selection()
+        run_selected()
+    finally:
+        A.only, A.part, A.cells = saved_a
+        for k, v in saved_env.items():
+            if v is None: os.environ.pop(k, None)
+            else: os.environ[k] = v
+    calls = [json.loads(l) for l in open(calls_log)]
+    home, secure = R.p("cfgdir-home"), R.p("cfgdir-securestorage")
+    assert len(calls) == 4 and all(c["argv"] == ["mcp", "list"] for c in calls), f"只跑四次 claude mcp list，开跑前没有别的 claude 命令：{calls}"
+    assert not any("-p" in c["argv"] for c in calls)
+    for c in calls:
+        assert c["env"]["HOME"] == home and c["env"]["CLAUDE_SECURESTORAGE_CONFIG_DIR"] == secure, "HOME 与安全存储目录都是本次的临时目录（反例：继承了存储变量）"
+        assert not {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "AWS_BEARER_TOKEN_BEDROCK"} & set(c["names"]), f"继承来的认证变量去掉了（反例：已有登录）：{c['names']}"
+    got = [(c["has_config_dir"], c["env"]["CLAUDE_CONFIG_DIR"]) for c in calls]
+    assert got == [(False, None), (True, ""), (True, os.path.join(home, ".claude")), (True, os.path.join(home, "custom-config"))], got
+    # 别的选择照常做准备
+    for only, part, cells in (("R2X", "recheck", None), ("R2X", None, None), ("G1", None, None), ("R2X", None, ("cfg", "k3")), ("R2X,G1", "cfgdir", None)):
+        A.only, A.part, A.cells = only, part, cells
+        try: assert not model_free_selection(), (only, part, cells)
+        finally: A.only, A.part, A.cells = saved_a
+    A.only, A.part, A.cells = "R2X", None, ("cfg",)
+    try: assert model_free_selection(), "--cell cfg 也算"
+    finally: A.only, A.part, A.cells = saved_a
+    # 纯函数：环境与污染
+    extra, skip = cfgdir_env(["PATH", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "AWS_PROFILE"], "/h", "/s", None, "/c")
+    assert extra == {"HOME": "/h", "CLAUDE_SECURESTORAGE_CONFIG_DIR": "/s"} and "CLAUDE_CONFIG_DIR" in skip and "ANTHROPIC_BASE_URL" in skip
+    assert "CLAUDE_SECURESTORAGE_CONFIG_DIR" not in skip and "PATH" not in skip and "AWS_PROFILE" in skip
+    nm = {"home": "t0g-home-a", "cfgdir": "t0g-cfgdir-a", "custom": "t0g-custom-a"}
+    out = "Checking MCP server health…\n\nt0g-home-a: /usr/bin/true  - ✓ Connected\n"
+    assert cfgdir_verdict(0, False, out, nm, "home")[0] == "PASS" and mcp_list_names(out) == ["t0g-home-a"]
+    polluted = out + "claude.ai Gmail: https://gmail.mcp.claude.com/mcp - ! Needs authentication\n"
+    assert cfgdir_verdict(0, False, polluted, nm, "home")[0] == "INCONCLUSIVE", "已有登录：带出了账号里的远程服务"
+    assert cfgdir_verdict(0, False, out + "my-own: npx thing - ✓ Connected\n", nm, "home")[0] == "INCONCLUSIVE", "带进了别的配置"
+
+
 def selftest():
     selftest_r2x()
+    selftest_cfgdir_isolation()
     selftest_recheck_and_p4()
     selftest_run_isolation()
     selftest_prompts()
@@ -6031,6 +6120,52 @@ def selftest():
     print("selftest ok")
 
 
+def selected_groups():
+    return [x.strip() for x in A.only.split(",") if x.strip()] or list(GROUPS)
+
+
+def model_free_selection():
+    """这次只选了不起模型的格（--only R2X 且选中的格都在 MODEL_FREE_CELLS 里）。纯函数（只读 A）。"""
+    if selected_groups() != ["R2X"]: return False
+    cells = A.cells or (R2X_PARTS[A.part] if A.part else sum(R2X_PARTS.values(), ()))
+    return bool(cells) and set(cells) <= MODEL_FREE_CELLS
+
+
+def run_groups():
+    for g in selected_groups():
+        log(f"—— {g}")
+        try: GROUPS[g]()
+        except Abort: raise
+        except Exception as e: record("INCONCLUSIVE", g, f"脚本自己出错：{e!r}")
+
+
+def run_selected():
+    """开跑：先做公用的准备（版本、帮助、g0 探针、工具清单），再跑选中的组。只选了不起模型的格（cfgdir）时
+    一个准备都不做（审查 2/F-1）：那几样都用真实账号起 claude，第一个 claude 命令要等到格子自己建好隔离之后。"""
+    global ISO
+    subprocess.run(["git", "init", "-q"], cwd=R.work, check=True)
+    json.dump({"mcpServers": {}}, open(R.p("cfg", "empty-mcp.json"), "w"))
+    ISO = ["--setting-sources", "", "--strict-mcp-config", "--mcp-config", R.p("cfg", "empty-mcp.json")]
+    if model_free_selection():
+        log(f"只跑不起模型的格 {sorted(MODEL_FREE_CELLS)}：跳过版本、帮助、g0 探针与工具清单；平台：{sys.platform}；根目录：{scrub(R.root)}")
+        run_groups()
+        return
+    ver = subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip()
+    log(f"Claude Code 版本：{ver}；平台：{sys.platform}；根目录：{scrub(R.root)}")
+    open(os.path.join(R.out, "claude-help.txt"), "w").write(scrub(subprocess.run(["claude", "--help"], capture_output=True, text=True).stdout))
+    probe = claude("g0-iso-probe", "Reply with exactly: OK", settings=None)
+    if probe["exit"] != 0 or probe["init"] is None:
+        log("--setting-sources 空值这种写法跑不通，隔离参数退回 t0f 的 project,local；G5 单独比较各写法")
+        ISO[1] = "project,local"
+        probe = claude("g0-iso-probe2", "Reply with exactly: OK", settings=None)
+    if probe["init"] is None:
+        raise Abort("拿不到 system/init，后面的用例都没法判定")
+    learn_inventory(probe["init"])
+    INV["valid"] = run_valid(probe)                    # G1a 导出清单的来源运行算不算数
+    run_groups()
+    report_strays()
+
+
 def main():
     global A, R, ISO
     ap = argparse.ArgumentParser()
@@ -6094,27 +6229,7 @@ def main():
         if R.root.startswith(tmp + os.sep):
             raise Abort("根目录落在 $TMPDIR 里，沙箱默认放行那里，「工作区外不可写」测不出来；换一个 --root-parent")
         ownership_preflight()
-        subprocess.run(["git", "init", "-q"], cwd=R.work, check=True)
-        json.dump({"mcpServers": {}}, open(R.p("cfg", "empty-mcp.json"), "w"))
-        ISO = ["--setting-sources", "", "--strict-mcp-config", "--mcp-config", R.p("cfg", "empty-mcp.json")]
-        ver = subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip()
-        log(f"Claude Code 版本：{ver}；平台：{sys.platform}；根目录：{scrub(R.root)}")
-        open(os.path.join(R.out, "claude-help.txt"), "w").write(scrub(subprocess.run(["claude", "--help"], capture_output=True, text=True).stdout))
-        probe = claude("g0-iso-probe", "Reply with exactly: OK", settings=None)
-        if probe["exit"] != 0 or probe["init"] is None:
-            log("--setting-sources 空值这种写法跑不通，隔离参数退回 t0f 的 project,local；G5 单独比较各写法")
-            ISO[1] = "project,local"
-            probe = claude("g0-iso-probe2", "Reply with exactly: OK", settings=None)
-        if probe["init"] is None:
-            raise Abort("拿不到 system/init，后面的用例都没法判定")
-        learn_inventory(probe["init"])
-        INV["valid"] = run_valid(probe)                    # G1a 导出清单的来源运行算不算数
-        for g in ([x.strip() for x in A.only.split(",") if x.strip()] or list(GROUPS)):
-            log(f"—— {g}")
-            try: GROUPS[g]()
-            except Abort: raise
-            except Exception as e: record("INCONCLUSIVE", g, f"脚本自己出错：{e!r}")
-        report_strays()
+        run_selected()
     except Abort as e:
         log(f"中止：{e}")
     finally:
