@@ -16,9 +16,12 @@
 //! | 10 工具输入超过 4 MiB | hook 一侧 `input_too_large_denies_without_connecting`；桥接一侧 `oversize_body_closes_without_event` |
 //! | 11 后台答拒绝 | `backend_reject_is_relayed`（17 行「工具未启用」是同一条路，只是原因不同） |
 //! | 12 后台答不认识的 | `unrecognized_answer_denies` |
-//! | 13 桥接兜底到时 | `backstop_denies_and_reports` |
-//! | 14 hook 自己到期 | `hook_deadline_first_makes_answer_late` |
+//! | 13 桥接兜底到时 | `backstop_denies_and_reports`、`stalled_write_still_hits_the_backstop`（写卡住也算期限） |
+//! | 14 hook 自己到期 | `hook_deadline_first_makes_answer_late`、`hook_gone_before_answer_is_reported` |
 //! | 15 hook panic、16 stdout 写不出去 | hook 一侧 `panic_denies.rs`、`hook_process.rs::stdout_write_failure_exits_2` |
+//!
+//! 4.4 的「没送到一律报失败」：`eof_and_allow_ready_together_reports_undelivered_allow`；先看到断开、信箱里已有
+//! 允许的那一种交错在 `hook_server` 的单测 `hook_gone_with_allow_already_in_the_mailbox`。
 //!
 //! 另有：回合结束时还在等的全部拒绝、头没在时限内读完、令牌不进日志、对端凭据与 `iwork-ipc` 对拍。
 #![cfg(unix)]
@@ -261,17 +264,70 @@ async fn hook_deadline_first_makes_answer_late() {
     let hook = spawn_hook("pre-tool-use", &env, INPUT);
     let (id, _) = b.next_call().await;
     assert_eq!(hook.await.unwrap().denied(), Failure::Deadline.reason());
-    for _ in 0..50 {
-        if b.pending.waiting() == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert_eq!(b.pending.waiting(), 0, "桥接看到 hook 走了");
+    assert!(
+        matches!(b.next_event().await, HookEvent::HookLost { id: got } if got == id),
+        "桥接看到 hook 走了，报会话失败"
+    );
+    assert_eq!(b.pending.waiting(), 0);
     assert_eq!(
         b.pending.answer(id, allow()),
         Delivery::Late { was_allow: true }
     );
+}
+
+/// 发完请求的原始客户端（不经 hook 程序）：返回连接本身，由测试决定什么时候关、读不读。
+fn sent_request(sock: &std::path::Path) -> std::os::unix::net::UnixStream {
+    let mut conn = std::os::unix::net::UnixStream::connect(sock).unwrap();
+    wire::write_request(
+        &mut conn,
+        &header(wire::token_hex(&TOKEN), std::process::id()),
+        INPUT.as_bytes(),
+    )
+    .unwrap();
+    conn
+}
+
+/// 审查 1/F-1：hook 在答复之前断开（被 CLI 杀掉、自己到期），桥接马上报会话失败，不等以后的后台答复。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_gone_before_answer_is_reported() {
+    let mut b = Bridge::start(Duration::from_secs(60));
+    let conn = sent_request(&b.sock);
+    let (id, _) = b.next_call().await;
+    drop(conn);
+    assert!(matches!(b.next_event().await, HookEvent::HookLost { id: got } if got == id));
+    assert_eq!(b.pending.waiting(), 0);
+}
+
+/// 审查 1/F-1：后台的允许已经交进连接任务的信箱、hook 也已经断开，两样同时就绪。不管先处理哪一样，
+/// 这条允许都没送到，要报 `AllowUndelivered`。单线程运行时：关连接与答复都在服务端任务被轮询之前做完。
+#[tokio::test(flavor = "current_thread")]
+async fn eof_and_allow_ready_together_reports_undelivered_allow() {
+    let mut b = Bridge::start(Duration::from_secs(60));
+    let conn = sent_request(&b.sock);
+    let (id, _) = b.next_call().await;
+    drop(conn);
+    assert_eq!(b.pending.answer(id, allow()), Delivery::Delivered);
+    assert!(matches!(b.next_event().await, HookEvent::AllowUndelivered { id: got } if got == id));
+}
+
+/// 审查 1/F-2：后台答了一条很大的允许，hook 不读答复：写卡住时兜底期限照样算，到期关连接并报出来，
+/// 不因为后台答过了就撤掉期限。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_write_still_hits_the_backstop() {
+    let mut b = Bridge::start(Duration::from_secs(1));
+    let _conn = sent_request(&b.sock);
+    let (id, _) = b.next_call().await;
+    let big = json!({ "command": "x".repeat(2 * 1024 * 1024) }).to_string();
+    assert_eq!(
+        b.pending.answer(
+            id,
+            BackendAnswer::Allow {
+                updated_input: Some(big)
+            }
+        ),
+        Delivery::Delivered
+    );
+    assert!(matches!(b.next_event().await, HookEvent::AllowUndelivered { id: got } if got == id));
 }
 
 /// 回合结束（取消、CLI 退出）：还在等的全部答拒绝（4.4）。

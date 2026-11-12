@@ -10,7 +10,16 @@
 //!    [`HookEvent::Call`]，等后台答复、兜底到时、hook 断开、回合结束四者之一（[`pending`]）。
 //!
 //! 期限：桥接的兜底（`deadlines().bridge`）从登记那一刻算，把系统睡眠也算进去（取单调时钟与墙钟的较大者，
-//! 同 hook 的看门狗，4.3）。到时答 hook 拒绝并发出 [`HookEvent::Backstop`]，结束会话由调用方做（第 13 行）。
+//! 同 hook 的看门狗，4.3）。它是一个绝对期限，一直管到答复真正写完：后台答了也不撤，写卡住（hook 不读）同样
+//! 到时。到时答 hook 拒绝（只试一次、不等）、关连接，并报出来（第 13 行）。
+//!
+//! 一次调用没能把后台的答复交给 hook，一律报会话失败，结束会话由调用方做（4.4）：
+//! - [`HookEvent::AllowUndelivered`]：手里是一条允许而没送到（后台已经记了交付，动作没执行）；
+//! - [`HookEvent::Backstop`]：兜底到时，送出去的是桥接自己的拒绝，或者手里的拒绝没写完；
+//! - [`HookEvent::HookLost`]：hook 在拿到答复之前断开了（被 CLI 杀掉、自己到期），手里没有允许。
+//!
+//! 后台答复与 hook 断开同时就绪时先取答复再写（`biased`），写不出去就按上面报；先看到断开时，信箱里要是已经
+//! 有答复（后台刚好在这时交了），照样取出来看它是不是允许，不靠以后的后台答复来发现。
 //!
 //! M1 不支持 Windows（AGENTS.md）：命名管道这一半不在这里，整个模块只在 unix 上编译。
 
@@ -82,10 +91,13 @@ pub enum HookEvent {
     SessionStart,
     /// 一次工具调用在等审批。`input` 是 Claude Code 给 hook 的 stdin 原文；答复经 [`Pending::answer`] 给
     Call { id: CallId, input: Vec<u8> },
-    /// 桥接兜底到时，已经答了 hook 拒绝：调用方对 prompt 回 `approval_backstop` 并结束会话（4.3、4.6 第 13 行）
+    /// 桥接兜底到时，后台的答复没交到 hook（hook 拿到的是桥接的拒绝，或什么都没拿到）：调用方对 prompt 回
+    /// `approval_backstop` 并结束会话（4.3、4.6 第 13 行）
     Backstop { id: CallId },
-    /// 后台的允许交给了连接任务，但写给 hook 时连接已经断了：动作没执行而后台记了交付，按兜底处理（4.4）
+    /// 后台的允许没送到 hook（连接断了或兜底到时）：动作没执行而后台记了交付，按兜底处理（4.4）
     AllowUndelivered { id: CallId },
+    /// hook 在拿到答复之前断开了，手里没有允许：同样结束会话（4.4、4.6 第 14 行）
+    HookLost { id: CallId },
 }
 
 /// 绑定失败：开会话失败 `channel_failed`（4.6 第 6 行）。说明里点名路径。
@@ -217,21 +229,92 @@ async fn handle(mut conn: UnixStream, ctx: Arc<Ctx>) {
         HookKind::PreToolUse => {
             let (id, answered) = ctx.pending.register();
             let _ = ctx.events.send(HookEvent::Call { id, input: body });
-            if let Some(response) = wait(&mut conn, &ctx, id, answered).await {
-                let written = reply(&mut conn, &response).await;
-                if let Some(event) = undelivered(id, &response, written) {
-                    let _ = ctx.events.send(event);
-                }
+            if let Some(event) = serve_call(&mut conn, &ctx, id, answered).await {
+                let _ = ctx.events.send(event);
             }
         }
     }
 }
 
-/// 答复写不出去时要不要报：只有允许要报（后台记了交付而动作没执行，4.4 第 2 条）；拒绝写不出去，hook 那边
-/// 本来也是拒绝（读不到答复按拒绝处理）。这个窗口（答复到了、hook 恰好在写之前走了）在集成测试里造不出确定的
-/// 次序，所以抽成这一个函数单测。
-fn undelivered(id: CallId, response: &Response, written: bool) -> Option<HookEvent> {
-    (!written && response.decision == Decision::Allow).then_some(HookEvent::AllowUndelivered { id })
+/// 答复为什么没送到。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cause {
+    HookGone,
+    Deadline,
+}
+
+/// 手里的答复没送到时报什么：允许一律 `AllowUndelivered`；拒绝按原因分。
+fn undelivered(id: CallId, response: &Response, cause: Cause) -> HookEvent {
+    match (response.decision, cause) {
+        (Decision::Allow, _) => HookEvent::AllowUndelivered { id },
+        (Decision::Deny, Cause::HookGone) => HookEvent::HookLost { id },
+        (Decision::Deny, Cause::Deadline) => HookEvent::Backstop { id },
+    }
+}
+
+/// 一次工具调用：等答复、写答复，全程在同一个兜底期限之内。答复送到了返回 `None`，没送到返回要报的事。
+async fn serve_call(
+    conn: &mut UnixStream,
+    ctx: &Ctx,
+    id: CallId,
+    mut answered: oneshot::Receiver<Response>,
+) -> Option<HookEvent> {
+    let deadline = backstop(Started::now(), ctx.backstop);
+    tokio::pin!(deadline);
+    let mut probe = [0u8; 1];
+    let response = tokio::select! {
+        biased;
+        // 回答方：后台答复、回合结束
+        r = &mut answered => r.unwrap_or_else(|_| Response::deny(Failure::Internal.reason())),
+        _ = &mut deadline => return backstop_now(conn, ctx, id, answered).await,
+        // hook 发完请求就只等答复，这条连接上再读到东西（EOF 或多余字节）就是它走了或者不守协议
+        _ = conn.read(&mut probe) => return Some(hook_gone(&ctx.pending, id, answered).await),
+    };
+    let bytes = encode(&response);
+    let cause = tokio::select! {
+        biased;
+        ok = write_all(conn, &bytes) => if ok { return None } else { Cause::HookGone },
+        // 期限不因为后台答过了就重新算
+        _ = &mut deadline => Cause::Deadline,
+    };
+    tracing::warn!(target: AUDIT_TARGET, call = id.0, ?cause, decision = ?response.decision, "答复没写到 hook");
+    Some(undelivered(id, &response, cause))
+}
+
+/// 兜底到时、答复还没到：抢到了就由桥接答拒绝（报兜底）；没抢到说明后台在同一刻答了，取它的答复。期限已过，
+/// 都只试写一次（拒绝帧小，空的发送缓冲一定放得下；放不下就不等），然后关连接。后台那条答复整帧写进去了，
+/// hook 拿到的就是它，算送到。
+async fn backstop_now(
+    conn: &mut UnixStream,
+    ctx: &Ctx,
+    id: CallId,
+    answered: oneshot::Receiver<Response>,
+) -> Option<HookEvent> {
+    let deny = Response::deny(Failure::Deadline.reason());
+    if ctx.pending.settle(id, deny.clone()) {
+        tracing::warn!(target: AUDIT_TARGET, call = id.0, "后台没在兜底期限内答复，桥接答拒绝");
+        try_write_once(conn, &encode(&deny));
+        return Some(HookEvent::Backstop { id });
+    }
+    // 发送端已被别人取走，它马上就会送出或丢掉，这里不会久等
+    let response = answered.await.unwrap_or(deny);
+    (!try_write_once(conn, &encode(&response))).then(|| undelivered(id, &response, Cause::Deadline))
+}
+
+/// hook 断开了：抢到了就是没答复可丢；没抢到说明答复已经（或正在）交进信箱，取出来看是不是允许。
+async fn hook_gone(
+    pending: &Pending,
+    id: CallId,
+    answered: oneshot::Receiver<Response>,
+) -> HookEvent {
+    tracing::warn!(target: AUDIT_TARGET, call = id.0, "hook 在等答复时断开了");
+    if pending.settle(id, Response::deny(Failure::Disconnected.reason())) {
+        return HookEvent::HookLost { id };
+    }
+    match answered.await {
+        Ok(response) => undelivered(id, &response, Cause::HookGone),
+        Err(_) => HookEvent::HookLost { id },
+    }
 }
 
 /// 令牌对、进程号与连接的对端一致。返回审计用的原因（不含令牌）。
@@ -243,35 +326,6 @@ fn check_header(ctx: &Ctx, header: &RequestHeader, peer: PeerCred) -> Result<(),
         return Err("请求头里的进程号不是连接的对端");
     }
     Ok(())
-}
-
-/// 等这一项被回答。返回要写给 hook 的答复；hook 已经断开时返回 `None`（没处可写）。
-async fn wait(
-    conn: &mut UnixStream,
-    ctx: &Ctx,
-    id: CallId,
-    mut answered: oneshot::Receiver<Response>,
-) -> Option<Response> {
-    let started = Started::now();
-    let mut probe = [0u8; 1];
-    tokio::select! {
-        // 回答方：后台答复、回合结束、兜底（下面那一支 settle 之后也从这里出来）
-        r = &mut answered => Some(r.unwrap_or_else(|_| Response::deny(Failure::Internal.reason()))),
-        _ = backstop(started, ctx.backstop) => {
-            if ctx.pending.settle(id, Response::deny(Failure::Deadline.reason())) {
-                tracing::warn!(target: AUDIT_TARGET, call = id.0, "后台没在兜底期限内答复，桥接答拒绝");
-                let _ = ctx.events.send(HookEvent::Backstop { id });
-            }
-            // 抢到了就是兜底的拒绝；没抢到说明同时有人答了，用那一条
-            answered.await.ok()
-        }
-        // hook 发完请求就只等答复，这条连接上再读到东西（EOF 或多余字节）就是它走了或者不守协议
-        _ = conn.read(&mut probe) => {
-            ctx.pending.settle(id, Response::deny(Failure::Disconnected.reason()));
-            tracing::warn!(target: AUDIT_TARGET, call = id.0, "hook 在等答复时断开了");
-            None
-        }
-    }
 }
 
 /// 兜底期限：最多每秒醒一次，重新比两种时钟（睡眠期间单调时钟可能不走）。
@@ -298,19 +352,28 @@ async fn read_body(conn: &mut UnixStream) -> Result<Vec<u8>, wire::WireError> {
     Ok(body)
 }
 
-/// 写一条答复，返回写没写成。
-async fn reply(conn: &mut UnixStream, response: &Response) -> bool {
-    let bytes = match wire::encode_response(response) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(target: AUDIT_TARGET, error = %e, "答复编码不了，按拒绝写");
-            match wire::encode_response(&Response::deny(Failure::BadResponse.reason())) {
-                Ok(b) => b,
-                Err(_) => return false,
-            }
-        }
-    };
-    conn.write_all(&bytes).await.is_ok() && conn.flush().await.is_ok()
+/// 答复帧。编码失败（超上限）就换成拒绝。
+fn encode(response: &Response) -> Vec<u8> {
+    wire::encode_response(response).unwrap_or_else(|e| {
+        tracing::warn!(target: AUDIT_TARGET, error = %e, "答复编码不了，按拒绝写");
+        wire::encode_response(&Response::deny(Failure::BadResponse.reason()))
+            .expect("拒绝帧很小，总能编码")
+    })
+}
+
+/// 写完并刷出，返回写没写成。
+async fn write_all(conn: &mut UnixStream, bytes: &[u8]) -> bool {
+    conn.write_all(bytes).await.is_ok() && conn.flush().await.is_ok()
+}
+
+/// 不等待地写一次，整帧写进去才算成。
+fn try_write_once(conn: &UnixStream, bytes: &[u8]) -> bool {
+    matches!(conn.try_write(bytes), Ok(n) if n == bytes.len())
+}
+
+/// 报到的答复：一个小帧，读端是刚发完请求的 hook。写不出去也没什么可报的（报到没来，开会话自己会停，3.5）。
+async fn reply(conn: &mut UnixStream, response: &Response) {
+    let _ = write_all(conn, &encode(response)).await;
 }
 
 #[cfg(test)]
@@ -318,14 +381,67 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_an_unwritten_allow_is_reported() {
+    fn undelivered_answer_is_always_reported() {
         let id = CallId(7);
+        let allow = Response::allow();
+        let deny = Response::deny("x");
+        for cause in [Cause::HookGone, Cause::Deadline] {
+            assert!(matches!(
+                undelivered(id, &allow, cause),
+                HookEvent::AllowUndelivered { id: CallId(7) }
+            ));
+        }
         assert!(matches!(
-            undelivered(id, &Response::allow(), false),
-            Some(HookEvent::AllowUndelivered { id: CallId(7) })
+            undelivered(id, &deny, Cause::HookGone),
+            HookEvent::HookLost { id: CallId(7) }
         ));
-        assert!(undelivered(id, &Response::allow(), true).is_none());
-        assert!(undelivered(id, &Response::deny("x"), false).is_none());
+        assert!(matches!(
+            undelivered(id, &deny, Cause::Deadline),
+            HookEvent::Backstop { id: CallId(7) }
+        ));
+    }
+
+    /// 审查 1/F-1 的交错：连接任务先看到 hook 断开，这时后台的允许已经交进了信箱（`answer` 返回 `Delivered`）。
+    /// 集成测试里造不出这个次序（反应器把 EOF 标成可读之前，任务先被信箱唤醒），所以直接调断开的处理。
+    #[tokio::test]
+    async fn hook_gone_with_allow_already_in_the_mailbox() {
+        let p = Pending::default();
+        let (id, rx) = p.register();
+        assert_eq!(
+            p.answer(
+                id,
+                pending::BackendAnswer::Allow {
+                    updated_input: None
+                }
+            ),
+            pending::Delivery::Delivered
+        );
+        assert!(matches!(
+            hook_gone(&p, id, rx).await,
+            HookEvent::AllowUndelivered { .. }
+        ));
+        // 信箱里是拒绝：没有允许丢掉，报 hook 走了
+        let (id, rx) = p.register();
+        p.answer(id, pending::BackendAnswer::Unrecognized);
+        assert!(matches!(
+            hook_gone(&p, id, rx).await,
+            HookEvent::HookLost { .. }
+        ));
+        // 信箱是空的：断开的一方抢到，报 hook 走了；之后的后台答复是迟到
+        let (id, rx) = p.register();
+        assert!(matches!(
+            hook_gone(&p, id, rx).await,
+            HookEvent::HookLost { .. }
+        ));
+        assert_eq!(
+            p.answer(
+                id,
+                pending::BackendAnswer::Allow {
+                    updated_input: None
+                }
+            ),
+            pending::Delivery::Late { was_allow: true }
+        );
     }
 
     #[test]
