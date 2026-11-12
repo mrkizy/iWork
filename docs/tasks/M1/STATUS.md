@@ -37,6 +37,7 @@
 | T07 引擎方案（已定稿、已实施） | `docs/plans/T07.md` 6.10 + `docs/plans/T02.md` 状态前提（未提交） | architect `890c712d`；reviewer `099b7f24` | `2026-11-10-m1-t07-engine-plan` **第 4 轮通过，定稿 `b6bf0a6`** | — | developer f8877913 在分支上按 6.10.14 做 E1–E7；真实观察者接线测试归 T10a 合入门槛 |
 | T09 | 方案 `docs/plans/T09.md`（未提交，429 行） | architect `62db2f05`；reviewer `9cbb7f89` | `2026-11-10-m1-t09-plan` 第 2 轮不通过：2/F-1（断线丢在飞的摘要重查）、2/F-2（reload 不释放 Tauri 旧帧暂存）、2/F-3（非时间线大 patch 超 1 MiB 永远发不出，blocking）；1/F-3～F-7 已解决可关，1/F-1、F-2 部分 | 见左 | 第 3 轮不通过（3/F-1 interceptor 守门无效、3/F-2 跨代旧响应覆盖），**方案定稿 `1df7d74`**，实施见下一行；设计窗口 Q9～Q12 待答 |
 | T09 实施 | **第一组 `414089b`、组 2a `d9fab70` 已合入 main**（2026-11-12，审查三轮）。剩：组 2b = 步 5b 锚点数据 + 锚点组件 + 步 5a（Dock、报在看哪、退出菜单）+ rfd 文件选择 + 拖入遮罩；组 3 = 7b、7c、7d；组 4 = 步 8、9；步 10 等 T04、步 11 等 T10 | developer `165268d4` 做 2b；code_reviewer `2a4efd5f`、ui_design_reviewer `0c8e300a` 留着复用 | `2026-11-11-m1-t09-ui`：2/F-1 令牌对比度（改动前就有）**等产品负责人定**；漏报 M-1 待产品负责人网站确认 | 全开档的赭红提示行要 NoteRow 加颜色，归 7b；2/F-2 找不到路径的项目行截断由 supervisor 暂定，待设计窗口补进 ui-m1 |
+- T09 组 2b（2026-11-12）：步 5b、锚点组件、步 5a 已做（`eb0a1c0`）；developer `165268d4` 上下文满已交接、终端已关，`b20e49db` 接手做 rfd、拖入遮罩、P1 锚点断言。**产品负责人 2026-11-12 批准**：`objc2-app-kit` 加开 NSMenu、NSMenuItem，直接依赖 `objc2`、`objc2-foundation`（与 tauri 已带的版本相同）。待产品负责人真机试：按住 Option「退出 iWork」切成「完全退出 iWork」。
 | T10a～T10g、T11 | 未开工；T10 已拆成七张小卡（产品负责人 2026-11-10 同意，见 T10.md） | — | — | — | T10a 等 T04、T06、T07、T09 第一组合入；T10d/e/f 先出方案，可以和 T10a 的实施同时写 |
 
 查开着的问题：`agent-scaffold findings list --task <任务 ID> --open`。记账工具轮次只能 1～9，超过换新任务 ID。
