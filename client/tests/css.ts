@@ -1,9 +1,14 @@
 // 测试共用：读 client/src 下的样式文件、拆出规则。只认这个仓库自己写的 CSS 子集（没有嵌套规则之外的花样）。
 import { readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const SRC = fileURLToPath(new URL("../src/", import.meta.url));
+
+/** 相对 client/src 的路径，分隔符统一成「/」（Windows 上 readdir 拼出来的是反斜杠，CI run 43188272735）。 */
+export function srcPath(file: string): string {
+  return relative(SRC, file).split(sep).join("/");
+}
 
 export function cssFiles(dir: string = SRC): string[] {
   return readdirSync(dir).flatMap((name) => {

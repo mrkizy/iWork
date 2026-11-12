@@ -3,7 +3,7 @@
 // 这条按样式规则查全部样式文件：以后新写的控件也挡得住，不靠逐个记得。
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { cssFiles, rules, SRC } from "./css.ts";
+import { cssFiles, rules, srcPath } from "./css.ts";
 
 const DISABLED = /:disabled|\[aria-disabled/;
 
@@ -25,9 +25,9 @@ describe("禁用控件上的提示不继承 opacity", () => {
   });
 
   it("client/src 的样式文件里没有这样的规则", () => {
-    const files = cssFiles(SRC);
+    const files = cssFiles();
     expect(files.length).toBeGreaterThan(5);
-    const hits = files.flatMap((f) => fadingDisabled(readFileSync(f, "utf8")).map((s) => `${f.slice(SRC.length)}: ${s}`));
+    const hits = files.flatMap((f) => fadingDisabled(readFileSync(f, "utf8")).map((s) => `${srcPath(f)}: ${s}`));
     expect(hits).toEqual([]);
   });
 });

@@ -3,9 +3,10 @@
 // client/src 里每一处 color-mix 都要登记：要么进 CHECKED（有文字压在上面），要么进 EXEMPT 并写明理由。
 // 新加一处混色而没登记，这条测试就红。
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { cssFiles, declaration, rules, SRC } from "./css.ts";
+import { cssFiles, declaration, rules, SRC, srcPath } from "./css.ts";
 
 const TOKENS = readFileSync(fileURLToPath(new URL("../../docs/design/design-system/tokens.css", import.meta.url)), "utf8");
 const AA = 4.5;
@@ -70,7 +71,7 @@ const EXEMPT: { file: string; selector: string; why: string }[] = [
 ];
 
 function background(file: string, selector: string): string {
-  const r = rules(readFileSync(SRC + file, "utf8")).find((x) => x.selector === selector);
+  const r = rules(readFileSync(join(SRC, file), "utf8")).find((x) => x.selector === selector);
   if (r === undefined) throw new Error(`${file} 里没有 ${selector}`);
   const bg = declaration(r.body, "background");
   if (bg === undefined) throw new Error(`${file} ${selector} 没有 background`);
@@ -100,7 +101,7 @@ describe("混色底上的文字对比度 ≥ 4.5:1", () => {
     const found = cssFiles().flatMap((f) =>
       rules(readFileSync(f, "utf8"))
         .filter((r) => r.body.includes("color-mix("))
-        .map((r) => `${f.slice(SRC.length)} ${r.selector}`),
+        .map((r) => `${srcPath(f)} ${r.selector}`),
     );
     expect(found.length, "对照：确实扫到了混色").toBeGreaterThan(0);
     expect(found.filter((x) => !known.has(x))).toEqual([]);
