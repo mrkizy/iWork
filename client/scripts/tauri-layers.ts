@@ -106,12 +106,10 @@ const TEST_BUILD_FLAGS = ["--debug", "--no-bundle", "--features"];
  * （supervisor 2026-11-13 定）。
  */
 export function isTestBuild(args: readonly string[]): boolean {
-  const own = args.includes("--") ? args.slice(0, args.indexOf("--")) : args;
-  const has = (long: string) => {
-    const flag = REFUSED_BUILD_FLAGS.find((f) => f.long === long);
-    return flag !== undefined && own.slice(1).some((a) => isFlag(a, flag));
-  };
-  return has("--debug") && has("--no-bundle");
+  // 只认明确写出来的独立参数：短参数串里的字母（如 `-fdev` 里的 d）不算（审查 2/F-4）
+  const own = (args.includes("--") ? args.slice(0, args.indexOf("--")) : args).slice(1);
+  const debug = own.includes("--debug") || own.includes("-d");
+  return debug && own.includes("--no-bundle");
 }
 
 // 会让打包器自己签名的环境变量：签名只许在装配步骤做（封印之后不能再往包里放后台）

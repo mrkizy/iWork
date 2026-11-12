@@ -150,3 +150,56 @@ fn wrong_behaviour_fails() {
         assert_eq!(word, "FAIL", "{name}：{line}");
     }
 }
+
+/// 审查 2/F-3：附加事件只按各自的区间算（9.8）：立刻检查在 t2..t3，W1 的被拒在 t1..t3，丢记录在 t1..t4，W2 重连后不许再被拒。
+#[test]
+fn side_events_count_only_inside_their_interval() {
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "W2：立刻检查记在 t4 之后",
+            "rejected",
+            "FAIL",
+            "10 1500 rejected\n12 2000 restart\n14 3000 connected\n15 3100 reject_check\n",
+        ),
+        (
+            "W2：立刻检查记在重启之后、重连之前",
+            "rejected",
+            "FAIL",
+            "10 1500 rejected\n12 2000 restart\n13 2500 reject_check\n14 3000 connected\n",
+        ),
+        (
+            "W2：重连之后又被拒",
+            "rejected",
+            "FAIL",
+            "10 1500 rejected\n11 1500 reject_check\n12 2000 restart\n14 3000 connected\n15 3200 rejected\n",
+        ),
+        (
+            "W1：先连上、重启之前又被拒",
+            "connected",
+            "FAIL",
+            "10 1500 connected\n11 1700 rejected\n12 2000 restart\n14 3000 connected\n",
+        ),
+        (
+            "t3 与 t4 之间丢了记录",
+            "connected",
+            "INCONCLUSIVE",
+            "10 1500 connected\n12 2000 restart\n13 2500 dropped\n14 3000 connected\n",
+        ),
+        (
+            "对照：t4 之后才丢记录，窗口照样完整",
+            "connected",
+            "PASS",
+            "10 1500 connected\n12 2000 restart\n14 3000 connected\n15 3100 dropped\n",
+        ),
+        (
+            "对照：W2 的检查在 t2 与 t3 之间",
+            "rejected",
+            "PASS",
+            "10 1500 rejected\n11 1600 reject_check\n12 2000 restart\n14 3000 connected\n",
+        ),
+    ];
+    for (name, expect, want, rows) in cases {
+        let (word, line) = verdict(expect, 1000, "yes", "A", rows);
+        assert_eq!(&word, want, "{name}：{line}");
+    }
+}

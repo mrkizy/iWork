@@ -41,8 +41,9 @@ describe("测试构建：--debug 与 --no-bundle 同时在才算（不出任何�
     expect(plan.args.find((a) => a.endsWith("tauri.build.conf.json")), "叠了发布层配置").toBeDefined();
   });
 
-  it("短参数 -d 同样算", () => {
+  it("独立的短参数 -d 同样算；这时 -fdev 是测试构建放行的 --features", () => {
     expect(planCommand(["build", "-d", "--no-bundle"], {}).kind).toBe("passthrough");
+    expect(planCommand(["build", "--no-bundle", "-fdev", "-d"], {}).kind).toBe("passthrough");
   });
 
   it.each([
@@ -54,6 +55,11 @@ describe("测试构建：--debug 与 --no-bundle 同时在才算（不出任何�
     [["build", "--debug", "--no-bundle", "--bundles", "app"]],
     [["build", "--debug", "--no-bundle", "--", "--no-default-features"]],
     [["build", "--features", "dev", "--", "--debug", "--no-bundle"]],
+    // 短参数串里的字母不算开关（审查 2/F-4）：-fdev 里的 d 不是 --debug，-df 不是独立的 -d
+    [["build", "--no-bundle", "-fdev"]],
+    [["build", "--no-bundle", "-df"]],
+    [["build", "--no-bundle", "-fd"]],
+    [["build", "--no-bundle", "--debug=true"]],
   ])("%j 被拒", (args) => {
     expect(() => planCommand(args, {})).toThrow(/不接受/);
   });
