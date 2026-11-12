@@ -37,7 +37,8 @@ jobs:
         run: scripts/check-no-dev-trust.sh --graph-only
 
   test:
-    # 三平台最长一次约 18 分钟（ubuntu，2026-11-11）；留一倍余量。卡住时判超时并留下日志，不挂到默认的 6 小时
+    # ubuntu 最长一次约 33 分钟（run 43155137187：cargo test 25 分钟、release 构建 6 分钟；前端已拆到 frontend job）。
+    # 卡住时判超时并留下日志，不挂到默认的 6 小时
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -112,6 +113,25 @@ jobs:
           IWORK_TEST_OTHER_USER=1 IWORK_IPC_TOOL=/tmp/iwork-ipc-tool \
             cargo test -p iwork-ipc --features dev --test peer_other_user -- --ignored
 
+  # 前端：类型检查、vitest，以及 vitest 之前对着假后台逐个录场景（pnpm fixtures，每个十几秒，随场景增多变长）。
+  #   从 test 拆出来单独跑，和 Rust 测试并行，各有各的时限：场景加多了只拉长这一个 job，不再把 test 顶过时限
+  #   （run 43155137187：ubuntu 上 cargo test 25 分钟 + release 构建 6 分钟之后，前端测试跑到第 40 分钟被取消）。
+  #   录场景要编 iwork-client-core 的 example 和假后台，不编 Tauri 壳，所以 Linux 上不用装 WebKitGTK。
+  #   Windows 上假后台不监听（M1 不支持 Windows），录像那一步只打印跳过，vitest 里吃录像的用例也跳过。
+  frontend:
+    # 最长一次（ubuntu，run 43156265818）前端测试 6.4 分钟，加上单独编译录像程序；留足余量
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
       - uses: pnpm/action-setup@v4
         with:
           # 版本取 client/package.json 的 packageManager 字段
