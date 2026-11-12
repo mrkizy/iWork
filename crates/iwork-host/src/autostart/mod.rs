@@ -136,8 +136,18 @@ pub(crate) mod test_tool {
                 log = dir.path().join("calls.log").display(),
                 fail = dir.path().join("fail_on").display(),
             );
+            // 可执行文件交给子进程（cp）去写：本进程若开着它的写句柄，同一时刻别的测试线程 fork 出的子进程
+            // 会继承这个句柄直到它 exec，期间执行这个文件在 Linux 上报 ETXTBSY（CI 实测）。
+            let src = dir.path().join("tool.sh");
+            std::fs::write(&src, script).unwrap();
             let path = dir.path().join("tool");
-            std::fs::write(&path, script).unwrap();
+            let ok = std::process::Command::new("cp")
+                .arg(&src)
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "cp 失败");
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             FakeTool { dir }

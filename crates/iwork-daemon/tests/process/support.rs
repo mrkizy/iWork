@@ -20,6 +20,39 @@ use iwork_proto::pb;
 
 pub const DAEMON: &str = env!("CARGO_BIN_EXE_iwork-daemon");
 
+/// 拷一个之后要被执行的文件。写交给子进程（`cp`）做：本进程若开着它的写句柄，同一时刻别的测试线程 fork
+/// 出的子进程会继承这个句柄直到它 exec，期间执行这个文件在 Linux 上报 ETXTBSY（CI 实测）。
+pub fn copy_exe(src: &Path, dst: &Path) {
+    run_ok(Command::new("cp").arg(src).arg(dst));
+}
+
+/// 写一个可执行脚本（理由同 [`copy_exe`]）：正文先写进旁边一个不会被执行的文件，再拷过去。
+pub fn write_script(dst: &Path, text: &str) {
+    let src = dst.with_extension("src");
+    std::fs::write(&src, text).unwrap();
+    copy_exe(&src, dst);
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dst, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// 往之后要被执行的文件末尾追加字节（理由同 [`copy_exe`]）。
+pub fn append_exe(dst: &Path, text: &str) {
+    run_ok(
+        Command::new("sh")
+            .args(["-c", "printf %s \"$1\" >> \"$2\"", "sh", text])
+            .arg(dst),
+    );
+}
+
+fn run_ok(cmd: &mut Command) {
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{cmd:?}：{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// 一个测试的家目录（`/tmp/iwt-XXXXXX`：macOS 的 socket 路径上限 103 字节，默认临时目录太长）。
 pub struct Sandbox {
     dir: Option<tempfile::TempDir>,

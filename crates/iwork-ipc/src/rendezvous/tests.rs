@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use proptest::prelude::*;
 
@@ -230,27 +230,40 @@ fn write_is_atomic() {
     });
     write_status(dir.path(), &a).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
+    let writes = Arc::new(AtomicU32::new(0));
     let writer = {
-        let (dir, a, b, stop) = (dir.path().to_path_buf(), a.clone(), b.clone(), stop.clone());
+        let (dir, a, b, stop, writes) = (
+            dir.path().to_path_buf(),
+            a.clone(),
+            b.clone(),
+            stop.clone(),
+            writes.clone(),
+        );
         std::thread::spawn(move || {
-            let mut n = 0u32;
             while !stop.load(Ordering::Relaxed) {
+                let n = writes.load(Ordering::Relaxed);
                 write_status(&dir, if n.is_multiple_of(2) { &b } else { &a }).unwrap();
-                n += 1;
+                writes.store(n + 1, Ordering::Relaxed);
             }
-            n
         })
     };
-    let mut seen_b = 0;
-    for _ in 0..2000 {
+    // 按进度停，不按读的次数停：慢机器（Windows CI）上写线程可能在读完固定次数之前还没被调度到。
+    const MIN_WRITES: u32 = 200;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let (mut reads, mut seen_b) = (0usize, 0usize);
+    while reads < 2000 || writes.load(Ordering::Relaxed) < MIN_WRITES || seen_b == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "60s 内写了 {} 次、读了 {reads} 次、读到第二份 {seen_b} 次",
+            writes.load(Ordering::Relaxed)
+        );
         let got = read_status(dir.path()).expect("读到了半份或没有文件");
         assert!(got == a || got == b);
         seen_b += usize::from(got == b);
+        reads += 1;
     }
     stop.store(true, Ordering::Relaxed);
-    let writes = writer.join().unwrap();
-    assert!(writes > 1, "写线程没跑起来");
-    assert!(seen_b > 0, "从没读到第二份：测试没有真的在交错");
+    writer.join().unwrap();
 }
 
 #[test]

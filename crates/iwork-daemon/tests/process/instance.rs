@@ -1,6 +1,6 @@
 //! 单实例与托管实例的等锁接班（方案 2.3；S1、S2、S11c、S11d）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use iwork_ipc::rendezvous::{self, Phase};
@@ -139,7 +139,7 @@ fn standby_execs_before_boot() {
     let bin_dir = sb.home.join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let exe = bin_dir.join("iwork-daemon");
-    std::fs::copy(crate::support::DAEMON, &exe).unwrap();
+    crate::support::copy_exe(Path::new(crate::support::DAEMON), &exe);
     let mut a = sb.spawn_exe(&exe, &[], &[]);
     sb.wait_ready(a.pid(), START);
     let mut b = sb.spawn_exe(&exe, &["--service"], &[]);
@@ -149,9 +149,7 @@ fn standby_execs_before_boot() {
     let marker: PathBuf = sb.home.join("execd");
     let script = format!("#!/bin/sh\necho \"$@\" > '{}'\nexit 7\n", marker.display());
     let tmp = bin_dir.join("next");
-    std::fs::write(&tmp, script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::support::write_script(&tmp, &script);
     std::fs::rename(&tmp, &exe).unwrap();
 
     a.kill9();

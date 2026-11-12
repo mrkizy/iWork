@@ -28,10 +28,7 @@ impl Tool {
             log = dir.join("calls.log").display(),
             flag = dir.join("kill-on-unregister").display(),
         );
-        let path = dir.join("tool");
-        std::fs::write(&path, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::support::write_script(&dir.join("tool"), &script);
         Tool { dir }
     }
 

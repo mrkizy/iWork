@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use iwork_ipc::peer::{self, ImageId, MANIFEST_FILE, Want};
 
-use crate::support::{DAEMON, Daemon, Sandbox, code, log_text};
+use crate::support::{DAEMON, Daemon, Sandbox, append_exe, code, copy_exe, log_text};
 
 const FAST: (&str, &str) = ("IWORK_DEV_INSTALL_FAST", "10");
 /// 每条用例要复制、重签几个 20 MB 的程序并反复算哈希；本机负载高（其他构建、杀毒软件扫新程序）时这些都慢，
@@ -78,7 +78,7 @@ impl Install {
             return staged;
         }
         let tmp = staged.with_extension("tmp");
-        std::fs::copy(DAEMON, &tmp).unwrap();
+        copy_exe(Path::new(DAEMON), &tmp);
         if cfg!(target_os = "macos") {
             let ok = std::process::Command::new("codesign")
                 .args(["-f", "-s", "-", "-i", &format!("dev.iwork.{name}.{tag}")])
@@ -89,10 +89,7 @@ impl Install {
                 .success();
             assert!(ok, "codesign 失败");
         } else {
-            use std::io::Write;
-            let mut f = std::fs::OpenOptions::new().append(true).open(&tmp).unwrap();
-            f.write_all(format!("iwork-test-variant-{tag}").as_bytes())
-                .unwrap();
+            append_exe(&tmp, &format!("iwork-test-variant-{tag}"));
         }
         std::fs::rename(&tmp, &staged).unwrap();
         staged
@@ -102,7 +99,7 @@ impl Install {
     pub fn put(&self, name: &str, tag: &str) {
         let src = self.build(name, tag);
         let tmp = self.dir.join(format!(".{name}.incoming"));
-        std::fs::copy(&src, &tmp).unwrap();
+        copy_exe(&src, &tmp);
         std::fs::rename(&tmp, self.dir.join(name)).unwrap();
     }
 
@@ -300,7 +297,7 @@ fn exec_failure_exits_restart_requested() {
     let mut d = start(&sb, &inst, &["--service"]);
     let b = inst.build("iwork-daemon", "B");
     let tmp = inst.dir.join(".noexec");
-    std::fs::copy(&b, &tmp).unwrap();
+    copy_exe(&b, &tmp);
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
     std::fs::rename(&tmp, inst.daemon()).unwrap();
     inst.put("iwork-client", "B");
