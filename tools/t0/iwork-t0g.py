@@ -2829,14 +2829,14 @@ def snapshot_dir(path):
     return out
 
 
-# ---------- 用户配置目录下的「本次认领的目录」：RC6 与 G5 共用（审查 repo 2/F-1～F-3，supervisor 2026-11-13 定一个机制）----------
-# 目录从建出或认领那一刻起就用 O_NOFOLLOW|O_DIRECTORY 打开、fstat 记身份，句柄一直持有到清理结束；所有建、删都经句柄。
-# 本次建的文件在 O_EXCL 成功的那一刻记下 (st_dev, st_ino)；CLI 在本次往这个目录里写的文件，跑完一格就经句柄认领（记身份）。
-# 清理只 unlink「经句柄 lstat 出来的身份与记录相同、而且是普通文件」的条目；目录本身只在核过身份、空了时经上一级句柄 rmdir
-# （rmdir 不递归，判空之后有人塞进东西也只会让 rmdir 失败）。上一级（agent-memory、项目目录）一样：只 rmdir，从不 unlink 别的东西。
+# ---------- 用户配置目录下的「本次认领的目录」：RC6 与 G5 共用 ----------
+# 脚本不删除用户配置目录（~/.claude 下）里的任何东西（supervisor 2026-11-13，审查 repo 3/F-1：POSIX 没有「身份相符才删」的原子操作，
+# 怎么核都只是挪窗口）。OwnedDir 只负责认领与记身份：目录从建出或认领那一刻起 O_NOFOLLOW|O_DIRECTORY 打开、fstat 记身份，句柄持有到收尾；
+# 本次 O_EXCL 建的文件在建成那一刻记身份；CLI 写的文件只在明确跑完一格之后认领（失败回退不重新扫描，免得把用户的文件当成本次的）。
+# 收尾时出一份 leftovers 清单（路径、身份、怎么来的），写进结果包、summary 与终端末尾，由用户确认后手动删。
 class OwnedDir:
-    """一个本次认领的目录。parent_fd：上一级目录的句柄（由调用方持有，清理完才关）。created：这一级是不是本次建的。
-    race：只给自测用的钩子，在几个交错点被调用（"claimed"、"before_rmdir"），用来在中间替换东西。"""
+    """一个本次认领的目录。parent_fd：上一级目录的句柄（由调用方持有，收尾才关）。created：这一级是不是本次建的。
+    race：只给自测用的钩子，在 "claimed"（建出之后、打开之前）被调用，用来在中间替换东西。"""
 
     def __init__(self, parent_fd, name, path, create, race=None):
         self.parent_fd, self.name, self.path, self.race = parent_fd, name, path, race or (lambda point, d: None)
@@ -2851,13 +2851,13 @@ class OwnedDir:
         st = os.fstat(self.fd)
         self.ident = (st.st_dev, st.st_ino)
         self.baseline = frozenset(os.listdir(self.fd))      # 和身份取自同一个句柄：本次碰它之前就在的名字
-        self.files = {}                                      # 名字 → 认领时的 (st_dev, st_ino)
+        self.files = {}                                      # 名字 → (认领时的 (st_dev, st_ino), "本次建的" / "CLI 写的")
 
     def create_file(self, fname, content):
         """独占新建一个文件（O_EXCL、不跟链接），成功的那一刻记下身份。返回它的路径（给访问观测等只读的用）。"""
         fd = os.open(fname, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd)
         st = os.fstat(fd)
-        self.files[fname] = (st.st_dev, st.st_ino)
+        self.files[fname] = ((st.st_dev, st.st_ino), "本次建的")
         with os.fdopen(fd, "w") as f: f.write(content)
         return os.path.join(self.path, fname)
 
@@ -2867,34 +2867,26 @@ class OwnedDir:
         return (self.create_file(name, text), self.create_file(".t0g-calib", "calibration\n"), self.create_file(BLANK_NAME, blank_text(text)))
 
     def adopt_new(self, names=None, include_baseline=False):
-        """跑完一格之后认领 CLI 本次写进来的普通文件：不在 baseline 里、还没认领过的。names 给了就只认这几个名字；
-        include_baseline：这几个名字是本次的东西（如本次各实例的会话记录），认领之前就在也认。"""
+        """明确跑完一格之后才调：认领 CLI 本次写进来的普通文件（不在 baseline 里、还没认领过的）。names 给了就只认这几个名字；
+        include_baseline：这几个名字是本次的东西（如本次各实例的会话记录），认领之前就在也认。失败回退的路径上不要调它。"""
         for e in (names if names is not None else os.listdir(self.fd)):
             if e in self.files or (e in self.baseline and not include_baseline): continue
             try: st = os.stat(e, dir_fd=self.fd, follow_symlinks=False)
             except FileNotFoundError: continue
-            if stat.S_ISREG(st.st_mode): self.files[e] = (st.st_dev, st.st_ino)
+            if stat.S_ISREG(st.st_mode): self.files[e] = ((st.st_dev, st.st_ino), "CLI 写的")
 
-    def cleanup(self, remove_dir=True):
-        """只 unlink 身份与记录相同的普通文件；空了而且这一级的身份还对、是本次建的（或 remove_dir 要求）时经上一级 rmdir。
-        返回 (删了的路径, 没删的原因或 None)。不关句柄（close 另调）。"""
-        removed = []
-        for fname, ident in self.files.items():
+    def inventory(self):
+        """这一级留下了什么（不删）：本次建的目录本身、认领过的文件；名字下现在的身份和记录对不上的（被换掉、不见了）不列进清单，
+        另记一条「已经不是本次的了」。返回 [{路径, 种类, 怎么来的, 身份}]。"""
+        items = []
+        if self.created:
+            items.append({"路径": self.path, "种类": "目录", "怎么来的": "本次建的", "身份": list(self.ident)})
+        for fname, (ident, how) in self.files.items():
             try: st = os.stat(fname, dir_fd=self.fd, follow_symlinks=False)
             except FileNotFoundError: continue
             if stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == ident:
-                os.unlink(fname, dir_fd=self.fd); removed.append(os.path.join(self.path, fname))
-        if not (remove_dir and self.created): return removed, None
-        left = os.listdir(self.fd)
-        if left: return removed, f"里面还有 {len(left)} 项不是本次写的，目录留着"
-        try: st = os.stat(self.name, dir_fd=self.parent_fd, follow_symlinks=False)
-        except FileNotFoundError: return removed, "目录已经不在了"
-        if (st.st_dev, st.st_ino) != self.ident: return removed, "这个名字下已经不是本次的目录了"
-        self.race("before_rmdir", self)
-        try: os.rmdir(self.name, dir_fd=self.parent_fd)
-        except OSError as e: return removed, f"rmdir 没成（{type(e).__name__}：判空之后又有了东西，或被换掉了）"
-        removed.append(self.path)
-        return removed, None
+                items.append({"路径": os.path.join(self.path, fname), "种类": "文件", "怎么来的": how, "身份": list(ident)})
+        return items
 
     def close(self):
         os.close(self.fd)
@@ -2912,15 +2904,11 @@ def open_config_chain(config_root, parts):
         raise
 
 
-def release_owned(chain_fds, owned_dirs, remove=True):
-    """一组认领的目录收尾：从最里层往外清理（owned_dirs 按建的次序给），再关全部句柄。返回 (删了的, [(路径, 原因)])。"""
-    removed, kept = [], []
+def release_owned(chain_fds, owned_dirs):
+    """一组认领的目录收尾：不删任何东西，只出清单（每个目录的 inventory），再关全部句柄。返回清单。"""
+    items = []
     try:
-        for d in reversed(owned_dirs):
-            if remove:
-                gone, why = d.cleanup()
-                removed += gone
-                if why: kept.append((d.path, why))
+        for d in owned_dirs: items += d.inventory()
     finally:
         for d in reversed(owned_dirs):
             try: d.close()
@@ -2928,7 +2916,27 @@ def release_owned(chain_fds, owned_dirs, remove=True):
         for fd in reversed(chain_fds):
             try: os.close(fd)
             except OSError: pass
-    return removed, kept
+    return items
+
+
+LEFTOVERS = []          # 本次在用户配置目录下留下的东西（不删，收尾时列给用户）
+
+
+def report_leftovers(label, items):
+    """把一组留下的东西记进 LEFTOVERS、写进结果包的 leftovers.json（整份重写），并在 summary 里记一行。路径里的家目录换成 ~。"""
+    for it in items: LEFTOVERS.append({"来自": label, **it, "路径": scrub(it["路径"])})
+    json.dump(LEFTOVERS, open(os.path.join(R.out, "leftovers.json"), "w"), ensure_ascii=False, indent=1)
+    if items:
+        record("INFO", f"{label}：本次在用户配置目录下留下的东西（没删，确认后可手动删除；目录名带本次随机名）",
+               f"{len(items)} 项，见结果包 leftovers.json")
+
+
+def leftovers_notice():
+    """终端末尾的提示。没有留下的就是空串。"""
+    if not LEFTOVERS: return ""
+    lines = [f"  {it['种类']} {it['路径']}（{it['怎么来的']}）" for it in LEFTOVERS]
+    return ("这些是本次测试在用户配置目录下留下的（脚本不删除用户配置目录里的东西），确认后可手动删除；目录名带本次随机名：\n"
+            + "\n".join(lines))
 
 
 BLANK_NAME = "NOTES.md"        # 空白对照：和被观测的 MEMORY.md 同类（大写名、.md 后缀、大小相同），让扫描文件的程序对两者一视同仁
@@ -2956,6 +2964,11 @@ def g5_adopt(owned, runs):
     if "proj" in owned:
         sids = [(r.get("init") or {}).get("session_id") for r in runs]
         owned["proj"].adopt_new([sid + ".jsonl" for sid in sids if sid and re.fullmatch(r"[0-9a-fA-F-]{8,64}", sid)], include_baseline=True)
+
+
+def g5_release(chain, owned):
+    """G5 的收尾：不删、不再认领，出清单（release_owned）。"""
+    return release_owned(chain, [owned[k] for k in ("proj", "mem", "agent_parent", "agent") if k in owned])
 
 
 def g5_isolation():
@@ -3082,12 +3095,9 @@ def g5_isolation():
                    g5_agent_memory_verdict(runs["s0"], runs["s2"], agent, d, observation_valid(s_answered, sobs["s0"], sobs["s2"]), sobs["s2"]["read"]),
                    f"观测前提成立={s_premise} s2 读过那个文件={sobs['s2']['read']} 空白对照被读过 s0={sobs['s0']['blank_read']} s2={sobs['s2']['blank_read']}")
     finally:
-        sids = [(r.get("init") or {}).get("session_id") for r in runs.values()]
-        g5_adopt(owned, list(runs.values()))
-        removed, kept = release_owned(chain, [owned[k] for k in ("proj", "mem", "agent_parent", "agent") if k in owned])
+        # 收尾不再认领（审查 repo 3/F-2）：CLI 的文件只在跑完一格之后认领；出错回退时重新扫描会把外来文件当成本次的
+        report_leftovers("G5", g5_release(chain, owned))
         if os.path.isdir(redirect) and not os.path.islink(redirect) and in_root(redirect): shutil.rmtree(redirect)     # 在本次根目录里
-        record("INFO", "G5 收尾（只动本次新建的记忆目录、子代理记忆目录、改道目录与这几个实例的会话记录）", f"删了 {len(removed)} 项")
-        if kept: record("INFO", "G5 收尾：这几处没删，留给用户看（身份不符或有不是本次写的内容）", json.dumps([(scrub(p_), w) for p_, w in kept], ensure_ascii=False))
 
 
 def read_obs_file_plain(path):
@@ -4633,14 +4643,13 @@ def rc6_prepare(config_root, names, secret, race=None):
             files.append(d.write_secret("MEMORY.md", secret))
         return (chain, owned), files
     except BaseException:
-        release_owned(chain, owned); raise
+        report_leftovers("R2X repo RC6（准备中途出错）", release_owned(chain, owned)); raise
 
 
 def rc6_cleanup(state):
-    """RC6 的收尾：OwnedDir 的清理（只删本次建的、身份对得上的文件，空了才 rmdir，不递归）。返回没删的（名字与原因）。"""
+    """RC6 的收尾：不删，出清单（release_owned）。返回清单。"""
     chain, owned = state
-    _, kept = release_owned(chain, owned)
-    return [{"目录": os.path.basename(p_), "原因": why} for p_, why in kept]
+    return release_owned(chain, owned)
 
 
 def r2x_rc6():
@@ -4676,9 +4685,7 @@ def r2x_rc6():
                g5_agent_memory_verdict(runs["s0"], runs["s2"], agent_type, code, valid, obs["s2"]["read"]),
                f"子代理类型={agent_type} 观测有效={valid} s2 读过那个文件={obs['s2']['read']} 空白对照被读过 s0={obs['s0']['blank_read']} s2={obs['s2']['blank_read']}")
     finally:
-        if state is not None:
-            kept = rc6_cleanup(state)
-            if kept: record("INFO", "R2X repo RC6 收尾：这几处没删，留给用户看（身份不符或混进了别的内容）", json.dumps(kept, ensure_ascii=False))
+        if state is not None: report_leftovers("R2X repo RC6", rc6_cleanup(state))
 
 
 def rc7_verdict(control_ok, ran, rc, err, target_exists):
@@ -5871,11 +5878,13 @@ def selftest_g5_isolation():
 
 
 def selftest_owned_dirs():
-    """用户配置目录下认领的目录（OwnedDir，RC6 与 G5 共用；审查 repo 2/F-1～F-3）。都在本次根目录里造假的配置目录。
-    正常一遍，再加五种交错：认领时目录被换掉、O_EXCL 遇到外来同名文件、本次的文件被同名换掉、判空之后又塞进东西、上一级里有别人的目录。"""
+    """用户配置目录下认领的目录（OwnedDir，RC6 与 G5 共用）。supervisor 2026-11-13：脚本不删用户配置目录里的任何东西，只出清单。
+    都在本次根目录里造假的配置目录；每种情形都断言磁盘上一样没少、清单只列本次的东西（外来的、被换掉的不在里面）。"""
     def fake_root(tag):
         root_ = R.p(f"st-own-{tag}"); os.makedirs(os.path.join(root_, "projects")); return root_
-    # 正常：G5 那样的一串（项目目录、记忆目录），本次写的、CLI 写的（认领过）、会话记录都删，两级空了也删
+    def tree(root_):
+        return sorted(os.path.relpath(os.path.join(d, n), root_) for d, ds, fs in os.walk(root_) for n in ds + fs)
+    # 正常：项目目录、记忆目录（本次建的）、本次写的三个文件、CLI 写的一个（跑完一格之后认领）、本次的会话记录，都进清单；什么都不删
     root_ = fake_root("normal")
     chain = open_config_chain(root_, ["projects"])
     proj = OwnedDir(chain[-1], "enc", os.path.join(root_, "projects", "enc"), "maybe")
@@ -5884,74 +5893,73 @@ def selftest_owned_dirs():
     open(os.path.join(mem.path, "cli-wrote.md"), "w").write("x"); mem.adopt_new()
     sid = "0" * 8 + "-1111-4222-8333-" + "4" * 12
     open(os.path.join(proj.path, sid + ".jsonl"), "w").write("{}"); proj.adopt_new([sid + ".jsonl"], include_baseline=True)
-    removed, kept = release_owned(chain, [proj, mem])
-    assert kept == [] and not os.path.exists(proj.path) and os.path.isdir(os.path.join(root_, "projects")), (removed, kept)
-    # 认领之前就在的文件不删；会话记录只认本次那几个名字
+    before = tree(root_)
+    items = release_owned(chain, [proj, mem])
+    assert tree(root_) == before, "一样都没删"
+    got = {(os.path.relpath(it["路径"], root_), it["怎么来的"]) for it in items}
+    assert got == {("projects/enc", "本次建的"), ("projects/enc/memory", "本次建的"), ("projects/enc/memory/MEMORY.md", "本次建的"),
+                   ("projects/enc/memory/.t0g-calib", "本次建的"), (f"projects/enc/memory/{BLANK_NAME}", "本次建的"),
+                   ("projects/enc/memory/cli-wrote.md", "CLI 写的"), (f"projects/enc/{sid}.jsonl", "CLI 写的")}, got
+    # 照用的目录（本来就在）不进清单，本来就在的文件也不进
     root_ = fake_root("baseline")
     os.makedirs(os.path.join(root_, "projects", "enc", "memory")); open(os.path.join(root_, "projects", "enc", "memory", "old.md"), "w").write("keep")
-    open(os.path.join(root_, "projects", "enc", "other-session.jsonl"), "w").write("keep")
     chain = open_config_chain(root_, ["projects"])
     proj = OwnedDir(chain[-1], "enc", os.path.join(root_, "projects", "enc"), "maybe")
     mem = OwnedDir(proj.fd, "memory", os.path.join(proj.path, "memory"), "maybe")
     mem.write_secret("MEMORY.md", "t0g-x"); mem.adopt_new()
-    _, kept = release_owned(chain, [proj, mem])
-    assert open(os.path.join(mem.path, "old.md")).read() == "keep" and open(os.path.join(proj.path, "other-session.jsonl")).read() == "keep"
-    assert not os.path.exists(os.path.join(mem.path, "MEMORY.md")) and kept == [], "照用的目录不是本次建的：只删本次的文件，目录留着、也不算没删"
-    # ① 认领时（mkdir 与 open 之间）目录被换掉：句柄拿到的是换进来的那个；只删本次写的，换进来的东西与被挪走的原目录都不动
+    items = release_owned(chain, [proj, mem])
+    assert {os.path.basename(it["路径"]) for it in items} == {"MEMORY.md", ".t0g-calib", BLANK_NAME} and os.path.exists(os.path.join(mem.path, "old.md"))
+    # 认领时（mkdir 与 open 之间）目录被换掉：清单只列本次经句柄写进去的，换进来的外来文件不在里面；都不删
     root_ = fake_root("swap")
     def swap(point, d):
         if point == "claimed" and d.name == "memory":
-            os.rename(os.path.join(d.path), d.path + "-moved"); os.mkdir(d.path); open(os.path.join(d.path, "foreign.md"), "w").write("keep")
+            os.rename(d.path, d.path + "-moved"); os.mkdir(d.path); open(os.path.join(d.path, "foreign.md"), "w").write("keep")
     chain = open_config_chain(root_, ["projects"])
     proj = OwnedDir(chain[-1], "enc", os.path.join(root_, "projects", "enc"), "maybe")
     mem = OwnedDir(proj.fd, "memory", os.path.join(proj.path, "memory"), "maybe", swap)
     mem.write_secret("MEMORY.md", "t0g-x")
-    _, kept = release_owned(chain, [proj, mem])
-    assert open(os.path.join(mem.path, "foreign.md")).read() == "keep" and os.path.isdir(mem.path + "-moved") and kept, kept
-    # ② O_EXCL 遇到外来同名文件：失败回退只清已经认领的，外来文件不动
-    root_ = fake_root("excl")
-    def plant(point, d):
-        if point == "claimed" and d.name.startswith("iwork-t0g-probe-"): open(os.path.join(d.path, BLANK_NAME), "w").write("keep")
-    try: rc6_prepare(root_, ["iwork-t0g-probe-e"], "t0g-x", race=plant)
-    except FileExistsError: pass
-    else: raise AssertionError("第三个文件撞上外来同名文件，应当失败")
-    d_ = os.path.join(root_, RC6_PARENT, "iwork-t0g-probe-e")
-    assert open(os.path.join(d_, BLANK_NAME)).read() == "keep" and not os.path.exists(os.path.join(d_, "MEMORY.md")), "外来文件不动，本次建成的两个清掉"
-    # ③ 本次的文件被同名换掉：身份对不上，不删
+    items = release_owned(chain, [proj, mem])
+    assert "foreign.md" not in {os.path.basename(it["路径"]) for it in items} and open(os.path.join(mem.path, "foreign.md")).read() == "keep"
+    assert os.path.isdir(mem.path + "-moved")
+    # 审查 repo 3/F-2：O_EXCL 遇到外来同名文件，写到一半失败；收尾不再认领，外来文件不进清单、不动
+    for flow in ("rc6", "g5"):
+        root_ = fake_root(f"excl-{flow}")
+        def plant(point, d):
+            if point == "claimed" and d.name in ("memory", "iwork-t0g-probe-e"): open(os.path.join(d.path, BLANK_NAME), "w").write("keep")
+        n_before = len(LEFTOVERS)
+        if flow == "rc6":
+            try: rc6_prepare(root_, ["iwork-t0g-probe-e"], "t0g-x", race=plant)
+            except FileExistsError: pass
+            else: raise AssertionError("第三个文件撞上外来同名文件，应当失败")
+            listed = {os.path.basename(it["路径"]) for it in LEFTOVERS[n_before:]}
+            d_ = os.path.join(root_, RC6_PARENT, "iwork-t0g-probe-e")
+        else:
+            chain = open_config_chain(root_, ["projects"])
+            owned = {"proj": OwnedDir(chain[-1], "enc", os.path.join(root_, "projects", "enc"), "maybe")}
+            owned["mem"] = OwnedDir(owned["proj"].fd, "memory", os.path.join(owned["proj"].path, "memory"), "maybe")
+            open(os.path.join(owned["mem"].path, BLANK_NAME), "w").write("keep")       # 认领之后、写入之前出现的外来文件（不在 baseline 里）
+            try: owned["mem"].write_secret("MEMORY.md", "t0g-x")
+            except FileExistsError: pass
+            listed = {os.path.basename(it["路径"]) for it in g5_release(chain, owned)}
+            d_ = owned["mem"].path
+        assert BLANK_NAME not in listed and {"MEMORY.md", ".t0g-calib"} <= listed, (flow, listed)
+        assert open(os.path.join(d_, BLANK_NAME)).read() == "keep" and os.path.exists(os.path.join(d_, "MEMORY.md")), "外来文件不动，本次的也不删"
+    # 本次的文件被同名换掉：身份对不上，不进清单，也不删
     root_ = fake_root("rename")
     state, _ = rc6_prepare(root_, ["iwork-t0g-probe-r"], "t0g-x")
     f_ = os.path.join(root_, RC6_PARENT, "iwork-t0g-probe-r", "MEMORY.md")
     os.remove(f_); open(f_, "w").write("keep")
-    kept = rc6_cleanup(state)
-    assert open(f_).read() == "keep" and kept, "同名换掉的文件不删，目录留着"
-    # ④ 判空之后、rmdir 之前塞进东西：rmdir 失败，塞进来的不动
-    root_ = fake_root("insert")
-    def insert(point, d):
-        if point == "before_rmdir" and d.name.startswith("iwork-t0g-probe-"): open(os.path.join(d.path, "late.md"), "w").write("keep")
-    state, _ = rc6_prepare(root_, ["iwork-t0g-probe-i"], "t0g-x", race=insert)
-    kept = rc6_cleanup(state)
-    assert open(os.path.join(root_, RC6_PARENT, "iwork-t0g-probe-i", "late.md")).read() == "keep" and kept, kept
-    # ④′ 这个名字下换成了别人的空目录：身份对不上，不 rmdir（别人的空目录也不删）
-    root_ = fake_root("emptyswap")
-    state, _ = rc6_prepare(root_, ["iwork-t0g-probe-s"], "t0g-x")
-    d_ = os.path.join(root_, RC6_PARENT, "iwork-t0g-probe-s")
-    os.rename(d_, d_ + "-moved"); os.mkdir(d_)
-    kept = rc6_cleanup(state)
-    assert os.path.isdir(d_) and kept, "名字下是别人的空目录：不删"
-    # ⑤ 上一级（agent-memory）里有别人的目录：上一级只 rmdir，非空就留着点名，别人的东西不动
-    root_ = fake_root("parent")
-    os.makedirs(os.path.join(root_, RC6_PARENT, "someone-else")); open(os.path.join(root_, RC6_PARENT, "someone-else", "x"), "w").write("keep")
-    state, _ = rc6_prepare(root_, ["iwork-t0g-probe-p"], "t0g-x")
-    kept = rc6_cleanup(state)
-    assert open(os.path.join(root_, RC6_PARENT, "someone-else", "x")).read() == "keep" and not os.path.exists(os.path.join(root_, RC6_PARENT, "iwork-t0g-probe-p"))
-    assert kept == [], "agent-memory 不是本次建的：它非空不算没删"
-    # 上一级是链接：认领时就打不开（O_NOFOLLOW）
+    items = rc6_cleanup(state)
+    assert f_ not in {it["路径"] for it in items} and open(f_).read() == "keep"
+    # agent-memory 是链接：认领时就打不开（O_NOFOLLOW），链接那头一个字节没动
     root_ = fake_root("link")
     os.makedirs(R.p("st-own-link-elsewhere")); os.symlink(R.p("st-own-link-elsewhere"), os.path.join(root_, RC6_PARENT))
     try: rc6_prepare(root_, ["iwork-t0g-probe-l"], "t0g-x")
     except OSError: pass
     else: raise AssertionError("agent-memory 是链接：不认领")
-    assert os.listdir(R.p("st-own-link-elsewhere")) == [], "链接那头一个字节没动"
+    assert os.listdir(R.p("st-own-link-elsewhere")) == []
+    # 清单进结果包与终端提示：路径里的家目录换成 ~
+    assert json.load(open(os.path.join(R.out, "leftovers.json"))) == LEFTOVERS and "确认后可手动删除" in leftovers_notice()
 
 
 def selftest_r2x():
@@ -6540,43 +6548,19 @@ def selftest_repo():
     assert rc8_breached(snap, rc8_snapshot(sp)), "审查 repo 1/F-6：内容没变、时间戳变了，也算被写过"
     assert rc8_breached(snap, None), "文件没了也算"
     assert one_candidate(["repo:x", "other"], "x") == "repo:x" and one_candidate(["a:x", "b:x"], "x") is None and one_candidate([], "x") is None, "审查 repo 1/F-8"
-    # 审查 repo 1/F-1：RC6 的建与删走目录句柄。四种情形：正常、子目录被换掉、agent-memory 被换成链接、混进了别的文件
-    def rc6_case(tamper):
-        root_ = R.p(f"st-rc6-{tamper}"); os.makedirs(root_)
-        state, files = rc6_prepare(root_, ["iwork-t0g-probe-a", "repo:iwork-t0g-probe-a"], "t0g-c")
-        assert len(files) == 2 and all(os.path.isfile(f_[0]) for f_ in files)
-        child = os.path.join(root_, RC6_PARENT, "iwork-t0g-probe-a")
-        elsewhere = R.p(f"st-rc6-{tamper}-elsewhere")
-        if tamper == "replaced":
-            os.rename(child, child + "-moved"); os.mkdir(child); open(os.path.join(child, "keep.txt"), "w").write("keep")
-        elif tamper == "parent-link":
-            os.makedirs(os.path.join(elsewhere, "iwork-t0g-probe-a")); open(os.path.join(elsewhere, "iwork-t0g-probe-a", "MEMORY.md"), "w").write("keep")
-            os.rename(os.path.join(root_, RC6_PARENT), os.path.join(root_, "moved")); os.symlink(elsewhere, os.path.join(root_, RC6_PARENT))
-        elif tamper == "foreign":
-            open(os.path.join(child, "user-note.md"), "w").write("keep")
-        elif tamper == "parent-replaced":                    # agent-memory 换成了另一个真目录，本次的子目录被挪了进去（子目录身份照旧）
-            old = os.path.join(root_, RC6_PARENT)
-            os.rename(old, os.path.join(root_, "moved")); os.mkdir(old)
-            os.rename(os.path.join(root_, "moved", "iwork-t0g-probe-a"), child)
-        kept = rc6_cleanup(state)
-        return root_, child, elsewhere, kept
-    root_, child, _, kept = rc6_case("normal")
-    assert kept == [] and not os.path.exists(os.path.join(root_, RC6_PARENT)), "正常：两个目录与本次建的 agent-memory 都删了"
-    root_, child, _, kept = rc6_case("replaced")
-    assert open(os.path.join(child, "keep.txt")).read() == "keep" and kept, "子目录被换掉：换进来的不删"
-    assert not os.path.exists(os.path.join(child + "-moved", "MEMORY.md")), "被挪走的原目录里本次写的文件经句柄删掉了"
-    root_, child, elsewhere, kept = rc6_case("parent-link")
-    assert open(os.path.join(elsewhere, "iwork-t0g-probe-a", "MEMORY.md")).read() == "keep" and kept, "agent-memory 换成链接：一个都不碰"
-    root_, child, _, kept = rc6_case("parent-replaced")
-    assert os.path.isdir(child) and kept, "agent-memory 换了：这个名字下的目录不 rmdir，点名留下"
-    root_, child, _, kept = rc6_case("foreign")
-    assert open(os.path.join(child, "user-note.md")).read() == "keep" and not os.path.exists(os.path.join(child, "MEMORY.md")) and kept, \
-        "混进了别的文件：只删本次写的，别人的不动，目录留着"
+    # RC6 的收尾（supervisor 2026-11-13：不删用户配置目录里的东西，只出清单）：两个目录与各三个文件都在清单里，磁盘上一样不少
+    root_ = R.p("st-rc6-normal"); os.makedirs(root_)
+    state, files = rc6_prepare(root_, ["iwork-t0g-probe-a", "repo:iwork-t0g-probe-a"], "t0g-c")
+    items = rc6_cleanup(state)
+    paths = {it["路径"] for it in items}
+    want = {os.path.join(root_, RC6_PARENT)} | {os.path.dirname(f_[0]) for f_ in files} | {p_ for f_ in files for p_ in f_}
+    assert paths == want and all(os.path.exists(p_) for p_ in want), (sorted(paths), sorted(want))
+    assert all(it["怎么来的"] == "本次建的" for it in items)
     pre = R.p("st-rc6-exists"); os.makedirs(os.path.join(pre, RC6_PARENT, "iwork-t0g-probe-b"))
     try: rc6_prepare(pre, ["iwork-t0g-probe-b"], "t0g-c")
     except FileExistsError: pass
     else: raise AssertionError("目录已经存在：不碰")
-    assert os.path.isdir(os.path.join(pre, RC6_PARENT, "iwork-t0g-probe-b")), "已经存在的不被删"
+    assert os.path.isdir(os.path.join(pre, RC6_PARENT, "iwork-t0g-probe-b")), "已经存在的不动"
     # 版本记录（supervisor 2026-11-13：本机已更新到 2.1.323）
     assert cli_version_facts("2.1.322 (Claude Code)\n", "/x/claude") == ({"cli": "/x/claude", "version": "2.1.322", "baseline": "2.1.322"}, "")
     facts_v, warn = cli_version_facts("2.1.323 (Claude Code)\n", "/x/claude")
@@ -7451,12 +7435,14 @@ def main():
             elif not A.selftest:
                 record(status, "运行前后原有文件核对", f"原有 {len(before)} 项，逐项比过没变" if before else "原来没有可核对的条目（没有同名前缀的文件，也没有 ~/.npmrc）")
             if not A.selftest:
+                if LEFTOVERS: log(leftovers_notice())
                 log(f"合计：{COUNTS}（FAIL 或 INCONCLUSIVE 不为 0 的组不能当作已验证）")
                 log(pack_obs(R.root, os.path.relpath(R.obs, R.root), os.path.join(R.out, "obs")))
                 result_path = write_results(R.parent)
         finally:
             R.remove()
         if result_path: print(f"完成，结果包：{scrub(result_path)}")
+        if LEFTOVERS and not A.selftest: print(leftovers_notice())
     if not A.selftest and (COUNTS["FAIL"] or COUNTS["INCONCLUSIVE"]):
         sys.exit(1)
 
