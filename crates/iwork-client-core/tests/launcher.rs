@@ -210,7 +210,11 @@ fn not_ready(r: Result<(Client, Incoming), LaunchError>) -> Box<Diagnostics> {
     }
 }
 
+/// 专测「到预算就返回」的用例用的预算。
 const BUDGET: Duration = Duration::from_secs(1);
+/// 验「拉不拉起、连不连得上」的用例用的预算：要的是结果，不是时延；
+/// 1s 在慢的 CI 机器上不够走完拉起和握手（这些路径一出结果就返回，预算大不拖慢用例）。
+const LAUNCH_BUDGET: Duration = Duration::from_secs(20);
 
 /// 只有 `Io` 拉起；五种别的错误原样返回 `Connect`，一次都不拉。
 #[tokio::test]
@@ -228,7 +232,7 @@ async fn only_io_error_launches() {
     for f in others {
         let w = World::new(false).await;
         w.script(&[Step::Err(f)]);
-        match w.launcher(BUDGET).connect_or_launch().await {
+        match w.launcher(LAUNCH_BUDGET).connect_or_launch().await {
             Err(LaunchError::Connect(e)) => assert_eq!(e.to_string(), f().to_string()),
             other => panic!("{other:?}", other = other.err()),
         }
@@ -237,7 +241,7 @@ async fn only_io_error_launches() {
     // 对照：Io → 拉起一次、连上
     let w = World::new(true).await;
     w.script(&[Step::Io]);
-    assert!(w.launcher(BUDGET).connect_or_launch().await.is_ok());
+    assert!(w.launcher(LAUNCH_BUDGET).connect_or_launch().await.is_ok());
     assert_eq!(w.spawns(), 1);
 }
 
@@ -261,7 +265,7 @@ async fn relaunch_rate_limited() {
 async fn spawn_failure_is_reported() {
     let w = World::new(false).await;
     w.ctl.spawn_fails.store(true, Ordering::SeqCst);
-    let d = not_ready(w.launcher(BUDGET).connect_or_launch().await);
+    let d = not_ready(w.launcher(LAUNCH_BUDGET).connect_or_launch().await);
     assert_eq!(d.stage, "拉起失败");
     assert!(d.spawn_error.as_deref().unwrap().contains("没有执行权限"));
     assert!(d.to_view().lines.iter().any(|(k, _)| k == "拉起失败"));
@@ -450,7 +454,7 @@ async fn refused_other_exe_is_relaunched() {
         }),
         other,
     );
-    assert!(w.launcher(BUDGET).connect_or_launch().await.is_ok());
+    assert!(w.launcher(LAUNCH_BUDGET).connect_or_launch().await.is_ok());
     assert_eq!(w.spawns(), 1);
 }
 
@@ -463,7 +467,7 @@ async fn manual_retry_relaunches() {
         }),
         w.stamp(),
     );
-    let mut l = w.launcher(BUDGET);
+    let mut l = w.launcher(LAUNCH_BUDGET);
     not_ready(l.connect_or_launch().await);
     assert_eq!(w.spawns(), 0);
     assert!(l.retry_now().await.is_ok());
@@ -482,7 +486,7 @@ async fn bind_failure_is_relaunched() {
         },
         w.stamp(),
     );
-    assert!(w.launcher(BUDGET).connect_or_launch().await.is_ok());
+    assert!(w.launcher(LAUNCH_BUDGET).connect_or_launch().await.is_ok());
     assert_eq!(w.spawns(), 1);
 }
 
@@ -498,7 +502,7 @@ async fn user_quit_then_client_reopens_launches() {
         },
         w.stamp(),
     );
-    assert!(w.launcher(BUDGET).connect_or_launch().await.is_ok());
+    assert!(w.launcher(LAUNCH_BUDGET).connect_or_launch().await.is_ok());
     assert_eq!(w.spawns(), 1);
 }
 
