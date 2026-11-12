@@ -1526,7 +1526,7 @@ mod interleave {
     }
 
     impl H {
-        fn new(cap: usize, gaps: &[u64]) -> Self {
+        fn new(cap: usize, gaps: &[u64]) -> Result<Self, TestCaseError> {
             let mut w = World::new();
             w.push(f::project_conversation(B, support::PID));
             // 两个对话的内容交错写进同一条事件日志：各自的 seq 都是稀疏的
@@ -1570,8 +1570,8 @@ mod interleave {
                 n: 0,
             };
             h.subscribe(A);
-            h.deliver_all();
-            h
+            h.deliver_all("初始快照")?;
+            Ok(h)
         }
 
         fn subscribe(&mut self, conv: &'static str) {
@@ -1829,22 +1829,38 @@ mod interleave {
                     prop_assert!(t.at_tail, "回到最新之后没接着最新：{:?}", t.identities());
                 }
                 Sent::Around(center) => {
-                    prop_assert!(
-                        t.identities().iter().any(|(k, _)| k.seq == center),
-                        "居中加载的锚组 {} 被裁掉了：{:?}",
-                        center,
-                        t.identities()
-                    );
+                    // 目标在送达时可能已经合法消失（继续卡片在途中被处理掉，T09 方案 S19：只显示那一段、不高亮）。
+                    // 还在 → 它那一组不许被裁；没了 → 那个位置上也不许留着行（旧卡片不复活）
+                    let here = t.identities().into_iter().filter(|(k, _)| k.seq == center);
+                    let here: Vec<_> = here.collect();
+                    if self.full(conv).iter().any(|(k, _)| k.seq == center) {
+                        prop_assert!(
+                            !here.is_empty(),
+                            "居中加载的锚组 {} 被裁掉了：{:?}",
+                            center,
+                            t.identities()
+                        );
+                    } else {
+                        prop_assert!(
+                            here.is_empty(),
+                            "居中目标 {} 已经不在了，时间线里却还有那一处的行：{:?}",
+                            center,
+                            here
+                        );
+                    }
                 }
                 _ => {}
             }
             Ok(())
         }
 
-        fn deliver_all(&mut self) {
+        /// 按顺序送达在途的全部，每一件之后都查（审查 8/F-1：排空队列也不许吞掉不变量的错误）。所有排空入口都走这里。
+        fn deliver_all(&mut self, why: &str) -> Result<(), TestCaseError> {
             while !self.queue.is_empty() {
-                let _ = self.deliver(0);
+                self.deliver(0)?;
+                self.check(&why)?;
             }
+            Ok(())
         }
 
         fn window(&mut self, i: usize, by_user: bool) {
@@ -1863,7 +1879,7 @@ mod interleave {
         }
 
         /// 每一步之后都成立的。
-        fn check(&self, op: &Op) -> Result<(), TestCaseError> {
+        fn check(&self, op: &dyn std::fmt::Debug) -> Result<(), TestCaseError> {
             let Some(t) = self.s.open.as_ref() else {
                 return Ok(());
             };
@@ -1887,13 +1903,21 @@ mod interleave {
                 op,
                 leaked
             );
+            // 继续卡片只跟着待处理表：表里没有了，时间线里就不许有（被处理掉的卡片不复活）
+            if self.card.is_none() {
+                prop_assert!(
+                    t.row("resume:t-A.int").is_none(),
+                    "{:?} 之后待处理表里已经没有的继续卡片还在时间线里",
+                    op
+                );
+            }
             Ok(())
         }
 
         /// 最后：在途的都送达，往前翻到头、再往后翻到头（网页一直贴着要翻的那一端，会话层发翻页的条件），每一步
         /// 最外一行严格前进；一路见过的行拼起来等于全集，不重不漏。
         fn page_through(&mut self) -> Result<(), TestCaseError> {
-            self.deliver_all();
+            self.deliver_all("收尾排空")?;
             let full = self.full(self.open);
             let mut seen: BTreeMap<RowKey, String> = keys_of(&self.s).into_iter().collect();
             let mut steps = 0;
@@ -1934,7 +1958,7 @@ mod interleave {
                         before,
                         after
                     );
-                    prop_assert!(self.s.open.as_ref().unwrap().len() <= self.cap);
+                    self.check(&"收尾翻页")?;
                     seen.extend(keys_of(&self.s));
                     steps += 1;
                     prop_assert!(steps <= 2 * full.len() + 4, "翻不到头");
@@ -1984,7 +2008,7 @@ mod interleave {
     }
 
     fn run(cap: usize, gaps: Vec<u64>, ops: Vec<Op>) -> Result<(), TestCaseError> {
-        let mut h = H::new(cap, &gaps);
+        let mut h = H::new(cap, &gaps)?;
         for op in &ops {
             match op.clone() {
                 Op::Live { other, kind } => h.live(other, kind),
@@ -2008,12 +2032,7 @@ mod interleave {
                     h.queue.push((h.open, sent));
                 }
                 Op::Deliver(i) => h.deliver(i)?,
-                Op::DeliverAll => {
-                    while !h.queue.is_empty() {
-                        h.deliver(0)?;
-                        h.check(op)?;
-                    }
-                }
+                Op::DeliverAll => h.deliver_all("DeliverAll")?,
                 Op::Reconnect => {
                     // 断线：在途的查询丢了；重新订阅（同一个编号），拿新快照
                     h.queue.clear();
@@ -2056,6 +2075,28 @@ mod interleave {
     use Op::*;
     const fn user(other: bool) -> Op {
         Live { other, kind: 0 }
+    }
+
+    /// 对继续卡片发居中加载，送达前卡片被处理掉（审查 8/F-2）：目标合法消失，接受只显示那一段，卡片不复活。
+    #[test]
+    fn pinned_around_target_removed_in_flight() {
+        // 卡片在全集里的位置（Around(i) 按发出那一刻的全集取第 i 行）：同样内容的 H 挂上卡片再数
+        let mut h = H::new(39, &[0]).unwrap();
+        h.card = Some(pb::ResumeCard {
+            turn_id: "t-A.int".into(),
+            conversation_id: A.into(),
+            reason: pb::InterruptReason::Crash as i32,
+            created_seq: h.interrupted_at,
+        });
+        let i = h
+            .full(A)
+            .iter()
+            .position(|(_, id)| id == "resume:t-A.int")
+            .expect("对照：挂上卡片后全集里有它");
+        pinned(
+            39,
+            vec![Pending(true), Around(i), Pending(false), Deliver(0)],
+        );
     }
 
     /// 检查点最新页从对话开头一直带到最新（has_more=false）、按窗口合并进来：旧的一端已经到头，往前翻不该再发一次
