@@ -123,6 +123,57 @@ mod imp {
         Ok(())
     }
 
+    /// 数据目录下到会话目录上一层的路径：`run`、`run/h`，逐级检查，不跟链接（S5 审查 1/F-2）。
+    /// 创建与清扫共用这一处：哪一级是符号链接、不是目录、不是自己的，都在碰它下面任何东西之前就停下。
+    /// `create`：缺的那一级用 0700 新建（一次只建一级，建完再查）；不建时缺一级就返回 `None`（什么都没有可清）。
+    /// `run` 只要求是自己的真目录（后台的本机 socket 也在这一层）；`run/h` 还要求是私有的（0700）。
+    fn session_root(data_dir: &Path, create: bool) -> Result<Option<PathBuf>, DirError> {
+        let mut path = data_dir.to_path_buf();
+        for (level, private) in [("run", false), ("h", true)] {
+            path.push(level);
+            match fs::symlink_metadata(&path) {
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound && create => {
+                    match DirBuilder::new().mode(0o700).create(&path) {
+                        Ok(()) => {}
+                        // 别的进程刚建好：照样往下查
+                        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                        Err(e) => {
+                            return Err(DirError(format!("建不了 {}（{e}）", path.display())));
+                        }
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => {
+                    return Err(DirError(format!(
+                        "读不了目录信息（{e}）：{}",
+                        path.display()
+                    )));
+                }
+            }
+            if private {
+                check_private_dir(&path)?;
+            } else {
+                check_own_dir(&path)?;
+            }
+        }
+        Ok(Some(path))
+    }
+
+    /// 是自己的真目录（不是符号链接）。
+    fn check_own_dir(path: &Path) -> Result<(), DirError> {
+        let bad = |why: &str| DirError(format!("{why}：{}", path.display()));
+        let meta =
+            fs::symlink_metadata(path).map_err(|e| bad(&format!("读不了目录信息（{e}）")))?;
+        if !meta.file_type().is_dir() {
+            return Err(bad("不是目录（可能是符号链接）"));
+        }
+        if meta.uid() != current_user() {
+            return Err(bad("属主不是当前用户"));
+        }
+        Ok(())
+    }
+
     fn random_name() -> Result<String, DirError> {
         let mut bytes = [0u8; RANDOM_BYTES];
         getrandom::fill(&mut bytes).map_err(|e| DirError(format!("取随机数失败：{e}")))?;
@@ -143,15 +194,9 @@ mod imp {
     }
 
     impl SessionDir {
-        /// 新建一个会话目录并写下属主（本进程号）。上一层 `run/h` 不存在就建（0700），存在要是自己的私有目录。
+        /// 新建一个会话目录并写下属主（本进程号）。`run`、`run/h` 不存在就逐级建（0700），存在要过 `session_root` 的检查。
         pub fn create(data_dir: &Path) -> Result<Self, DirError> {
-            let root = root(data_dir);
-            DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&root)
-                .map_err(|e| DirError(format!("建不了 {}（{e}）", root.display())))?;
-            check_private_dir(&root)?;
+            let root = session_root(data_dir, true)?.expect("create 时缺的那一级已经建好");
             for _ in 0..CREATE_ATTEMPTS {
                 let path = root.join(random_name()?);
                 check_socket_len(&path.join(SOCKET))?;
@@ -219,12 +264,11 @@ mod imp {
     /// 自己的私有目录、属主文件能读出进程号、里面只有那四个名字」的目录；别的一律不碰。
     /// 进程号被复用时最多晚删一轮。
     pub fn sweep(data_dir: &Path) -> io::Result<usize> {
-        let root = root(data_dir);
-        let entries = match fs::read_dir(&root) {
-            Ok(e) => e,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(e),
+        // 先过同一个边界检查：run 或 run/h 是链接、不是自己的，就不读、不删，报错
+        let Some(root) = session_root(data_dir, false).map_err(|e| io::Error::other(e.0))? else {
+            return Ok(0);
         };
+        let entries = fs::read_dir(&root)?;
         let mut removed = 0;
         for entry in entries {
             let path: PathBuf = entry?.path();

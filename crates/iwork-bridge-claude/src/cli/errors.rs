@@ -12,7 +12,8 @@
 pub struct ResultFacts {
     /// 结局类别（`subtype`）
     pub subtype: String,
-    pub is_error: bool,
+    /// 错误标记；缺失或不是布尔值为 `None`（不知道，不当成没出错）
+    pub is_error: Option<bool>,
     /// API 报的 HTTP 状态码（`api_error_status`）
     pub api_error_status: Option<u16>,
     /// `terminal_reason`
@@ -55,14 +56,15 @@ const fn model_unavailable(reason: &'static str) -> TurnEnd {
 /// 登记表，自上而下第一行命中的生效。
 const ROWS: [Row; 4] = [
     Row {
-        matches: |r| r.subtype == "success" && !r.is_error,
+        // 明确成功：类别是 success、错误标记是明确的 false
+        matches: |r| r.subtype == "success" && r.is_error == Some(false),
         end: TurnEnd::Completed,
         note: "实录：text_multiturn 等",
     },
     // N5：不存在的模型 subtype 照样是 success，靠 is_error + 404 + api_error 认（G6；实录 bad_model）
     Row {
         matches: |r| {
-            r.is_error
+            r.is_error == Some(true)
                 && r.api_error_status == Some(404)
                 && r.terminal_reason.as_deref() == Some("api_error")
         },
@@ -70,12 +72,12 @@ const ROWS: [Row; 4] = [
         note: "实录：bad_model",
     },
     Row {
-        matches: |r| r.is_error && r.api_error_status == Some(403),
+        matches: |r| r.is_error == Some(true) && r.api_error_status == Some(403),
         end: model_unavailable("no_permission"),
         note: "未实录：按 API 的 403 写",
     },
     Row {
-        matches: |r| r.is_error && r.api_error_status == Some(529),
+        matches: |r| r.is_error == Some(true) && r.api_error_status == Some(529),
         end: model_unavailable("overloaded"),
         note: "未实录：按 API 的 529 overloaded_error 写",
     },
@@ -120,7 +122,7 @@ mod tests {
     ) -> ResultFacts {
         ResultFacts {
             subtype: subtype.into(),
-            is_error,
+            is_error: Some(is_error),
             api_error_status: status,
             terminal_reason: terminal.map(Into::into),
         }
@@ -184,6 +186,29 @@ mod tests {
         // 404 但不是 api_error 的终止原因：不当成模型不存在
         assert_eq!(
             turn_end(&r("success", true, Some(404), None), false),
+            TurnEnd::Error {
+                code: "cli_error",
+                reason: Some("success")
+            }
+        );
+    }
+
+    /// 错误标记缺失或类型不对（S5 审查 1/F-3）：不知道就不算成功；404 也不当成「模型不存在」（要明确的 true）。
+    #[test]
+    fn unknown_error_flag_is_never_success() {
+        let mut facts = r("success", false, None, None);
+        facts.is_error = None;
+        assert_eq!(
+            turn_end(&facts, false),
+            TurnEnd::Error {
+                code: "cli_error",
+                reason: Some("success")
+            }
+        );
+        facts.api_error_status = Some(404);
+        facts.terminal_reason = Some("api_error".into());
+        assert_eq!(
+            turn_end(&facts, false),
             TurnEnd::Error {
                 code: "cli_error",
                 reason: Some("success")

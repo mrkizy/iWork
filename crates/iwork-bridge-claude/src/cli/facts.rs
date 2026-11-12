@@ -188,7 +188,10 @@ mod tests {
 
     #[test]
     fn quota_outside_turn_waits_for_next_turn() {
-        let info = RateLimitInfo { windows: vec![] };
+        let info = RateLimitInfo {
+            windows: vec![],
+            incomplete: 0,
+        };
         let mut f = Facts::default();
         assert_eq!(f.on_rate_limit(info.clone()), None);
         assert_eq!(f.begin_turn().quota, Some(info.clone()));

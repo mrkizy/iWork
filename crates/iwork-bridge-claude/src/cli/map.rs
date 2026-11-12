@@ -66,7 +66,7 @@ pub enum Report {
 pub struct QuotaWindow {
     pub window: String,
     pub used_pct: u8,
-    pub resets_at_secs: Option<i64>,
+    pub resets_at_secs: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +78,10 @@ pub enum Diagnostic {
     OutsideTurn,
     /// 整条消息的文字和已发的增量对不上（不补发，免得重复）
     TextMismatch,
+    /// 额度事件里有窗口的数值缺失或不是数，没报（方案 6.4）
+    QuotaWindowIncomplete,
+    /// `result` 里没有 `model_usage_since_last_result`：token 退到 `result.usage`、费用不报（方案 6.3；每条会话记一次）
+    UsageFallback,
 }
 
 /// 致命：结束 CLI。
@@ -106,6 +110,8 @@ pub struct StreamMapper {
     /// 启动时给的思考强度：上报模型时一起带上
     effort: &'static str,
     turn: Option<Turn>,
+    /// 用量退路的诊断这条会话记过没有
+    usage_fallback_noted: bool,
 }
 
 impl StreamMapper {
@@ -114,6 +120,7 @@ impl StreamMapper {
             facts: Facts::default(),
             effort,
             turn: None,
+            usage_fallback_noted: false,
         }
     }
 
@@ -181,7 +188,12 @@ impl StreamMapper {
                 }
             }
             CliEvent::RateLimit(info) => {
-                if let Some(info) = self.facts.on_rate_limit(info) {
+                if info.incomplete > 0 {
+                    out.push(Out::Diagnostic(Diagnostic::QuotaWindowIncomplete));
+                }
+                if !info.windows.is_empty()
+                    && let Some(info) = self.facts.on_rate_limit(info)
+                {
                     out.push(quota_report(info));
                 }
             }
@@ -197,6 +209,10 @@ impl StreamMapper {
                 Some(turn) => {
                     if let CliEvent::Result(r) = &event {
                         let end = turn_end(&r.facts, turn.cancel_requested);
+                        if r.usage_fallback && !self.usage_fallback_noted {
+                            self.usage_fallback_noted = true;
+                            out.push(Out::Diagnostic(Diagnostic::UsageFallback));
+                        }
                         out.push(Out::Report(Report::Usage(r.usage.clone())));
                         self.turn = None;
                         if let Some(d) = self.facts.end_turn() {
@@ -298,9 +314,7 @@ fn quota_report(info: RateLimitInfo) -> Out {
             .into_iter()
             .map(|w| QuotaWindow {
                 window: w.window,
-                used_pct: w
-                    .utilization
-                    .map_or(0, |u| (u * 100.0).round().clamp(0.0, 100.0) as u8),
+                used_pct: (w.utilization * 100.0).round().clamp(0.0, 100.0) as u8,
                 resets_at_secs: w.resets_at,
             })
             .collect(),
@@ -326,22 +340,23 @@ mod tests {
             windows: vec![
                 super::super::events::RateWindow {
                     window: "a".into(),
-                    utilization: Some(1.7),
-                    resets_at: None,
+                    utilization: 1.7,
+                    resets_at: 9,
                 },
                 super::super::events::RateWindow {
                     window: "b".into(),
-                    utilization: Some(-0.2),
-                    resets_at: Some(5),
+                    utilization: -0.2,
+                    resets_at: 5,
                 },
             ],
+            incomplete: 0,
         };
         let Out::Report(Report::Quota(w)) = quota_report(info) else {
             panic!()
         };
         assert_eq!(
             (w[0].used_pct, w[1].used_pct, w[1].resets_at_secs),
-            (100, 0, Some(5))
+            (100, 0, 5)
         );
     }
 }

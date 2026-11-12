@@ -4,6 +4,9 @@
 //!
 //! 一行不是合法 JSON、或超过 [`MAX_LINE_BYTES`]：致命（[`LineError`]），结束 CLI、回 `cli_exited`——不信任输出
 //! 格式已经坏掉的 CLI。
+//!
+//! **决定成败的字段不拿默认值兜底**（S5 审查 1/F-3）：`result.is_error`、`tool_result.is_error` 缺失或不是布尔值时
+//! 记成「不知道」（`None`），落到失败那一边，绝不当成没出错。别的字段缺失记 0 / `None`，不影响成败。
 
 use serde_json::Value;
 
@@ -84,6 +87,7 @@ pub enum AssistantBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResult {
     pub tool_use_id: String,
+    /// `is_error` 不是明确的 `false`（缺失、不是布尔值、是 `true`）都算失败
     pub is_error: bool,
     /// 结果里的文字（字符串原样；内容块数组只取文字块，按出现次序接起来）
     pub text: String,
@@ -93,10 +97,14 @@ pub struct ToolResult {
 pub struct TurnResult {
     pub facts: ResultFacts,
     pub session_id: Option<String>,
+    /// 这一个 `result` 新增的用量（方案 6.3）
     pub usage: Usage,
+    /// `model_usage_since_last_result` 整个没有（或不是对象）：token 退到 `result.usage`、费用记 `None`，要记诊断
+    pub usage_fallback: bool,
 }
 
-/// `result.usage` 与 `total_cost_usd`（方案 6.3）。缺的记 0 / `None`，不估算。
+/// 这一个 `result` 新增的用量（方案 6.3）：token 与费用都取 `model_usage_since_last_result`，各模型相加。
+/// 累计值（`total_cost_usd`、`modelUsage`）不进来。缺的 token 记 0；费用缺一个模型就记 `None`，不拿一部分顶全部。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Usage {
     pub input_tokens: u64,
@@ -110,16 +118,18 @@ pub struct Usage {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RateLimitInfo {
     pub windows: Vec<RateWindow>,
+    /// 数值缺失、不是数而没报的窗口个数（方案 6.4：不拿 0 顶替，记诊断）
+    pub incomplete: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RateWindow {
-    /// `rateLimitType`，不透明
+    /// 窗口名：`unifiedWindows` 的键，或顶层的 `rateLimitType`；不透明
     pub window: String,
     /// 0–1
-    pub utilization: Option<f64>,
+    pub utilization: f64,
     /// 秒
-    pub resets_at: Option<i64>,
+    pub resets_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -242,7 +252,8 @@ fn tool_results(v: &Value) -> Vec<ToolResult> {
         .filter_map(|b| {
             Some(ToolResult {
                 tool_use_id: s(b, "tool_use_id")?,
-                is_error: b.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+                // 只有明确的 false 才算成功
+                is_error: b.get("is_error").and_then(Value::as_bool) != Some(false),
                 text: match b.get("content") {
                     Some(Value::String(t)) => t.clone(),
                     Some(Value::Array(parts)) => parts
@@ -259,11 +270,12 @@ fn tool_results(v: &Value) -> Vec<ToolResult> {
 }
 
 fn result(v: &Value) -> TurnResult {
-    let usage = v.get("usage").cloned().unwrap_or(Value::Null);
+    let (usage, usage_fallback) = per_result_usage(v);
     TurnResult {
         facts: ResultFacts {
             subtype: s(v, "subtype").unwrap_or_default(),
-            is_error: v.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+            // 缺失或不是布尔值：不知道，不当成没出错
+            is_error: v.get("is_error").and_then(Value::as_bool),
             api_error_status: v
                 .get("api_error_status")
                 .and_then(Value::as_u64)
@@ -271,42 +283,79 @@ fn result(v: &Value) -> TurnResult {
             terminal_reason: s(v, "terminal_reason"),
         },
         session_id: s(v, "session_id"),
-        usage: Usage {
-            input_tokens: u(&usage, "input_tokens"),
-            output_tokens: u(&usage, "output_tokens"),
-            cache_read_tokens: u(&usage, "cache_read_input_tokens"),
-            cache_write_tokens: u(&usage, "cache_creation_input_tokens"),
-            cost_usd: v.get("total_cost_usd").and_then(Value::as_f64),
-        },
+        usage,
+        usage_fallback,
     }
 }
 
-fn window(name: String, v: &Value) -> RateWindow {
-    RateWindow {
+/// 方案 6.3 的取数规则。返回（用量，是不是走了退路）。
+fn per_result_usage(v: &Value) -> (Usage, bool) {
+    let Some(models) = v
+        .get("model_usage_since_last_result")
+        .and_then(Value::as_object)
+    else {
+        // 退路：token 取 result.usage（样本里它和增量相等），费用不知道
+        let usage = v.get("usage").cloned().unwrap_or(Value::Null);
+        return (
+            Usage {
+                input_tokens: u(&usage, "input_tokens"),
+                output_tokens: u(&usage, "output_tokens"),
+                cache_read_tokens: u(&usage, "cache_read_input_tokens"),
+                cache_write_tokens: u(&usage, "cache_creation_input_tokens"),
+                cost_usd: None,
+            },
+            true,
+        );
+    };
+    // 空对象（一次 API 调用都没成）：token 全 0、费用 0
+    let mut total = Usage {
+        cost_usd: Some(0.0),
+        ..Usage::default()
+    };
+    for m in models.values() {
+        total.input_tokens += u(m, "inputTokens");
+        total.output_tokens += u(m, "outputTokens");
+        total.cache_read_tokens += u(m, "cacheReadInputTokens");
+        total.cache_write_tokens += u(m, "cacheCreationInputTokens");
+        total.cost_usd = match (total.cost_usd, m.get("costUSD").and_then(Value::as_f64)) {
+            (Some(sum), Some(c)) => Some(sum + c),
+            _ => None,
+        };
+    }
+    (total, false)
+}
+
+/// 一个窗口；`utilization` 或 `resetsAt` 缺失、不是数就不报（返回 `None`），不拿 0 顶替。
+fn window(name: String, v: &Value) -> Option<RateWindow> {
+    Some(RateWindow {
         window: name,
-        utilization: v.get("utilization").and_then(Value::as_f64),
-        resets_at: v.get("resetsAt").and_then(Value::as_i64),
-    }
+        utilization: v.get("utilization").and_then(Value::as_f64)?,
+        resets_at: v.get("resetsAt").and_then(Value::as_i64)?,
+    })
 }
 
-/// `unifiedWindows`（2.1.322：以窗口名为键的对象）有内容时每项一个窗口，否则用 `rate_limit_info` 自己那一个
-/// （窗口名是它的 `rateLimitType`）。
+/// 方案 6.4：`unifiedWindows`（以窗口名为键的对象）每项一个窗口；顶层那一个（窗口名是 `rateLimitType`）不在
+/// 里面就另报一条；`unifiedWindows` 没有或是空的，只报顶层那一个。
 fn rate_limit(v: &Value) -> RateLimitInfo {
     let info = v.get("rate_limit_info").cloned().unwrap_or(Value::Null);
-    let unified: Vec<RateWindow> = info
+    let mut candidates: Vec<(String, &Value)> = info
         .get("unifiedWindows")
         .and_then(Value::as_object)
-        .map(|m| m.iter().map(|(name, w)| window(name.clone(), w)).collect())
+        .map(|m| m.iter().map(|(name, w)| (name.clone(), w)).collect())
         .unwrap_or_default();
+    if let Some(top) = s(&info, "rateLimitType")
+        && !candidates.iter().any(|(name, _)| *name == top)
+    {
+        candidates.push((top, &info));
+    }
+    let total = candidates.len();
+    let windows: Vec<RateWindow> = candidates
+        .into_iter()
+        .filter_map(|(name, w)| window(name, w))
+        .collect();
     RateLimitInfo {
-        windows: if unified.is_empty() {
-            s(&info, "rateLimitType")
-                .map(|name| window(name, &info))
-                .into_iter()
-                .collect()
-        } else {
-            unified
-        },
+        incomplete: u32::try_from(total - windows.len()).unwrap_or(u32::MAX),
+        windows,
     }
 }
 
@@ -344,6 +393,141 @@ mod tests {
         assert_eq!(parse_line("[1,2]"), Err(LineError::NotJson));
         let long = format!("\"{}\"", "x".repeat(MAX_LINE_BYTES));
         assert!(matches!(parse_line(&long), Err(LineError::TooLong { .. })));
+    }
+
+    fn result_of(extra: &str) -> TurnResult {
+        let line = format!(
+            r#"{{"type":"result","subtype":"success","is_error":false,"usage":{{"input_tokens":7,"output_tokens":8,"cache_read_input_tokens":9,"cache_creation_input_tokens":10}},"total_cost_usd":99.0,"modelUsage":{{"m":{{"inputTokens":1000,"costUSD":99.0}}}}{extra}}}"#
+        );
+        match parse_line(&line).unwrap() {
+            CliEvent::Result(r) => r,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 方案 6.3：各模型相加；累计值（total_cost_usd、modelUsage）不进来。期望值手写。
+    #[test]
+    fn usage_sums_models_since_last_result() {
+        let r = result_of(
+            r#","model_usage_since_last_result":{"a":{"inputTokens":1,"outputTokens":2,"cacheReadInputTokens":3,"cacheCreationInputTokens":4,"costUSD":0.25},"b":{"inputTokens":10,"outputTokens":20,"cacheReadInputTokens":30,"cacheCreationInputTokens":40,"costUSD":0.5}}"#,
+        );
+        assert_eq!(
+            r.usage,
+            Usage {
+                input_tokens: 11,
+                output_tokens: 22,
+                cache_read_tokens: 33,
+                cache_write_tokens: 44,
+                cost_usd: Some(0.75),
+            }
+        );
+        assert!(!r.usage_fallback);
+    }
+
+    #[test]
+    fn usage_edge_cases() {
+        // 键在、对象空：token 0、费用 0（bad_model 样本）
+        let empty = result_of(r#","model_usage_since_last_result":{}"#);
+        assert_eq!(
+            empty.usage,
+            Usage {
+                cost_usd: Some(0.0),
+                ..Usage::default()
+            }
+        );
+        assert!(!empty.usage_fallback);
+        // 有一个模型缺 costUSD：费用不知道，token 照加
+        let partial = result_of(
+            r#","model_usage_since_last_result":{"a":{"inputTokens":1,"costUSD":0.25},"b":{"inputTokens":2}}"#,
+        );
+        assert_eq!(
+            (partial.usage.input_tokens, partial.usage.cost_usd),
+            (3, None)
+        );
+        // 键整个没有：token 退到 result.usage、费用 None、记退路；不拿累计值顶替
+        let missing = result_of("");
+        assert_eq!(
+            missing.usage,
+            Usage {
+                input_tokens: 7,
+                output_tokens: 8,
+                cache_read_tokens: 9,
+                cache_write_tokens: 10,
+                cost_usd: None,
+            }
+        );
+        assert!(missing.usage_fallback);
+    }
+
+    /// S5 审查 1/F-3：错误标记缺失或不是布尔值时记成「不知道」，工具结果算失败。
+    #[test]
+    fn error_flags_are_not_defaulted_to_success() {
+        let line = r#"{"type":"result","subtype":"success","is_error":"true","api_error_status":404,"terminal_reason":"api_error"}"#;
+        let CliEvent::Result(r) = parse_line(line).unwrap() else {
+            panic!()
+        };
+        assert_eq!(r.facts.is_error, None);
+        let line = r#"{"type":"result","subtype":"success"}"#;
+        let CliEvent::Result(r) = parse_line(line).unwrap() else {
+            panic!()
+        };
+        assert_eq!(r.facts.is_error, None, "缺失也一样");
+        for flag in [r#""is_error":"false","#, "", r#""is_error":1,"#] {
+            let line = format!(
+                r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t",{flag}"content":"x"}}]}}}}"#
+            );
+            let CliEvent::User { tool_results } = parse_line(&line).unwrap() else {
+                panic!()
+            };
+            assert!(tool_results[0].is_error, "{flag}");
+        }
+        let ok = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t","is_error":false,"content":"x"}]}}"#;
+        let CliEvent::User { tool_results } = parse_line(ok).unwrap() else {
+            panic!()
+        };
+        assert!(!tool_results[0].is_error, "对照：明确的 false 才算成功");
+    }
+
+    fn quota(info: &str) -> RateLimitInfo {
+        match parse_line(&format!(
+            r#"{{"type":"rate_limit_event","rate_limit_info":{info}}}"#
+        ))
+        .unwrap()
+        {
+            CliEvent::RateLimit(r) => r,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 方案 6.4：顶层窗口不在 unifiedWindows 里另报一条；名字已在就不重复；没有 unifiedWindows 只报顶层；
+    /// 数值缺失或不是数的窗口不报、记个数。
+    #[test]
+    fn quota_windows() {
+        let w = |name: &str, u: f64, r: i64| RateWindow {
+            window: name.into(),
+            utilization: u,
+            resets_at: r,
+        };
+        let both = quota(
+            r#"{"rateLimitType":"five_hour","utilization":0.1,"resetsAt":100,"unifiedWindows":{"seven_day":{"utilization":0.74,"resetsAt":200}}}"#,
+        );
+        assert_eq!(
+            both.windows,
+            [w("seven_day", 0.74, 200), w("five_hour", 0.1, 100)]
+        );
+        let same = quota(
+            r#"{"rateLimitType":"seven_day","utilization":0.74,"resetsAt":200,"unifiedWindows":{"seven_day":{"utilization":0.74,"resetsAt":200}}}"#,
+        );
+        assert_eq!(same.windows, [w("seven_day", 0.74, 200)]);
+        let top_only = quota(r#"{"rateLimitType":"seven_day","utilization":0.5,"resetsAt":7}"#);
+        assert_eq!(top_only.windows, [w("seven_day", 0.5, 7)]);
+        let gaps = quota(
+            r#"{"rateLimitType":"five_hour","resetsAt":100,"unifiedWindows":{"a":{"utilization":"0.3","resetsAt":1},"b":{"utilization":0.2,"resetsAt":2}}}"#,
+        );
+        assert_eq!(
+            (gaps.windows.clone(), gaps.incomplete),
+            (vec![w("b", 0.2, 2)], 2)
+        );
     }
 
     #[test]

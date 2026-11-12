@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use iwork_bridge_claude::cli::errors::TurnEnd;
+use iwork_bridge_claude::cli::events::Usage;
 use iwork_bridge_claude::cli::facts::IsolationBroken;
 use iwork_bridge_claude::cli::map::{Fatal, Out, QuotaWindow, Report, StreamMapper};
 use serde_json::Value;
@@ -185,7 +186,7 @@ fn rate_limit_event_maps_to_quota() {
         [vec![QuotaWindow {
             window: "seven_day".into(),
             used_pct: 74,
-            resets_at_secs: Some(1_794_855_600),
+            resets_at_secs: 1_794_855_600,
         }]]
     );
 }
@@ -310,5 +311,111 @@ fn settings_ignored_is_detected() {
         Some(Fatal::Isolation(IsolationBroken {
             reported: Some("default".into())
         }))
+    );
+}
+
+/// 一个 `result` 转出的用量的手写期望：(输入, 输出, 缓存读, 缓存写, 费用)。
+type Expect = (u64, u64, u64, u64, f64);
+
+fn usages(out: &[Out]) -> Vec<Usage> {
+    out.iter()
+        .filter_map(|o| match o {
+            Out::Report(Report::Usage(u)) => Some(u.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 方案 6.3：每个 `result` 报的是这一个 `result` 新增的用量，不是累计值（S5 审查 1/F-1）。三件事：
+/// ① 转出的值等于手写期望（含 text_multiturn 第 2 轮 0.00140933、resume 0.00023148）；
+/// ② 同一进程相邻两个 `result`：后一个的 total_cost_usd 减前一个的，等于后一个转出的费用；modelUsage 的 token 同理；
+/// ③ 续接那一轮转出的费用小于它的 total_cost_usd（历史没被算进来）。
+#[test]
+fn usage_is_per_result_delta() {
+    let expected: [(&str, &[Expect]); 6] = [
+        (
+            "text_multiturn",
+            &[
+                (2, 5, 11_888, 9_413, 0.002_004_18),
+                (2, 5, 15_063, 6_280, 0.001_409_33),
+            ],
+        ),
+        ("tool_allowed", &[(4, 90, 35_935, 6_876, 0.001_779_95)]),
+        ("tool_denied", &[(4, 308, 35_931, 6_910, 0.001_895_71)]),
+        ("resume", &[(2, 5, 21_318, 78, 0.000_231_48)]),
+        ("bad_model", &[(0, 0, 0, 0, 0.0)]),
+        (
+            "interrupt_set_model",
+            &[
+                (2, 87, 14_591, 6_726, 0.001_534_81),
+                (2, 6, 21_317, 287, 0.000_273_77),
+            ],
+        ),
+    ];
+    for (name, want) in expected {
+        let got = usages(&run(name));
+        assert_eq!(got.len(), want.len(), "{name}：每个 result 报一条");
+        for (i, (u, w)) in got.iter().zip(want).enumerate() {
+            assert_eq!(
+                (
+                    u.input_tokens,
+                    u.output_tokens,
+                    u.cache_read_tokens,
+                    u.cache_write_tokens
+                ),
+                (w.0, w.1, w.2, w.3),
+                "{name} 第 {} 个 result 的 token",
+                i + 1
+            );
+            let cost = u.cost_usd.unwrap_or_else(|| panic!("{name}：费用应当有"));
+            assert!(
+                (cost - w.4).abs() < 1e-12,
+                "{name} 第 {} 个：{cost} ≠ {}",
+                i + 1,
+                w.4
+            );
+        }
+
+        // ② 用样本里的累计值核对「增量」这个语义本身
+        let results: Vec<Value> = fixture(name)
+            .iter()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .filter(|v| v["type"] == "result")
+            .collect();
+        for i in 1..results.len() {
+            let delta = results[i]["total_cost_usd"].as_f64().unwrap()
+                - results[i - 1]["total_cost_usd"].as_f64().unwrap();
+            assert!(
+                (delta - got[i].cost_usd.unwrap()).abs() < 1e-9,
+                "{name}：累计差 {delta} 与第 {} 个的增量不符",
+                i + 1
+            );
+            let tokens = |v: &Value, key: &str| -> u64 {
+                v["modelUsage"]
+                    .as_object()
+                    .unwrap()
+                    .values()
+                    .map(|m| m[key].as_u64().unwrap())
+                    .sum()
+            };
+            assert_eq!(
+                tokens(&results[i], "outputTokens") - tokens(&results[i - 1], "outputTokens"),
+                got[i].output_tokens,
+                "{name}：modelUsage 的累计差"
+            );
+        }
+    }
+    // ③ 续接：历史在累计值里，不在转出的增量里
+    let resume_total = fixture("resume")
+        .iter()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .find(|v| v["type"] == "result")
+        .unwrap()["total_cost_usd"]
+        .as_f64()
+        .unwrap();
+    let resume_cost = usages(&run("resume"))[0].cost_usd.unwrap();
+    assert!(
+        resume_cost < resume_total,
+        "{resume_cost} 应小于 {resume_total}"
     );
 }

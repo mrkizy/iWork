@@ -1,6 +1,6 @@
 Control(ControlResponse { request_id: Some("init-1"), success: true, current_permission_mode: Some("dontAsk") })
 Report(Model { id: "claude-haiku-5-5", effort: "low" })
 Text("ONE")
-Report(Quota([QuotaWindow { window: "seven_day", used_pct: 74, resets_at_secs: Some(1794855600) }]))
-Report(Usage(Usage { input_tokens: 2, output_tokens: 5, cache_read_tokens: 21318, cache_write_tokens: 78, cost_usd: Some(0.00364499) }))
+Report(Quota([QuotaWindow { window: "seven_day", used_pct: 74, resets_at_secs: 1794855600 }]))
+Report(Usage(Usage { input_tokens: 2, output_tokens: 5, cache_read_tokens: 21318, cache_write_tokens: 78, cost_usd: Some(0.00023148000000000003) }))
 End(Completed)

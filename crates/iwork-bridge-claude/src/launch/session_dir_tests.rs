@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 use super::*;
 
@@ -122,4 +123,74 @@ fn sweep_removes_only_dead_owners_dirs() {
     assert!(crowded.path().exists());
     // 没有 run/h 时什么都不做
     assert_eq!(sweep(data().path()).unwrap(), 0);
+}
+
+/// 一个已经退出的进程号。
+fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    pid
+}
+
+/// 在 `dir` 下摆一个和会话目录同形的私有目录：12 位十六进制名字、0700、属主文件是死进程，外加一个哨兵文件
+/// （名字也在那四个之内，清扫要是越界就会删掉它）。返回那个哨兵。
+fn plant_lookalike(dir: &Path) -> PathBuf {
+    let victim = dir.join("abcdefabcdef");
+    fs::create_dir_all(&victim).unwrap();
+    fs::set_permissions(&victim, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(victim.join(OWNER), dead_pid().to_string()).unwrap();
+    let sentinel = victim.join(SETTINGS);
+    fs::write(&sentinel, b"outside").unwrap();
+    sentinel
+}
+
+/// S5 审查 1/F-2：`run/h` 是指向外部的链接时，清扫不跟过去，外部的同形目录原样留着。
+#[test]
+fn sweep_does_not_follow_linked_root() {
+    let d = data();
+    let outside = tempfile::tempdir().unwrap();
+    fs::set_permissions(outside.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let sentinel = plant_lookalike(outside.path());
+    fs::create_dir_all(d.path().join("run")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), root(d.path())).unwrap();
+    assert!(sweep(d.path()).is_err(), "根是链接：报错，不清");
+    assert!(sentinel.exists(), "外部的哨兵文件还在");
+}
+
+/// 链路中间那一段（`run`）是链接：同样不跟。
+#[test]
+fn sweep_does_not_follow_linked_middle_segment() {
+    let d = data();
+    let outside = tempfile::tempdir().unwrap();
+    let h = outside.path().join("h");
+    fs::create_dir_all(&h).unwrap();
+    fs::set_permissions(&h, fs::Permissions::from_mode(0o700)).unwrap();
+    let sentinel = plant_lookalike(&h);
+    std::os::unix::fs::symlink(outside.path(), d.path().join("run")).unwrap();
+    assert!(sweep(d.path()).is_err());
+    assert!(sentinel.exists());
+    // 对照：同样的同形目录放在真的 run/h 下面，清扫会删掉它（证明上面没删不是因为同形目录不合格）
+    let d2 = data();
+    let r = root(d2.path());
+    fs::create_dir_all(&r).unwrap();
+    fs::set_permissions(&r, fs::Permissions::from_mode(0o700)).unwrap();
+    let inside = plant_lookalike(&r);
+    assert_eq!(sweep(d2.path()).unwrap(), 1);
+    assert!(!inside.exists());
+}
+
+/// 创建也走同一个检查：`run` 是链接时拒绝，不在外部建目录。
+#[test]
+fn create_refuses_linked_middle_segment() {
+    let d = data();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), d.path().join("run")).unwrap();
+    let err = SessionDir::create(d.path()).unwrap_err();
+    assert!(err.0.contains("符号链接"), "{err}");
+    assert_eq!(
+        fs::read_dir(outside.path()).unwrap().count(),
+        0,
+        "外部没被写进任何东西"
+    );
 }
