@@ -1,0 +1,496 @@
+//! 装配脚本 `scripts/assemble-release.sh`（T04p 方案 4.2；R1–R6、R9、R10）。夹具是假的 `.app`（或 Linux 的程序），
+//! 不跑 `tauri build`；核对用真的 `check-install` 示例程序。缺 bash、jq 时失败并说明，不跳过。
+#![cfg(unix)]
+
+mod package_support;
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::OnceLock;
+
+use iwork_ipc::peer::{ImageId, MANIFEST_FILE, Manifest, Want, file_image_ids};
+use package_support::*;
+
+/// `check-install` 示例程序。只跑这一个测试文件时 cargo 不编示例程序，这里用同一个 cargo、同一个 profile 补编一次。
+fn check_install() -> &'static Path {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let profile_dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let path = profile_dir.join("examples/check-install");
+        if !path.exists() {
+            let mut cmd = Command::new(env!("CARGO"));
+            cmd.args([
+                "build",
+                "-q",
+                "-p",
+                "iwork-daemon",
+                "--example",
+                "check-install",
+            ])
+            .arg("--manifest-path")
+            .arg(repo_root().join("Cargo.toml"));
+            if profile_dir.file_name().unwrap() == "release" {
+                cmd.arg("--release");
+            }
+            run(&mut cmd);
+        }
+        assert!(path.exists(), "编完还是没有 {}", path.display());
+        path
+    })
+}
+
+/// 一次装配的输入：Tauri 的包（macOS）、包外的客户端与后台程序、成品目录。
+struct Inputs {
+    _t: tempfile::TempDir,
+    root: PathBuf,
+    app: PathBuf,
+    client: PathBuf,
+    daemon: PathBuf,
+    dist: PathBuf,
+}
+
+impl Inputs {
+    fn new(version: &str) -> Inputs {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let bins = root.join("bins");
+        let client = place_program(&bins, CLIENT, version);
+        let daemon = place_program(&bins, DAEMON, version);
+        // Tauri 打出来的样子：只有客户端，没有封印（macOS）
+        let app_root = root.join("tauri");
+        let app = app_root.join("iWork.app");
+        if cfg!(target_os = "macos") {
+            let macos = app_skeleton(&app_root);
+            std::fs::copy(&client, macos.join(CLIENT)).unwrap();
+        }
+        Inputs {
+            root: root.clone(),
+            app,
+            client,
+            daemon,
+            dist: root.join("dist"),
+            _t: t,
+        }
+    }
+
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(repo_root().join("scripts/assemble-release.sh"));
+        if cfg!(target_os = "macos") {
+            cmd.arg("--app").arg(&self.app);
+        }
+        cmd.arg("--client")
+            .arg(&self.client)
+            .arg("--daemon")
+            .arg(&self.daemon)
+            .arg("--check")
+            .arg(check_install())
+            .arg("--dist")
+            .arg(&self.dist)
+            .env_remove("IWORK_SIGN_IDENTITY")
+            .env_remove("IWORK_SIGN_KEYCHAIN");
+        cmd
+    }
+
+    fn assemble(&self) -> Output {
+        self.command().output().unwrap()
+    }
+
+    /// 形态 A 的成品里放程序的目录。
+    fn unsigned_bin(&self) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            self.dist.join("unsigned/iWork.app/Contents/MacOS")
+        } else {
+            self.dist.join("linux/iwork")
+        }
+    }
+
+    fn product(&self) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            self.dist.join("unsigned/iWork.app")
+        } else {
+            self.dist.join("linux/iwork")
+        }
+    }
+}
+
+fn ok(out: &Output) {
+    assert!(
+        out.status.success(),
+        "退出 {:?}\nstdout：{}\nstderr：{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// 目录下每个文件的相对路径与全部内容，按路径排序。用来证明「一个字节都没动」。
+fn digest_tree(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                let bytes = std::fs::read(&p).unwrap();
+                out.push((p.strip_prefix(dir).unwrap().to_path_buf(), bytes));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn dist_entries(dist: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dist)
+        .map(|rd| {
+            rd.map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// R1：装配后的包里后台、客户端、清单都在同一个目录（macOS 的 `Contents/MacOS`）。
+#[test]
+fn assemble_puts_daemon_next_to_client() {
+    let i = Inputs::new("a");
+    ok(&i.assemble());
+    let bin = i.unsigned_bin();
+    for name in [DAEMON, CLIENT, MANIFEST_FILE] {
+        assert!(bin.join(name).is_file(), "{} 不在 {}", name, bin.display());
+    }
+    assert_eq!(
+        std::fs::read(bin.join(DAEMON)).unwrap(),
+        std::fs::read(&i.daemon).unwrap(),
+        "放进去的就是给的后台程序"
+    );
+    assert_eq!(
+        dist_entries(&i.dist),
+        [if cfg!(target_os = "macos") {
+            "unsigned"
+        } else {
+            "linux"
+        }],
+        "发布完没有留下暂存或留底"
+    );
+}
+
+/// R1 `binary_names_agree_everywhere`：后台、客户端的名字在四处写的是同一组——后台代码的两个常量、客户端找后台用的
+/// 常量（去掉平台的可执行后缀）、清单脚本的 BINARIES、装配脚本的 PROGRAMS。改一处不改别处就红。
+#[test]
+fn binary_names_agree_everywhere() {
+    let script_list = |file: &str, var: &str| -> Vec<String> {
+        let text = std::fs::read_to_string(repo_root().join(file)).unwrap();
+        let line = text
+            .lines()
+            .find(|l| l.starts_with(&format!("{var}=(")))
+            .unwrap_or_else(|| panic!("{file} 里没有 {var}=(…)"));
+        let inner = line
+            .split_once('(')
+            .and_then(|(_, r)| r.split_once(')'))
+            .unwrap()
+            .0;
+        let mut names: Vec<String> = inner.split_whitespace().map(str::to_owned).collect();
+        names.sort();
+        names
+    };
+    let mut code = vec![DAEMON.to_owned(), CLIENT.to_owned()];
+    code.sort();
+    assert_eq!(
+        script_list("scripts/write-install-manifest.sh", "BINARIES"),
+        code
+    );
+    assert_eq!(script_list("scripts/assemble-release.sh", "PROGRAMS"), code);
+    let launcher_daemon = iwork_client_core::launcher::DAEMON_FILE
+        .strip_suffix(std::env::consts::EXE_SUFFIX)
+        .unwrap_or(iwork_client_core::launcher::DAEMON_FILE);
+    assert_eq!(launcher_daemon, DAEMON, "客户端找后台用的名字");
+}
+
+/// R3 `manifest_matches_final_files`：重算成品里两个程序的身份，等于清单里登记的。
+#[test]
+fn manifest_matches_final_files() {
+    let i = Inputs::new("a");
+    ok(&i.assemble());
+    let bin = i.unsigned_bin();
+    let manifest = Manifest::load(&bin.join(MANIFEST_FILE)).unwrap();
+    for name in [DAEMON, CLIENT] {
+        let listed = manifest.binaries.get(name).unwrap();
+        let mut on_disk = file_image_ids(&bin.join(name), Want::All).unwrap();
+        let mut want = listed.clone();
+        on_disk.sort_by_key(ImageId::to_string);
+        want.sort_by_key(ImageId::to_string);
+        assert_eq!(on_disk, want, "{name}");
+    }
+}
+
+/// R9 `assemble_requires_explicit_paths`：少给一个路径参数就是用法错（退出 2），不去找默认位置。
+#[test]
+fn assemble_requires_explicit_paths() {
+    let i = Inputs::new("a");
+    let mut cmd = Command::new(repo_root().join("scripts/assemble-release.sh"));
+    if cfg!(target_os = "macos") {
+        cmd.arg("--app").arg(&i.app);
+    }
+    cmd.arg("--client")
+        .arg(&i.client)
+        .arg("--daemon")
+        .arg(&i.daemon)
+        .arg("--dist")
+        .arg(&i.dist); // 少了 --check
+    let out = cmd.output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(!i.dist.exists(), "用法错时什么都不建");
+}
+
+/// R6 `failed_check_keeps_previous_artifact`：成品路径上先有一个好包；这次核对不过 → 非零退出，原成品一个字节都没动，
+/// 没有留下暂存。
+#[test]
+fn failed_check_keeps_previous_artifact() {
+    let i = Inputs::new("a");
+    ok(&i.assemble());
+    let before = digest_tree(&i.product());
+    // 一个总说「不过」的核对程序
+    let fake_check = i.root.join("check-fails");
+    write_executable(&fake_check, "#!/bin/sh\necho 形态 FAIL 故意的\nexit 1\n");
+    let out = i
+        .command()
+        .args(["--check"])
+        .arg(&fake_check)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(digest_tree(&i.product()), before, "原成品没动");
+    assert_eq!(
+        dist_entries(&i.dist),
+        [if cfg!(target_os = "macos") {
+            "unsigned"
+        } else {
+            "linux"
+        }]
+    );
+}
+
+/// R6 `interrupted_run_never_exposes_unchecked`：
+/// ① 核对当中被 kill -9：成品路径上是原来的好包，留下一个 `.staging-*`；
+/// ② 再打一次：`.staging-*` 被清掉；
+/// ③ 断在两次改名之间（旧成品已改名留底、新的还没到位）：下一次开头把留底改回成品；
+/// ④ 新成品已到位、留底还在：下一次开头删留底。
+/// （改名之间那两刻用盘上的样子造出来；杀在核对当中是真杀。）
+#[test]
+fn interrupted_run_never_exposes_unchecked() {
+    let i = Inputs::new("a");
+    ok(&i.assemble());
+    let good = digest_tree(&i.product());
+    let form_dir = i.product().parent().unwrap().to_path_buf();
+    let name = i.product().file_name().unwrap().to_owned();
+
+    // ① 核对卡住时杀
+    let hang = i.root.join("check-hangs");
+    let marker = i.root.join("check-started");
+    write_executable(
+        &hang,
+        &format!("#!/bin/sh\ntouch '{}'\nexec sleep 30\n", marker.display()),
+    );
+    let mut child = i.command().arg("--check").arg(&hang).spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !marker.exists() {
+        assert!(std::time::Instant::now() < deadline, "核对没开始");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // SAFETY：只对自己起的子进程发信号
+    unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
+    let _ = child.wait();
+    assert_eq!(digest_tree(&i.product()), good, "成品路径上还是原来的好包");
+    assert!(
+        dist_entries(&i.dist)
+            .iter()
+            .any(|n| n.starts_with(".staging-")),
+        "被 kill -9 时删不到暂存：{:?}",
+        dist_entries(&i.dist)
+    );
+    // 卡住的 sleep 留着也不影响；收掉它
+    let _ = Command::new("pkill")
+        .arg("-f")
+        .arg(hang.to_str().unwrap())
+        .status();
+
+    // ② 再打一次：暂存清掉，照常发布
+    ok(&i.assemble());
+    assert!(
+        !dist_entries(&i.dist).iter().any(|n| n.starts_with('.')),
+        "{:?}",
+        dist_entries(&i.dist)
+    );
+
+    // ③ 断在两次改名之间：成品不在、留底在 → 改回去（用一个核对必然失败的运行来触发开头的恢复，不发布新的）
+    let current = digest_tree(&i.product());
+    std::fs::rename(i.product(), form_dir.join(".old-99999")).unwrap();
+    let fake_check = i.root.join("check-fails");
+    write_executable(&fake_check, "#!/bin/sh\nexit 1\n");
+    let out = i
+        .command()
+        .arg("--check")
+        .arg(&fake_check)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(digest_tree(&i.product()), current, "留底改回了成品");
+    assert!(!form_dir.join(".old-99999").exists());
+
+    // ④ 成品在、留底也在 → 删留底
+    let leftover = form_dir.join(".old-88888");
+    std::fs::create_dir_all(leftover.join("x")).unwrap();
+    let out = i
+        .command()
+        .arg("--check")
+        .arg(&fake_check)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!leftover.exists(), "留底被删");
+    assert_eq!(digest_tree(&form_dir.join(&name)), current);
+}
+
+fn write_executable(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, text).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::*;
+
+    /// R9 `assemble_stops_when_app_missing`：`--app` 指的位置没有包 → 停。
+    #[test]
+    fn assemble_stops_when_app_missing() {
+        let i = Inputs::new("a");
+        std::fs::remove_dir_all(&i.app).unwrap();
+        let out = i.assemble();
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(
+            stderr(&out).contains("找不到 Tauri 的包"),
+            "{}",
+            stderr(&out)
+        );
+    }
+
+    /// R3 `assemble_stops_when_bundled_client_differs`：包里的主程序被改了一个字节 → 停，不发布。
+    #[test]
+    fn assemble_stops_when_bundled_client_differs() {
+        let i = Inputs::new("a");
+        let bundled = i.app.join("Contents/MacOS").join(CLIENT);
+        let mut bytes = std::fs::read(&bundled).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        std::fs::write(&bundled, bytes).unwrap();
+        let out = i.assemble();
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(stderr(&out).contains("不是同一份"), "{}", stderr(&out));
+        assert!(!i.product().exists());
+    }
+
+    /// R5 `assemble_stops_on_presealed_bundle`：Tauri 的包已有封印 → 停。
+    #[test]
+    fn assemble_stops_on_presealed_bundle() {
+        let i = Inputs::new("a");
+        run(Command::new("codesign").args(["-f", "-s", "-"]).arg(&i.app));
+        let out = i.assemble();
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(
+            stderr(&out).contains("Tauri 给包签了名"),
+            "{}",
+            stderr(&out)
+        );
+        assert!(!i.product().exists());
+    }
+
+    fn signed_command(i: &Inputs, s: &Signer) -> Command {
+        let mut cmd = i.command();
+        cmd.env("IWORK_SIGN_IDENTITY", &s.identity)
+            .env("IWORK_SIGN_KEYCHAIN", &s.keychain);
+        cmd
+    }
+
+    /// R4 `signed_bundle_verifies` 与对照 `file_added_after_seal_fails_check`：形态 B 装配后整包验签过、核对三件都过；
+    /// 成品里再放一个文件，核对不过。
+    #[test]
+    fn signed_bundle_verifies() {
+        let i = Inputs::new("b");
+        let s = Signer::new("iWork assemble signed");
+        ok(&signed_command(&i, &s).output().unwrap());
+        let app = i.dist.join("signed/iWork.app");
+        run(Command::new("codesign")
+            .args(["--verify", "--deep", "--strict"])
+            .arg(&app));
+        let bin = app.join("Contents/MacOS");
+        assert!(!bin.join(MANIFEST_FILE).exists(), "签名的包里没有清单");
+        let checked = Command::new(check_install())
+            .arg(&bin)
+            .arg("--expect-leaf")
+            .arg(hex::encode(s.leaf))
+            .output()
+            .unwrap();
+        ok(&checked);
+
+        std::fs::write(app.join("Contents/Resources/extra.txt"), "多出来的").unwrap();
+        let after = Command::new(check_install()).arg(&bin).output().unwrap();
+        assert_eq!(after.status.code(), Some(1), "封印之后多一个文件：核对不过");
+    }
+
+    /// R2 `signed_form_refuses_leftover_manifest`：Tauri 的包里有一份清单（比如上一次的），形态 B 装配 → 停（I2）。
+    #[test]
+    fn signed_form_refuses_leftover_manifest() {
+        let i = Inputs::new("b");
+        let s = Signer::new("iWork assemble leftover");
+        std::fs::write(i.app.join("Contents/MacOS").join(MANIFEST_FILE), "{}").unwrap();
+        let out = signed_command(&i, &s).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(
+            stderr(&out).contains("签名的包里不能有清单"),
+            "{}",
+            stderr(&out)
+        );
+        assert!(!i.dist.join("signed/iWork.app").exists());
+    }
+
+    /// R10 `adhoc_identity_fails_before_publish` 的前一半：`IWORK_SIGN_IDENTITY=-` 或空 → 第 0 步就停，`dist/` 里没有它。
+    /// （后一半「绕过第 0 步、ad-hoc 整包签名的包过不了核对」在 tests/check_install.rs。）
+    #[test]
+    fn adhoc_identity_fails_before_publish() {
+        for id in ["-", ""] {
+            let i = Inputs::new("b");
+            let out = i.command().env("IWORK_SIGN_IDENTITY", id).output().unwrap();
+            assert_eq!(out.status.code(), Some(1), "{id:?}：{}", stderr(&out));
+            assert!(stderr(&out).contains("ad-hoc"), "{}", stderr(&out));
+            assert!(!i.dist.join("signed").exists());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_refuses_sign_identity() {
+    let i = Inputs::new("a");
+    let out = i
+        .command()
+        .env("IWORK_SIGN_IDENTITY", "anything")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr(&out).contains("没有签名的形态"));
+}
