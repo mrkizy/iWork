@@ -192,9 +192,17 @@ pub fn wait_readies(sb: &Sandbox, n: usize, limit: Duration) -> Vec<String> {
 
 /// 起安装目录里的后台（加快安装检查的计时），等它就绪。
 pub fn start(sb: &Sandbox, inst: &Install, args: &[&str]) -> Daemon {
+    let before = readies(sb).len();
     let d = sb.spawn_exe(&inst.daemon(), args, &[FAST]);
-    sb.wait_ready(d.pid(), START);
+    wait_ready_logged(sb, d.pid(), before);
     d
+}
+
+/// 等 `pid` 就绪，并等它的「后台服务就绪」那行日志写下来。后台先把状态文件写成 Ready、再记这行日志，日志还经异步
+/// 写线程落盘：只等状态文件就去读日志里最后一次就绪，读到的可能还是前任的（CI run 43236780312）。
+pub fn wait_ready_logged(sb: &Sandbox, pid: u32, readies_before: usize) {
+    sb.wait_ready(pid, START);
+    wait_readies(sb, readies_before + 1, START);
 }
 
 fn installed(sb: &Sandbox, tag: &str) -> Install {
@@ -343,8 +351,9 @@ fn old_daemon_restarted_mid_install_still_upgrades_via_standby() {
     standby.wait_stderr("等锁接班", START);
     inst.put("iwork-daemon", "B");
     // 磁盘上已是 B 的后台、清单还是 A：A 崩了，等锁的实例 exec 磁盘上的程序（B）接班
+    let before = readies(&sb).len();
     a.kill9();
-    sb.wait_ready(standby.pid(), START);
+    wait_ready_logged(&sb, standby.pid(), before);
     let r = readies(&sb);
     assert_eq!(r.last().unwrap(), &inst.image("B"), "接班的是磁盘上的 B");
     let before = r.len();
