@@ -94,6 +94,7 @@
 - T10f A：92e3827 已推，ad7b3f77 审（任务 2026-11-13-m1-t10f-a）；`b57765cc` 开 script6。
 - T04p 第 3 版 8fd61b2，9a5980a0 审第 3 轮（最后一轮）。T10a 表第 2 版 7a531fc，8036b426 审。
 - 待转设计窗口：tokens.css 259 行 --sidebar-w-max 注释「主区域至少 480」与 12b 的 568 不一致；P4 沙箱依赖缺失时的提示文案。
+- 墙钟测试排查（e355ed8c，表在它 scratchpad wallclock_survey.tsv，237 行）：第一批（agent-acp process.rs:567、ipc slow_consumer、client-core launcher、daemon process wait_ready/outbox、store crash_injection）在修，分支 fix-wallclock-tests-1；第二批等 T09 组 3、T10a 步 2 合入（client-core settle/record/composer、core turn_runner.rs:622 虚拟时钟下忙等真 5 秒）；daemon install cooldown 要可注入时钟（产品代码，小卡）；顺带记下的竞态：core turn_runner answer_arriving_while_cancelling、fake-agent permission_wait.rs:280、ipc protocol_violation audit>=7。
 - 小卡待排：iwork-ipc slow_consumer 延迟阈值在高负载下偶发；iwork-agent-acp `process::tests::slow_scan_does_not_block_the_async_thread`（process.rs:567，最长停顿 <150ms）在 CI macOS 偶发（T06 侧，2026-11-13 T09 2b CI 撞到一次）；iwork-daemon `tasks::outbox::tests::lane_drains_more_than_one_page`（outbox.rs:751，40 条 5 秒墙钟）在 CI Windows 偶发：2026-11-13 main c90f1f2 卡在第 21 条、第二页中途（不在翻页边界），按 6f8e5b1 的做法改成看进度；CI 主干 rust-cache 常 miss；macOS runner 容量紧，job 没分到 runner 被取消时只重跑那个 job。
 - 2026-11-13 夜：T10a 方案 9 轮定稿（677d5f4 定稿后小改），组 A 开工（c87fefd6 步 1、e6a27582 步 2）；S6-4 第 1 轮 3 条交 4ea1efca；T09 2b 第 9 轮 e036441c 在审；script6 第一批 6 轮通过、第二批第 1 轮 8 条交 b57765cc，分支 CI 等 macOS 重跑。
 
