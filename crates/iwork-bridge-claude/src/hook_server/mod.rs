@@ -35,6 +35,9 @@ use self::pending::{CallId, Pending};
 /// 请求头（和正文）最多等多久读完（2.4 第 4 步）。
 pub const HEADER_READ_LIMIT: Duration = Duration::from_secs(2);
 
+/// accept 出错后隔多久再试。
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
+
 /// 令牌校验没过时回给模型的话（4.6 第 4 行）。
 pub const REASON_TOKEN_REJECTED: &str = "iWork 审批通道校验失败，这次调用没有执行";
 
@@ -153,7 +156,11 @@ impl HookServer {
                     Ok((stream, _)) => {
                         conns.spawn(handle(stream, Arc::clone(&self.ctx)));
                     }
-                    Err(e) => tracing::warn!(target: AUDIT_TARGET, error = %e, "hook 通道 accept 失败"),
+                    Err(e) => {
+                        tracing::warn!(target: AUDIT_TARGET, error = %e, "hook 通道 accept 失败");
+                        // 文件描述符用完之类的错会一直报：歇一下，不空转
+                        tokio::time::sleep(ACCEPT_RETRY).await;
+                    }
                 },
                 // 收掉跑完的连接任务，表不无限长
                 Some(_) = conns.join_next(), if !conns.is_empty() => {}
