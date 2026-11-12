@@ -71,7 +71,9 @@ export function VirtualRows(props: VirtualRowsProps) {
       props.onOverflow?.(now);
     }
     const range = visibleOrdinals(boxes(), box.scrollTop, box.clientHeight);
-    if (range && (reported === undefined || range[0] !== reported[0] || range[1] !== reported[1])) {
+    // 两件事分开判断（审查 5/F-2）：范围变了才报是去重；用户自己滚了就算范围没变也要报，Rust 靠它作废等待中的跳转
+    const changed = range !== undefined && (reported === undefined || range[0] !== reported[0] || range[1] !== reported[1]);
+    if (range && (changed || userInput)) {
       reported = range;
       props.onVisible(range[0], range[1], userInput);
     }

@@ -143,4 +143,30 @@ describe("报可见行", () => {
     expect(t.visible.length).toBeGreaterThan(0);
     expect(t.visible.every(([, , byUser]) => !byUser)).toBe(true);
   });
+
+  // 审查 5/F-2：可见的首尾行没变（行很高、只滚了一点）时也要把这次用户滚动交给 Rust，它据此作废等待中的跳转
+  it("首尾行没变的用户滚动也报一次 byUser；同样幅度的程序滚动不报", () => {
+    vi.useFakeTimers();
+    const t = setup();
+    t.setKeys(["a", "b", "c", "d", "e", "f"]);
+    // 停在 250：可见的是第 4、5 行（d、e）
+    t.scroll.userScrollTo(250);
+    t.box.dispatchEvent(new Event("scroll"));
+    flush();
+    const settled = t.visible.at(-1);
+    expect(settled?.slice(0, 2), "对照：可见的是 d、e").toEqual([BigInt("d".charCodeAt(0)), BigInt("e".charCodeAt(0))]);
+    t.visible.length = 0;
+    // 程序滚到 270（首尾行不变）：不报
+    t.scroll.userScrollTo(270);
+    t.box.dispatchEvent(new Event("scroll"));
+    flush();
+    expect(t.visible, "程序滚动、范围没变：去重，不报").toEqual([]);
+    // 用户滚轮滚到 250（首尾行不变）：要报，且 byUser
+    t.box.dispatchEvent(new WheelEvent("wheel", { deltaY: -20 }));
+    t.scroll.userScrollTo(250);
+    t.box.dispatchEvent(new Event("scroll"));
+    flush();
+    expect(t.visible.filter(([, , byUser]) => byUser).length, "用户滚动报一次").toBe(1);
+    expect(t.visible.at(-1)?.slice(0, 2)).toEqual(settled?.slice(0, 2));
+  });
 });
