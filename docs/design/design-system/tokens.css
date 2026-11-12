@@ -255,6 +255,9 @@
   --shadow-dialog: 0 20px 50px rgba(0,0,0,.2);
 
   --sidebar-w: 296px;     /* 侧栏外宽（含内边距与右边框，box-sizing: border-box），与画布截图一致 */
+  --sidebar-w-min: 240px; /* 可拖动调宽的下限（ui-m1 2a 第 12 条） */
+  --sidebar-w-max: 390px; /* 完整侧栏上限；运行时还要保证主区域至少 480px */
+  --sidebar-w-rail: 64px; /* 仅头像形态的固定宽度；拖到约 160px 以下收成它 */
   --content-max: 720px;   /* 对话内容列 */
   --composer-max: 760px;  /* 输入框 */
 }
