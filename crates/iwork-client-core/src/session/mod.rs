@@ -6,6 +6,7 @@
 //! - 断了 → 立即重拨，之后按 `Backoff` 退避；在飞视图查询表整张清空，每种用途从状态里重新算「还要再发」。
 //! - 网页取帧是一次长等待：没有可交的就挂着，状态变了或到了 16ms 再试。
 
+mod assistant_edits;
 mod attention;
 pub mod dial;
 mod models;
@@ -433,6 +434,7 @@ impl<D: Dialer> Session<D> {
             self.ask_open_target();
             self.want_models(now);
             self.advance_start();
+            self.drive_assistant_edits();
             self.mark_read(now);
         }
         if self.store.take_back_to_latest_started() {
@@ -571,6 +573,13 @@ impl<D: Dialer> Session<D> {
                 let _ = self.effects.send(e);
                 let _ = tx.send(ok);
             }
+            Action::AssistantField {
+                assistant_id,
+                field,
+            } => {
+                let error = self.assistant_field(&assistant_id, field);
+                let _ = tx.send(pb::IntentAck { error });
+            }
             Action::Start { project_id, text } => {
                 let error = self.start(project_id, text);
                 let _ = tx.send(pb::IntentAck { error });
@@ -630,6 +639,10 @@ impl<D: Dialer> Session<D> {
                     project_id,
                     new_path: first,
                 }),
+                Some(tx),
+            ),
+            Pick::ProjectsRoot => self.send_command(
+                pb::command::Kind::SetProjectsRoot(pb::SetProjectsRoot { path: first }),
                 Some(tx),
             ),
         }
@@ -910,6 +923,9 @@ impl<D: Dialer> Session<D> {
                             last,
                             crate::store::created::Purpose::Open,
                         );
+                    }
+                    if let Some(pb::command::Kind::UpdateAssistant(u)) = &f.command.kind {
+                        self.assistant_update_done(&u.assistant_id, ack.as_ref());
                     }
                     if ack.is_none()
                         && matches!(f.command.kind, Some(pb::command::Kind::RevokeRule(_)))

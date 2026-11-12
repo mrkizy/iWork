@@ -1,0 +1,133 @@
+/* 设置页（画布 12）：整页，左栏是「‹ 返回」与几节，右边是那一节的卡片 */
+.iw-settings {
+  display: flex;
+  height: 100%;
+  background: var(--bg);
+}
+.iw-settings__nav {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 2px;
+  width: var(--sidebar-w);
+  padding: 24px 10px;
+  border-right: 1px solid var(--bd);
+  background: var(--side);
+}
+.iw-settings__back {
+  align-self: flex-start;
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  color: var(--tx3);
+  font: inherit;
+  font-size: var(--fs-sm2);
+  cursor: pointer;
+}
+.iw-settings__title {
+  margin: 16px 10px 12px;
+  color: var(--tx);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+.iw-settings__item {
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--tx2);
+  font: inherit;
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+}
+.iw-settings__item:hover {
+  background: var(--sideOn);
+}
+.iw-settings__item[aria-current="page"] {
+  background: var(--sideOn);
+  color: var(--tx);
+  font-weight: 600;
+}
+.iw-settings__body {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 32px 40px;
+}
+.iw-settings__body > * {
+  max-width: 760px;
+}
+.iw-settings__heading {
+  margin: 0 0 20px;
+  color: var(--tx);
+  font-size: var(--fs-title);
+  font-weight: 600;
+}
+.iw-settings__card {
+  margin: 0 0 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-lg);
+  background: var(--surf);
+  list-style: none;
+}
+.iw-settings__card--upcoming {
+  color: var(--tx3);
+}
+.iw-settings__card--upcoming .iw-settings__name {
+  color: var(--tx3);
+}
+.iw-settings__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 36px;
+  color: var(--tx);
+  font-size: var(--fs-md);
+}
+.iw-settings__name {
+  color: var(--tx);
+  font-weight: 600;
+}
+.iw-settings__meta {
+  color: var(--tx2);
+  font-size: var(--fs-sm2);
+}
+.iw-settings__guidance {
+  margin: 6px 0 0;
+  color: var(--warnTx);
+  font-size: var(--fs-sm2);
+}
+.iw-settings__path {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm2);
+}
+.iw-settings__group-title {
+  margin: 0 0 8px;
+  color: var(--tx2);
+  font-size: var(--fs-sm2);
+  font-weight: 600;
+}
+.iw-settings__rules {
+  padding: 4px 16px;
+}
+.iw-settings__rules > li + li {
+  border-top: 1px solid var(--bd);
+}
+.iw-settings__empty {
+  color: var(--tx3);
+}
+.iw-settings__about {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--tx);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}

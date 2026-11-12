@@ -357,6 +357,9 @@ pub fn quota_tooltip(window: &str, used: u32, reset: Option<String>) -> String {
 
 pub const RUNTIME_LOCKED_TIP: &str = "要换运行时请开新对话";
 pub const RUNTIME_NOT_IN_M1: &str = "M2 接入";
+/// 连接类整页的出口。
+pub const EXIT_RETRY: &str = "重试";
+pub const EXIT_RELAUNCH: &str = "重新打开 iWork";
 
 /// 徽标上最多写到的数（ui-m1.md 第 2 节第 4 条，产品负责人 2026-11-11 定）；再多写「99+」。
 pub const BADGE_MAX: u32 = 99;

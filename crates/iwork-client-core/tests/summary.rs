@@ -466,6 +466,63 @@ fn no_verification_label_outside_runtime_views() {
     }
 }
 
+/// 设置 › 运行时：接入了的照状态列，还没接入的（Codex、Antigravity CLI）列在后面、标「M2 接入」、置灰，
+/// 不能重新检测；接入了同名运行时以后不再重复列（画布 12）。
+#[test]
+fn settings_lists_upcoming_runtimes_after_real_ones() {
+    let mut s = with_summary(
+        vec![project(0)],
+        vec![],
+        vec![assistant("a1", "iWork", true)],
+        vec![],
+        vec![],
+    );
+    let list = |s: &iwork_client_core::store::Store| {
+        derive::settings::settings(s)
+            .runtimes
+            .into_iter()
+            .map(|r| (r.display_name, r.state_label, r.upcoming, r.can_redetect))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        list(&s),
+        vec![
+            ("Codex".to_owned(), "M2 接入".to_owned(), true, false),
+            (
+                "Antigravity CLI".to_owned(),
+                "M2 接入".to_owned(),
+                true,
+                false
+            ),
+        ],
+        "对照：还没有接入的运行时时只有这两行"
+    );
+    for (seq, id, name) in [(9, "r1", "Claude Code"), (10, "r2", "Codex")] {
+        s.apply(persisted(
+            seq,
+            &[SIDEBAR],
+            E::RuntimeUpdated(pb::RuntimeUpdated {
+                runtime: Some(pb::RuntimeStatus {
+                    runtime_id: id.into(),
+                    display_name: name.into(),
+                    state: pb::RuntimeState::ReadyVerified as i32,
+                    ..Default::default()
+                }),
+            }),
+        ));
+    }
+    let names: Vec<_> = list(&s).into_iter().map(|(n, _, up, _)| (n, up)).collect();
+    assert_eq!(
+        names,
+        vec![
+            ("Claude Code".to_owned(), false),
+            ("Codex".to_owned(), false),
+            ("Antigravity CLI".to_owned(), true),
+        ],
+        "接入了的在前；Codex 接入后不再重复列成「M2 接入」"
+    );
+}
+
 /// 额度取不到时显示「—」，悬停写原因；有值时写窗口类型（验收 5 的 Rust 侧）。
 #[test]
 fn quota_dash_and_tooltip() {

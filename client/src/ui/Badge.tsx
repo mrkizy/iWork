@@ -1,5 +1,5 @@
-// 小件：未读徽标、状态圆点、转圈。数字、状态与状态名全由 Rust 侧给（ui-m1.md 第 2 节第 4 条、2a 第 1 条）。
-import { Show } from "solid-js";
+// 小件：未读徽标、状态圆点、转圈、文字标签。数字、状态与状态名全由 Rust 侧给（ui-m1.md 第 2 节第 4 条、2a 第 1 条）。
+import { Show, type JSX } from "solid-js";
 import { DotState, type CountBadge } from "../gen/iwork/v1/view_pb";
 import "./Badge.css";
 
@@ -31,4 +31,9 @@ export function Dot(props: { state: DotState; label: string }) {
 
 export function Spinner(props: { label?: string }) {
   return <span class="iw-spinner" role="status" aria-label={props.label ?? "进行中"} />;
+}
+
+/** 文字标签（越界、卡片状态、待处理种类）。`tone` 只管颜色：warn 待处理与越界，ok 成功（ui-m1.md 3.2）。 */
+export function Tag(props: { tone?: "warn" | "ok"; children: JSX.Element }) {
+  return <span class={`iw-tag${props.tone ? ` iw-tag--${props.tone}` : ""}`}>{props.children}</span>;
 }

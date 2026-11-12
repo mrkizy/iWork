@@ -1,7 +1,9 @@
 // 预览场景确实录到了要审的状态（审查 2a F-13）：每个场景对着全量帧渲染，看画面上有没有那一处。
 // 文字都来自 Rust 的视图模型；这里只证明录像里有，不重复验派生规则（那些在 client-core 的测试里）。
+import { create } from "@bufbuild/protobuf";
 import { fireEvent, screen, within } from "@solidjs/testing-library";
 import { describe, expect, it } from "vitest";
+import { ConnectionState, ConnectionViewSchema, ViewPatchSchema } from "../gen/iwork/v1/view_pb";
 import { noFixtures, renderScenario } from "../test-fixtures";
 
 const composerBlock = () => document.querySelector(".iw-composer__block");
@@ -24,12 +26,35 @@ describe.skipIf(noFixtures)("预览场景", () => {
     ["composer-incompatible", "Claude Code 2.1.322 没有通过安全检查，暂不能使用", "查看详情"],
     ["composer-not-installed", "没有找到", "查看详情"],
     ["composer-not-logged-in", "还没登录", "查看详情"],
-    ["composer-offline", "正在重新连接，连上后就能发送", undefined],
   ])("%s：输入框上方的说明", (name, reason, action) => {
     renderScenario(name);
     const block = composerBlock() as HTMLElement;
     expect(block).toHaveTextContent(reason);
     if (action) expect(within(block).getByRole("button", { name: action })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+  });
+
+  // 后台停了、连接被拒：照方案 2.3 的表进诊断页（整页，退避重拨，连上后自动消失）。输入框上方的「正在重新连接」
+  // 在连接断开（顶部细条、不整页）时才看得到：在录像的 store 上把连接改成 RECONNECTING 再看。
+  it("composer-offline：连不上时整页诊断；断开重连时输入框上方说明、发送不可点", () => {
+    const { store } = renderScenario("composer-offline");
+    const c = store.state.connection!;
+    expect(c.state, "对照：录像停在诊断页").toBe(ConnectionState.DIAGNOSTICS);
+    expect(screen.getByRole("heading", { name: c.title })).toBeInTheDocument();
+    expect(composerBlock(), "诊断页盖住了输入框").toBeNull();
+    store.applyPatch(
+      create(ViewPatchSchema, {
+        changes: [
+          {
+            change: {
+              case: "connection",
+              value: { view: create(ConnectionViewSchema, { state: ConnectionState.RECONNECTING, title: "正在重新连接" }) },
+            },
+          },
+        ],
+      }),
+    );
+    expect(composerBlock()).toHaveTextContent("正在重新连接，连上后就能发送");
     expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
   });
 

@@ -1,0 +1,91 @@
+/* 助手主页（画布 09、13）：左边私聊，右边资料栏 */
+.iw-assistant-page {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.iw-assistant-page > .iw-conv-page {
+  min-width: 0;
+}
+.iw-profile {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: 356px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 24px 18px;
+  border-left: 1px solid var(--bd);
+  background: var(--side);
+}
+.iw-profile__head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.iw-profile__name {
+  margin: 6px 0 0;
+  color: var(--tx);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+.iw-profile__sub {
+  color: var(--tx2);
+  font-size: var(--fs-sm2);
+}
+.iw-tabs {
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  margin: 16px 0;
+}
+.iw-tabs__tab {
+  padding: 4px 12px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--tx2);
+  font: inherit;
+  font-size: var(--fs-md);
+  cursor: pointer;
+}
+.iw-tabs__tab[aria-selected="true"] {
+  background: var(--sideOn);
+  color: var(--tx);
+  font-weight: 600;
+}
+.iw-profile__empty {
+  margin: 24px 8px;
+  color: var(--tx3);
+  font-size: var(--fs-md);
+  line-height: 1.6;
+  text-align: center;
+}
+.iw-config {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.iw-config__tool {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  color: var(--tx);
+  font-size: var(--fs-md);
+}
+.iw-config__error {
+  margin: 0;
+  color: var(--acc);
+  font-size: var(--fs-sm2);
+}
+.iw-model-selects {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.iw-dialog--form .iw-field + .iw-field,
+.iw-dialog--form .iw-model-selects {
+  margin-top: 12px;
+}

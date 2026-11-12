@@ -224,6 +224,52 @@ fn user_action_states() {
     assert_eq!(c.state_label, "你已执行");
 }
 
+/// 执行成功（你已执行、退出码 0）才标成功，网页按它用成功色（画布 15-UserAction-done）；退出码非 0、被信号结束、
+/// 执行失败、还在执行都不标。
+#[test]
+fn user_action_succeeded_only_on_exit_zero() {
+    use pb::UserActionState as S;
+    let code = |c| {
+        Some(pb::ExitStatus {
+            kind: Some(pb::exit_status::Kind::Code(c)),
+        })
+    };
+    let signal = Some(pb::ExitStatus {
+        kind: Some(pb::exit_status::Kind::Signal(9)),
+    });
+    let cases = [
+        (S::Done, code(0), true),
+        (S::Done, code(2), false),
+        (S::Done, signal, false),
+        (S::Failed, None, false),
+        (S::Executing, None, false),
+    ];
+    for (state, exit, ok) in cases {
+        let mut s = live_store();
+        s.apply(persisted(
+            10,
+            &[CONV],
+            E::UserActionProposed(pb::UserActionProposed {
+                card: Some(card(S::Pending)),
+            }),
+        ));
+        s.apply(persisted(
+            11,
+            &[CONV],
+            E::UserActionStateChanged(pb::UserActionStateChanged {
+                card_id: "card".into(),
+                state: state as i32,
+                exit,
+                ..Default::default()
+            }),
+        ));
+        let V::UserAction(c) = view(&s, "card") else {
+            panic!()
+        };
+        assert_eq!(c.succeeded, ok, "{state:?} {exit:?}");
+    }
+}
+
 /// 对话停在「删除中」时，结果未知的卡片提示「确认后继续删除」。
 #[test]
 fn unknown_card_while_deleting() {
@@ -420,6 +466,38 @@ fn switch_notes_render_like_their_rebuilt_rows() {
         matches!(view(&s, "note:17"), V::Note(_)),
         "对照：切档位是说明行"
     );
+}
+
+/// 切到全开的说明行标出全开（ui-m1 第 2 节第 9 条：全开时提示用赭红色）：网页按这个字段上色，不看文字。
+/// 切到手动、自动和恢复跟随都不标。
+#[test]
+fn full_access_note_is_marked() {
+    let mut s = live_store();
+    let modes = [
+        (20, Some(pb::ApprovalMode::Manual), false),
+        (21, Some(pb::ApprovalMode::Auto), false),
+        (22, Some(pb::ApprovalMode::FullAccess), true),
+        (23, None, false),
+    ];
+    for (seq, mode, _) in modes {
+        s.apply(persisted(
+            seq,
+            &[CONV],
+            E::ApprovalModeChanged(pb::ApprovalModeChanged {
+                target: Some(pb::ApprovalModeTarget {
+                    kind: Some(pb::approval_mode_target::Kind::ConversationId(CID.into())),
+                }),
+                mode: mode.map(|m| m as i32),
+                cause: pb::ApprovalModeChangeCause::User as i32,
+            }),
+        ));
+    }
+    for (seq, mode, full) in modes {
+        let V::Note(n) = view(&s, &format!("note:{seq}")) else {
+            panic!("note:{seq} 不是说明行");
+        };
+        assert_eq!(n.full_access, full, "{mode:?}：{}", n.text);
+    }
 }
 
 #[test]

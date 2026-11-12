@@ -4,6 +4,7 @@
 //! `set_*` 写入。两者都只往 [`DirtySet`] 记「哪块脏了」，帧在网页来取时才由 `derive` 从当前状态算（方案 2.4）。
 
 pub mod anchors;
+pub mod assistant_edits;
 pub mod created;
 pub mod home;
 pub mod models;
@@ -234,13 +235,21 @@ pub enum Connection {
     Connecting,
     Live,
     Reconnecting,
-    /// 升级窗口的中性提示：文字与出口取 `WaitPrompt`。
+    /// 升级窗口的中性提示：文字取 `WaitPrompt`，出口见 [`Exit`]。
     Waiting {
         title: &'static str,
-        exits: Vec<&'static str>,
+        exits: Vec<Exit>,
     },
     Diagnostics(Diagnostics),
     Environment(String),
+}
+
+/// 连接类整页上的出口（只列有实现的；查看诊断等 T04p 接上真诊断再加）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exit {
+    Retry,
+    /// 重启客户端自己，不碰后台。
+    Relaunch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -289,6 +298,8 @@ pub struct Store {
     pub created: created::CreatedWatch,
     /// 各运行时的模型清单（ListModels 附带查询的结果，见 models 模块）。
     pub models: models::ModelCatalog,
+    /// 助手配置的自动保存闸（见 assistant_edits 模块）：会话层按它的决定发 UpdateAssistant。
+    pub assistant_edits: assistant_edits::AssistantEdits,
     /// 「已重新连接，回到最新」提示挂在哪个对话上（Q9）；会话层到时撤掉。
     pub back_to_latest: Option<String>,
     /// 这一轮刚挂上提示：会话层取走后开始计时。
@@ -315,6 +326,31 @@ pub struct Store {
 impl Store {
     pub fn new() -> Self {
         Self::with_timeline_cap(timeline::TIMELINE_CAP)
+    }
+
+    /// 按摘要里这个助手此刻的样子推一步自动保存闸（`step` 是闸的某个方法），配置页随之重算。
+    /// 摘要里没有这个助手（删了）时闸一起丢掉。
+    pub fn step_assistant_edit(
+        &mut self,
+        id: &str,
+        step: impl FnOnce(
+            &mut assistant_edits::AssistantEdits,
+            Option<assistant_edits::Base<'_>>,
+        ) -> Option<assistant_edits::Send>,
+    ) -> Option<assistant_edits::Send> {
+        self.dirty.mark(ViewKey::Assistant);
+        let Some(a) = self.summary.assistant(id) else {
+            self.assistant_edits.forget(id);
+            return None;
+        };
+        let config = a.config.as_ref()?;
+        step(
+            &mut self.assistant_edits,
+            Some(assistant_edits::Base {
+                version: a.version,
+                config,
+            }),
+        )
     }
 
     pub fn with_timeline_cap(cap: usize) -> Self {
@@ -391,6 +427,9 @@ impl Store {
     pub fn set_models(&mut self, runtime_id: &str, result: pb::ListModelsResult) {
         self.models.loaded(runtime_id, result);
         self.mark_header();
+        // 侧栏的新建助手菜单、助手配置页的三个下拉也读模型清单
+        self.dirty.mark(ViewKey::Sidebar);
+        self.dirty.mark(ViewKey::Assistant);
     }
 
     // ---------- 本地视图状态 ----------

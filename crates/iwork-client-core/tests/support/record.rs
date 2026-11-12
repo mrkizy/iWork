@@ -187,6 +187,29 @@ async fn client_act(
             }
         }
         ClientAct::DragHover => app.shell(ShellEvent::Dragging(true)),
+        ClientAct::ShowAllConversations(project) => {
+            // 首页照旧声明着：没有 focus 的场景连上时声明过首页，撤掉它不会有增量清掉网页里那一份，
+            // 逐帧折叠就会和全量对不上（不可见的视图不算增量，方案 2.4 第 9 条）
+            let mut v = visible(None, true);
+            if let Some(pb::ui_intent::Kind::SetVisible(s)) = v.kind.as_mut() {
+                s.conversation_list = Some(pb::ConversationListQuery {
+                    project_id: project.into(),
+                    filter: String::new(),
+                });
+            }
+            if let Some(e) = app.intent(v).await.error {
+                return Err(format!("SetVisible 被拒：{}", e.message));
+            }
+        }
+        ClientAct::ShowAssistant(id) => {
+            let mut v = visible(Some(focus), false);
+            if let Some(pb::ui_intent::Kind::SetVisible(s)) = v.kind.as_mut() {
+                s.assistant_id = Some(id.into());
+            }
+            if let Some(e) = app.intent(v).await.error {
+                return Err(format!("SetVisible 被拒：{}", e.message));
+            }
+        }
         ClientAct::DropOversized => {
             // 稀疏文件：只占目录项，不真写 21MB
             let path = dir.join("超过二十兆.bin");
@@ -351,9 +374,8 @@ pub async fn record(s: &Scenario, mut opts: Options) -> Result<Recording, String
     }
     let opened = pump.frames.len();
     for act in s.client {
-        let focus = s
-            .focus
-            .ok_or_else(|| format!("场景 {} 有客户端动作却没有 focus", s.name))?;
+        // 没有 focus 的场景只做不针对某个对话的动作（如打开「全部对话」）；针对对话的动作会被后台拒、录像失败
+        let focus = s.focus.unwrap_or_default();
         client_act(&mut pump, &daemon, &app, *act, focus, dir.path()).await?;
     }
     // 剩下的事件：这一段的帧才是增量

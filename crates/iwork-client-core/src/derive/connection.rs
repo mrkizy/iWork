@@ -3,7 +3,7 @@
 use iwork_proto::pb;
 
 use super::text;
-use crate::store::{Connection, Store};
+use crate::store::{Connection, Exit, Store};
 
 pub fn connection(store: &Store) -> pb::ConnectionView {
     let mut v = pb::ConnectionView {
@@ -26,7 +26,7 @@ pub fn connection(store: &Store) -> pb::ConnectionView {
         Connection::Waiting { title, exits } => {
             v.state = pb::ConnectionState::Waiting.into();
             v.title = (*title).into();
-            v.exits = exits.iter().map(|e| (*e).to_owned()).collect();
+            v.exit_actions = exits.iter().map(|e| exit(*e)).collect();
         }
         Connection::Diagnostics(d) => {
             v.state = pb::ConnectionState::Diagnostics.into();
@@ -48,8 +48,55 @@ pub fn connection(store: &Store) -> pb::ConnectionView {
         Connection::Environment(msg) => {
             v.state = pb::ConnectionState::Environment.into();
             v.message.clone_from(msg);
-            v.exits = vec!["重试".into()];
+            v.exit_actions = vec![exit(Exit::Retry)];
         }
     }
     v
+}
+
+fn exit(e: Exit) -> pb::ConnectionExit {
+    let (label, kind) = match e {
+        Exit::Retry => (text::EXIT_RETRY, pb::ConnectionExitKind::Retry),
+        Exit::Relaunch => (text::EXIT_RELAUNCH, pb::ConnectionExitKind::Relaunch),
+    };
+    pb::ConnectionExit {
+        label: label.into(),
+        kind: kind.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exits(c: Connection) -> Vec<(String, pb::ConnectionExitKind)> {
+        let mut s = Store::default();
+        s.set_connection(c);
+        connection(&s)
+            .exit_actions
+            .into_iter()
+            .map(|e| (e.label, pb::ConnectionExitKind::try_from(e.kind).unwrap()))
+            .collect()
+    }
+
+    /// 出口带动作（网页按 kind 接，不按文字猜）：版本不一致给「重新打开 iWork」，环境说明给「重试」，
+    /// 正常连着时没有出口。
+    #[test]
+    fn exits_carry_kinds() {
+        assert_eq!(
+            exits(Connection::Waiting {
+                title: "后台服务与客户端版本不一致",
+                exits: vec![Exit::Relaunch],
+            }),
+            vec![(
+                "重新打开 iWork".to_owned(),
+                pb::ConnectionExitKind::Relaunch
+            )]
+        );
+        assert_eq!(
+            exits(Connection::Environment("M1 暂不支持 Windows".into())),
+            vec![("重试".to_owned(), pb::ConnectionExitKind::Retry)]
+        );
+        assert_eq!(exits(Connection::Live), vec![]);
+    }
 }

@@ -111,6 +111,8 @@ message SidebarView {
   CountBadge pending_badge = 5;
   // 对话标题最多几个字符（按码点算）：就地重命名时截到这么长，Rust 提交时再校验一次。
   uint32 title_max_chars = 6;
+  // 新建助手弹窗的运行时 / 模型 / 思考强度（默认选中内置 iWork 的）。
+  ModelMenuView new_assistant_menu = 7;
 }
 
 // 数字徽标（ui-m1.md 第 2 节第 4 条）：超过 99 写「99+」，侧栏徽标、「待你处理」与 Dock 角标同一个规则。
@@ -515,6 +517,8 @@ message UserActionRow {
   bool muted = 15;
   // 「执行结果未知，请自行核对」等说明。
   optional string notice = 16;
+  // 你已执行且退出码 0：结果用成功色（画布 15-UserAction-done）。
+  bool succeeded = 17;
 }
 
 message TurnEndRow {
@@ -537,6 +541,8 @@ message ResumeRow {
 
 message NoteRow {
   string text = 1;
+  // 切到全开的那一行（ui-m1 第 2 节第 9 条：全开时提示用赭红色）；网页按它上色，不看文字。
+  bool full_access = 2;
 }
 
 // ---------- 全部对话 ----------
@@ -634,6 +640,8 @@ message RuntimeView {
   optional string guidance = 7;
   bool can_redetect = 8;
   bool ready = 9;
+  // 还没接入（M2）的运行时：只列名字与「M2 接入」，置灰（画布 12、ui-m1 第 1 节引导页一行）。
+  bool upcoming = 10;
 }
 
 message RuleGroup {
@@ -685,6 +693,10 @@ message AssistantProfileView {
   // 「动态」「记忆」空态说明（D3）。
   string activity_empty_text = 15;
   string memory_empty_text = 16;
+  // 运行时 / 模型 / 思考强度三个下拉（同一套 model_menu 派生，ui-m1 第 2 节第 14 条）。
+  ModelMenuView model_menu = 17;
+  // 自动保存没成功的说明（字段非法、后台校验拒）；下一次改动清掉。
+  optional string save_error = 18;
 }
 
 message ToolToggle {
@@ -742,11 +754,12 @@ enum ConnectionState {
 }
 
 message ConnectionView {
+  // 原来的出口纯文字：换成了带动作的 exit_actions（网页不按文字猜动作）。
+  reserved 4;
+  reserved "exits";
   ConnectionState state = 1;
   string title = 2;
   string message = 3;
-  // 提示上的出口文字。
-  repeated string exits = 4;
   // 「后台负载过高」提示条；不过载时不设。
   optional string overload_notice = 5;
   // 会发命令的按钮可不可点（断线时不可点，D8）。
@@ -756,6 +769,23 @@ message ConnectionView {
   bool quit_requested = 8;
   // 有数据没取到、正在退避重试时的一行说明（如「部分数据暂时没取到，稍后自动重试」）；没有就不设。
   optional string query_notice = 9;
+  // 整页提示上的出口：只列 Rust 有实现的（查看诊断等 T04p 接上真诊断再给）。
+  repeated ConnectionExit exit_actions = 10;
+}
+
+message ConnectionExit {
+  string label = 1;
+  ConnectionExitKind kind = 2;
+}
+
+enum ConnectionExitKind {
+  CONNECTION_EXIT_KIND_UNSPECIFIED = 0;
+  // 发 UiIntent.retry。
+  CONNECTION_EXIT_KIND_RETRY = 1;
+  // 打开诊断页（T04p 步 10 接真 Diagnostics 后才给）。
+  CONNECTION_EXIT_KIND_SHOW_DIAGNOSTICS = 2;
+  // 发 UiIntent.relaunch：只重启客户端自己，不碰后台。
+  CONNECTION_EXIT_KIND_RELAUNCH = 3;
 }
 
 message DiagnosticsView {
@@ -799,9 +829,9 @@ message FrameChunk {
 
 // ui_intent 的请求。
 message UiIntent {
-  // 原来网页直接带路径的两个操作，换成了 pick_attachments、pick_project_location（T09 组 2b）。
-  reserved 60, 73;
-  reserved "attach_paths", "relocate_project";
+  // 原来网页直接带路径的几个操作，换成了 Rust 弹选择框的 pick_*（R7：网页拿不到本机路径；T09 组 2b、组 3）。
+  reserved 60, 70, 73;
+  reserved "attach_paths", "add_project", "relocate_project";
   oneof kind {
     // 视图声明
     SetVisible set_visible = 1;
@@ -849,11 +879,13 @@ message UiIntent {
     PickAttachments pick_attachments = 62;
 
     // 项目
-    ProjectPathIntent add_project = 70;
     PinProjectIntent pin_project = 71;
     ProjectIntent remove_project = 72;
     // 「重新定位」：Rust 弹文件夹选择框，选好后发 RelocateProject，由后台校验 project.toml。
     ProjectIntent pick_project_location = 74;
+    // 75–79、92–95 留给添加项目一组（T09 方案 15.2，步 7d-0）。
+    // 设置 › 项目位置的「更换」：Rust 弹文件夹选择框，选好后发 SetProjectsRoot（方案 15.2）。
+    PickProjectsRoot pick_projects_root = 96;
 
     // 助手与设置
     AssistantEditIntent create_assistant = 80;
@@ -865,8 +897,14 @@ message UiIntent {
     RuntimeIntent redetect_runtime = 86;
     // 「完全退出 iWork」确认框的结果：确认则关后台服务并退出，取消则关掉确认框。
     QuitIntent quit = 87;
+    // 助手配置页改了一项（自动保存）：Rust 合并、按版本发 UpdateAssistant（store::assistant_edits）。
+    UpdateAssistantFieldIntent update_assistant_field = 88;
+    // 连接类整页的「重新打开 iWork」：壳重启客户端进程，不碰后台。
+    RelaunchIntent relaunch = 89;
   }
 }
+
+message RelaunchIntent {}
 
 message QuitIntent {
   bool confirm = 1;
@@ -1034,9 +1072,7 @@ message AttachPasted {
   bytes data = 4;
 }
 
-message ProjectPathIntent {
-  string path = 1;
-}
+message PickProjectsRoot {}
 
 message PinProjectIntent {
   string project_id = 1;
@@ -1058,6 +1094,29 @@ message AssistantEditIntent {
   repeated int32 disabled_groups = 7;
   string avatar_initial = 8;
   string avatar_color = 9;
+}
+
+// 助手配置页的一项改动。网页不拼整份配置、不管版本：同一个助手的改动由 Rust 排队合并（步 7c）。
+message UpdateAssistantFieldIntent {
+  string assistant_id = 1;
+  oneof field {
+    string name = 2;
+    string prompt = 3;
+    ModelChoice model = 4;
+    ToolChoice tool = 5;
+  }
+}
+
+// 模型与思考强度一起改（菜单里是同一次选择）；value 取 ModelMenuView 里的。
+message ModelChoice {
+  string model_id = 1;
+  optional string effort = 2;
+}
+
+message ToolChoice {
+  // ToolToggle.group。
+  int32 group = 1;
+  bool enabled = 2;
 }
 
 message AssistantIntent {

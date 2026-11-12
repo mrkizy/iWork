@@ -31,3 +31,8 @@
   gap: 8px;
   margin-top: 20px;
 }
+
+/* 表单弹窗（新建助手，画布 13-AssistantConfig-new）比确认框宽 */
+.iw-dialog--form {
+  width: min(560px, calc(100vw - 48px));
+}

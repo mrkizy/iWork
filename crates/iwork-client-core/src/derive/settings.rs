@@ -27,6 +27,20 @@ pub fn runtime_view(r: &pb::RuntimeStatus) -> pb::RuntimeView {
                 | pb::RuntimeState::Incompatible
         ),
         ready: matches!(state, pb::RuntimeState::ReadyVerified),
+        upcoming: false,
+    }
+}
+
+/// 设置 › 运行时里列出、但 M1 还没接入的运行时（画布 12；ui-m1 第 1 节：Codex、agy 显示「M2 接入」）。
+/// 输入框的运行时菜单照画布 01 只列 Codex（model_menu::UPCOMING_RUNTIMES）。接入后从这里删掉。
+pub const UPCOMING_IN_SETTINGS: &[&str] = &["Codex", "Antigravity CLI"];
+
+fn upcoming_runtime(name: &str) -> pb::RuntimeView {
+    pb::RuntimeView {
+        display_name: name.to_owned(),
+        state_label: text::RUNTIME_NOT_IN_M1.into(),
+        upcoming: true,
+        ..Default::default()
     }
 }
 
@@ -99,7 +113,17 @@ pub fn settings(store: &Store) -> pb::SettingsView {
         playful_ui: s.playful_ui,
         autostart: s.autostart,
         projects_root: s.projects_root,
-        runtimes: store.runtimes.values().map(runtime_view).collect(),
+        runtimes: store
+            .runtimes
+            .values()
+            .map(runtime_view)
+            .chain(
+                UPCOMING_IN_SETTINGS
+                    .iter()
+                    .filter(|n| !store.runtimes.values().any(|r| r.display_name == **n))
+                    .map(|n| upcoming_runtime(n)),
+            )
+            .collect(),
         rules_loading: store.rules.is_none(),
         rules_empty_text: if store.rules.is_some() && rule_groups.is_empty() {
             text::RULES_EMPTY.into()

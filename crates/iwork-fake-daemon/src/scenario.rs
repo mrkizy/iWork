@@ -62,6 +62,10 @@ pub enum ClientAct {
     DropOversized,
     /// 文件拖进窗口、还没松开（对话区出现「松开以添加」虚线框）。
     DragHover,
+    /// 打开这个助手的主页（私聊 + 资料栏）：可见视图里加上助手资料（AssistantProfileView）。
+    ShowAssistant(&'static str),
+    /// 打开这个项目的「全部对话」列表页（ConversationListView，不筛选）。
+    ShowAllConversations(&'static str),
 }
 
 impl Scenario {
@@ -226,6 +230,42 @@ pub const REGISTRY: &[Scenario] = &[
         about: "崩溃中断的回合：继续 / 放弃卡片",
         build: resume_card,
         focus: Some("c-resume"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "pending-kinds",
+        about: "待你处理：审批、亲手执行、继续卡片、AGENTS.md 草稿四种各一项，分在不同对话与项目",
+        build: pending_kinds,
+        focus: None,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "assistant-profile",
+        about: "助手主页：阿森的私聊（聊过一轮）与右侧资料栏（动态、记忆、配置）",
+        build: assistant_profile,
+        focus: Some("c-dm-asen"),
+        characters: &[],
+        client: &[ClientAct::ShowAssistant("as-asen")],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "all-conversations",
+        about: "全部对话：一个项目 55 个对话（一批 50 条，还有下一批），各聊过一句",
+        build: all_conversations,
+        focus: None,
+        characters: &[],
+        client: &[ClientAct::ShowAllConversations(PROJECT)],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "settings-rules",
+        about: "设置：记住的规则三组（永久、本项目、本对话）各一条，运行时就绪",
+        build: settings_rules,
+        focus: Some("c-rules"),
         characters: &[],
         client: &[],
         timeline_cap: None,
@@ -978,6 +1018,112 @@ fn resume_card() -> Vec<Step> {
         T::Interrupted,
         None,
     )));
+    s
+}
+
+fn pending_kinds() -> Vec<Step> {
+    let mut s = base();
+    let (ca, cu, cr) = ("c-pk-approval", "c-pk-action", "c-pk-resume");
+    for c in [ca, cu, cr] {
+        s.push(a(f::project_conversation(c, PROJECT)));
+    }
+    s.extend(exchange(
+        ca,
+        "pk-approval",
+        "发布一下",
+        "要发布到 npm，需要你批准。",
+    ));
+    s.push(a(f::approval(
+        "ap-pk",
+        ca,
+        "t-pk-approval",
+        f::command_action("npm publish"),
+        pb::ApprovalKind::Ask,
+        &[],
+    )));
+    s.extend(exchange(
+        cu,
+        "pk-action",
+        "看看我加载了哪些密钥",
+        "要读钥匙串，得你来跑。",
+    ));
+    s.push(a(f::user_action("ua-pk", cu, "t-pk-action", "ssh-add -l")));
+    s.extend(exchange(
+        cr,
+        "pk-resume",
+        "把依赖都升级一遍",
+        "先升级 tokio……",
+    ));
+    s.push(a(f::turn_state(
+        "t-pk-resume",
+        T::Running,
+        T::Interrupted,
+        None,
+    )));
+    s.push(a(f::agents_md_draft("draft-pk", PROJECT)));
+    s
+}
+
+fn assistant_profile() -> Vec<Step> {
+    let (id, dm) = ("as-asen", "c-dm-asen");
+    let mut s = base();
+    s.push(a(f::assistant(id, "阿森", false)));
+    s.push(a(f::dm(dm, id)));
+    s.push(a(f::user_message(
+        "m-asen-u",
+        dm,
+        "帮我看下 webhook 重试为什么一直打满",
+    )));
+    s.push(a(f::turn_queued("t-asen", dm, id)));
+    s.push(a(f::turn_state("t-asen", T::Queued, T::Running, None)));
+    s.push(a(f::assistant_message(
+        "m-asen-a", dm, "t-asen", id, "阿森",
+    )));
+    s.push(a(f::message_completed(
+        dm,
+        "m-asen-a",
+        "原因是重试没有上限，失败会无限排队。我加了指数退避和 5 次上限。",
+    )));
+    s.push(a(f::turn_finished("t-asen", T::Completed, false, None)));
+    s
+}
+
+fn all_conversations() -> Vec<Step> {
+    let mut s = base();
+    for i in 0..55 {
+        let c = format!("c-all-{i:02}");
+        s.push(a(f::project_conversation(&c, PROJECT)));
+        s.push(a(f::user_message(
+            &format!("m-all-{i:02}"),
+            &c,
+            &format!("第 {i} 个对话的第一句\n第二行不显示"),
+        )));
+    }
+    s
+}
+
+fn settings_rules() -> Vec<Step> {
+    use pb::scope::Kind as S;
+    let mut s = base();
+    // 规则排在建出 focus 对话之前（打开前那一段）：rule 流不在任何订阅范围里，设置页的 ListRules 只在连上时
+    // 查一次（方案 2.7；T10 给设置范围加上 rule 流后不用这样排）
+    s.push(a(f::remembered_rule(
+        "rule-forever",
+        "执行 `npm test …` 不再问",
+        S::Global(pb::GlobalScope {}),
+    )));
+    s.push(a(f::remembered_rule(
+        "rule-project",
+        "本项目内写 `src/` 不再问",
+        S::ProjectId(PROJECT.into()),
+    )));
+    s.push(a(f::remembered_rule(
+        "rule-conv",
+        "本对话内执行 `cargo build` 不再问",
+        S::ConversationId("c-rules".into()),
+    )));
+    s.push(a(f::project_conversation("c-rules", PROJECT)));
+    s.extend(exchange("c-rules", "rules", "跑一下测试", "测试都过了。"));
     s
 }
 

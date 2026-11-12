@@ -12,8 +12,10 @@ import { Menu, MenuItem, MenuSeparator, type MenuAnchor } from "../ui/Menu";
 import iconUrl from "@design/icon/iwork-icon-white-256.png";
 import { loadExpanded, saveExpanded } from "./expanded";
 import { followEyes } from "./eyes";
+import { ConversationMenu, DeleteConversationDialog } from "./ConversationActions";
 import { InlineRename } from "./InlineRename";
-import type { Router } from "./route";
+import { NewAssistantDialog } from "../pages/AssistantNew";
+import type { AssistantTab, Router } from "./route";
 import "./Sidebar.css";
 
 type MenuState =
@@ -21,8 +23,6 @@ type MenuState =
   | { kind: "project"; project: ProjectRow; at: MenuAnchor }
   | { kind: "assistant"; assistant: AssistantRow; at: MenuAnchor };
 
-/** 尚未实现的入口（下一组）上的说明。 */
-const NEXT_GROUP = "下一组实现";
 
 export function Sidebar(props: { router: Router }) {
   const host = useHost();
@@ -30,6 +30,11 @@ export function Sidebar(props: { router: Router }) {
   const [menu, setMenu] = createSignal<MenuState>();
   const [renaming, setRenaming] = createSignal<string>();
   const [deleting, setDeleting] = createSignal<ConversationItem>();
+  const [deletingAssistant, setDeletingAssistant] = createSignal<AssistantRow>();
+  const [creating, setCreating] = createSignal(false);
+  // 点助手：进它的主页（私聊 + 右侧资料栏），停在指定页签
+  const openAssistant = (a: AssistantRow, tab: AssistantTab) =>
+    props.router.go({ page: "assistant", id: a.assistantId, conversationId: a.dmConversationId, tab });
   const [expanded, setExpanded] = createSignal(loadExpanded());
   let root!: HTMLElement;
 
@@ -87,7 +92,7 @@ export function Sidebar(props: { router: Router }) {
       <div class="iw-sidebar__scroll">
         <div class="iw-side-section">
           <span>项目</span>
-          <IconButton icon="plus" label="添加项目" iconSize={14} onClick={() => props.router.go({ page: "settings" })} />
+          <IconButton icon="plus" label="添加项目" iconSize={14} onClick={() => props.router.go({ page: "addProject" })} />
         </div>
         <For each={view()?.projects}>
           {(p) => (
@@ -171,7 +176,7 @@ export function Sidebar(props: { router: Router }) {
 
         <div class="iw-side-section">
           <span>助手</span>
-          <IconButton icon="plus" label="新建助手" iconSize={14} disabled data-tip={NEXT_GROUP} />
+          <IconButton icon="plus" label="新建助手" iconSize={14} onClick={() => setCreating(true)} />
         </div>
         <For each={view()?.assistants}>{(a) => <AssistantItem a={a} />}</For>
       </div>
@@ -190,21 +195,25 @@ export function Sidebar(props: { router: Router }) {
       </div>
 
       <Show when={menu()}>{(m) => <ContextMenu m={m()} />}</Show>
-      <Show when={deleting()}>
-        {(c) => (
+      <Show when={deleting()}>{(c) => <DeleteConversationDialog item={c()} onClose={() => setDeleting(undefined)} />}</Show>
+      <Show when={deletingAssistant()}>
+        {(a) => (
           <ConfirmDialog
-            title={`删除「${c().title}」？`}
+            title={`删除助手「${a().name}」？`}
             confirmLabel="删除"
             confirmVariant="accent"
-            onCancel={() => setDeleting(undefined)}
+            onCancel={() => setDeletingAssistant(undefined)}
             onConfirm={() => {
-              void host.act({ case: "deleteConversation", value: { conversationId: c().conversationId } });
-              setDeleting(undefined);
+              void host.act({ case: "deleteAssistant", value: { assistantId: a().assistantId } });
+              setDeletingAssistant(undefined);
             }}
           >
-            对话记录将删除，不影响代码文件。
+            和它的私聊记录会一起删除，不影响代码文件。
           </ConfirmDialog>
         )}
+      </Show>
+      <Show when={creating()}>
+        <NewAssistantDialog onClose={() => setCreating(false)} />
       </Show>
     </aside>
   );
@@ -215,7 +224,7 @@ export function Sidebar(props: { router: Router }) {
       <button
         type="button"
         class={`iw-side-item iw-assistant${a().activityLine === undefined ? " iw-assistant--one-line" : ""}${a().selected ? " iw-side-item--selected" : ""}`}
-        onClick={() => props.router.go({ page: "conversation", id: a().dmConversationId })}
+        onClick={() => openAssistant(a(), "activity")}
         onContextMenu={(e) => openMenu(e, (at) => ({ kind: "assistant", assistant: a(), at }))}
       >
         <Avatar avatar={a().avatar} size={32} interactive label={a().name} />
@@ -239,18 +248,14 @@ export function Sidebar(props: { router: Router }) {
     switch (m.kind) {
       case "conversation":
         return (
-          <Menu anchor={m.at} onClose={close} label="对话操作">
-            <MenuItem onSelect={() => (close(), props.router.go({ page: "conversation", id: m.item.conversationId }))}>打开</MenuItem>
-            <Show when={m.item.canRename}>
-              <MenuItem onSelect={() => (close(), setRenaming(m.item.conversationId))}>重命名</MenuItem>
-            </Show>
-            <Show when={m.item.canDelete}>
-              <MenuSeparator />
-              <MenuItem danger onSelect={() => (close(), setDeleting(m.item))}>
-                删除
-              </MenuItem>
-            </Show>
-          </Menu>
+          <ConversationMenu
+            item={m.item}
+            at={m.at}
+            onClose={close}
+            onOpen={() => props.router.go({ page: "conversation", id: m.item.conversationId })}
+            onRename={() => setRenaming(m.item.conversationId)}
+            onDelete={() => setDeleting(m.item)}
+          />
         );
       case "project":
         return (
@@ -287,13 +292,11 @@ export function Sidebar(props: { router: Router }) {
       case "assistant":
         return (
           <Menu anchor={m.at} onClose={close} label="助手操作">
-            <MenuItem onSelect={() => (close(), props.router.go({ page: "conversation", id: m.assistant.dmConversationId }))}>
-              打开对话
-            </MenuItem>
-            <MenuItem onSelect={() => (close(), props.router.go({ page: "assistant", id: m.assistant.assistantId }))}>配置</MenuItem>
+            <MenuItem onSelect={() => (close(), openAssistant(m.assistant, "activity"))}>打开对话</MenuItem>
+            <MenuItem onSelect={() => (close(), openAssistant(m.assistant, "config"))}>配置</MenuItem>
             <Show when={m.assistant.canDelete}>
               <MenuSeparator />
-              <MenuItem danger disabled tip={NEXT_GROUP} onSelect={close}>
+              <MenuItem danger onSelect={() => (close(), setDeletingAssistant(m.assistant))}>
                 删除
               </MenuItem>
             </Show>

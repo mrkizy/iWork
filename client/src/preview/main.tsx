@@ -10,6 +10,7 @@ import { render } from "solid-js/web";
 import { IntentAckSchema } from "../gen/iwork/v1/view_pb";
 import type { Host } from "../host";
 import { App } from "../shell/App";
+import type { Route } from "../shell/route";
 import { decodeFrames, type FixtureEntry } from "../state/fixtures";
 import { createViewStore } from "../state/store";
 import { DESIGN_CATALOG } from "../ui/characters";
@@ -34,7 +35,15 @@ async function fetchBytes(path: string): Promise<Uint8Array> {
   return new Uint8Array(await r.arrayBuffer());
 }
 
-function parseHash(): { name?: string; theme: "light" | "dark" | "system"; play: boolean; stopAt?: number } {
+/** 不带 id 的页面可以直接在地址里点名：`#/<场景>?page=pending`（审查用；没写就照场景的 focus 打开）。 */
+const PAGES_BY_NAME = { pending: { page: "pending" }, settings: { page: "settings" }, addProject: { page: "addProject" } } as const;
+
+function pageRoute(name: string | null, focus: string | null): Route {
+  if (name !== null && name in PAGES_BY_NAME) return PAGES_BY_NAME[name as keyof typeof PAGES_BY_NAME];
+  return focus ? { page: "conversation", id: focus } : { page: "home" };
+}
+
+function parseHash(): { name?: string; theme: "light" | "dark" | "system"; play: boolean; stopAt?: number; page: string | null } {
   const [path, query = ""] = location.hash.replace(/^#\/?/, "").split("?");
   const q = new URLSearchParams(query);
   const t = q.get("theme");
@@ -45,6 +54,7 @@ function parseHash(): { name?: string; theme: "light" | "dark" | "system"; play:
     theme: t === "light" || t === "dark" ? t : "system",
     play: q.get("play") === "1" || stopAt !== undefined,
     stopAt,
+    page: q.get("page"),
   };
 }
 
@@ -128,7 +138,7 @@ async function main() {
         <App
           host={host}
           toasts={toaster.View}
-          initialRoute={entry.focus ? { page: "conversation", id: entry.focus } : { page: "home" }}
+          initialRoute={pageRoute(parseHash().page, entry.focus)}
         />
         <Show when={last()}>
           <div class="iw-preview-log">{last()}</div>

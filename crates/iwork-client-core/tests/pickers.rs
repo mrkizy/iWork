@@ -246,6 +246,53 @@ async fn picked_folder_relocates_project() {
     .await;
 }
 
+/// 连接类整页的「重新打开 iWork」：意图直接变成壳效果 Relaunch（只重启客户端，不发任何命令给后台）。
+#[tokio::test(flavor = "multi_thread")]
+async fn relaunch_intent_becomes_shell_effect() {
+    let mut h = start("conversation-basic", CONV).await;
+    let ack = act(&h.app, I::Relaunch(pb::RelaunchIntent {}));
+    assert_eq!(timeout(WAIT, ack).await.unwrap().unwrap().error, None);
+    let e = timeout(WAIT, async {
+        loop {
+            match h.effects.recv().await {
+                Some(Effect::Relaunch) => return Effect::Relaunch,
+                Some(_) => continue,
+                None => panic!("效果通道关了"),
+            }
+        }
+    })
+    .await
+    .expect("等不到 Relaunch 效果");
+    assert_eq!(e, Effect::Relaunch);
+}
+
+/// 设置 › 项目位置的「更换」：同样由 Rust 弹框，选好后设成新建项目的默认父目录。
+#[tokio::test(flavor = "multi_thread")]
+async fn picked_folder_sets_projects_root() {
+    let mut h = start("conversation-basic", CONV).await;
+    let ack = h
+        .app
+        .intent(pb::UiIntent {
+            kind: Some(I::SetVisible(pb::SetVisible {
+                sidebar: true,
+                settings: true,
+                conversation_id: Some(CONV.into()),
+                ..Default::default()
+            })),
+        })
+        .await;
+    assert_eq!(ack.error, None);
+    let ack = act(&h.app, I::PickProjectsRoot(pb::PickProjectsRoot {}));
+    assert_eq!(pick_effect(&mut h.effects).await, PickKind::Folder);
+    let dir = h.dir.path().to_string_lossy().into_owned();
+    h.app.shell(ShellEvent::Picked(vec![dir.clone()]));
+    assert_eq!(timeout(WAIT, ack).await.unwrap().unwrap().error, None);
+    until(&mut h, "设置里的项目位置换成选的目录", |s| {
+        s.settings.as_ref().is_some_and(|v| v.projects_root == dir)
+    })
+    .await;
+}
+
 /// 后台拒了重新定位（这里：项目不存在）：受理结果带上后台的错误。
 #[tokio::test(flavor = "multi_thread")]
 async fn relocate_rejected_by_daemon_reports_error() {

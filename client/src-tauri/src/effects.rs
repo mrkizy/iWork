@@ -56,6 +56,8 @@ pub fn spawn(handle: AppHandle, core: App, mut effects: mpsc::UnboundedReceiver<
                 Effect::OpenExternal(url) => open_external(&url),
                 Effect::PickPaths(kind) => crate::picker::open(&handle, core.clone(), kind),
                 Effect::Exit => handle.exit(0),
+                // 只重启客户端进程；后台是独立进程，不受影响（重开后照常 attach）
+                Effect::Relaunch => handle.restart(),
             }
         }
     });

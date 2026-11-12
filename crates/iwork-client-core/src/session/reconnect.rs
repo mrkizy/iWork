@@ -1,9 +1,9 @@
 //! 重连决策（T09 方案 2.3）：纯函数。`from_seq` 只在 [`ReconnectState::from_seq`] 一处算。
 
-use iwork_ipc::client::ConnectError;
+use iwork_ipc::client::{ConnectError, WaitPrompt};
 
 use super::dial::DialError;
-use crate::store::Connection;
+use crate::store::{Connection, Exit};
 
 /// 连接关闭计数（与 T03 2.11 的说法逐字对应）：关闭时游标与上一次关闭时相同就加一，不同就置 1；
 /// 应用了任何带 seq 的项（事件、快照、查询结果）就清零。
@@ -72,6 +72,15 @@ pub enum Retry {
     Manual,
 }
 
+/// 中性提示上的出口（iwork-ipc 的 `WaitPrompt::exits` 列了「重新打开 iWork」「查看诊断」）：只给有实现的。
+/// 「查看诊断」等 T04p 步 10 接上真 Diagnostics 再加。
+fn wait_exits(p: WaitPrompt) -> Vec<Exit> {
+    match p {
+        WaitPrompt::VersionMismatch => vec![Exit::Relaunch],
+        WaitPrompt::SwitchingVersion => Vec::new(),
+    }
+}
+
 /// 拨号失败 → 界面与下一步（方案 2.3 的表）。
 pub fn on_dial_error(e: &DialError) -> (Connection, Retry) {
     match e {
@@ -79,7 +88,7 @@ pub fn on_dial_error(e: &DialError) -> (Connection, Retry) {
             Some(p) => (
                 Connection::Waiting {
                     title: p.text(),
-                    exits: p.exits().to_vec(),
+                    exits: wait_exits(p),
                 },
                 Retry::Backoff,
             ),
@@ -156,25 +165,26 @@ mod tests {
     #[test]
     fn dial_error_table() {
         let (c, retry) = on_dial_error(&DialError::Connect(ConnectError::ClosedBeforeWelcome));
-        assert!(matches!(
+        assert_eq!(
             c,
             Connection::Waiting {
                 title: "后台服务与客户端版本不一致",
-                ..
-            }
-        ));
+                exits: vec![Exit::Relaunch],
+            },
+            "版本不一致：只给有实现的出口（查看诊断等 T04p）"
+        );
         assert_eq!(retry, Retry::Backoff);
         let (c, _) = on_dial_error(&DialError::Connect(ConnectError::VersionMismatch {
             client_major: 1,
             server_major: 2,
         }));
-        assert!(matches!(
+        assert_eq!(
             c,
             Connection::Waiting {
                 title: "正在切换版本",
-                ..
+                exits: vec![],
             }
-        ));
+        );
         let (c, retry) = on_dial_error(&DialError::Connect(ConnectError::Timeout));
         assert!(matches!(c, Connection::Diagnostics(_)));
         assert_eq!(retry, Retry::Backoff);

@@ -1,0 +1,32 @@
+/* 表单件（全站共用）：带标签的一项、输入框、多行输入、下拉 */
+.iw-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.iw-field__label {
+  color: var(--tx2);
+  font-size: var(--fs-sm2);
+}
+.iw-field__hint {
+  margin: 4px 0 0;
+  color: var(--tx3);
+  font-size: var(--fs-sm2);
+}
+.iw-input,
+.iw-select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--bd2);
+  border-radius: var(--r-md);
+  background: var(--surf);
+  color: var(--tx);
+  font: inherit;
+  font-size: var(--fs-md);
+}
+.iw-input--area {
+  min-height: 112px;
+  line-height: 1.6;
+  resize: vertical;
+}

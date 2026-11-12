@@ -13,6 +13,8 @@ export function ConfirmDialog(props: {
   cancelLabel?: string;
   confirmVariant?: ButtonVariant;
   confirmDisabled?: boolean;
+  /** 表单弹窗（新建助手等）：不是警示确认，读屏按普通对话框读，打开时焦点落在第一个输入框。 */
+  form?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -27,7 +29,8 @@ export function ConfirmDialog(props: {
   };
   onMount(() => {
     document.addEventListener("keydown", onKey, true);
-    cancel.focus();
+    const first = props.form ? box.querySelector<HTMLElement>("input, textarea, select") : null;
+    (first ?? cancel).focus();
   });
   onCleanup(() => {
     document.removeEventListener("keydown", onKey, true);
@@ -36,7 +39,13 @@ export function ConfirmDialog(props: {
   return (
     <Portal>
       <div class="iw-dialog-scrim" onClick={(e) => e.target === e.currentTarget && props.onCancel()}>
-        <div ref={box} class="iw-dialog" role="alertdialog" aria-modal="true" aria-label={props.title}>
+        <div
+          ref={box}
+          class={`iw-dialog${props.form ? " iw-dialog--form" : ""}`}
+          role={props.form ? "dialog" : "alertdialog"}
+          aria-modal="true"
+          aria-label={props.title}
+        >
           <h2 class="iw-dialog__title">{props.title}</h2>
           <div class="iw-dialog__body">{props.children}</div>
           <div class="iw-dialog__actions">

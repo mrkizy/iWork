@@ -208,9 +208,124 @@ pub fn decide(
                 new_path: x.new_path.clone(),
             })));
         }
+        // 添加项目（步 7d）：真后台要检查目录、写 project.toml（技术设计 8.2）；假后台按路径的最后一段起名。
+        C::AddProject(x) => {
+            if tables.projects.values().any(|p| p.root_path == x.path) {
+                return Err(error(
+                    pb::ErrorCode::InvalidArgument,
+                    "这个文件夹已经是项目了",
+                    false,
+                ));
+            }
+            let name = x
+                .path
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or_default();
+            d.events
+                .push(fixtures::project(&fresh("project"), name, &x.path));
+        }
+        // 设置（步 7d）：只带变了的字段
+        C::SetPlayfulUi(x) => {
+            d.events
+                .push(ev(E::GlobalSettingsChanged(pb::GlobalSettingsChanged {
+                    playful_ui: Some(x.enabled),
+                    ..Default::default()
+                })))
+        }
+        C::SetAutostart(x) => {
+            d.events
+                .push(ev(E::GlobalSettingsChanged(pb::GlobalSettingsChanged {
+                    autostart: Some(x.enabled),
+                    ..Default::default()
+                })))
+        }
+        C::SetProjectsRoot(x) => {
+            d.events
+                .push(ev(E::GlobalSettingsChanged(pb::GlobalSettingsChanged {
+                    projects_root: Some(x.path.clone()),
+                    ..Default::default()
+                })))
+        }
+        C::RevokeRule(x) => {
+            if !tables.rules.contains_key(&x.rule_id) {
+                return Err(not_found("rule_id", &x.rule_id));
+            }
+            d.events.push(ev(E::RuleRevoked(pb::RuleRevoked {
+                rule_id: x.rule_id.clone(),
+            })));
+        }
+        // 助手（步 7c 的配置页、新建弹窗、删除）：乐观并发照协议（版本对不上回 CONFLICT），名字为空回
+        // INVALID_ARGUMENT，配置没变不产生事件；新建同时建它的私聊；内置 iWork 不能删。
+        C::CreateAssistant(x) => {
+            let config = x.config.clone().unwrap_or_default();
+            check_assistant_name(&config)?;
+            let id = fresh("assistant");
+            d.events.push(ev(E::AssistantCreated(pb::AssistantCreated {
+                assistant: Some(pb::Assistant {
+                    id: id.clone(),
+                    builtin: false,
+                    version: 1,
+                    config: Some(config),
+                    updated_at: None,
+                }),
+            })));
+            d.events.push(fixtures::dm(&fresh("dm"), &id));
+        }
+        C::UpdateAssistant(x) => {
+            let a = tables
+                .assistants
+                .get(&x.assistant_id)
+                .ok_or_else(|| not_found("assistant_id", &x.assistant_id))?;
+            if a.version != x.expected_version {
+                return Err(error(
+                    pb::ErrorCode::Conflict,
+                    "助手配置已经被改过，请按最新的再改",
+                    false,
+                ));
+            }
+            let config = x.config.clone().unwrap_or_default();
+            check_assistant_name(&config)?;
+            if a.config.as_ref() != Some(&config) {
+                d.events.push(ev(E::AssistantUpdated(pb::AssistantUpdated {
+                    assistant_id: a.id.clone(),
+                    version: a.version + 1,
+                    config: Some(config),
+                })));
+            }
+        }
+        C::DeleteAssistant(x) => {
+            let a = tables
+                .assistants
+                .get(&x.assistant_id)
+                .ok_or_else(|| not_found("assistant_id", &x.assistant_id))?;
+            if a.builtin {
+                return Err(error(
+                    pb::ErrorCode::InvalidArgument,
+                    "iWork 不能删除",
+                    false,
+                ));
+            }
+            d.events.push(ev(E::AssistantDeleted(pb::AssistantDeleted {
+                assistant_id: a.id.clone(),
+                name_snapshot: a
+                    .config
+                    .as_ref()
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default(),
+            })));
+        }
         _ => return Err(unimplemented()),
     }
     Ok(d)
+}
+
+fn check_assistant_name(c: &pb::AssistantConfig) -> Result<(), pb::Error> {
+    if c.name.trim().is_empty() {
+        return Err(error(pb::ErrorCode::InvalidArgument, "名字不能为空", false));
+    }
+    Ok(())
 }
 
 fn unimplemented() -> pb::Error {

@@ -64,3 +64,22 @@
     transform: rotate(360deg);
   }
 }
+
+/* 标签：越界等用待处理色，成功用成功色，其余中性 */
+.iw-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: var(--r-sm);
+  background: var(--surf2);
+  color: var(--tx2);
+  font-size: var(--fs-sm);
+}
+.iw-tag--warn {
+  background: var(--warnBg);
+  color: var(--warnTx);
+}
+.iw-tag--ok {
+  background: var(--okBg);
+  color: var(--okTx);
+}
