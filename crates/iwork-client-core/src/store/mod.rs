@@ -1098,6 +1098,7 @@ impl Store {
                 if let Some(round) = round {
                     self.refresh.result_applied(*round, SummaryTable::Anchors);
                 }
+                let seq = self.first_visible_seq();
                 let Some(t) = self
                     .open
                     .as_mut()
@@ -1105,16 +1106,10 @@ impl Store {
                 else {
                     return;
                 };
-                let c = TimelineChange::from_anchor(t.anchors.replace_window(*center, w));
+                let c = TimelineChange::from_anchor(t.anchors.window_arrived(*center, w, seq));
                 // 相对跳转在等这份窗口：现在落
                 let relative = t.anchors.pending_relative.take();
                 self.dirty.conversation(c);
-                if let Some(seq) = self.first_visible_seq()
-                    && let Some(t) = self.open.as_mut()
-                {
-                    let e = t.anchors.recompute_current(seq);
-                    self.dirty.conversation(TimelineChange::from_anchor(e));
-                }
                 if let Some(delta) = relative {
                     let cid = conversation_id.clone();
                     self.jump_relative(&cid, delta);

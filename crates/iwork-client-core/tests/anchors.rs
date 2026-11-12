@@ -496,3 +496,119 @@ fn cap_drops_far_end() {
     assert_eq!(ids, ["m3", "m4", "m5", "m6"], "丢的是旧的一端");
     assert!(tl.has_older, "丢掉的还能往上翻取回");
 }
+
+/// 跳到 `preview` 以「第 N 轮」开头的那一处，等它落地；返回那一行的 key。
+async fn jump_to_round(app: &App, web: &mut Web, cid: &str, round: usize) -> String {
+    let prefix = format!("第 {round} 轮");
+    let key = items(&web.state)
+        .iter()
+        .find(|i| i.preview.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("锚点窗口里没有{prefix}"))
+        .key
+        .clone();
+    intent(
+        app,
+        I::JumpToAnchor(pb::JumpToAnchor {
+            conversation_id: cid.into(),
+            key,
+        }),
+    )
+    .await;
+    let row = format!("m-al{round:03}-u");
+    let want = row.clone();
+    until(app, web, "落到那一处", move |s| {
+        s.scroll_to.as_ref().is_some_and(|x| x.row_key == want) && s.rows.contains_key(&want)
+    })
+    .await;
+    row
+}
+
+/// 相对跳转越过锚点窗口前端（前面还有）：先以当前位置为中心重取窗口，再落到前一处（方案 2.9「跳转」）。
+/// 单测 `relative_at_window_edge_fetches_first` 只测状态机；这里走「重取 → 窗口回来 → 落下」的整条接线。
+#[tokio::test(flavor = "multi_thread")]
+async fn relative_jump_at_window_edge_fetches_first() {
+    let (_d, app, mut web, _dir) = start(&["anchors-unloaded"], 5000).await;
+    let cid = "c-anchors-long";
+    open(&app, cid, false).await;
+    until(&app, &mut web, "锚点到了", |s| s.anchors.is_some()).await;
+    // 以最新为中心前后各 60 处：120 轮里窗口从第 60 轮开始，前面还有
+    let first = items(&web.state).first().unwrap().clone();
+    assert!(first.preview.starts_with("第 60 轮"), "{}", first.preview);
+    assert!(web.state.anchors.as_ref().unwrap().has_before);
+    // 跳到窗口最前那一处，网页报它是可见第一行：当前位置就是窗口的第一处
+    let row = jump_to_round(&app, &mut web, cid, 60).await;
+    let ordinal = web.state.rows[&row].ordinal;
+    window(&app, cid, ordinal, ordinal + 3).await;
+    until(&app, &mut web, "当前位置是第 60 轮", |s| {
+        s.anchor_cursor.as_ref().map(|c| c.current_key.as_str()) == Some(first.key.as_str())
+    })
+    .await;
+    let ack = intent(
+        &app,
+        I::JumpRelative(pb::JumpRelative {
+            conversation_id: cid.into(),
+            delta: -1,
+        }),
+    )
+    .await;
+    assert_eq!(ack.error, None);
+    until(
+        &app,
+        &mut web,
+        "窗口重取到前面、落到第 59 轮",
+        |s| {
+            items(s).iter().any(|i| i.preview.starts_with("第 59 轮"))
+                && s.scroll_to
+                    .as_ref()
+                    .is_some_and(|x| x.row_key == "m-al059-u")
+        },
+    )
+    .await;
+}
+
+/// 锚点窗口过时（目标那一条已经不在了）时跳过去：居中加载回来的一段里没有目标行，只显示这一段，
+/// 不滚动、不高亮，加载提示收掉（方案 S19）。
+#[tokio::test(flavor = "multi_thread")]
+async fn jump_target_gone_shows_segment_without_highlight() {
+    let (d, app, mut web, _dir) = start(&["anchors-unloaded"], 5000).await;
+    let cid = "c-anchors-long";
+    open(&app, cid, false).await;
+    until(&app, &mut web, "锚点到了", |s| s.anchors.is_some()).await;
+    let target = items(&web.state)
+        .iter()
+        .find(|i| i.preview.starts_with("第 60 轮"))
+        .unwrap()
+        .key
+        .clone();
+    assert!(
+        !web.state.rows.contains_key("m-al060-u"),
+        "对照：目标没加载"
+    );
+    // 后台那边这一条没了，客户端的锚点窗口还没重取（不产生事件，锚点不会失效）
+    d.mutate_tables(|t| {
+        let row = t.conversations.get_mut(cid).unwrap();
+        row.messages.retain(|m| m.id != "m-al060-u");
+    });
+    let before = web.state.scroll_to.clone();
+    intent(
+        &app,
+        I::JumpToAnchor(pb::JumpToAnchor {
+            conversation_id: cid.into(),
+            key: target,
+        }),
+    )
+    .await;
+    until(
+        &app,
+        &mut web,
+        "换成那一段、加载提示收掉",
+        |s| {
+            s.rows.contains_key("m-al061-u")
+                && s.anchors.as_ref().is_some_and(|a| a.jump_loading.is_none())
+        },
+    )
+    .await;
+    assert!(!web.state.rows.contains_key("m-al060-u"));
+    assert_eq!(web.state.scroll_to, before, "目标不在：不滚动、不高亮");
+    assert!(!web.state.window.unwrap().at_tail, "停在那一段，不接着最新");
+}

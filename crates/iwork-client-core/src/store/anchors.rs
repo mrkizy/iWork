@@ -94,6 +94,28 @@ impl Anchors {
         }
     }
 
+    /// 查询结果到了：换上窗口，再按可见位置（`first_visible_seq`，还没有可见行为 `None`）更新当前位置。
+    /// 第一份窗口要完整核对一次（出了窗口就重取）：它到之前网页报的可见位置没有窗口可比，被跳过了。
+    /// 之后的窗口只重算位置，见 [`Anchors::recompute_current`]。
+    pub fn window_arrived(
+        &mut self,
+        center: u64,
+        w: pb::ListAnchorsResult,
+        first_visible_seq: Option<u64>,
+    ) -> AnchorEffect {
+        let first = self.window.is_none();
+        let mut e = self.replace_window(center, w);
+        if let Some(seq) = first_visible_seq {
+            let follow = if first {
+                self.on_visible(seq)
+            } else {
+                self.recompute_current(seq)
+            };
+            e.cursor_dirty |= follow.cursor_dirty;
+        }
+        e
+    }
+
     /// 网页报了新的可见窗口（第一行的 seq，用户滚动了）：重算当前位置；位置出了已取的窗口、那一侧还有，
     /// 就以它为中心重取。
     pub fn on_visible(&mut self, first_visible_seq: u64) -> AnchorEffect {
@@ -259,6 +281,26 @@ mod tests {
         t.replace_window(0, window(&[100, 200], false, false));
         t.on_visible(50);
         assert_eq!(t.want_center, None, "对照：前面没有了就不重取");
+    }
+
+    /// 第一份窗口到达之前网页已经报过可见位置（打开对话就往上翻）：窗口一到就按那个位置核对，出了窗口就重取。
+    /// 之后换来的窗口（翻看、重取）只重算位置，不把翻看出来的窗口拉回去。
+    #[test]
+    fn first_window_checks_visible_position() {
+        let mut s = Anchors::default();
+        s.window_arrived(0, window(&[100, 200], true, false), Some(50));
+        assert_eq!(
+            s.want_center,
+            Some(50),
+            "第一份窗口：位置在它之前、前面还有，重取"
+        );
+
+        let mut t = Anchors::default();
+        t.window_arrived(0, window(&[100, 200], true, false), Some(150));
+        assert_eq!(t.want_center, None, "对照：位置在窗口里不重取");
+        t.window_arrived(300, window(&[300, 400], true, false), Some(150));
+        assert_eq!(t.want_center, None, "后来的窗口（翻看来的）不拉回去");
+        assert_eq!(t.current.as_deref(), Some("300"), "位置照常重算");
     }
 
     #[test]
