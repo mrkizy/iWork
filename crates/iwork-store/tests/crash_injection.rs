@@ -55,6 +55,8 @@ fn events_for(n: u128) -> Vec<DomainEvent> {
 const MODE_ENV: &str = "IWORK_STORE_CRASH_MODE";
 const MODE_EXIT_BEFORE_READY: &str = "exit_before_ready";
 const MODE_EXIT_AFTER_READY: &str = "exit_after_ready";
+/// 子进程 stdout 到 EOF 之后，最多等它退出这么久。
+const EXIT_AFTER_EOF_LIMIT: Duration = Duration::from_secs(60);
 
 /// 子进程入口。没有环境变量时什么都不做（正常跑测试时它是个空测试）。
 /// 打开存储后先写一行 `READY <轮次>` 握手，再进提交循环。
@@ -184,12 +186,31 @@ fn run_round(
         }
     }
     if !ready {
-        // stdout 已到 EOF：子进程正在退出（或已退出），直接等它收尸拿退出状态。
-        // 不用 try_wait 轮询加宽限期：EOF 和系统回收之间的间隔在慢机器上没有上限可言
-        let status = child.wait().map_err(|e| format!("wait 失败：{e}"))?;
+        // stdout 已到 EOF：子进程正在退出，等它收尸拿退出状态。EOF 到被系统回收之间在慢机器上可能要好几秒，
+        // 所以上限给得很宽；到点还没退就是真卡住了（关了 stdout 却不退），杀掉报错，不让整套测试一直挂着。
+        // 用 try_wait 轮询而不是把 wait 放进别的线程：std 里 wait 阻塞时没法从外面杀它（本 crate 不依赖 libc）
+        let exit_deadline = Instant::now() + EXIT_AFTER_EOF_LIMIT;
+        let msg = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    break format!("第 {round} 轮子进程在握手前就退出了（{status}）");
+                }
+                Ok(None) if Instant::now() < exit_deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break format!(
+                        "第 {round} 轮子进程关了 stdout 却 {EXIT_AFTER_EOF_LIMIT:?} 内一直没退（已杀掉）"
+                    );
+                }
+                Err(e) => return Err(format!("try_wait 失败：{e}")),
+            }
+        };
         let _ = out_reader.join();
         return Err(format!(
-            "第 {round} 轮子进程在握手前就退出了（{status}）；stderr：{}",
+            "{msg}；stderr：{}",
             err_reader.join().unwrap_or_default()
         ));
     }
