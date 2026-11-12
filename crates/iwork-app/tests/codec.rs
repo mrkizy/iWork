@@ -75,6 +75,32 @@ fn codec_rejects_kind_mismatch_and_garbage() {
     ));
 }
 
+/// 更新的版本写的事件：种类名本版本不认识，载荷里是本版本不认识的 oneof 字段。解码报 `UnknownKind` 并点名种类
+/// （T07 PD6；T04 启动表第 5a 步靠它判「这一版读不了这个库」）。种类认识而载荷坏的仍是 `Malformed`。
+#[test]
+fn codec_reports_unknown_kind_for_future_events() {
+    let codec = ProtoEventCodec;
+    // 字段号 9999、长度 0 的子消息：本版本的 oneof 里没有它
+    let mut future = Vec::new();
+    prost::encoding::encode_key(
+        9999,
+        prost::encoding::WireType::LengthDelimited,
+        &mut future,
+    );
+    prost::encoding::encode_varint(0, &mut future);
+    assert_eq!(
+        codec.decode("zz_future_kind", &future),
+        Err(CodecError::UnknownKind {
+            kind: "zz_future_kind".into()
+        })
+    );
+    // 对照：认识的种类配上这样的载荷，是载荷坏了，不是不认识
+    assert!(matches!(
+        codec.decode("rule_revoked", &future),
+        Err(CodecError::Malformed { .. })
+    ));
+}
+
 // ---------- 最小内存 store：只为用例 6，在线提交与重建都经 codec 与同一个投影 ----------
 
 /// 投影表：审批表 + 审计表。

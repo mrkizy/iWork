@@ -17,6 +17,13 @@ iwork-agent-acp.workspace = true
 iwork-vcs-git.workspace = true
 iwork-host.workspace = true
 iwork-ipc.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tokio-util.workspace = true
+futures.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["registry"] }
+serde_json.workspace = true
+ulid = { workspace = true, features = ["std"] }
 
 [features]
 # 开发开关 --dev-trust（跳过签名校验，同用户照查）。不是默认 feature；发布构建里不存在：
@@ -24,6 +31,15 @@ iwork-ipc.workspace = true
 dev = ["iwork-ipc/dev"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
 tempfile.workspace = true
 dunce.workspace = true
+rusqlite.workspace = true
+libc.workspace = true
+pollster.workspace = true
+
+# 真进程测试：测试进程不是受信映像，后台要带 --dev-trust（只在 dev feature 下存在）
+[[test]]
+name = "process"
+path = "tests/process/main.rs"
+required-features = ["dev"]

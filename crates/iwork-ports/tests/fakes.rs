@@ -381,20 +381,22 @@ impl<C: EventCodec, P: Projector<Tx = InMemoryTables>> StoragePort for InMemoryS
     fn outbox_requeue_dispatched(
         &self,
         redeliver_prefixes: Vec<String>,
+        fail_prefixes: Vec<String>,
     ) -> impl Future<Output = Result<RequeueReport, StorageError>> + Send {
-        let redeliver = OutboxSelector::NoneOf(redeliver_prefixes);
+        // NoneOf 命中 = 不以其中任何前缀开头；两边都不沾的原样留在 Dispatched
+        let not_redeliver = OutboxSelector::NoneOf(redeliver_prefixes);
+        let not_fail = OutboxSelector::NoneOf(fail_prefixes);
         let mut report = RequeueReport::default();
         for item in &mut self.state.lock().unwrap().outbox {
             if item.state != DeliveryState::Dispatched {
                 continue;
             }
-            // NoneOf 命中 = 不以任何可重投前缀开头
-            if redeliver.matches(&item.target) {
-                item.state = DeliveryState::Failed;
-                report.failed += 1;
-            } else {
+            if !not_redeliver.matches(&item.target) {
                 item.state = DeliveryState::Queued;
                 report.requeued += 1;
+            } else if !not_fail.matches(&item.target) {
+                item.state = DeliveryState::Failed;
+                report.failed += 1;
             }
         }
         async move { Ok(report) }
