@@ -161,3 +161,15 @@ pub fn header(token: String, pid: u32) -> RequestHeader {
         pid,
     }
 }
+
+/// 发完请求的原始客户端（不经 hook 程序）：返回连接本身，由测试决定什么时候关、读不读。
+pub fn sent_request(sock: &std::path::Path) -> std::os::unix::net::UnixStream {
+    let mut conn = std::os::unix::net::UnixStream::connect(sock).unwrap();
+    wire::write_request(
+        &mut conn,
+        &header(wire::token_hex(&TOKEN), std::process::id()),
+        INPUT.as_bytes(),
+    )
+    .unwrap();
+    conn
+}
