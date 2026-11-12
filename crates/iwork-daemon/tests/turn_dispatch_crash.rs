@@ -275,6 +275,7 @@ fn model() -> ModelSelection {
 
 fn plan(turn: Turn) -> TurnPlan {
     TurnPlan {
+        changes: None,
         entry: TurnEntry::New,
         turn,
         assistant_name: "小助手".into(),

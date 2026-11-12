@@ -76,6 +76,7 @@ impl Harness {
 
     fn plan(&self, cwd: &std::path::Path, prompt: &str) -> TurnPlan {
         TurnPlan {
+            changes: None,
             entry: TurnEntry::New,
             turn: queued_turn(&self.ids),
             assistant_name: "小助手".into(),

@@ -18,7 +18,17 @@
 //! 提交绑定、发 prompt），或者 `run_turn` 的 future 半路被丢掉、panic，新会话照 `retire` 的规矩丢掉、会话线退回
 //! 旧编号；已经给回合落盘了新编号的，补一条 `TurnSessionBound` 记回旧编号（重启后从回合上取到的也是旧编号）。
 //! 下一回合重新走一遍恢复，不会不带上文接着用新会话。这件事在 `run_turn` 的入口和收尾各查一次（
-//! [`SessionLine::settle_unconfirmed`]）：收尾管正常返回，入口管 future 被丢掉、panic 被接住之后接着用这条线。
+//! [`SessionLine::settle`]）：收尾管正常返回，入口管 future 被丢掉、panic 被接住之后接着用这条线。调用方丢掉
+//! 一条会话线之前也先调它（T10a 方案 D8a），[`SessionLine::is_settled`] 说这条线还有没有没了结的东西。
+//!
+//! **交出 prompt 之前认取消**（T10a 方案 D1a）：取消可以在交接表建好之前就到（记在 `TurnSlot` 上，建表时带上）。
+//! 建完交接表、开完会话、读完摘要之后各看一眼，只为少做无用功；保证靠的是两处 `session.prompt()` 之前的裁决点
+//! （锁里看取消标记）。看到取消时照这一趟已经提交到哪收尾：新回合还没提交第一笔 → `Queued` → `Cancelled`；
+//! 第一笔已提交 → 照取消的回合收尾（`Cancelling` → `Cancelled`）；续接的回合还没提交第一笔 → 什么都不提交，
+//! 原样停在 `Interrupted`。
+//!
+//! **改动摘要**（T10a 方案 D10）：回合以 `Completed` 收尾时，提交之前限时问一次 `TurnPlan.changes`
+//! （[`CHANGE_SUMMARY_LIMIT`]）；给不出来（出错、panic、到时）就不带摘要、不盖章，回合照常收尾。
 //!
 //! **续接**（T06 方案 2.6 第 4 条）：`TurnPlan.entry` 是 [`TurnEntry::Resume`] 时，第一步用 `Resume` 而不是
 //! `Started`，另起一条助手消息（同一个回合）；说明文字由调用方用 [`super::resume_note`] 生成放进 `blocks`。
@@ -51,6 +61,7 @@
 //! 免得工具继续改文件），然后把原始错误交给上层；不重发 prompt。
 
 use std::future::{Future, poll_fn};
+use std::panic::AssertUnwindSafe;
 use std::pin::pin;
 use std::sync::Arc;
 use std::task::Poll;
@@ -60,9 +71,9 @@ use iwork_domain::action::{Action, ActionFlags, ActionKind, ActionTarget};
 use iwork_domain::approval::VoidReason;
 use iwork_domain::common::{Actor, Usage};
 use iwork_domain::event::{
-    ApprovalDelivered, DomainEvent, MessageAppended, MessageCompleted, QuotaObserved,
-    SessionReplaced, ToolCallFinished, ToolCallStarted, TurnFinished, TurnModelReported,
-    TurnSessionBound, TurnStateChanged, UsageReported,
+    ApprovalDelivered, ChangeSummary, DomainEvent, MessageAppended, MessageCompleted,
+    QuotaObserved, SessionReplaced, ToolCallFinished, ToolCallStarted, TurnFinished,
+    TurnModelReported, TurnSessionBound, TurnStateChanged, UsageReported,
 };
 use iwork_domain::id::{CommandId, MessageId, ProjectId, TurnId};
 use iwork_domain::message::{Author, Message, MessageBody, MessageStatus};
@@ -76,6 +87,7 @@ use iwork_ports::clock::{Clock, IdGenerator, MonotonicInstant, Timer};
 use iwork_ports::live::{LivePublisher, MessageDelta};
 use iwork_ports::read_model::ReadModelPort;
 use iwork_ports::store::{CommitRequest, StorageError, StoragePort};
+use iwork_ports::vcs::ChangeProbe;
 
 use super::binding::{Rebind, mismatch_reason, rebind};
 use super::permission::{
@@ -105,6 +117,9 @@ pub const NUDGE_LIMIT: Duration = Duration::from_secs(1);
 
 /// 因等待上限中断的回合，旧进程树没能确认清空时，改记 `Failed` 的原因。
 pub const TREE_NOT_CLEARED: &str = "运行时进程树没能结束";
+
+/// 回合以 `Completed` 收尾时等改动探针最多这么久；到时不带摘要照常收尾（T10a 方案 D10）。
+pub const CHANGE_SUMMARY_LIMIT: Duration = Duration::from_secs(2);
 
 /// 带作废的提交被投影器拒（计划过期）后重新要计划，最多这么多次。
 const VOID_COMMIT_ATTEMPTS: u32 = 3;
@@ -154,7 +169,7 @@ impl<S, C, I, L, T, H> Copy for TurnPorts<'_, S, C, I, L, T, H> {}
 
 /// 一个回合要做什么。`turn` 处于 `Queued`（新回合，`TurnQueued` 已由受理命令的一方写入）或
 /// `Interrupted`（续接），和 `entry` 对应。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TurnPlan {
     pub turn: Turn,
     pub entry: TurnEntry,
@@ -165,6 +180,23 @@ pub struct TurnPlan {
     pub spec: SessionSpec,
     /// 新回合是用户的请求；续接的回合是续接说明
     pub blocks: Vec<ContentBlock>,
+    /// 这一趟的改动探针（开始时的样子已经拍在里面）；没有就不出改动摘要（T10a 方案 D10）
+    pub changes: Option<Arc<dyn ChangeProbe>>,
+}
+
+// 探针是端口对象，不要求它能打印；只说有没有
+impl std::fmt::Debug for TurnPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurnPlan")
+            .field("turn", &self.turn)
+            .field("entry", &self.entry)
+            .field("assistant_name", &self.assistant_name)
+            .field("context_project_id", &self.context_project_id)
+            .field("spec", &self.spec)
+            .field("blocks", &self.blocks)
+            .field("changes", &self.changes.is_some())
+            .finish()
+    }
 }
 
 /// 回合从哪儿进。
@@ -293,6 +325,12 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         self.resume.as_deref()
     }
 
+    /// 这条线身上没有没了结的东西：用摘要新开的会话没被收下、要补记旧编号（[`Self::settle`] 管）；旧进程树没确认
+    /// 清空（[`Self::retire`] 管）。调用方丢掉这条线之前要它为真（T10a 方案 D8a）。
+    pub fn is_settled(&self) -> bool {
+        self.unconfirmed.is_none() && self.unclean.is_none()
+    }
+
     /// 跑一个回合，返回它停在的状态。返回 `Err` 时交接表已撤，会话已丢掉（清不掉的记着，见模块文档）。
     pub async fn run_turn<S, C, I, L, T, H>(
         &mut self,
@@ -309,14 +347,14 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         H: ReadModelPort,
     {
         // 上一次 run_turn 半路被丢掉或 panic 了：收尾没跑到，在这里补上
-        self.settle_unconfirmed(ports).await?;
+        self.settle(ports).await?;
         let result = self.run_turn_inner(agent, ports, plan).await;
         if result.is_err() {
             // 交接表已随 run_turn_inner 返回撤掉；结束运行时，免得它在无人记录时继续动手。
             // 清不掉的记在 unclean 里，下一次开会话前再清；这里交回的是原始错误
             let _ = self.retire().await;
         }
-        let settled = self.settle_unconfirmed(ports).await;
+        let settled = self.settle(ports).await;
         let state = result?;
         settled?;
         Ok(state)
@@ -324,8 +362,10 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
 
     /// 用摘要新开的会话没收下首条 prompt：丢掉它（清不掉的照常记在 unclean 里）、会话线退回旧编号；已给回合落盘了
     /// 新编号的，补提交一条 `TurnSessionBound` 记回旧编号。补提交失败是编排自己的错误（同读历史失败）：
-    /// `unconfirmed` 留着，下一次入口再补，丢会话、退编号这两步不会重做。
-    async fn settle_unconfirmed<S, C, I, L, T, H>(
+    /// `unconfirmed` 留着，下一次再补，丢会话、退编号这两步不会重做。没有要了结的就什么都不做。
+    ///
+    /// `run_turn` 的入口与收尾都调它；调用方丢掉这条线之前也调它（T10a 方案 D8a）。
+    pub async fn settle<S, C, I, L, T, H>(
         &mut self,
         ports: TurnPorts<'_, S, C, I, L, T, H>,
     ) -> Result<(), TurnRunError>
@@ -381,6 +421,7 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             context_project_id,
             spec,
             blocks,
+            changes,
         } = plan;
         // 和回合状态对不上的在第一步里报表外转换
         let (first, request) = match entry {
@@ -393,7 +434,14 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         let decider = self.decider.clone();
         let timer = ports.timer;
         let mut run = TurnRun::new(turn, ports, &*decider, &slot, context_project_id, request);
+        run.changes = changes;
+        let resuming = first == TurnTrigger::Resume;
 
+        // 交出 prompt 之前的三次「看一眼」只为少做无用功；保证在 prompt() 里的裁决点（T10a 方案 D1a）
+        if slot.cancel_requested() {
+            run.cancel_before_start(resuming).await?;
+            return Ok(run.turn.state);
+        }
         let (reused, replaced) = match self.ensure_session(agent, &spec).await {
             Ok(Ensured::Reused) => (true, None),
             Ok(Ensured::Opened { replaced }) => (false, replaced),
@@ -402,6 +450,10 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
                 return Ok(run.turn.state);
             }
         };
+        if slot.cancel_requested() {
+            run.cancel_before_start(resuming).await?;
+            return Ok(run.turn.state);
+        }
         let blocks = match &replaced {
             None => blocks,
             Some(r) => match run.with_summary(blocks, r.reason).await? {
@@ -412,6 +464,10 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
                 }
             },
         };
+        if slot.cancel_requested() {
+            run.cancel_before_start(resuming).await?;
+            return Ok(run.turn.state);
+        }
         if replaced.is_some() {
             self.mark_bound(run.turn.id);
         }
@@ -502,8 +558,9 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         }
     }
 
-    /// 丢掉当前会话：确认整棵进程树清空才放掉。清不掉时会话留着、记下原因，返回错误。
-    async fn retire(&mut self) -> Result<(), AgentError> {
+    /// 丢掉当前会话：确认整棵进程树清空才放掉。清不掉时会话留着、记下原因，返回错误。没有会话时直接成功。
+    /// 调用方丢掉这条线之前、删除对话收线时都经它（T10a 方案 D8a、X3）。
+    pub async fn retire(&mut self) -> Result<(), AgentError> {
         let Some(session) = self.session.as_ref() else {
             self.unclean = None;
             return Ok(());
@@ -626,6 +683,9 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             .session
             .as_ref()
             .expect("ensure_session 成功后一定有会话");
+        if !run.slot.pass_prompt() {
+            return Ok(Err(End::Finished(TurnOutcome::Cancelled)));
+        }
         let first = session.prompt(blocks.clone()).await;
         if !(reused && matches!(first, Err(AgentError::ProcessExited { .. }))) {
             return Ok(first.map_err(End::Failed));
@@ -649,6 +709,9 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         }
         run.bind_session(self.resume.clone(), replaced).await?;
         let session = self.session.as_ref().expect("刚开好会话");
+        if !run.slot.pass_prompt() {
+            return Ok(Err(End::Finished(TurnOutcome::Cancelled)));
+        }
         Ok(session.prompt(blocks).await.map_err(End::Failed))
     }
 }
@@ -735,6 +798,8 @@ struct TurnRun<'a, S, C, I, L, T, H, D> {
     usage: Usage,
     last_checkpoint: Option<MonotonicInstant>,
     checkpointed_len: usize,
+    /// 这一趟的改动探针（`TurnPlan.changes`）
+    changes: Option<Arc<dyn ChangeProbe>>,
 }
 
 impl<'a, S, C, I, L, T, H, D> TurnRun<'a, S, C, I, L, T, H, D>
@@ -767,6 +832,7 @@ where
             usage: Usage::default(),
             last_checkpoint: None,
             checkpointed_len: 0,
+            changes: None,
         }
     }
 
@@ -872,9 +938,23 @@ where
     async fn fail_before_start(&mut self, reason: String) -> Result<(), TurnRunError> {
         let events = vec![
             self.step(TurnTrigger::Failed, Some(reason))?,
-            self.finished_event(),
+            self.finished_event(None),
         ];
         self.commit_and_nudge(events, Voiding::of(TurnTrigger::Failed, 0))
+            .await
+    }
+
+    /// 第一笔提交之前看到取消（T10a 方案 D1a ①③）。新回合：`Queued` → `Cancelled`，带 `TurnFinished`。续接的回合：
+    /// 什么都不提交，原样停在 `Interrupted`（它的继续意图什么时候失效由宿主管）。
+    async fn cancel_before_start(&mut self, resuming: bool) -> Result<(), TurnRunError> {
+        if resuming {
+            return Ok(());
+        }
+        let events = vec![
+            self.step(TurnTrigger::Cancel, None)?,
+            self.finished_event(None),
+        ];
+        self.commit_and_nudge(events, Voiding::of(TurnTrigger::Cancel, 0))
             .await
     }
 
@@ -1209,7 +1289,7 @@ where
     async fn fail_after_interrupt(&mut self) -> Result<(), TurnRunError> {
         let events = vec![
             self.step(TurnTrigger::Failed, Some(TREE_NOT_CLEARED.into()))?,
-            self.finished_event(),
+            self.finished_event(None),
         ];
         self.commit_and_nudge(events, Voiding::of(TurnTrigger::Failed, 0))
             .await
@@ -1254,6 +1334,12 @@ where
             End::Failed(error) => triggers.push((failed, Some(error.to_string()))),
             End::Unrecovered(reason) => triggers.push((failed, Some(reason))),
         }
+        // 只有做完了的回合问探针；排在「先处理已经收到的取消」之后、最后一笔提交之前（T10a 方案 D10）
+        let summary = if triggers.last().map(|(t, _)| *t) == Some(TurnTrigger::Completed) {
+            self.change_summary().await
+        } else {
+            None
+        };
         let mut events = Vec::new();
         let mut void = None;
         for (trigger, reason) in triggers {
@@ -1284,22 +1370,55 @@ where
             );
         }
         if self.turn.state.is_terminal() {
-            events.push(self.finished_event());
+            events.push(self.finished_event(summary));
         }
         self.commit_and_nudge(events, void).await
     }
 
-    fn finished_event(&self) -> DomainEvent {
+    /// 限时问一次改动探针。没有探针 → `None`；探针给不出（出错）、panic、到时 → `None`，记一条 warn 点名回合。
+    /// 到时就丢掉探针的 future：探针自己的读由它的实现放在不随这里丢掉的地方跑完（D10 的在途上限）。
+    async fn change_summary(&self) -> Option<ChangeSummary> {
+        let probe = self.changes.as_ref()?;
+        let asked = within(
+            self.ports.timer,
+            CHANGE_SUMMARY_LIMIT,
+            catch_unwind(probe.summary()),
+        )
+        .await;
+        let why = match asked {
+            Some(Ok(Some(summary))) => return Some(summary),
+            Some(Ok(None)) => "探针给不出改动摘要",
+            Some(Err(())) => "改动探针 panic",
+            None => "改动探针超时",
+        };
+        tracing::warn!(turn = %self.turn.id, why, "回合收尾不带改动摘要");
+        None
+    }
+
+    /// 回合结束事件。`summary` 只在以 `Completed` 收尾时可能有；有改动的文件才盖「搞定」章（技术设计 9.7）。
+    fn finished_event(&self, summary: Option<ChangeSummary>) -> DomainEvent {
         TurnFinished {
             turn_id: self.turn.id,
             state: self.turn.state,
             usage: self.usage,
-            // 「搞定」章要看改动摘要（技术设计 9.7），改动统计随版本控制接入
-            celebrate: false,
-            change_summary: None,
+            celebrate: summary.as_ref().is_some_and(|s| s.files_changed > 0),
+            change_summary: summary,
         }
         .into()
     }
+}
+
+/// 接住 `fut` 在 poll 里的 panic，变成 `Err(())`。探针是端口对象，它 panic 不能带倒整趟编排。
+async fn catch_unwind<F: Future>(fut: F) -> Result<F::Output, ()> {
+    let mut fut = pin!(fut);
+    poll_fn(
+        |cx| match std::panic::catch_unwind(AssertUnwindSafe(|| fut.as_mut().poll(cx))) {
+            Ok(Poll::Ready(out)) => Poll::Ready(Ok(out)),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(_) => Poll::Ready(Err(())),
+        },
+    )
+    .await
 }
 
 /// 回合停在的状态 → 助手消息的结局。

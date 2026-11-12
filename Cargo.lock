@@ -3125,6 +3125,7 @@ dependencies = [
  "iwork-ports",
  "iwork-rootfs",
  "proptest",
+ "sha2",
  "tempfile",
  "tokio",
 ]

@@ -15,8 +15,8 @@ mod workspace;
 use std::path::{Path, PathBuf};
 
 use iwork_ports::vcs::{
-    BaselineRef, Detection, Diff, DiffRange, ProgressSink, RepoRoot, VcsCapabilities, VcsError,
-    VcsProvider, WorkspaceStatus,
+    BaselineRef, Detection, Diff, DiffRange, PathVersion, ProgressSink, RepoRoot, VcsCapabilities,
+    VcsError, VcsProvider, WorkspaceStatus,
 };
 
 pub use command::GitCommand;
@@ -88,5 +88,17 @@ impl VcsProvider for GitVcs {
     async fn diff(&self, repo: &RepoRoot, range: DiffRange) -> Result<Diff, VcsError> {
         let repo = repo.clone();
         blocking("diff", move || workspace::diff(&repo, &range)).await
+    }
+
+    async fn worktree_versions(
+        &self,
+        repo: &RepoRoot,
+        paths: &[PathBuf],
+    ) -> Result<Vec<PathVersion>, VcsError> {
+        let (repo, paths) = (repo.clone(), paths.to_vec());
+        blocking("worktree_versions", move || {
+            workspace::worktree_versions(&repo, &paths)
+        })
+        .await
     }
 }

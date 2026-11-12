@@ -14,7 +14,7 @@ pub use permission::{
 pub use resume_note::{ResumeReason, resume_note};
 pub use resume_summary::{SUMMARY_HEADER, SummaryLimits, resume_summary};
 pub use runner::{
-    CHECKPOINT_INTERVAL, FAIR_BURST, LIMIT_CHECK_INTERVAL, ORCHESTRATOR_ACTOR, REQUEST_HEADER,
-    ResumeRequest, SUMMARY_RECENT_LIMIT, SessionLine, TREE_NOT_CLEARED, TurnCanceller, TurnEntry,
-    TurnPlan, TurnPorts, TurnRunError,
+    CHANGE_SUMMARY_LIMIT, CHECKPOINT_INTERVAL, FAIR_BURST, LIMIT_CHECK_INTERVAL,
+    ORCHESTRATOR_ACTOR, REQUEST_HEADER, ResumeRequest, SUMMARY_RECENT_LIMIT, SessionLine,
+    TREE_NOT_CLEARED, TurnCanceller, TurnEntry, TurnPlan, TurnPorts, TurnRunError,
 };

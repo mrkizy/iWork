@@ -125,6 +125,7 @@ fn start(fake: &Fake) -> Run {
     let canceller = line.canceller();
     let runtime = AcpRuntime::new(fake.launch.clone());
     let plan = TurnPlan {
+        changes: None,
         entry: TurnEntry::New,
         turn: queued_turn(&h.ids),
         assistant_name: "小助手".into(),

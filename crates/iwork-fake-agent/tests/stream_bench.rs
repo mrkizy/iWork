@@ -106,6 +106,7 @@ async fn run_scenario(members: usize, secs: u64) -> Report {
                 history: &history,
             };
             let plan = TurnPlan {
+                changes: None,
                 entry: TurnEntry::New,
                 turn: queued_turn(&ids),
                 assistant_name: "压测".into(),

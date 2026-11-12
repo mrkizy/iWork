@@ -255,12 +255,14 @@ pub(crate) struct Handoff {
     next_seq: u64,
     /// 编排没活干时留下的唤醒器
     runner: Option<Waker>,
-    /// 取消请求：不带回执，没有人等它
+    /// 取消请求：不带回执，没有人等它。只用来叫醒更新循环；要不要交出 prompt 看 `cancel_requested`
     cancel: mpsc::UnboundedSender<()>,
+    /// 这个回合被要求取消了（交出 prompt 前的裁决点在锁里读它，T10a 方案 D1a）
+    cancel_requested: bool,
 }
 
 impl Handoff {
-    fn new(turn_id: TurnId, cancel: mpsc::UnboundedSender<()>) -> Self {
+    fn new(turn_id: TurnId, cancel: mpsc::UnboundedSender<()>, cancel_requested: bool) -> Self {
         Self {
             turn_id,
             accepting: true,
@@ -269,6 +271,7 @@ impl Handoff {
             next_seq: 0,
             runner: None,
             cancel,
+            cancel_requested,
         }
     }
 
@@ -448,31 +451,46 @@ impl Handoff {
     }
 }
 
+/// 交接表和早到的取消，同一把锁护着。
+#[derive(Debug, Default)]
+pub(crate) struct SlotState {
+    /// 当前回合的交接表；回合没开或已结束时为 `None`
+    pub handoff: Option<Handoff>,
+    /// 交接表还没建时就到了的取消：这个回合一开就算已要求取消（T10a 方案 D1a、1/F-5）
+    early_cancel: Option<TurnId>,
+}
+
 /// 当前回合的交接表。会话线、权限处理方、取消句柄共用；回合结束时撤掉。
 #[derive(Debug, Default)]
-pub(crate) struct TurnSlot(Mutex<Option<Handoff>>);
+pub(crate) struct TurnSlot(Mutex<SlotState>);
 
 impl TurnSlot {
-    pub fn lock(&self) -> MutexGuard<'_, Option<Handoff>> {
+    pub fn lock(&self) -> MutexGuard<'_, SlotState> {
         self.0.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// 拿锁、对当前回合的表做一件事、放锁。没有回合时返回 `None`。
     fn with<R>(&self, f: impl FnOnce(&mut Handoff) -> R) -> Option<R> {
-        self.lock().as_mut().map(f)
+        self.lock().handoff.as_mut().map(f)
     }
 
-    /// 开一个回合的表，返回取消请求的接收端。
+    /// 开一个回合的表，返回取消请求的接收端。之前早到的、正是这个回合的取消随之带上；别的回合的丢掉。
     pub fn open(&self, turn_id: TurnId) -> mpsc::UnboundedReceiver<()> {
         let (cancel, cancels) = mpsc::unbounded();
-        let old = self.lock().replace(Handoff::new(turn_id, cancel));
+        let mut state = self.lock();
+        let early = state.early_cancel.take() == Some(turn_id);
+        let old = state.handoff.replace(Handoff::new(turn_id, cancel, early));
         debug_assert!(old.is_none(), "上一个回合的表没有撤掉");
         cancels
     }
 
-    /// 停止受理，再把回合撤掉。
+    /// 停止受理，再把回合撤掉；没用上的早到取消一并清掉。
     pub fn close(&self) {
-        let refusals = self.lock().take().map(|mut h| h.stop_accepting());
+        let refusals = {
+            let mut state = self.lock();
+            state.early_cancel = None;
+            state.handoff.take().map(|mut h| h.stop_accepting())
+        };
         if let Some(refusals) = refusals {
             refusals.deliver();
         }
@@ -531,16 +549,33 @@ impl TurnSlot {
 
     /// 只读地看一眼当前回合的表。
     pub fn inspect<R>(&self, f: impl FnOnce(&Handoff) -> R) -> Option<R> {
-        self.lock().as_ref().map(f)
+        self.lock().handoff.as_ref().map(f)
     }
 
-    /// 请求取消某个回合；回合已经结束或换了就什么都不做。
+    /// 请求取消某个回合（T10a 方案 D1a）。交接表是这个回合的：置取消标记、叫醒编排。还没有交接表：记下
+    /// 「这个回合一开就取消」，`open` 时带上。表是别的回合的：什么都不做（这个回合已经结束）。
     pub fn cancel(&self, turn_id: TurnId) {
-        if let Some(handoff) = self.lock().as_ref()
-            && handoff.turn_id == turn_id
-        {
-            let _ = handoff.cancel.unbounded_send(());
+        let mut state = self.lock();
+        match state.handoff.as_mut() {
+            Some(handoff) if handoff.turn_id == turn_id => {
+                handoff.cancel_requested = true;
+                let _ = handoff.cancel.unbounded_send(());
+            }
+            Some(_) => {}
+            None => state.early_cancel = Some(turn_id),
         }
+    }
+
+    /// 交出 prompt 之前的裁决点（T10a 方案 D1a）：锁里看取消标记。没要求取消 → `true`，可以交出；要求了 →
+    /// `false`，不交出。取消和裁决在同一把锁里，只有两种先后：取消先到，这一趟没有 prompt；裁决先过，
+    /// 之后到的取消照在跑的回合处理（更新循环里的 `on_cancel`）。
+    pub fn pass_prompt(&self) -> bool {
+        !self.cancel_requested()
+    }
+
+    /// 这个回合被要求取消了没有。没有交接表时为 `false`。
+    pub fn cancel_requested(&self) -> bool {
+        self.inspect(|h| h.cancel_requested).unwrap_or(false)
     }
 }
 

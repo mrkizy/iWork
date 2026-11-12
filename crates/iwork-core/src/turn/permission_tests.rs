@@ -290,6 +290,7 @@ fn stop_while_sender_is_inside_the_lock() {
         let mut guard = b.slot.lock();
         let t = stopper(&b, &wire);
         let (registered, _waker) = guard
+            .handoff
             .as_mut()
             .expect("回合在")
             .register(0)
@@ -312,6 +313,7 @@ fn stop_while_sender_is_inside_the_lock() {
     let mut guard = b.slot.lock();
     let t = stopper(&b, &wire);
     let (acked, _waker) = guard
+        .handoff
         .as_mut()
         .expect("回合在")
         .submit(turn(), registered.ticket, None)

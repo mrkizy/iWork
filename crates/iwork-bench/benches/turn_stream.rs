@@ -188,6 +188,7 @@ fn plan(n: u128) -> TurnPlan {
         effort: None,
     };
     TurnPlan {
+        changes: None,
         entry: TurnEntry::New,
         turn: Turn {
             id: TurnId::from_raw(id),

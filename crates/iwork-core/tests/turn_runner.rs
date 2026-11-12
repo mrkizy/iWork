@@ -536,6 +536,7 @@ impl Bench {
     fn plan(&self) -> TurnPlan {
         let id = |n| RawUlid::from_u128(self.ids.0.fetch_add(1, Ordering::SeqCst) as u128 + n);
         TurnPlan {
+            changes: None,
             entry: TurnEntry::New,
             turn: Turn {
                 id: TurnId::from_raw(id(1)),

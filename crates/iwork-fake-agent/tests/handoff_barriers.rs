@@ -152,6 +152,7 @@ impl<J: Judge> W<J> {
         let mut line = SessionLine::new(self.decider.clone(), None);
         let canceller = line.canceller();
         let plan = TurnPlan {
+            changes: None,
             entry: TurnEntry::New,
             turn,
             assistant_name: "小助手".into(),
