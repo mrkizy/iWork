@@ -249,10 +249,9 @@ mod tests {
             matches!(held, LockOutcome::HeldByOther(_)),
             "子进程握着副本时锁不该放开：{held:?}"
         );
-        assert!(matches!(
-            acquire(&a, &b, &info(3)).unwrap(),
-            LockOutcome::Acquired(_)
-        ));
+        // 自己的子进程已收尸，它那份副本关了；但同一测试进程里别的测试可能在 `first` 持锁期间 fork 了、还没 exec，
+        // 它们的副本还握着锁，所以这里也只能断言「很快拿得到」（第 1 轮审查 1/F-1）
+        acquire_eventually(&a, &b, 3);
     }
 
     /// 已经 exec 完的子进程不握锁：锁文件句柄随 `O_CLOEXEC` 在 exec 时关掉，放掉之后马上拿得到。
