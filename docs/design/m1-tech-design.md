@@ -317,7 +317,8 @@ iWork 在本机是三类进程：客户端、后台服务（daemon）、每个�
 | Edit、Write、NotebookEdit | 写文件 |
 | Bash | 执行命令（按子动作求值） |
 | WebFetch、WebSearch | 联网 |
-| 子代理（Agent）、Skill、TodoWrite、计划模式工具、读取后台命令输出 | 放行（自身无副作用；子代理内的工具调用照常经 hook） |
+| 子代理（Agent）、TodoWrite、计划模式工具、读取后台命令输出 | 放行（自身无副作用；子代理内的工具调用照常经 hook） |
+| Skill | 放行。**加载技能有副作用**：技能正文里的内联命令在加载时直接执行、不经 hook（实测 R2X K3b；已知例外，产品负责人 2026-11-12 定 PD-5，需求第 9 章）；技能声明的 `allowed-tools` 在 hook 没给出决定时会放宽 CLI 自己的规则（P17）。仓库里的技能照常加载（P16），不可信仓库的技能也能借此执行命令，产品负责人接受 |
 | 停止后台命令 | 放行（只影响本会话启动的进程） |
 | RemoteTrigger 等创建云端定时任务或远程会话的工具 | **启动时不提供（`--disallowedTools`），hook 兜底拒绝，三档相同**：在 Anthropic 云端运行、不经本机 hook |
 | CronCreate、CronDelete 等会话内定时工具 | **启动时不提供，hook 兜底拒绝**：iWork 每轮结束后会话即结束，定时要么不触发、要么在用户不知情时触发；需要定时由 iWork 自己调度 |
