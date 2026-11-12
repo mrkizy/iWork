@@ -53,7 +53,7 @@
   G5 仓库项目级设置能否排除（O1 ③）
 --selftest：不调用 claude，只自测脚本自己的机制。
 """
-import argparse, ast, hashlib, json, os, re, secrets, shlex, shutil, signal, stat, subprocess, sys, tarfile, tempfile, threading, time
+import argparse, ast, collections, hashlib, json, os, re, secrets, shlex, shutil, signal, stat, subprocess, sys, tarfile, tempfile, threading, time
 
 HOME = os.path.expanduser("~")
 A = None            # 命令行参数
@@ -1433,14 +1433,33 @@ def record_verdict(ev, executed):
     return info_if(ev["ok"]), f"有执行的痕迹={bool(executed)}"
 
 
-def unprompted_verdict(ev, executed, accepted):
+# 权限层拒绝的证据（2.1.322 实测，S0 结果包）：一条带 tool_use_id 的 system/permission_denied 事件；或者结果文字是登记过的拒绝说法。
+# 只有工具自己报错（任务号不存在、技能名不存在）说明不了「没执行」：CLI 不问就跑了，是工具自己失败的（脚本审查 2/1/F-1）。新的说法要先实测再加
+PERMISSION_DENIED_TEXT = re.compile(r"^\s*(?:<tool_use_error>\s*)?Permission to use \S+ has been denied because Claude Code is running in don't ask mode")
+
+
+def permission_denied_ids(events):
+    """流里 system/permission_denied 事件点名的 tool_use_id。"""
+    return {o.get("tool_use_id") for o in events if o.get("type") == "system" and o.get("subtype") == "permission_denied"}
+
+
+def denied_by_permission_layer(use, res, denied_ids):
+    """这一次调用有没有权限层拒绝的证据：事件点了它的名，或者结果是登记过的拒绝文字（且标了错误）。"""
+    return use["id"] in denied_ids or (res["is_error"] and bool(PERMISSION_DENIED_TEXT.match(res["text"])))
+
+
+def unprompted_verdict(ev, executed, accepted, denied_ids=frozenset()):
     """「不问工具」记录行的一格（方案 3.4、16.1）。纯函数。
     执行了而不在接受清单里 → FAIL（痕迹本身就是正面证据）；证据不齐 → INCONCLUSIVE；结果是 CLI 自己判的失败（cli_rejected：
-    没到权限层）→ INCONCLUSIVE；执行了且在清单里、或没执行（结果是权限层的报错）→ INFO。"""
+    没到权限层）→ INCONCLUSIVE；执行了且在清单里 → INFO。
+    说「没执行」要每一次调用都有权限层拒绝的证据（denied_by_permission_layer），这时记 INFO；只有工具自己的报错、没有这类证据 → INCONCLUSIVE。"""
     if executed and not accepted: return "FAIL", "执行了，而这个工具不在接受清单里：交产品负责人定"
     if not ev["ok"]: return "INCONCLUSIVE", ev["why"]
     if any(cli_rejected(res) for res in ev["results"]): return "INCONCLUSIVE", "结果是 CLI 自己判的失败，没到权限层"
-    return "INFO", f"执行了={bool(executed)} 在接受清单里={bool(accepted)}"
+    if executed: return "INFO", f"执行了=True 在接受清单里={bool(accepted)}"
+    if all(denied_by_permission_layer(u, res, denied_ids) for u, res in zip(ev["uses"], ev["results"])):
+        return "INFO", f"执行了=False（每一次都有权限层拒绝的证据） 在接受清单里={bool(accepted)}"
+    return "INCONCLUSIVE", "有一次调用没执行的痕迹、也没有权限层拒绝的证据（可能是工具自己报错）"
 
 
 def result_executed(ev):
@@ -1472,7 +1491,7 @@ def g2_cell_status(cls, outcome, r, rows, spec, facts, mode, accepted=None):
     if cls == "不问工具":
         ev = evidence(r, spec["match"], spec["parent"], hook_rows=rows_if, many=True)
         executed = facts["executed"] if spec.get("trace") is not None else result_executed(ev)
-        return unprompted_verdict(ev, executed, accepted)
+        return unprompted_verdict(ev, executed, accepted, permission_denied_ids(r.get("events", [])))
     if want == RECORD:
         return record_verdict(evidence(r, spec["match"], spec["parent"], hook_rows=rows_if, many=True), facts["executed"])
     verdict = cell_verdict(outcome, r, rows, spec["match"], spec["parent"], facts["executed"], want == EXEC)
@@ -1514,8 +1533,14 @@ def unsandboxed_pair_facts(ctl_calls, cell_calls, command, ctl_pid, cell_pid, pa
     ctl = own(ctl_calls, ctl_pid)
     if any(o is None for _, o in ctl): return None, None
     allowed = any(o and c["place"] == "inside" for c, o in ctl)
-    cli_shapes = {call_shape(c) for c in ctl_calls if c["place"] == "outside" and stub_call_matches(words, c)}
-    cell = [(c, o) for c, o in own(cell_calls, cell_pid) if call_shape(c) not in cli_shapes]
+    # 按笔数扣（脚本审查 2/1/F-2）：对照里某个形状的沙箱外调起有几笔，出沙箱格里同形状的沙箱外调起就扣几笔；多出来的照常判归属
+    budget = collections.Counter(call_shape(c) for c in ctl_calls if c["place"] == "outside" and stub_call_matches(words, c))
+    cell = []
+    for c, o in own(cell_calls, cell_pid):
+        shape = call_shape(c)
+        if c["place"] == "outside" and budget[shape] > 0:
+            budget[shape] -= 1; continue
+        cell.append((c, o))
     if any(o is None for _, o in cell): return allowed, None
     return allowed, any(o for _, o in cell)
 
@@ -1840,7 +1865,10 @@ def g4():
     net = {"2a": "curl -sS -o /dev/null --max-time 20 https://example.com", "2b": "nc -z -w 8 github.com 22",
            "2c": "python3 -c \"import socket;a=socket.socket();a.bind(('127.0.0.1',0));a.listen(1);b=socket.socket();b.connect(a.getsockname())\"",
            "7b": "gh auth status"}
-    for key in net: host_control(key, net[key])
+    if A.no_host_control:
+        record("INFO", "G4 沙箱外对照", "--no-host-control：跳过（②、②b、②c、⑦b 四条命令不在沙箱外另跑）")
+    else:
+        for key in net: host_control(key, net[key])
     g4_case("2a", "② 联网 HTTPS", net["2a"], True, st)
     g4_case("2b", "②b 联网非 HTTP（TCP 22）", net["2b"], True, st)
     g4_case("2c", "②c 绑定并连接本机端口", net["2c"], True, st)
@@ -2825,14 +2853,22 @@ def selftest_g2_matrix():
     # 「不问工具」记录行
     U_ = lambda r, executed, accepted, trace=None: g2_cell_status("不问工具", "NOHOOK", r, [], {"match": lambda n, ti: n == "ToolSearch", "parent": "main",
                                                                                           "trace": trace}, {"executed": executed}, "dontAsk", accepted)
-    ts = lambda res: run([use("t1", "ToolSearch")], {"t1": res})
+    ts = lambda res, events=(): run([use("t1", "ToolSearch")], {"t1": res}, events=list(events))
+    pd_event = {"type": "system", "subtype": "permission_denied", "tool_use_id": "t1", "tool_name": "ToolSearch"}
+    dont_ask = {"is_error": True, "text": "Permission to use ToolSearch has been denied because Claude Code is running in don't ask mode."}
+    own_error = {"is_error": True, "text": "<tool_use_error>No task found with ID: iwork-t0g-none</tool_use_error>"}
     assert U_(ts(fine), False, False)[0] == "FAIL", "清单外的工具结果成功 → FAIL"
-    assert U_(ts(fine), False, True)[0] == "INFO" and U_(ts(err), False, False)[0] == "INFO", "清单内的成功、结果是报错 → INFO"
+    assert U_(ts(fine), False, True)[0] == "INFO", "清单内的成功 → INFO"
+    assert U_(ts(err, [pd_event]), False, False)[0] == "INFO" and U_(ts(dont_ask), False, False)[0] == "INFO", \
+        "没执行要有权限层拒绝的证据：permission_denied 事件，或登记过的 don't ask 拒绝文字"
+    assert U_(ts(own_error), False, False)[0] == "INCONCLUSIVE", "审查复现的那一例：清单外工具、唯一一次结果是工具自己的报错 → 说不清执行没有"
+    assert U_(ts(err, [{**pd_event, "tool_use_id": "other"}]), False, False)[0] == "INCONCLUSIVE", "事件点的是别的调用"
+    assert U_(ts({**dont_ask, "is_error": False}), False, False)[0] == "FAIL", "文字像拒绝、却没标错误：算执行了"
     assert U_(ts({"is_error": True, "text": "<tool_use_error>Error: No such tool available: ToolSearch</tool_use_error>"}), False, False)[0] == "INCONCLUSIVE"
     assert U_(run([], {}), False, False)[0] == "INCONCLUSIVE", "没有目标调用"
     assert U_(run([], {}), True, False, trace=lambda r: True)[0] == "FAIL", "有副作用的工具留下了哨兵、而不在清单里：痕迹本身就是证据"
-    assert U_(ts(err), False, False, trace=lambda r: False)[0] == "INFO" and U_(ts(fine), False, False, trace=lambda r: False)[0] == "INFO", \
-        "有哨兵可看的工具只看哨兵，结果成功不算执行"
+    assert U_(ts(err, [pd_event]), False, False, trace=lambda r: False)[0] == "INFO" and U_(ts(fine), False, False, trace=lambda r: False)[0] == "INCONCLUSIVE", \
+        "有哨兵可看的工具只看哨兵：没哨兵而结果成功，又没有拒绝的证据，说不清"
     # 链接格与对照
     L_ = lambda r, executed, link_ok, control_ok=True, outcome="NOHOOK": g2_cell_status(
         "补充-链接", outcome, r, [], {"match": lambda n, ti: n == "Read", "parent": "main", "link": "/w/l"},
@@ -2906,6 +2942,7 @@ def selftest_g2_matrix():
     assert pf(ctl_with_cli_sh, [call("outside", 700, cli_sh, "remote", "-v")])[1] is False, "对照里见过同样形状的沙箱外调起：扣掉"
     assert pf(ctl_with_cli_sh, [call("outside", 700, cli_sh, "remote", "-v"), call("outside", SH, via_shell, "remote", "-v")])[1] is True, \
         "命令自己的调起（父进程是 Bash 的 shell，形状不同）不被扣掉"
+    assert pf(ctl_with_cli_sh, [call("outside", 700, cli_sh, "remote", "-v")] * 2)[1] is True, "按笔数扣：对照 1 笔、出沙箱格 2 笔，多出来的那笔算执行"
     ok_ev, bad_ev = {"ok": True, "why": "", "results": [err]}, {"ok": False, "why": "没有归属对得上的目标调用"}
     pv = unsandboxed_pair_verdict
     assert pv(ok_ev, True, ok_ev, False) == ("PASS", "")
@@ -3535,6 +3572,9 @@ def main():
                     help="声明这是一次性环境（临时系统用户 / 虚拟机，里面没有要紧的东西）：故障探针不等外层保护验证就跑，G5、G9d 也跑。日常用的账号下不要加")
     ap.add_argument("--long", action="store_true", help="跑 G3 的睡眠时钟手动步骤")
     ap.add_argument("--skip-builds", action="store_true", help="跳过 G4 ⑧ 的最小构建")
+    ap.add_argument("--no-host-control", action="store_true",
+                    help="跳过 G4 联网用例的沙箱外对照：默认会由脚本自己直接跑 curl https://example.com、nc github.com 22、本机端口、"
+                         "gh auth status（会带着本机的 gh 登录去问 GitHub），只记退出码")
     ap.add_argument("--no-fail-if-unavailable", action="store_true", help="G4 不设 sandbox.failIfUnavailable（方案 16.2 第 3 项：看沙箱起不来时 CLI 怎么表现）")
     ap.add_argument("--root-parent", default=HOME, help="本次根目录与结果包建在哪个目录下（默认家目录；必须在 $TMPDIR 之外）")
     ap.add_argument("--selftest", action="store_true")
