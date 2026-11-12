@@ -653,6 +653,12 @@ impl<D: Dialer> Session<D> {
                 last,
                 by_user,
             } => {
+                // 开发构建里把每次可见行上报打到 stderr（`pnpm -C client dev:fake` 时看「用户滚动」有没有报出 by_user；
+                // 组 2b 第 6 轮 UI 审查）。发布构建没有这一行
+                #[cfg(feature = "dev")]
+                eprintln!(
+                    "[dev] SetVisibleRows conversation={conversation_id} first={first} last={last} by_user={by_user}"
+                );
                 self.store
                     .set_window(&conversation_id, first, last, by_user);
             }

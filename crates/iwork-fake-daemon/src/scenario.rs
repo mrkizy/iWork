@@ -186,6 +186,15 @@ pub const REGISTRY: &[Scenario] = &[
         timeline_cap: None,
     },
     Scenario {
+        name: "long-tool-turn",
+        about: "长工具回合：一个回合 400 次工具调用、中间一个待审批（等你处理的锚点），前后各一问一答；上限调小时两端都会被裁",
+        focus: Some("c-long-tools"),
+        build: long_tool_turn,
+        characters: &[],
+        client: &[],
+        timeline_cap: Some(60),
+    },
+    Scenario {
         name: "anchors-unloaded",
         about: "消息锚点：对话很长，最早的几处不在打开时加载的那一页里",
         focus: Some("c-anchors-long"),
@@ -867,6 +876,52 @@ fn anchors_unloaded() -> Vec<Step> {
             "改好了。",
         ));
     }
+    s
+}
+
+fn long_tool_turn() -> Vec<Step> {
+    let c = "c-long-tools";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(finished_exchange(
+        c,
+        "lt-first",
+        "先看下 README",
+        "看过了。",
+    ));
+    s.push(a(f::user_message(
+        "m-lt-q",
+        c,
+        "把整个仓库的测试全跑一遍，一个一个模块来",
+    )));
+    s.push(a(f::turn_queued("t-lt", c, IWORK)));
+    s.push(a(f::turn_state("t-lt", T::Queued, T::Running, None)));
+    for i in 0..400 {
+        s.push(a(f::tool_started(
+            "t-lt",
+            &format!("lt-{i:03}"),
+            "Bash",
+            &format!("cargo test -p module-{i:03}"),
+        )));
+        s.push(a(f::tool_finished("t-lt", &format!("lt-{i:03}"), true)));
+        if i == 200 {
+            s.push(a(f::approval(
+                "ap-lt",
+                c,
+                "t-lt",
+                f::command_action("rm -rf target"),
+                pb::ApprovalKind::Ask,
+                &[],
+            )));
+        }
+    }
+    s.push(a(f::assistant_message(
+        "m-lt-a",
+        c,
+        "t-lt",
+        IWORK,
+        "全部跑完了",
+    )));
     s
 }
 

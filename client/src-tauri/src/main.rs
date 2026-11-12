@@ -113,6 +113,21 @@ fn reopen(app: &tauri::AppHandle) {
     }
 }
 
+/// 客户端的可调项。开发构建（`dev` feature）可用 `IWORK_DEV_TIMELINE_CAP` 把时间线行数上限调小，方便对着假后台看裁剪
+/// 与翻页（至少 2：一组最多两行，方案 2.2 第 4 条）；发布构建不认识这个变量（R8）。
+fn options() -> Options {
+    #[allow(unused_mut, reason = "只有 dev 构建改上限")]
+    let mut o = Options::default();
+    #[cfg(feature = "dev")]
+    if let Ok(v) = std::env::var("IWORK_DEV_TIMELINE_CAP") {
+        match v.parse::<usize>() {
+            Ok(cap) if cap >= 2 => o.timeline_cap = cap,
+            _ => eprintln!("[dev] IWORK_DEV_TIMELINE_CAP={v} 不是不小于 2 的整数，用默认上限"),
+        }
+    }
+    o
+}
+
 fn main() {
     let dialer = effects::dialer().unwrap_or_else(|e| panic!("找不到后台服务的端点：{e}"));
     #[allow(unused_mut, reason = "只有 e2e 构建改上下文")]
@@ -129,7 +144,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![attach, next_frame, ui_intent])
         .setup(move |app| {
             let (core, effects) =
-                tauri::async_runtime::block_on(async { App::start(dialer, Options::default()) });
+                tauri::async_runtime::block_on(async { App::start(dialer, options()) });
             app.manage(Bridge {
                 app: core.clone(),
                 counters: Arc::new(PathCounters::default()),
