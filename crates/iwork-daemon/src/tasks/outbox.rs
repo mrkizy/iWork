@@ -523,17 +523,56 @@ mod tests {
             ))
         }
 
-        async fn until(&self, what: &str, limit: Duration, f: impl Fn(&Self) -> bool) {
-            let deadline = Instant::now() + limit;
+        /// 等到 `f` 成立。时限按进展算，不按墙钟：库里的 outbox 条目或无人认领的报告有变化就重新计时，
+        /// `stall` 内毫无变化才算卡住（`stall` 要长过被测路径里最长的一段设计内等待，如退避）。
+        /// 慢机器（Windows runner 上每次提交可达上百毫秒）只要一直在动就继续等，直到总上限
+        /// `stall × UNTIL_TOTAL_FACTOR`。失败时打印每次变化的时间点，分得清是「停住了」还是「太慢」。
+        async fn until(&self, what: &str, stall: Duration, f: impl Fn(&Self) -> bool) {
+            let started = Instant::now();
+            let total = stall * UNTIL_TOTAL_FACTOR;
+            let mut last = self.progress();
+            let mut last_change = started;
+            let mut history = vec![(Duration::ZERO, summarize(&last))];
             while !f(self) {
+                let now = self.progress();
+                if now != last {
+                    last_change = Instant::now();
+                    history.push((started.elapsed(), summarize(&now)));
+                    last = now;
+                }
+                let stalled = last_change.elapsed() >= stall;
+                let over = started.elapsed() >= total;
                 assert!(
-                    Instant::now() < deadline,
-                    "{limit:?} 内没等到：{what}；{:?}",
-                    self.states()
+                    !stalled && !over,
+                    "没等到：{what}（{}）；进展：{history:#?}；最终：{:?}",
+                    if stalled {
+                        format!("{stall:?} 内没有任何进展")
+                    } else {
+                        format!("一直有进展，但超过总上限 {total:?}")
+                    },
+                    last.0
                 );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
+
+        /// 判断有没有进展的快照：每条 outbox 的 (target, state, attempts)，加上已收到的报告条数。
+        fn progress(&self) -> (Vec<(String, String, i64)>, usize) {
+            (self.states(), self.reports().len())
+        }
+    }
+
+    /// [`World::until`] 的总上限是没进展时限的几倍。
+    const UNTIL_TOTAL_FACTOR: u32 = 6;
+
+    /// 进展快照的一行摘要：各状态条数、派发次数合计、报告条数。
+    fn summarize((states, reports): &(Vec<(String, String, i64)>, usize)) -> String {
+        let mut by_state = std::collections::BTreeMap::<&str, usize>::new();
+        for (_, state, _) in states {
+            *by_state.entry(state).or_default() += 1;
+        }
+        let attempts: i64 = states.iter().map(|(_, _, a)| a).sum();
+        format!("{by_state:?} 派发 {attempts} 次 报告 {reports} 条")
     }
 
     fn seen() -> Seen {
@@ -871,7 +910,7 @@ mod tests {
             Mode::AlwaysRetry,
             &s,
         )]);
-        // 3 次派发之间退避 1s、2s
+        // 3 次派发之间退避 1s、2s，第 3 次之后再退避 4s 才标失败：最长一段没进展约 4s，10s 留足余量
         w.until("失败", Duration::from_secs(10), |w| {
             w.count("a:", "failed") == 1
         })
