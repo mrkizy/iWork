@@ -488,7 +488,13 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 
 ### R2、R3（2026-11-12，方案 19 节 S0 行；脚本已照方案 16.1 第 7 版改过）
 
-每条命令开头都另有 1 个探查实例（下表没算）。语料先在日常账号生成：`cargo run -p iwork-core --example dump-credential-corpus > corpus.json`（现在 44 行，清单并集 36 个条目），R3 要把这份文件拷进一次性环境。
+每条命令开头都另有 1 个探查实例（下表没算）。两份输入先在日常账号生成，R3 要把它们拷进一次性环境：
+- 语料：`cargo run -p iwork-core --example dump-credential-corpus > corpus.json`（现在 44 行，清单并集 36 个条目）；
+- 产品的永久禁用工具名单：`cargo run -p iwork-core --example dump-disabled-tools > disabled-tools.json`（现在 11 个：RemoteTrigger、CronCreate、CronDelete、CronList、ScheduleWakeup，加 P13 定的 DesignSync、PushNotification、SendMessage、Workflow、EnterWorktree、ExitWorktree）。名单从 T07 的工具登记表导出，和产品启动参数是同一个函数的结果，脚本里不另抄。
+
+**环境变量**：脚本起每个实例时从环境里去掉 `CLAUDE_CODE_PLUGIN_DIRS`（在 Claude Code 的终端里跑脚本时，它会把用户的插件带进被测会话），登录、代理相关的变量不动；结果包的 `env-names.json` 记下脚本启动时 `CLAUDE*`、`ANTHROPIC*` 开头的变量名和去掉了哪几个，只有名字，没有值。
+
+**G4 两轮不逐格直接比**：第一轮的 `--modes` 默认是 `default,dontAsk`，G4 取第一个，跑在 `default` 下；R2 起默认是 `dontAsk`，G4 跑在 `dontAsk` 下。两轮之间某一格变了，先分清是权限模式换了、脚本改了，还是 CLI 的行为变了；t0-findings 里写 G4 结论时注明模式，产品只用 `dontAsk`，以 R2 的为准。
 
 **R2：日常账号**（都用好的探针，或者过得了日常账号的运行门）
 
@@ -507,9 +513,11 @@ R2 合计约 109 个实例，加 5 个探查。
 
 | 命令 | 约几个实例 | 看什么 |
 | --- | --- | --- |
-| `python3 tools/t0/iwork-t0g.py --only G2,G5,G9 --disposable-env --modes dontAsk --corpus corpus.json` | G2 约 230：主矩阵 9 × 11 = 99、补充格 33、出沙箱格对 2 × 36 = 72、「不问工具」记录行 15（2.1.322 的工具清单；会在根目录外留下副作用的 8 个不起实例，见下）、对照配置的 read 行 11；一次性环境不预检。G5 7，G9 2。合计约 239，加 1 个探查 | `G2 硬格子 [dontAsk+block]` 一行 `PASS`（硬格子 114 个加出沙箱的 M 个全过）；`G2 范围记录 [dontAsk+block]` 一行；`G2 [...] 出沙箱这一组` 一行的 M 与「这条写法没测到组合的条目」（M = 0 时整组 `INCONCLUSIVE`，要先换「条目 → 只读写法」表里的写法再跑）；read 行三个记录格写的「有执行的痕迹」；对照配置 read 行失败格的痕迹（有痕迹说明 `block` 在起作用）；`G5 A --setting-sources 空值` 一行 `PASS`；`G9d` 一行 `PASS` |
+| `python3 tools/t0/iwork-t0g.py --only G2,G5,G9 --disposable-env --modes dontAsk --corpus corpus.json --disabled-tools disabled-tools.json` | G2 约 228：主矩阵 9 × 11 = 99、补充格 33、出沙箱格对 2 × 36 = 72、「不问工具」记录行 12 加它开头的探查 1（2.1.322 的工具清单去掉永久禁用的 11 个之后）、对照配置的 read 行 11；一次性环境不预检。G5 7，G9 2。合计约 237，加 1 个探查 | `G2 硬格子 [dontAsk+block]` 一行 `PASS`（硬格子 114 个加出沙箱的 M 个全过）；`G2 范围记录 [dontAsk+block]` 一行；`G2 [...] 出沙箱这一组` 一行的 M、「这条写法没测到组合的条目」与「做过扣除的条目」（各自那一行写了 CLI 自己的调起对照里几笔、出沙箱格里几笔，请看一眼；M = 0 时整组 `INCONCLUSIVE`，要先换「条目 → 只读写法」表里的写法再跑）；`不问工具：带着永久禁用名单启动后的工具清单` 一行；read 行三个记录格写的「有执行的痕迹」；对照配置 read 行失败格的痕迹（有痕迹说明 `block` 在起作用）；`G5 A --setting-sources 空值` 一行 `PASS`；`G9d` 一行 `PASS` |
 
-**「不问工具」记录行里不起实例的工具**（脚本 `UNPROMPTED_NOT_RUN`，记 `INCONCLUSIVE` 并写原因，所以 `G2 范围记录` 一行在它们有着落之前到不了 `PASS`）：CronCreate、CronDelete、DesignSync、PushNotification、RemoteTrigger、SendMessage、Workflow 执行了会在本次根目录之外留下副作用（定时任务、账号上的设计、推送到设备、云端例程、给别的会话发消息、一串子代理），和「脚本只动自己建的东西」冲突；ExitWorktree 单独一次调用触发不了。要产品负责人定：用 `--disallowedTools` 从会话里去掉它们，或者另想办法测。
+**不带 `--disabled-tools`**：「不问工具」记录行整组记 `INCONCLUSIVE`（不知道会话里有哪些工具），不拿默认工具集顶替，`G2 范围记录` 一行到不了 `PASS`。
+
+**「不问工具」记录行里会停在没测成的工具**：Skill、TaskStop 的探针换不出「能成功又不留副作用」的参数（会话里没有技能、没有在跑的任务，调用注定报错），只要 CLI 没留下权限层拒绝的证据，这两格就是 `INCONCLUSIVE`，结果里点名写了原因；它们会让 `G2 范围记录` 一行到不了 `PASS`，交 supervisor。脚本里还登记了一张不起实例的表（`UNPROMPTED_NOT_RUN`：执行了会在本次根目录之外留下副作用，或单独触发不了），表里的工具现在都在永久禁用名单里，带着 `--disabled-tools` 跑时不会出现；以后名单里去掉了哪个，它会回来，记 `INCONCLUSIVE` 并点名。
 
 **第一轮 ④ 的结果不回填 T07**：第一轮 `g4-corpus-filled.json` 里记成「实测 outside」的 17 行不可信（审查复核：替身的调起没有和命令对上，有一行命令根本没跑也记成了实测）。T07 `credential_corpus` 第四列只用上面 R2 第 3 条（`--only G4 ... --corpus corpus.json`）重测的结果。
 
@@ -535,7 +543,8 @@ macOS 上：`sudo sysadminctl -addUser t0gtmp -password -`（按提示输密码�
 | 「外层保护没验证过（[...]），这个格子不在这台机器上跑」 | 运行门没过：日常账号下这几样保护不成立，故障格子不许跑。去一次性环境加 `--disposable-env` 跑（步 4）。同时把 `外层保护 [...]` 那几行原样记下来：产品里的本机验证就靠这几样 |
 | 「只在一次性环境……里加 --disposable-env 跑」 | G5、G9d 在日常账号下本来就不跑，去步 4 |
 | G2「外层保护没验证过（['unsandboxed']）」「（['read-outside']）」「（['supplement']）」「（['unprompted']）」 | 这几种没有预检，日常账号下本来就不跑，去 R3。G2 两行总结论因此在日常账号下恒为 `INCONCLUSIVE` |
-| G2「不起实例：…」 | 「不问工具」记录行里登记成不跑的工具（上面那张清单），等产品负责人定 |
+| G2「不起实例：…」 | 「不问工具」记录行：没给 `--disabled-tools`（加上再跑），或者是登记成不跑的工具（`UNPROMPTED_NOT_RUN`，见上文），交 supervisor |
+| G2「探针换不出能成功又不留副作用的参数」 | Skill、TaskStop 这类工具停在没测成，见上文，交 supervisor |
 | G2「探针在目标调用上答了允许」 | 岔子没冲着目标调用，这一格说明不了被测的结局；看这一格的 `hook-calls.jsonl`，多半是模型调用的写法和登记的对不上。偶发就重跑，每次都这样交 developer |
 | 「缺正面证据：……」「运行无效（没有 init、超时或退出码不对）」「没有归属对得上的目标调用」「目标调用不止一次（N 次）」「有一次目标调用没有按 id 对上的结果」「有一次目标调用探针没有被调起的记录」 | 这次运行本身不算数：模型没按要求发调用、超时，或 CLI 没起来。「没执行 / 被拦下」这类格子允许模型重发，只要每一次都有结果、都是报错、探针每一次都有记录（2026-11-12 起）；要读回值的格子（G1b、G6 读回、G9a 等）仍要恰好一次，重发了就是「不止一次」。先看这个用例的 `<名>-stream.jsonl` 和 `<名>-stderr.txt`；偶发的（模型没照做、网络抖）就用 `--only <组>` 单独重跑这一组；每次都这样的，交 supervisor |
 | 「权限模式没生效：init 报 ...」 | 设置文件没被 CLI 收下（`-p` 模式下设置文件校验不过会被整个静默忽略）。看 `<名>-stderr.txt` 有没有设置校验的告警，交 supervisor，别重跑 |
