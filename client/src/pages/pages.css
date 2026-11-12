@@ -82,6 +82,12 @@
 .iw-timeline .iw-vrows {
   padding: 16px 0 8px;
 }
+/* 宽形态（主区域 ≥ 600px，回差见 anchor/layout.ts）：左边给导轨让位。行（.iw-row）保持原样、自带左右 24px，
+   所以对话区只补 --anchor-gutter 减 24px，头像左边缘离主区域左边缘正好 --anchor-gutter（导轨 44 + 间隙 8）；
+   右边 0。这段边距始终留着，不管导轨此刻显不显示（ui-m1 2a 第 11 条）。窄形态两侧都是 0 */
+.iw-conv-page--wide .iw-timeline .iw-vrows {
+  padding-left: calc(var(--anchor-gutter) - 24px);
+}
 .iw-jump {
   position: absolute;
   left: 50%;

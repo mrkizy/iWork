@@ -1,11 +1,12 @@
-/* 消息锚点（画布 16-Anchor-*）：对话区左边距、上下居中。展开态刻度以中间为准上下排，越远越短越淡。 */
+/* 消息锚点（画布 16-Anchor-*）：宽形态贴着侧栏右边缘、在对话区左边距里，上下居中。展开态刻度以中间为准上下排，
+   越远越短越淡。导轨在主区域里定位，left: 0 就是侧栏右边缘，随侧栏宽度移动（ui-m1 2a 第 11 条：不写死 296px）。 */
 .iw-anchor {
   position: absolute;
   z-index: 5;
   top: 0;
   bottom: 0;
   left: 0;
-  width: 44px;
+  width: var(--anchor-rail-w);
   outline: none;
 }
 .iw-anchor:focus-visible .iw-anchor__rest {
@@ -187,6 +188,79 @@
   color: var(--tx2);
   font-size: var(--fs-xs);
   white-space: nowrap;
+}
+
+/* 窄形态：标题栏最右端 32×32 按钮，三条短线；状态点画在按钮右上角（ui-m1 2a 第 11 条「窄形态」） */
+.iw-anchor-btn-wrap {
+  position: relative;
+  margin-left: auto;
+}
+.iw-anchor-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  cursor: pointer;
+}
+.iw-anchor-btn:hover,
+.iw-anchor-btn--open {
+  background: var(--sideOn);
+}
+.iw-anchor-btn__icon {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.iw-anchor-btn__icon span {
+  display: block;
+  width: 16px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--tx2);
+}
+.iw-anchor-btn__icon span:nth-child(2) {
+  width: 11px;
+}
+.iw-anchor-btn__icon .iw-anchor__dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  margin: 0;
+}
+.iw-anchor-btn__icon .iw-anchor__dot--failed:nth-child(5) {
+  /* 两个点都有时赭红点挪到芥末黄点左边，不叠在一起 */
+  right: 11px;
+}
+
+/* 窄形态的弹出面板：按钮下方、右对齐，约 312px；左边刻度滚轮，右边信息卡，样式同展开态 */
+.iw-anchor-panel {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 312px;
+  height: 180px;
+  border: 1px solid var(--bd2);
+  border-radius: var(--r-lg);
+  background: var(--surf);
+  box-shadow: var(--shadow-pop);
+}
+.iw-anchor-panel .iw-anchor__wheel {
+  top: 50%;
+  left: 20px;
+}
+.iw-anchor-panel .iw-anchor__card {
+  width: 248px;
+}
+.iw-anchor-panel .iw-anchor__loading {
+  top: auto;
+  bottom: 8px;
 }
 
 /* 减少动态效果：去掉滑动、淡入与回弹 */

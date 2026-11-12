@@ -1,9 +1,12 @@
 // 对话页（画布 04、10、15）：标题栏（标题、本对话用量）、提示条、时间线（虚拟行）、回到最新、输入框。
 // 还没有消息的对话显示和首页一样的「要做点什么？」。整页说明（如「数据不完整」）设了就不显示行。
 // 拖文件进窗口时整块对话区盖一层虚线框（文字由 Rust 给，没在拖时不设）。
-// 消息锚点（2a 第 11 条）：左边距的滚轮，内容超出一屏才显示；⌥↑ / ⌥↓ 不经滚轮直接逐处跳。
+// 消息锚点（2a 第 11 条）：内容超出一屏才显示。宽形态（主区域 ≥ 600px）是左边距里的导轨，窄形态是标题栏最右端的按钮
+// 加弹出面板（形态按主区域宽度判断、有回差，见 anchor/layout.ts）；⌥↑ / ⌥↓ 两种形态都不经滚轮直接逐处跳。
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
+import { AnchorButton } from "../anchor/AnchorButton";
 import { AnchorRail } from "../anchor/AnchorRail";
+import { nextNarrow } from "../anchor/layout";
 import { Composer } from "../composer/Composer";
 import { useHost } from "../host";
 import { RowView } from "../rows/RowView";
@@ -20,7 +23,21 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
   const win = () => conv()?.window;
   const empty = () => (conv()?.order.length ?? 0) === 0 && !win()?.hasOlder;
   const [overflow, setOverflow] = createSignal(false);
+  const [narrow, setNarrow] = createSignal(false);
+  let page!: HTMLDivElement;
+  onMount(() => {
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width;
+      if (width !== undefined && width > 0) setNarrow((was) => nextNarrow(was, width));
+    });
+    observer.observe(page);
+    onCleanup(() => observer.disconnect());
+  });
   const anchors = () => conv()?.anchors;
+  /** 有锚点、内容又超出一屏时才给锚点（两种形态同一个条件）。 */
+  const shownAnchors = () => (overflow() && (anchors()?.items.length ?? 0) > 0 ? anchors() : undefined);
+  const jumpTo = (key: string) => void host.act({ case: "jumpToAnchor", value: { conversationId: props.id, key } });
+  const browseAt = (key: string) => void host.act({ case: "anchorBrowse", value: { conversationId: props.id, key } });
   const scrollTo = () => {
     const s = conv()?.scrollTo;
     return s && { rowKey: s.rowKey, token: s.token, highlightMs: s.highlightMs };
@@ -36,7 +53,7 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
   onMount(() => document.addEventListener("keydown", onKey));
   onCleanup(() => document.removeEventListener("keydown", onKey));
   return (
-    <div class="iw-conv-page">
+    <div ref={page} class={`iw-conv-page${narrow() ? "" : " iw-conv-page--wide"}`}>
       <div class="iw-conv-header">
         <span class="iw-conv-header__title">{header()?.title}</span>
         <Show when={header()?.usageText}>
@@ -45,6 +62,9 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
               {u()}
             </span>
           )}
+        </Show>
+        <Show when={narrow() && shownAnchors()}>
+          {(a) => <AnchorButton anchors={a()} currentKey={conv()?.anchorKey} onJump={jumpTo} onBrowse={browseAt} />}
         </Show>
       </div>
       <Show when={header()?.notice}>
@@ -88,15 +108,8 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
               }
               onReachOldest={() => void host.act({ case: "loadOlder", value: { conversationId: props.id } })}
             />
-            <Show when={overflow() && (anchors()?.items.length ?? 0) > 0 && anchors()}>
-              {(a) => (
-                <AnchorRail
-                  anchors={a()}
-                  currentKey={conv()?.anchorKey}
-                  onJump={(key) => void host.act({ case: "jumpToAnchor", value: { conversationId: props.id, key } })}
-                  onBrowse={(key) => void host.act({ case: "anchorBrowse", value: { conversationId: props.id, key } })}
-                />
-              )}
+            <Show when={!narrow() && shownAnchors()}>
+              {(a) => <AnchorRail anchors={a()} currentKey={conv()?.anchorKey} onJump={jumpTo} onBrowse={browseAt} />}
             </Show>
             <Show when={(win()?.newBelow ?? 0) > 0}>
               <Button

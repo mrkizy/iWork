@@ -99,6 +99,8 @@
   color: var(--acc);
   font-weight: 700;
   background: color-mix(in srgb, var(--acc) 6%, transparent);
+  /* 底色变淡后用描边保住醒目（ui-m1 第 2 节第 9 条，2026-11-12）。手动、自动没有描边 */
+  border: 1px solid var(--acc);
 }
 .iw-pill__override {
   color: var(--mus);
