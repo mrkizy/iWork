@@ -11,6 +11,13 @@ use std::sync::OnceLock;
 use iwork_ipc::peer::{ImageId, MANIFEST_FILE, Manifest, Want, file_image_ids};
 use package_support::*;
 
+/// 跑脚本用的 bash：macOS 上是系统自带的 3.2（打包命令实际用的就是它），别的平台用 PATH 里的。
+const BASH: &str = if cfg!(target_os = "macos") {
+    "/bin/bash"
+} else {
+    "bash"
+};
+
 /// `check-install` 示例程序。只跑这一个测试文件时 cargo 不编示例程序，这里用同一个 cargo、同一个 profile 补编一次。
 fn check_install() -> &'static Path {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -80,7 +87,11 @@ impl Inputs {
     }
 
     fn command(&self) -> Command {
-        let mut cmd = Command::new(repo_root().join("scripts/assemble-release.sh"));
+        // 用 macOS 自带的 bash 3.2、UTF-8 locale 跑：真打包就是这样跑的（审查 1/F-5）
+        let mut cmd = Command::new(BASH);
+        cmd.arg(repo_root().join("scripts/assemble-release.sh"))
+            .env("LANG", "en_US.UTF-8")
+            .env("LC_ALL", "en_US.UTF-8");
         if cfg!(target_os = "macos") {
             cmd.arg("--app").arg(&self.app);
         }
@@ -241,7 +252,8 @@ fn manifest_matches_final_files() {
 #[test]
 fn assemble_requires_explicit_paths() {
     let i = Inputs::new("a");
-    let mut cmd = Command::new(repo_root().join("scripts/assemble-release.sh"));
+    let mut cmd = Command::new(BASH);
+    cmd.arg(repo_root().join("scripts/assemble-release.sh"));
     if cfg!(target_os = "macos") {
         cmd.arg("--app").arg(&i.app);
     }
@@ -493,4 +505,43 @@ fn linux_refuses_sign_identity() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("没有签名的形态"));
+}
+
+/// macOS 自带的 bash 3.2 在 UTF-8 locale 下，会把紧跟在 `$变量` 后面的中文字节当成变量名的一部分（`$label）`
+/// 读成一个叫 `label）` 的变量），set -u 下当场退出（T04p 审查 1/F-5）。仓库里所有 shell 脚本都不许这样写：
+/// `$` 后的名字紧跟非 ASCII 字节时必须写成 `${名字}`。
+#[test]
+fn shell_vars_before_non_ascii_are_braced() {
+    let files = run(Command::new("git")
+        .args(["ls-files", "*.sh"])
+        .current_dir(repo_root()));
+    let mut bad = Vec::new();
+    for f in files.lines() {
+        let bytes = std::fs::read(repo_root().join(f)).unwrap();
+        for (n, line) in bytes.split(|b| *b == b'\n').enumerate() {
+            let mut i = 0;
+            while i < line.len() {
+                if line[i] == b'$'
+                    && i + 1 < line.len()
+                    && (line[i + 1].is_ascii_alphabetic() || line[i + 1] == b'_')
+                {
+                    let mut j = i + 1;
+                    while j < line.len() && (line[j].is_ascii_alphanumeric() || line[j] == b'_') {
+                        j += 1;
+                    }
+                    if j < line.len() && line[j] >= 0x80 {
+                        bad.push(format!("{f}:{}", n + 1));
+                    }
+                    i = j;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    assert!(files.lines().count() > 5, "对照：确实扫到了脚本");
+    assert!(
+        bad.is_empty(),
+        "这些行的 $变量 后面紧跟非 ASCII 字节，要写成 ${{变量}}：{bad:?}"
+    );
 }

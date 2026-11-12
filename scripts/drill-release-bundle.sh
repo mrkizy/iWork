@@ -90,7 +90,7 @@ launchd_data_dir_state() {
 
 # ---------------------------------------------------------------- 前置检查（9.2；不满足就停，什么都不动）
 stop_before() { note "前置检查没过：$*。什么都没动"; exit 3; }
-note "演练开始；数据根 D=$D；装到 $DEST；日志配置 IWORK_LOG=$LOG_SPEC"
+note "演练开始；数据根 D=${D}；装到 ${DEST}；日志配置 IWORK_LOG=$LOG_SPEC"
 START_AUTOSTART="$(autostart_state)"
 note "开始前的自启：$START_AUTOSTART"
 [ "$START_AUTOSTART" = 没注册 ] || stop_before "开始前 $LABEL 就注册着（不是演练留下的，请人处理）"
@@ -146,7 +146,7 @@ cleanup() {
   if grep -rqF "$FAKE_CRED" "$OUT"; then
     note "记录里搜到了虚构凭据标记（IWORK_DRILL_FAKE_CREDENTIAL），这份记录要按 S9 处理"; rc=1
   fi
-  note "结束：退出码 $rc；动过的：$DEST（已删）、数据根（已改名留证）；自启：$end_state"
+  note "结束：退出码 ${rc}；动过的：${DEST}（已删）、数据根（已改名留证）；自启：$end_state"
   exit "$rc"
 }
 trap cleanup EXIT
@@ -198,11 +198,11 @@ verify_root() {
   lsof -p "$pid" -Fn 2>/dev/null | sed -n 's/^n//p' > "$f" || true
   local relevant outside
   relevant="$(grep -E 'iwork\.db|daemon\.lock|/logs/' "$f" || true)"
-  [ -n "$relevant" ] || fail_drill "lsof 没看到后台 $pid 打开库、锁或日志（$label）"
+  [ -n "$relevant" ] || fail_drill "lsof 没看到后台 $pid 打开库、锁或日志（${label}）"
   outside="$(printf '%s\n' "$relevant" | grep -vF "$D/" || true)"
-  [ -z "$outside" ] || fail_drill "后台 $pid 打开了数据根之外的文件（$label）：$outside"
-  grep -qF "$SENT/" "$f" && fail_drill "后台 $pid 打开了哨兵目录下的文件（$label）"
-  note "数据根核实（$label）：后台 $pid 打开的库、锁、日志都在 D 下"
+  [ -z "$outside" ] || fail_drill "后台 $pid 打开了数据根之外的文件（${label}）：$outside"
+  grep -qF "$SENT/" "$f" && fail_drill "后台 $pid 打开了哨兵目录下的文件（${label}）"
+  note "数据根核实（${label}）：后台 $pid 打开的库、锁、日志都在 D 下"
 }
 
 # 只看演练自己起的进程的参数，不带 e
@@ -281,7 +281,7 @@ wait_event "②自行重启（U1）" "$T2" "$F_RESTART" >/dev/null || stop_log 2
 wait_event "U1 重启后就绪" "$T2" "$F_READY" >/dev/null || FAILURES+=("U1：重启后没就绪")
 NEW_HASH="$(cdhash_of_pid "$DAEMON_PID")"
 if kill -0 "$DAEMON_PID" 2>/dev/null && [ "$NEW_HASH" = "$(cdhash_of_file "$DEST/Contents/MacOS/iwork-daemon")" ] && [ "$NEW_HASH" != "$OLD_HASH" ]; then
-  note "U1 PASS：同一个 pid $DAEMON_PID 重启成 B 版（inode 前 $INODE_BEFORE、后 $(stat -f %i "$DEST/Contents/MacOS/iwork-daemon")）"
+  note "U1 PASS：同一个 pid $DAEMON_PID 重启成 B 版（inode 前 ${INODE_BEFORE}、后 $(stat -f %i "$DEST/Contents/MacOS/iwork-daemon")）"
 else
   note "U1 FAIL：pid $DAEMON_PID 没有自己重启成 B 版；按方案 8.2，验收 3 不做，回 architect"
   exit 1
@@ -292,14 +292,14 @@ note "日志自检三类都看到了"
 T3="$(now_ms)"
 I_BEFORE="$(stat -f %i "$DEST/Contents/MacOS/iwork-daemon")"
 ditto "$PKG/a-unsigned/iWork.app" "$DEST"
-note "U2：ditto 直接盖到正在运行的包上（同形态 A 版）；inode 前 $I_BEFORE、后 $(stat -f %i "$DEST/Contents/MacOS/iwork-daemon")"
+note "U2：ditto 直接盖到正在运行的包上（同形态 A 版）；inode 前 ${I_BEFORE}、后 $(stat -f %i "$DEST/Contents/MacOS/iwork-daemon")"
 if wait_event "U2 自行重启" "$T3" "$F_RESTART" >/dev/null; then
   note "U2：后台 $(pids_of iwork-daemon) 自己重启了（原 pid $DAEMON_PID 还在：$(kill -0 "$DAEMON_PID" 2>/dev/null && echo 是 || echo 否)）"
 else
   note "U2：${WAIT} 秒内没看到自行重启；后台进程：$(pids_of iwork-daemon | tr '\n' ' ')"
 fi
 DAEMON_PID="$(pids_of iwork-daemon | head -1)"
-if confirm "U3：请在 Finder 里把 $PKG/b-unsigned/iWork.app 拖进 $APPS、选「替换」；做完输入 y，不做输入 n"; then
+if confirm "U3：请在 Finder 里把 $PKG/b-unsigned/iWork.app 拖进 ${APPS}、选「替换」；做完输入 y，不做输入 n"; then
   T4="$(now_ms)"
   wait_event "U3 自行重启" "$T4" "$F_RESTART" >/dev/null && note "U3：后台自己重启了" || note "U3：${WAIT} 秒内没看到自行重启"
 else
@@ -323,15 +323,15 @@ upgrade_round() { # <从> <到>：后台跑着 <从>、客户端关着；整包�
   pid="$(pids_of iwork-daemon | head -1)"
   t="$(now_ms)"
   install_package "$to"
-  if wait_event "9.7 $from→$to 自行重启" "$t" "$F_RESTART" >/dev/null \
-     && wait_event "9.7 $from→$to 就绪" "$t" "$F_READY" >/dev/null \
+  if wait_event "9.7 ${from}→$to 自行重启" "$t" "$F_RESTART" >/dev/null \
+     && wait_event "9.7 ${from}→$to 就绪" "$t" "$F_READY" >/dev/null \
      && [ "$(cdhash_of_pid "$pid")" = "$(cdhash_of_file "$DEST/Contents/MacOS/iwork-daemon")" ]; then
     local installing
     installing="$(events_since "$t" "$F_INSTALLING" | wc -l | tr -d ' ')"
-    note "9.7 $from→$to PASS：pid $pid 重启成新版；「安装中」$installing 条"
+    note "9.7 ${from}→$to PASS：pid $pid 重启成新版；「安装中」$installing 条"
   else
-    note "9.7 $from→$to FAIL"
-    FAILURES+=("9.7 $from→$to")
+    note "9.7 ${from}→$to FAIL"
+    FAILURES+=("9.7 ${from}→$to")
   fi
 }
 upgrade_round b-signed a-signed
@@ -377,8 +377,8 @@ window_cell() { # <格> <A 版包> <B 版包> <期望 t2：connected|rejected>
     else
       [ -z "$(events_since "$t1" "$F_REJECTED and .fields.pid == $CLIENT_PID")" ] || verdict=FAIL
     fi
-    confirm "$cell：窗口里的表现和方案 9.8 写的一样" || verdict=FAIL
-    note "$cell $verdict：t1=$t1 t2=$t2（$kind） t3=$t3 t4=$t4"
+    confirm "${cell}：窗口里的表现和方案 9.8 写的一样" || verdict=FAIL
+    note "$cell ${verdict}：t1=$t1 t2=${t2}（${kind}） t3=$t3 t4=$t4"
     return 0
   done
   note "$cell 三次都 INCONCLUSIVE，交回 architect"

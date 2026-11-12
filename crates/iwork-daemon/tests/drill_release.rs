@@ -165,13 +165,17 @@ exit 1
     /// 跑演练：HOME 是临时的；终端里「留着」一个外部数据目录与一个假凭据；回答一串 y。
     fn drill(&self) -> Output {
         let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", self.bin.display());
-        let mut child = Command::new(repo_root().join("scripts/drill-release-bundle.sh"))
+        // 用系统自带的 bash 3.2、UTF-8 locale 跑：演练就是在这样的终端里跑的（审查 1/F-5）
+        let mut child = Command::new("/bin/bash")
+            .arg(repo_root().join("scripts/drill-release-bundle.sh"))
             .args(["--packages"])
             .arg(&self.pkgs)
             .arg("--out")
             .arg(&self.out)
             .env_clear()
             .env("HOME", &self.home)
+            .env("LANG", "en_US.UTF-8")
+            .env("LC_ALL", "en_US.UTF-8")
             .env("PATH", path)
             .env("IWORK_DATA_DIR", &self.outer)
             .env("ANTHROPIC_API_KEY", SECRET)
