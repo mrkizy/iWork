@@ -65,8 +65,9 @@ pub fn cli_args(setup: &Setup, opening: &Opening, files: &Files) -> Vec<String> 
     }
     // AI 审查回合：一个工具都不给，也就不触发 hook（技术设计 7.2b；G8a）。白名单管不到它，两者都有时以它为准。
     // 否则表外的 CLI 版本带内置工具白名单（第 9 节，P11 的 d）；和 --disallowedTools 同用时禁用优先（G8d）。
-    // 这条路依赖两个待 R2 核实的前提：白名单不影响 MCP 工具（G8e）、写了这个版本没有的名字不报错（G8g）。
-    // 任何一个不成立就退到第 9 节的 d1（不用 --tools，把新工具追加进 disabled_tools），由 architect 改方案后再改这里
+    // 这条路依赖的两个前提 R2 已证实（2026-11-12，2.1.322，结果包 iwork-t0g-results-20261112-141011-8ff1ae）：
+    // 白名单不影响 MCP 工具，MCP 工具仍在 init.tools 里、也调成了（G8e）；写了这个版本没有的名字不报错、只剩有的（G8g）。
+    // 所以用第 9 节的 d2，不退到 d1
     match (setup.tools, &setup.builtin_tool_allowlist) {
         (Tools::None, _) => push(&["--tools", ""]),
         (Tools::Default, Some(allow)) => push(&["--tools", &allow.join(",")]),
