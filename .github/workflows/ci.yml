@@ -69,6 +69,24 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      # T04：后台服务的真进程用例（真起 iwork-daemon：单实例、等锁接班、崩溃恢复、停机、投递、自行重启、自启、日志脱敏）
+      #   与客户端拉起（卡验收 2）。要 dev feature：测试进程不是受信映像，后台要带 --dev-trust。
+      #   launcher_process 用 target/debug/iwork-daemon，先单独构建 dev 版。
+      - name: 后台服务真进程用例（macOS、Linux）
+        if: ${{ !cancelled() && runner.os != 'Windows' }}
+        run: |
+          cargo test -p iwork-daemon --features dev --test process
+          cargo build -p iwork-daemon --features dev
+          cargo test -p iwork-client-core --features dev --test launcher_process
+
+      # T04：M1 不支持 Windows，后台在启动表第 1 步就拒绝（退出码 10）。按名字核对这一条真的跑到且通过
+      - name: 后台在 Windows 上启动即拒绝（Windows）
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        run: |
+          cargo test -p iwork-daemon --test windows_refuses 2>&1 | tee daemon-windows.log
+          grep -q "^test unsupported_platform_refuses_at_identity \.\.\. ok" daemon-windows.log \
+            || { echo "::error::没跑到或没通过：unsupported_platform_refuses_at_identity"; exit 1; }
+
       # T03：iwork-ipc 里 cfg(windows) 的测试（命名管道 DACL、两端 pid、按句柄验映像）要在 Windows 上真跑到。
       #   上面的 workspace 测试已经包含它们；这里按名字核对每一条都出现且通过，防止 cfg 写错后悄悄变成 0 条。
       #   独立于上一步：workspace 里别的 crate 测试失败时这里照样跑。
@@ -112,6 +130,9 @@ jobs:
           install -m 755 target/debug/examples/ipc-tool /tmp/iwork-ipc-tool
           IWORK_TEST_OTHER_USER=1 IWORK_IPC_TOOL=/tmp/iwork-ipc-tool \
             cargo test -p iwork-ipc --features dev --test peer_other_user -- --ignored
+          # T06 方案 4.6 第 5 行：hook 通道上别的用户连进来，桥接直接关连接（测试自己把客户端拷进 /tmp 再以另一用户跑）
+          IWORK_TEST_OTHER_USER=1 \
+            cargo test -p iwork-bridge-claude --test hook_channel -- --ignored --exact other_user_rejected
 
   # 前端：类型检查、vitest，以及 vitest 之前对着假后台逐个录场景（pnpm fixtures，每个十几秒，随场景增多变长）。
   #   从 test 拆出来单独跑，和 Rust 测试并行，各有各的时限：场景加多了只拉长这一个 job，不再把 test 顶过时限

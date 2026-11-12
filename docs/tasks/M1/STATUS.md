@@ -64,6 +64,44 @@
 | `da37bce2` | architect（T10e） | T10e 方案第 2 轮不过（2/F-1～F-4），在改，第 3 轮是最后一轮；reviewer `8036b426` | Q1～Q6、K1～K5 等产品负责人 |
 | `a2c030fb` | architect（T10f） | T10f 方案第 2 版 `5460e55`，reviewer `9a5980a0` 第 2 轮在审 | PD-1～PD-9 等产品负责人；1/F-8（仓库技能 hooks/allowed-tools，改动前就有）等 `--part skill` 结果交产品负责人 |
 
+**16:20 之后的变化**：
+- T09：方案改完 `43034ce`（行级游标 R14、2.9 行级语义、步 5c，另补同 seq 一起丢、客户端取 limit 行、继续卡片跟范围走）。`b20e49db` 本地已提交 5/F-2 `0b32fb8`、5/F-1 `00e1322`（另把全开档药丸底色 12%→6%，请 UI reviewer 看）、形象一览 `c72b2f0`（`/preview.html#/characters`），在做步 5c，做完一起跑全量和重录。真后台的行级查询归 T10a（方案第 3 节五条要点，和卡片 `6376fce` 一致）。
+- T10e：方案第 3 版 `6eb61c3`（换成「卡片宿主」对账机制），reviewer `8036b426` 第 3 轮（最后一轮）在审。**过了之后**把 1.4 的 A2（提交观察者唤醒卡片宿主）、A5（删除对话收尾挂在已提交事件上）写进 T10a 卡片。
+- T10f：第 2 轮 5 条（2/F-1 blocking：门槛关着时 discover 仍读凭据内容；2/F-2～F-5 important），1/F-2/3/4/6/7/9 已关 fixed；交回 `a2c030fb` 改，第 3 轮最后一轮。问产品负责人 PD-9 时带上漏网例子（`secrets/production.json`、`credentials/team.yaml`、`credentials.dev.json`）。`--part skill` 还缺 K3e/K3f/K3g，T10f 启用前要 T06 那边补格。
+- T06 S6-1：reviewer `6114386d` 中间结论 2 条 blocking（1/F-1 hook 连接断开不发失败事件、已入队 allow 会无声丢；1/F-2 后台答完就撤 backstop、写响应无期限），等最终汇报和 `4ea1efca` 的基准。
+- T04 组 3：reviewer `5166257f` 第 2 轮初步看到 F-1 没修全（已有注册项更新失败：macOS bootout 失败、Linux daemon-reload 失败后下一轮早退），托管实例 set(true) 自 bootout 也成立；等它记账。
+- AGENTS.md 加了「加删素材后清 .vitest-cache」（`9dcac56`）。
+
+**18:55 进展（最新，冲突以这里为准）**：
+- **T10e 方案全部定稿**：安全清单 0e38d98（任务 lists 第 4 轮 []）、卡片部分 83fefad（第 5 轮 []），账上 0 开。待办：第 12 节交接转 T10a（删除四步、观察者唤醒）、T10b（删助手意图）、T02（投影器 check_cascade）、T04（ShutdownDaemon 受理改异步、card-host 致命任务、K6 存储卡 I/O、空闲 CPU 算 30 秒对账）、T07/T01（Edit 暂不出卡片、「用户执行失败」文案）；Q1–Q6 与 K6 交产品负责人。
+- **T06 D2 方案定稿**（6fcd26d，第 4 轮只 1 nit 已改 5260d45）：S6-5 可按 5.4a 开工（要改 T05 process.rs 等退出那段；含产品负责人选「这次顺手修」的根组回收前清树）。
+- **D5 = a**（M1 关后台任务 + Monitor 禁用；M2 和多成员一起开放），**P16 改回照常加载**（不经 --setting-sources project，iWork 读 CLAUDE.md/AGENTS.md 接系统提示、复制 .claude/skills|commands|agents 成插件经 --plugin-dir），**PD-5 内联命令不关**、**P17 接受**、**技能文件头 hook 照常跑**、**PD-A1 名字照原样**、**Linux 出生时间刻度边界接受**、回合定义「到运行时静下来」、M1 回合中消息排队（0 档，不做停止并发送）——全部进需求附录 B / 第 9 章 / AGENTS.md。
+- T06 3.1c（P16 做法）方案第 1 轮不过（f5380551，任务 2026-11-12-m1-t06-plan-p16：1 blocking 插件放 run/h 被底线拦，4 important），`47737e78` 在改。P15 子代理记忆重开（放开真实会话前要 RC6 结论）。3.1c 不算放开真实会话的前提，实现排 S6-3 之后单开一批。
+- S6-2 送审，`6114386d` 第 1 轮 3 条（1 blocking stdout 无界/协议错误被吞，2 important account 留存、取消 open 漏清目录），`4ea1efca` 在修。
+- T04 组 3 第 3 轮（最后一轮）`5166257f` 在审 da2b0ac。
+- T10f 第一部分 A 定稿（b88c802 PD-A1 版 + e877c60 插件只认 user 范围）；`b57765cc` 在做 A-1～A-3；script6（G1/G8/G7 改产品设置 28 实例 + RC1–RC7 12 实例 + AGENTS.md 两格）排在它之后，表在 scratchpad/script6-cells.md。
+- 实测已跑：--part skill（175237）、--cell k3（180013），分析 scratchpad/r2y-analysis.md。
+- **事故**：18:05 blob 办法写法错误把工作区需求文档截空，已从不可达 blob ae69b84 三方合并恢复（备份 2aad52f），记忆 blob-method-write-order。
+- 磁盘 18:50 一度只剩 8 GB（StorageFull 打断 reviewer 全量），删了 c0814d74 worktree、main 的 target、各 scratchpad 变异副本的 target、两个空闲 worktree 的 incremental，回到 47 GB。
+
+**17:45 进展（最新，冲突以这里为准）**：
+- 合入：S6-1 → main e949487（CI 43187465223 绿）；`4ea1efca` 接着做 S6-2。
+- 产品负责人新定：回合定义改成「到运行时静下来为止」（附录 B bf3bd9b）；Q7 选 a（4ef3479）。**待答**：PD-A1（本机导入列表显不显示合语法的名字，推荐 a，没答按 b 做）；M1 插话做到哪档（推荐 0 档 + 停止并发送，D5 选 a；1 档「发出就交 CLI」约 13–20 人天放 T10a 后或 M2；2 档放 M2；评估报告 scratchpad/non-strict-turns-assessment.md）。D5 随插话一起定。
+- T10f 第一部分 A **定稿**（133a7a9 + 9b4da26，第 5 轮 []）。A-1～A-3 不依赖别的卡，可派 developer（打算 script5 合入后交 `b57765cc`）；A-4、A-5 等 T10a。设计窗口三问待转（列表怎么摆含固定句式、要不要写「M1 只能查看」、设置页摘要）。
+- T10e：义务表审过（第 4 轮 --append []），`da37bce2` 在照表重写卡片正文；安全清单第 4 轮（0e38d98）`8036b426` 在审，过了定稿。K6（存储线程卡 I/O 查不出）要转 T04 并交产品负责人知情。
+- T06 D2 方案审查（任务 `2026-11-12-m1-t06-plan-d2`，reviewer `f5380551`）第 1 轮 2 条 blocking（桥接退出后被 SIGSTOP 的 CLI 收到 SIGHUP/SIGCONT；只冻根组漏掉无组长组里新 fork 的后代），交 `47737e78`。S6-5 等它过审。
+- script5 第 3 轮（42c1431）`ad7b3f77` 在审，最后一轮。
+
+**17:15 进展（这一段比上面两段新，冲突以这里为准）**：
+- 产品负责人今天下午定的（都已进需求附录 B）：T10e 开第 4 轮、补丁卡片拆到 T10h（e4e002c）、卡片任务与宿主 panic 一律 Fatal、安全清单先定稿；T10f 切开只做 A（能列出、不能导入）、撤回定为重启即撤回（3b5adc0）；联网口径按实测写进第 9 章（df56bd5）；**D2 = b″**（e4085e6）。**D5 未定**：产品负责人担心关后台任务后对话变成队列，已问 architect `47737e78` 回合中途发消息在 M1 怎么处理（设计 + 实测），答复后转产品负责人。
+- T10e：义务表（0a，bd9ffb3）第 4 轮 4 条（4/F-1、4/F-3 blocking，4/F-2、4/F-4 important）交 `da37bce2` 改表，改完 reviewer `8036b426` 同轮 --append 审表，表过了再写正文。安全清单单独审（任务 `2026-11-12-m1-t10e-lists`）：第 2 版 3423f23，1/F-1、1/F-2 已关，新 2/F-1 important（会话启动后受保护路径改成链接，审批旧快照漏保护，K2/S11/U2 保证说过头），交 `da37bce2`；可能要产品负责人接受已知限制。P3「不认代理的程序由用户加进需凭据命令清单」就是 T10e 2.6 的增删命令，提示文案「全开档不受沙箱保护；带管道/重定向的写法会留在沙箱里失败」要转设计窗口。
+- T10f：第 4 轮只审 A（013fc40），reviewer `9a5980a0`。3/F-1～F-3、2/F-3、1/F-5 已按范围关 not_worth；1/F-8（仓库技能 hooks/allowed-tools，改动前就有）仍在用户队列。技术设计第 1 节与 9.5、T10.md 已同步（f600c72）。设计窗口三问待转：「还没启用」列表怎么摆、要不要写「M1 只能查看」、设置页摘要写什么。
+- T04 组 3：第 2 轮 4 条 blocking（2/F-1 更新失败误判已对齐、2/F-2 托管实例自 bootout、2/F-3 超时后同步诊断、2/F-4 测试没隔离真实 launchd——本机没有 com.iwork.daemon，未出事）；1/F-2/3/5/8/9 已关；2/F-2 的设计已写进 T04 方案 2.12（95efaed：托管实例只重写文件不重载）。`e5b90212` 修，第 3 轮是最后一轮；变异清单（22 项，21 杀 1 等价）第 3 轮派活时转 reviewer `5166257f`。1/F-6 结果已补（可接受），1/F-7 仍卡打包。
+- T06 S6-1：第 1 轮 2 条 blocking 已修（ec59609、34615cb），reviewer `6114386d` 第 2 轮在审。cold_start 基准：负载 3–4 倍核数，A/B 差距小于噪声，正式数挪到 mac120（S9）。CI 43180045901 Ubuntu 偶发已重跑。
+- 脚本：script4 已合 main（92453d5）；script5（87e702a）第 1 轮 3 条（1/F-1 硬链接、1/F-3 甲第二种形状 blocking，1/F-2 提示末行 important），另加 k/b/n/工具清单几格改带产品沙箱设置、加一格带产品设置重记 k3/k4。`b57765cc` 修，`ad7b3f77` 审。过了合 main，请产品负责人跑 `--only R2X --part skill`（周额度 15:25 时已 86%，提醒他）。
+- T09：`b20e49db` 在做步 5c（43034ce 的行级游标）。
+- 本机 launchd 现状：无 com.iwork.daemon；有 N1 留下的 com.iwork.t04probe 禁用覆盖记录，没动过。
+
 **R2 补测已跑（产品负责人，2026-11-12 15:27–16:13）**：D2：SIGKILL CLI 进程组后前台命令照样跑完（k1），只关输入 CLI 不退（k2），**SIGTERM 时 CLI 自己收拾前台命令并退出（k3）**；D5：设 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` 后子代理在前台跑、`run_in_background` 被拒后模型改前台重发（b1/b2），不设时子代理后台跑、2 个 init 2 个 result（n1）；D4 ①c′①d′ PASS；net：经隧道连 github:22 读到问候，带 allowLocalBinding 能连本机监听、不带连不上；`--tools`/`--disallowedTools` 认 Task 和 Agent 两个名字；G5 记忆写 PASS、记忆读 INCONCLUSIVE（脚本没跟上 b543196 放宽的甲）、子代理记忆守卫预检没过（改 R3）。**等 architect 报告后问产品负责人 D2、D5、P3 远端连接、P15**。
 
 **等产品负责人的**：T10d PD 8 条（已发表格，推荐全按推荐）；T10e、T10f 的问题等审完整理；D2/D5/P3/P15 等分析；仓库 CLAUDE.md 在 `--setting-sources ""` 下不加载（等 `--part skill` 的 L1/L2）；要真机试：选择框「取消后再弹」与「重新定位」入口、Option 切「完全退出」、侧栏拖动（做好后）。

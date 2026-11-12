@@ -111,6 +111,55 @@ mod tests {
         }
     }
 
+    /// 对拍：plist 与 systemd 单元里给后台的参数，能被本程序解析，且是托管实例（方案 7.2 `packaged_args_parse`）。
+    #[cfg(unix)]
+    #[test]
+    fn packaged_args_parse() {
+        use iwork_host::autostart::{linux, macos};
+        let program = std::path::Path::new("/Applications/iWork.app/Contents/MacOS/iwork-daemon");
+        let from_plist = macos::plist_args(&macos::plist_text(program));
+        let (exe, from_unit) = linux::exec_start(&linux::unit_text(program)).unwrap();
+        assert_eq!(exe, program);
+        for raw in [from_plist, from_unit] {
+            assert!(!raw.is_empty());
+            let raw: Vec<OsString> = raw.into_iter().map(OsString::from).collect();
+            let parsed = parse(raw.clone()).unwrap_or_else(|e| panic!("{raw:?}：{e}"));
+            assert!(parsed.service && is_service(&raw), "{raw:?}");
+            assert_eq!(
+                parsed.trust,
+                TrustPolicy::RequireSigner,
+                "发布配置不带开发开关"
+            );
+        }
+    }
+
+    /// 对拍：服务管理器的重启配置只表达「非零（或被信号结束）就再拉、零就不拉」，不列具体退出码——报零还是非零
+    /// 只由 2.2 的表决定（`exit::process_status`）。plist 用 `Program` 不用 `BundleProgram`；单元不加
+    /// `RestartForceExitStatus`（N4）。
+    #[cfg(unix)]
+    #[test]
+    fn service_restart_config_matches_exit_table() {
+        use iwork_host::autostart::{linux, macos};
+        let program = std::path::Path::new("/x/iwork-daemon");
+        let plist = macos::plist_text(program);
+        assert!(plist.contains("<key>KeepAlive</key>"));
+        assert!(plist.contains("<key>SuccessfulExit</key><false/>"));
+        assert!(plist.contains("<key>Program</key>") && !plist.contains("BundleProgram"));
+        assert!(
+            !plist.contains("Crashed"),
+            "不用 KeepAlive.Crashed：它不等于「被信号结束」"
+        );
+        let unit = linux::unit_text(program);
+        assert!(unit.contains("Restart=on-failure"));
+        for forbidden in [
+            "RestartForceExitStatus",
+            "RestartPreventExitStatus",
+            "SuccessExitStatus",
+        ] {
+            assert!(!unit.contains(forbidden), "{forbidden}");
+        }
+    }
+
     #[cfg(not(feature = "dev"))]
     #[test]
     fn release_build_does_not_know_dev_trust() {

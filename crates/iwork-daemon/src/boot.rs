@@ -37,6 +37,13 @@ pub type Store = SqliteStore<ProtoEventCodec>;
 /// 开发构建的暂停点：状态已写定、锁还没放（见 [`dev`]）。
 pub const PAUSE_BEFORE_EXIT: &str = "before-exit";
 
+/// 开发构建的暂停点：升级停机走完、锁已放开，原地 `exec` 之前（S7g：别的进程在这个瞬间接手）。
+pub const PAUSE_BEFORE_UPGRADE_EXEC: &str = "upgrade-exec";
+
+/// M1 在 Windows 上启动即拒绝时的说明（方案 2.15）。
+pub const WINDOWS_UNSUPPORTED: &str =
+    "M1 暂不支持 Windows：对端映像校验未通过实测（t0-findings 6.4）";
+
 /// 本程序的版本（写进锁文件与状态文件）。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -101,8 +108,12 @@ impl Step {
 /// 启动失败。变体就是 2.2 启动失败表里的格子。
 #[derive(Debug, Clone, PartialEq)]
 pub enum BootError {
-    /// 第 1 步：算不出自己的身份（含运行映像身份）。不写状态。
-    Identity(String),
+    /// 第 1 步：算不出自己的身份（含运行映像身份）。不写状态。`kind` 是把磁盘再看一遍之后的分类
+    /// （方案 2.2「第 1 步失败分两种」）：决定逻辑码是 14 还是 10。
+    Identity {
+        kind: crate::install::IdentityFailure,
+        message: String,
+    },
     /// 第 2 步：端点或数据目录不可用。不写状态。
     Endpoint(String),
     /// 第 5 步存储拒绝打开；第 5a、9 步读到不认识的事件种类。写 `Refused`。
@@ -116,7 +127,7 @@ pub enum BootError {
 impl BootError {
     pub fn code(&self) -> ExitCode {
         match self {
-            BootError::Identity(_) => ExitCode::Unsupported,
+            BootError::Identity { kind, .. } => kind.code(),
             BootError::Endpoint(_) => ExitCode::EndpointRefused,
             BootError::Refused(_) => ExitCode::StoreRefused,
             BootError::Bind(_) => ExitCode::BindFailed,
@@ -127,7 +138,7 @@ impl BootError {
     /// 要写进状态文件的阶段；还没拿锁就失败的（不是状态文件的主人）为 `None`。
     pub fn status(&self) -> Option<Phase> {
         match self {
-            BootError::Identity(_) | BootError::Endpoint(_) => None,
+            BootError::Identity { .. } | BootError::Endpoint(_) => None,
             BootError::Refused(r) => Some(Phase::Refused(r.clone())),
             BootError::Bind(message) => Some(Phase::Exited {
                 code: ExitCode::BindFailed,
@@ -149,7 +160,8 @@ impl BootError {
 
     fn message(&self) -> String {
         match self {
-            BootError::Identity(m) | BootError::Endpoint(m) | BootError::Bind(m) => m.clone(),
+            BootError::Identity { kind, message } => format!("{message}；{}", kind.describe()),
+            BootError::Endpoint(m) | BootError::Bind(m) => m.clone(),
             BootError::Refused(r) => format!("{r:?}"),
             BootError::Fatal { step, message } => format!("{}：{message}", step.name()),
         }
@@ -180,7 +192,8 @@ pub fn read_error(step: Step, e: StorageError) -> BootError {
         StorageError::Codec(CodecError::UnknownKind { kind }) => {
             BootError::Refused(Refusal::StoreOpenFailed {
                 message: format!(
-                    "库里有本版本不认识的事件种类 {kind}：这个库被更新的版本写过，装回更新的那一版可继续使用"
+                    "库里有本版本不认识的事件种类 {kind}：这个库{}版本写过，装回更新的那一版可继续使用",
+                    iwork_ipc::rendezvous::WRITTEN_BY_NEWER
                 ),
             })
         }
@@ -204,24 +217,72 @@ pub struct Identity {
 }
 
 fn identify(started: Instant) -> Result<Identity, BootError> {
-    let unsupported = |m: String| BootError::Identity(m);
-    if dev::fail_at(Step::Identity.name()) {
-        return Err(unsupported("开发注入：取运行映像身份失败".into()));
+    // 取戳是第 1 步的第一件事：失败之后再取一次来比，看程序文件在这期间动没动（方案 2.2）
+    let exe = std::env::current_exe().map_err(|e| format!("取不到本进程的可执行文件路径：{e}"));
+    let stamp_before = exe.as_ref().ok().and_then(|p| ExeStamp::of(p).ok());
+    dev::pause_at(Step::Identity.name());
+    // 两样身份各取各的：一样失败不妨碍取另一样（分类时要用运行身份）
+    let own = if dev::fail_at(Step::Identity.name()) {
+        Err("开发注入：取身份失败".to_owned())
+    } else {
+        SelfIdentity::detect().map_err(|e| e.to_string())
+    };
+    let running = peer::running_image_id().map_err(|e| format!("取运行映像身份失败：{e}"));
+    let stamp = match &exe {
+        Ok(p) => ExeStamp::of(p).map_err(|e| format!("读 {} 的元数据失败：{e}", p.display())),
+        Err(e) => Err(e.clone()),
+    };
+    match (own, running, exe, stamp, stamp_before) {
+        // 全都取到就成功；开头的戳只在失败后的分类里用，不另加成功的条件
+        (Ok(own), Ok(running_image), Ok(exe), Ok(exe_stamp), _) => Ok(Identity {
+            own,
+            running_image,
+            exe,
+            exe_stamp,
+            started,
+        }),
+        (own, running, exe, stamp, stamp_before) => {
+            let message = [own.err(), running.as_ref().err().cloned(), stamp.err()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("；");
+            let kind = classify_on_disk(running.ok().as_ref(), exe.ok().as_deref(), stamp_before);
+            let message = if cfg!(windows) {
+                format!("{WINDOWS_UNSUPPORTED}（{message}）")
+            } else {
+                message
+            };
+            Err(BootError::Identity { kind, message })
+        }
     }
-    let own = SelfIdentity::detect().map_err(|e| unsupported(e.to_string()))?;
-    let running_image =
-        peer::running_image_id().map_err(|e| unsupported(format!("取运行映像身份失败：{e}")))?;
-    let exe = std::env::current_exe()
-        .map_err(|e| unsupported(format!("取不到本进程的可执行文件路径：{e}")))?;
-    let exe_stamp = ExeStamp::of(&exe)
-        .map_err(|e| unsupported(format!("读 {} 的元数据失败：{e}", exe.display())))?;
-    Ok(Identity {
-        own,
-        running_image,
-        exe,
-        exe_stamp,
-        started,
-    })
+}
+
+/// 第 1 步失败后把磁盘再看一遍，全用现成的判断（方案 2.2）：后台是不是我（2.9 第一问的那一半）、戳、装齐（2.9 第二问）。
+fn classify_on_disk(
+    running: Option<&ImageId>,
+    exe: Option<&std::path::Path>,
+    stamp_before: Option<ExeStamp>,
+) -> crate::install::IdentityFailure {
+    let daemon_is_me = match (running, exe) {
+        (Some(r), Some(p)) => Some(
+            crate::install::read_disk(p, r)
+                .daemon
+                .is_some_and(|ids| ids.contains(r)),
+        ),
+        _ => None,
+    };
+    let stamp_after = exe.and_then(|p| ExeStamp::of(p).ok());
+    let complete = exe.and_then(std::path::Path::parent).is_some_and(|dir| {
+        crate::install::installed_complete(&crate::install::forms(), dir).complete
+    });
+    crate::install::classify_identity_failure(
+        !cfg!(windows),
+        daemon_is_me,
+        stamp_before,
+        stamp_after,
+        complete,
+    )
 }
 
 pub(crate) fn report(err: &BootError) {
@@ -267,7 +328,10 @@ pub fn run(raw: Vec<OsString>) -> std::process::ExitCode {
 #[cfg(not(unix))]
 fn run_identified(args: DaemonArgs, _raw: Vec<OsString>, _id: Identity) -> std::process::ExitCode {
     // M1 不支持 Windows：`SelfIdentity::detect` 在第 1 步就失败，走不到这里（方案 2.15）
-    let e = BootError::Identity("M1 暂不支持 Windows".into());
+    let e = BootError::Identity {
+        kind: crate::install::IdentityFailure::PlatformUnsupported,
+        message: "M1 暂不支持 Windows".into(),
+    };
     report(&e);
     status_of(process_status(&e.exit_phase(), args.service))
 }
@@ -633,6 +697,28 @@ mod tests {
         );
     }
 
+    /// 对拍：存储（T02）真的因为「schema 比程序新」拒绝打开时，拒绝原文带着「被更新的」标记，诊断页能据此提示
+    /// 装回更新的那一版（`Refusal::written_by_newer`）。
+    #[test]
+    fn newer_schema_refusal_is_marked_written_by_newer() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = DataDir::from_root(t.path().join("data"));
+        let clock = Arc::new(SystemClock::new());
+        drop(open_store(&dir, clock.clone()).unwrap());
+        rusqlite::Connection::open(dir.db_path())
+            .unwrap()
+            .execute(
+                "UPDATE meta SET value = '999' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        match open_store(&dir, clock) {
+            Err(BootError::Refused(r)) => assert!(r.written_by_newer(), "{r:?}"),
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("应拒绝打开"),
+        }
+    }
+
     #[test]
     fn step_names_are_unique() {
         let mut names: Vec<_> = Step::ALL.iter().map(|s| s.name()).collect();
@@ -656,6 +742,13 @@ mod tests {
                 Some(Phase::Refused(Refusal::StoreOpenFailed { message })) => {
                     assert!(message.contains("zz_future_kind"), "{message}");
                     assert!(message.contains("更新的版本"), "{message}");
+                    assert!(
+                        Refusal::StoreOpenFailed {
+                            message: message.clone()
+                        }
+                        .written_by_newer(),
+                        "{message}"
+                    );
                 }
                 other => panic!("{other:?}"),
             }
@@ -691,10 +784,22 @@ mod tests {
         });
         let cases: Vec<(BootError, ExitCode, bool, Relaunchable)> = vec![
             (
-                BootError::Identity("x".into()),
+                BootError::Identity {
+                    kind: crate::install::IdentityFailure::Settled,
+                    message: "x".into(),
+                },
                 ExitCode::Unsupported,
                 false,
                 Relaunchable::NotWithThisProgram,
+            ),
+            (
+                BootError::Identity {
+                    kind: crate::install::IdentityFailure::Incomplete,
+                    message: "x".into(),
+                },
+                ExitCode::IdentityUnsettled,
+                false,
+                Relaunchable::Yes,
             ),
             (
                 BootError::Endpoint("x".into()),

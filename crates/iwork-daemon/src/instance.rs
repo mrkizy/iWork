@@ -44,8 +44,9 @@ fn open_lock_file(path: &Path) -> io::Result<File> {
     opts.create(true).truncate(false).read(true).write(true);
     #[cfg(unix)]
     {
+        // 不跟随链接：之后要往里写 pid 与版本（write_lock_info），不能顺着别人放好的链接写到别处
         use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     opts.open(path)
 }
@@ -136,6 +137,18 @@ pub fn standby_action(prev: Option<&StartupStatus>, disk_exe: Option<ExeStamp>) 
 mod tests {
     use super::*;
     use iwork_ipc::rendezvous::{ExitCode, Phase, Refusal, StopReason};
+
+    /// 锁文件的位置上是指向别处的链接 → 打开失败（不会往链接指向的文件里写 pid），被指向的文件不变。
+    #[cfg(unix)]
+    #[test]
+    fn lock_file_symlink_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let victim = d.path().join("victim");
+        std::fs::write(&victim, "keep me").unwrap();
+        std::os::unix::fs::symlink(&victim, d.path().join(LOCK_FILE)).unwrap();
+        assert!(acquire(d.path(), d.path(), &info(1)).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+    }
 
     fn info(pid: u32) -> LockInfo {
         LockInfo {

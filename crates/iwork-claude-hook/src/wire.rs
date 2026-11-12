@@ -138,14 +138,51 @@ impl From<io::Error> for WireError {
     }
 }
 
-fn read_len(r: &mut impl Read, what: &'static str, limit: u32) -> Result<usize, WireError> {
-    let mut len = [0u8; 4];
-    r.read_exact(&mut len)?;
+/// 帧前缀的字节数：魔数 4 + 长度 4。
+pub const PREFIX_BYTES: usize = 8;
+
+/// 长度字段（`u32` 小端）超没超上限。
+fn checked_len(len: [u8; 4], what: &'static str, limit: u32) -> Result<usize, WireError> {
     let len = u32::from_le_bytes(len);
     if len > limit {
         return Err(WireError::TooLarge { what, limit });
     }
     Ok(len as usize)
+}
+
+/// 帧前缀 → 正文长度：先看魔数，再看长度上限。异步读的一方（桥接）先读满前缀、问它要读多少，
+/// 再读满正文交给 [`decode_request_header`]；同步读的一方走 [`read_request_header`]，两边同一套检查。
+pub fn frame_len(
+    prefix: &[u8; PREFIX_BYTES],
+    what: &'static str,
+    limit: u32,
+) -> Result<usize, WireError> {
+    let (magic, len) = prefix.split_at(4);
+    if magic != MAGIC {
+        return Err(WireError::BadMagic);
+    }
+    checked_len(len.try_into().expect("前缀后 4 字节"), what, limit)
+}
+
+/// 请求头帧前缀 → 头的长度（上限 [`MAX_HEADER_BYTES`]）。
+pub fn request_header_len(prefix: &[u8; PREFIX_BYTES]) -> Result<usize, WireError> {
+    frame_len(prefix, "请求头", MAX_HEADER_BYTES)
+}
+
+/// 正文长度字段 → 正文长度（上限 [`MAX_BODY_BYTES`]）。
+pub fn request_body_len(len: [u8; 4]) -> Result<usize, WireError> {
+    checked_len(len, "请求正文", MAX_BODY_BYTES)
+}
+
+/// 解析读满了的请求头 JSON。
+pub fn decode_request_header(json: &[u8]) -> Result<RequestHeader, WireError> {
+    serde_json::from_slice(json).map_err(|_| WireError::Malformed("请求头"))
+}
+
+fn read_len(r: &mut impl Read, what: &'static str, limit: u32) -> Result<usize, WireError> {
+    let mut len = [0u8; 4];
+    r.read_exact(&mut len)?;
+    checked_len(len, what, limit)
 }
 
 fn read_exact_vec(r: &mut impl Read, len: usize) -> Result<Vec<u8>, WireError> {
@@ -160,12 +197,9 @@ fn read_frame<T: for<'de> Deserialize<'de>>(
     what: &'static str,
     limit: u32,
 ) -> Result<T, WireError> {
-    let mut magic = [0u8; 4];
-    r.read_exact(&mut magic)?;
-    if magic != MAGIC {
-        return Err(WireError::BadMagic);
-    }
-    let len = read_len(r, what, limit)?;
+    let mut prefix = [0u8; PREFIX_BYTES];
+    r.read_exact(&mut prefix)?;
+    let len = frame_len(&prefix, what, limit)?;
     let body = read_exact_vec(r, len)?;
     serde_json::from_slice(&body).map_err(|_| WireError::Malformed(what))
 }
@@ -217,8 +251,8 @@ pub fn read_request_body(r: &mut impl Read) -> Result<Vec<u8>, WireError> {
     read_exact_vec(r, len)
 }
 
-/// 写一个答复（桥接用）。
-pub fn write_response(w: &mut impl Write, response: &Response) -> Result<(), WireError> {
+/// 编码一个答复帧（桥接用；异步写的一方拿字节自己写）。
+pub fn encode_response(response: &Response) -> Result<Vec<u8>, WireError> {
     let json = serde_json::to_vec(response).expect("答复总能序列化");
     if json.len() > MAX_BODY_BYTES as usize {
         return Err(WireError::TooLarge {
@@ -226,7 +260,12 @@ pub fn write_response(w: &mut impl Write, response: &Response) -> Result<(), Wir
             limit: MAX_BODY_BYTES,
         });
     }
-    w.write_all(&frame(&json))?;
+    Ok(frame(&json))
+}
+
+/// 写一个答复（桥接用）。
+pub fn write_response(w: &mut impl Write, response: &Response) -> Result<(), WireError> {
+    w.write_all(&encode_response(response)?)?;
     w.flush()?;
     Ok(())
 }
@@ -291,6 +330,34 @@ mod tests {
             br#"{"tool_name":"Bash"}"#
         );
         assert!(r.is_empty());
+    }
+
+    /// 异步读的一方分两步（先前缀、再正文）与同步读得到同一个头；前缀的检查和同步读的一样。
+    #[test]
+    fn split_header_read_matches_sync_read() {
+        let mut buf = Vec::new();
+        write_request(&mut buf, &header(), b"{}").unwrap();
+        let prefix: [u8; PREFIX_BYTES] = buf[..PREFIX_BYTES].try_into().unwrap();
+        let len = request_header_len(&prefix).unwrap();
+        let json = &buf[PREFIX_BYTES..PREFIX_BYTES + len];
+        assert_eq!(decode_request_header(json).unwrap(), header());
+        let rest = &buf[PREFIX_BYTES + len..];
+        assert_eq!(request_body_len(rest[..4].try_into().unwrap()).unwrap(), 2);
+
+        let mut bad = prefix;
+        bad[0] = b'X';
+        assert!(matches!(request_header_len(&bad), Err(WireError::BadMagic)));
+        let mut big = prefix;
+        big[4..].copy_from_slice(&(MAX_HEADER_BYTES + 1).to_le_bytes());
+        assert!(matches!(
+            request_header_len(&big),
+            Err(WireError::TooLarge { .. })
+        ));
+        assert!(matches!(
+            request_body_len((MAX_BODY_BYTES + 1).to_le_bytes()),
+            Err(WireError::TooLarge { .. })
+        ));
+        assert!(decode_request_header(b"{oops").is_err());
     }
 
     #[test]

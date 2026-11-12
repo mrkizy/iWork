@@ -1,6 +1,6 @@
 //! 单实例与托管实例的等锁接班（方案 2.3；S1、S2、S11c、S11d）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use iwork_ipc::rendezvous::{self, Phase};
@@ -8,16 +8,25 @@ use iwork_ipc::rendezvous::{self, Phase};
 use crate::support::{Sandbox, alive, code};
 
 const START: Duration = Duration::from_secs(20);
+/// 十个一起起时的时限（见 `ten_concurrent_starts_one_survives`）
+const CROWDED_START: Duration = Duration::from_secs(90);
 
 /// 卡验收 1（S1）：同时起 10 个，恰好一个活着、能握手，其余 9 个退出码 0，库没被写过。
 #[test]
 fn ten_concurrent_starts_one_survives() {
     let sb = Sandbox::new();
     let mut ds: Vec<_> = (0..10).map(|_| sb.spawn(&[], &[])).collect();
-    let deadline = Instant::now() + START;
+    // 十个进程在拿锁（启动表第 3 步）之前都要先算运行映像身份（第 1 步；Linux 上是对整个调试构建算
+    // SHA-256），在核数少的 CI 机器上会挤在一起，所以给它单独放宽时限。
+    let deadline = Instant::now() + CROWDED_START;
     let mut exited = Vec::new();
     while exited.len() < 9 {
-        assert!(Instant::now() < deadline, "9 个没在时限内让路");
+        assert!(
+            Instant::now() < deadline,
+            "{}s 内只有 {} 个让路",
+            CROWDED_START.as_secs(),
+            exited.len()
+        );
         for (i, d) in ds.iter_mut().enumerate() {
             if !exited.contains(&i)
                 && let Some(s) = d.try_exit()
@@ -130,7 +139,7 @@ fn standby_execs_before_boot() {
     let bin_dir = sb.home.join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let exe = bin_dir.join("iwork-daemon");
-    std::fs::copy(crate::support::DAEMON, &exe).unwrap();
+    crate::support::copy_exe(Path::new(crate::support::DAEMON), &exe);
     let mut a = sb.spawn_exe(&exe, &[], &[]);
     sb.wait_ready(a.pid(), START);
     let mut b = sb.spawn_exe(&exe, &["--service"], &[]);
@@ -140,9 +149,7 @@ fn standby_execs_before_boot() {
     let marker: PathBuf = sb.home.join("execd");
     let script = format!("#!/bin/sh\necho \"$@\" > '{}'\nexit 7\n", marker.display());
     let tmp = bin_dir.join("next");
-    std::fs::write(&tmp, script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::support::write_script(&tmp, &script);
     std::fs::rename(&tmp, &exe).unwrap();
 
     a.kill9();

@@ -13,10 +13,17 @@ prost.workspace = true
 base64.workspace = true
 serde_json.workspace = true
 getrandom.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 proptest.workspace = true
+tracing-subscriber.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+# 对拍：桥接取到的对端凭据与 iwork-ipc 的 Connection::peer() 一致（T06 方案 2.1）
+[target.'cfg(unix)'.dev-dependencies]
+iwork-ipc.workspace = true

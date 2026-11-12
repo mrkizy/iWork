@@ -11,6 +11,7 @@ pub mod dev;
 mod dev_parts;
 pub mod exit;
 pub mod handler;
+pub mod install;
 pub mod instance;
 pub mod logging;
 pub mod publish;

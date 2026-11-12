@@ -10,6 +10,7 @@ pub mod attach;
 pub mod derive;
 pub mod frame;
 pub mod intent;
+pub mod launcher;
 pub mod session;
 pub mod store;
 

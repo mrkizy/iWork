@@ -111,6 +111,20 @@ pub enum Refusal {
     StoreOpenFailed { message: String },
 }
 
+/// 「这个库被更新的版本写过」的标记字样：存储（schema 比程序新，T02）与后台第 5a 步（库里有不认识的事件种类）
+/// 给出的拒绝原文里都带它。诊断页据此提示「装回更新的那一版」。
+pub const WRITTEN_BY_NEWER: &str = "被更新的";
+
+impl Refusal {
+    /// 拒绝是不是因为库被更新的版本写过（装回更新的那一版就能用）。
+    pub fn written_by_newer(&self) -> bool {
+        match self {
+            Refusal::StoreOpenFailed { message } => message.contains(WRITTEN_BY_NEWER),
+            Refusal::ProtocolMajorMismatch { .. } => false,
+        }
+    }
+}
+
 /// 逻辑退出码。写进状态文件的是名字不是数字：新版本加了码而旧程序不认识时，整份状态解析不了、按「读不到」处理。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ExitCode {
@@ -118,7 +132,7 @@ pub enum ExitCode {
     Stopped,
     /// 参数不认识。
     Usage,
-    /// 算不出自己的身份（含 M1 的 Windows）。
+    /// 算不出自己的身份，而磁盘上是一个稳定、装齐的安装；或平台不支持（含 M1 的 Windows）。
     Unsupported,
     /// 端点或数据目录不可用。
     EndpointRefused,
@@ -126,6 +140,8 @@ pub enum ExitCode {
     StoreRefused,
     /// 拿到锁却绑不上 socket。
     BindFailed,
+    /// 身份暂时读不到：程序文件正在被换，或磁盘上的包还没装齐（T04 方案 2.2「第 1 步失败分两种」）。
+    IdentityUnsettled,
     /// 运行中（或启动阶段）的不可恢复故障。
     Fatal,
     /// 自行重启时 `exec` 失败。
@@ -134,13 +150,14 @@ pub enum ExitCode {
 
 impl ExitCode {
     /// 全部逻辑退出码（测试与诊断页列举用）。
-    pub const ALL: [ExitCode; 8] = [
+    pub const ALL: [ExitCode; 9] = [
         ExitCode::Stopped,
         ExitCode::Usage,
         ExitCode::Unsupported,
         ExitCode::EndpointRefused,
         ExitCode::StoreRefused,
         ExitCode::BindFailed,
+        ExitCode::IdentityUnsettled,
         ExitCode::Fatal,
         ExitCode::RestartRequested,
     ];
@@ -154,6 +171,7 @@ impl ExitCode {
             ExitCode::EndpointRefused => 11,
             ExitCode::StoreRefused => 12,
             ExitCode::BindFailed => 13,
+            ExitCode::IdentityUnsettled => 14,
             ExitCode::Fatal => 20,
             ExitCode::RestartRequested => 21,
         }
@@ -207,16 +225,20 @@ fn after_exit_without_reason(code: ExitCode) -> Relaunchable {
         | ExitCode::Unsupported
         | ExitCode::EndpointRefused
         | ExitCode::StoreRefused => Relaunchable::NotWithThisProgram,
-        // 可能是暂时的，或本来就是要重启
-        ExitCode::BindFailed | ExitCode::Fatal | ExitCode::RestartRequested => Relaunchable::Yes,
+        // 可能是暂时的（含安装还没做完），或本来就是要重启
+        ExitCode::BindFailed
+        | ExitCode::IdentityUnsettled
+        | ExitCode::Fatal
+        | ExitCode::RestartRequested => Relaunchable::Yes,
     }
 }
 
 /// 写状态文件：先写同目录的临时文件再改名，读的一方永远读到完整的旧内容或新内容。Unix 上权限 0600。
+/// 临时文件名随机、独占新建、不跟随链接（[`create_new_private`]）：不会顺着别人放好的链接写到别处。
 pub fn write_status(run_dir: &Path, status: &StartupStatus) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(status).map_err(io::Error::other)?;
-    let tmp = run_dir.join(format!("{STATUS_FILE}.tmp.{}", std::process::id()));
-    let mut file = create_private(&tmp)?;
+    let tmp = run_dir.join(format!(".{STATUS_FILE}.{}.tmp", ulid::Ulid::generate()));
+    let mut file = create_new_private(&tmp)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
     drop(file);
@@ -246,20 +268,16 @@ pub fn read_lock_info(run_dir: &Path) -> Option<LockInfo> {
     serde_json::from_slice(&bytes).ok()
 }
 
-#[cfg(unix)]
-fn create_private(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-}
-
-#[cfg(not(unix))]
-fn create_private(path: &Path) -> io::Result<File> {
-    File::create(path)
+/// 独占新建（`O_CREAT|O_EXCL`：已存在就失败，最后一级是链接也失败）；Unix 上另加 `O_NOFOLLOW`、权限 0600。
+fn create_new_private(path: &Path) -> io::Result<File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    opts.open(path)
 }
 
 #[cfg(test)]
