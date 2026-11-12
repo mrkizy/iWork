@@ -320,6 +320,7 @@ iWork 在本机是三类进程：客户端、后台服务（daemon）、每个�
 | 停止后台命令 | 放行（只影响本会话启动的进程） |
 | RemoteTrigger 等创建云端定时任务或远程会话的工具 | **启动时不提供（`--disallowedTools`），hook 兜底拒绝，三档相同**：在 Anthropic 云端运行、不经本机 hook |
 | CronCreate、CronDelete 等会话内定时工具 | **启动时不提供，hook 兜底拒绝**：iWork 每轮结束后会话即结束，定时要么不触发、要么在用户不知情时触发；需要定时由 iWork 自己调度 |
+| DesignSync、PushNotification、SendMessage、Workflow、EnterWorktree、ExitWorktree | **启动时不提供，hook 兜底拒绝，三档相同**（产品负责人 2026-11-12 定，T06 方案 P13）：前三个把东西送出 iWork（claude.ai 设计、用户设备、别的会话），iWork 对它们的目标没有规则；Workflow 起的子代理不受 iWork 回合控制；两个 worktree 工具会在会话中途换工作目录，独立工作区是 M2 由 iWork 做的 |
 
 这两类禁用工具不出现在助手配置的工具开关里，用户也不能启用。
 
