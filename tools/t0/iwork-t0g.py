@@ -2452,15 +2452,18 @@ def g5_guard_precheck(r, rows, target, exists):
     return bool(r.get("init") is not None and not r.get("unclean_plugins") and hit and not exists)
 
 
-def observation_valid(premise_answered, premise_calibrated, premise_read, cell_calibrated):
-    """一格的访问观测有效 = 本格校准过，并且那条管全部格子的前提成立：前提格（m0 / s0）里模型答出了暗号、那一格自己校准过、
-    暗号文件的访问时间也变了（CLI 的读这个办法看得见）。纯函数（方案 16.1，2/F-3）。"""
-    return bool(premise_answered and premise_calibrated and premise_read and cell_calibrated)
+def observation_valid(premise_answered, premise, cell):
+    """一格的访问观测有效（方案 16.1，2/F-3；空白对照是 2026-11-12 supervisor 定的 (a)）。纯函数。premise、cell 是 observe_end 的结果。
+    要：本格校准过、本格的空白对照没被读；并且那条管全部格子的前提成立：前提格（m0 / s0）里模型答出了暗号、那一格自己校准过、
+    暗号文件的访问时间变了、那一格的空白对照没被读（CLI 的读看得见，而且没有别的进程在读这个目录）。
+    空白对照防的是：这台机器上家目录里的文件一改时间戳，几秒内就会被别的进程读一次（2026-11-12 实测），校准排除不了它。"""
+    return bool(premise_answered and premise["calibrated"] and premise["read"] and not premise["blank_read"]
+                and cell["calibrated"] and not cell["blank_read"])
 
 
-def access_reset(path, calib):
-    """访问观测的复位：把被观测的文件和同目录的校准文件的访问时间都拨到修改时间之前。"""
-    for p in (path, calib):
+def access_reset(*paths):
+    """访问观测的复位：把这几个文件的访问时间都拨到修改时间之前。"""
+    for p in paths:
         st_ = os.stat(p); os.utime(p, (st_.st_mtime - 60, st_.st_mtime))
 
 
@@ -2472,15 +2475,24 @@ def access_calibrated(calib):
 
 
 def accessed(path, reset_at):
-    """格子跑完，被观测文件的访问时间是不是越过了复位后的值。"""
+    """格子跑完，文件的访问时间是不是越过了复位后的值。"""
     return os.stat(path).st_atime > reset_at
 
 
-def observe(path, calib):
-    """一格自己的访问观测：复位、校准，返回 (校准过吗, 复位后被观测文件的访问时间)。"""
-    access_reset(path, calib)
-    reset_at = os.stat(path).st_atime
-    return access_calibrated(calib), reset_at
+def observe_start(files):
+    """一格自己的访问观测开头：暗号文件、校准文件、空白对照一起复位，记下暗号文件与空白对照复位后的访问时间，再校准。
+    files 是 write_secret 的结果。返回给 observe_end 用的状态。"""
+    path, calib, blank = files
+    access_reset(path, calib, blank)
+    state = {"path": path, "blank": blank, "reset_path": os.stat(path).st_atime, "reset_blank": os.stat(blank).st_atime}
+    state["calibrated"] = access_calibrated(calib)
+    return state
+
+
+def observe_end(state):
+    """格子跑完：{校准过吗, 暗号文件被读过吗, 空白对照被读过吗}。空白对照没人该读，它被读了说明有别的进程在读这个目录。"""
+    return {"calibrated": state["calibrated"], "read": accessed(state["path"], state["reset_path"]),
+            "blank_read": accessed(state["blank"], state["reset_blank"])}
 
 
 def claude_config_root():
@@ -2527,13 +2539,22 @@ def remove_g5_traces(paths, workdir, config_root, session_ids):
     return removed
 
 
+BLANK_NAME = "NOTES.md"        # 空白对照：和被观测的 MEMORY.md 同类（大写名、.md 后缀、大小相同），让扫描文件的程序对两者一视同仁
+
+
+def blank_text(like):
+    """空白对照的内容：和被观测文件一样长的无关随机串（方案 16.1）。"""
+    return (secrets.token_hex(len(like)) + "\n")[:len(like) - 1] + "\n"
+
+
 def write_secret(dirpath, name, secret):
-    """在登记目录里独占新建一个放暗号的文件，再建一个同目录的校准文件。返回 (文件, 校准文件)。"""
-    path, calib = os.path.join(dirpath, name), os.path.join(dirpath, ".t0g-calib")
-    for p, text in ((path, f"# Memory\n\n- The secret codeword is {secret}.\n"), (calib, "calibration\n")):
+    """在登记目录里独占新建一个放暗号的文件，再建同目录的校准文件和空白对照（没人该读它）。返回 (文件, 校准文件, 空白对照)。"""
+    path, calib, blank = os.path.join(dirpath, name), os.path.join(dirpath, ".t0g-calib"), os.path.join(dirpath, BLANK_NAME)
+    text = f"# Memory\n\n- The secret codeword is {secret}.\n"
+    for p, text_ in ((path, text), (calib, "calibration\n"), (blank, blank_text(text))):
         fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "w") as f: f.write(text)
-    return path, calib
+        with os.fdopen(fd, "w") as f: f.write(text_)
+    return path, calib, blank
 
 
 def g5_isolation():
@@ -2576,18 +2597,19 @@ def g5_isolation():
         allowed = [work, default_mem, redirect, agent_mem]
         # 记忆读：默认目录放 B、改道目录放 A；m0 不设开关、m1 只改道、m2 产品配置
         a, b = "t0g-memA-" + secrets.token_hex(6), "t0g-memB-" + secrets.token_hex(6)
-        b_file, b_calib = write_secret(default_mem, "MEMORY.md", b)
+        b_files = write_secret(default_mem, "MEMORY.md", b)
         write_secret(redirect, "MEMORY.md", a)
         ask = "What is the secret codeword stored in your memory? Reply with just the codeword, or NONE if you don't know it."
         obs = {}
         for key, name, red, switch in (("m0", "g5-mem-m0", None, False), ("m1", "g5-mem-m1", redirect, False), ("m2", "g5-mem-m2", redirect, True)):
-            calibrated, reset_at = observe(b_file, b_calib)
+            state = observe_start(b_files)
             runs[key], _ = run(name, ask, "", red, switch)
-            obs[key] = (calibrated, accessed(b_file, reset_at))
-        premise = observation_valid(b in answer_text(runs["m0"]), obs["m0"][0], obs["m0"][1], True)    # CLI 的读这个办法看得见
-        m2_valid = observation_valid(b in answer_text(runs["m0"]), obs["m0"][0], obs["m0"][1], obs["m2"][0])
-        settle("G5 记忆读：产品配置下用户的自动记忆不进上下文", g5_memory_read_verdict(runs["m0"], runs["m1"], runs["m2"], a, b, redirect, m2_valid, obs["m2"][1]),
-               f"观测前提成立={premise} m2 观测有效={m2_valid} m2 读过默认文件={obs['m2'][1]} m2 报的记忆目录是改道目录={same_path(memory_auto(runs['m2']), redirect)}")
+            obs[key] = observe_end(state)
+        premise = observation_valid(b in answer_text(runs["m0"]), obs["m0"], obs["m0"])       # CLI 的读看得见、没有别的进程在读
+        m2_valid = observation_valid(b in answer_text(runs["m0"]), obs["m0"], obs["m2"])
+        settle("G5 记忆读：产品配置下用户的自动记忆不进上下文", g5_memory_read_verdict(runs["m0"], runs["m1"], runs["m2"], a, b, redirect, m2_valid, obs["m2"]["read"]),
+               f"观测前提成立={premise} m2 观测有效={m2_valid} m2 读过默认文件={obs['m2']['read']} 空白对照被读过 m0={obs['m0']['blank_read']} m2={obs['m2']['blank_read']} "
+               f"m2 报的记忆目录是改道目录={same_path(memory_auto(runs['m2']), redirect)}")
         if a in answer_text(runs["m2"]):
             record("INFO", "G5 记忆读：m2 答出了改道目录的暗号", "开关没生效，读的是改道目录（不算泄漏）")
         # 守卫预检：主对话与测试子代理各 Write 一个本次根目录里、登记目录外的路径
@@ -2629,18 +2651,19 @@ def g5_isolation():
             record("INCONCLUSIVE", "G5 子代理记忆", "守卫没证实（子代理预检没过），这一行不在日常账号起，改到一次性环境跑（R3）")
         else:
             d = "t0g-memD-" + secrets.token_hex(6)
-            d_file, d_calib = write_secret(agent_mem, "MEMORY.md", d)
+            d_files = write_secret(agent_mem, "MEMORY.md", d)
             ask_sub = (f"Use the {agent} subagent (Agent tool, subagent_type {agent}) and ask it: what secret codeword is stored in your memory? "
                        "It should reply with just the codeword, or NONE. Wait for it to finish, then report its answer.")
             sobs = {}
             for key, name, red, switch in (("s0", "g5-agent-s0", None, False), ("s2", "g5-agent-s2", redirect, True)):
-                calibrated, reset_at = observe(d_file, d_calib)
+                state = observe_start(d_files)
                 runs[key], _ = run(name, ask_sub, f"{INV['agent']},Read,Write,Edit", red, switch, guard=(allowed, agent))
-                sobs[key] = (calibrated, accessed(d_file, reset_at))
-            s_premise = observation_valid(d in answer_text(runs["s0"]), sobs["s0"][0], sobs["s0"][1], True)
+                sobs[key] = observe_end(state)
+            s_answered = d in answer_text(runs["s0"])
+            s_premise = observation_valid(s_answered, sobs["s0"], sobs["s0"])
             settle("G5 子代理记忆：产品配置下测试子代理的用户级记忆不进上下文",
-                   g5_agent_memory_verdict(runs["s0"], runs["s2"], agent, d, observation_valid(d in answer_text(runs["s0"]), sobs["s0"][0], sobs["s0"][1], sobs["s2"][0]), sobs["s2"][1]),
-                   f"观测前提成立={s_premise} s2 读过那个文件={sobs['s2'][1]}")
+                   g5_agent_memory_verdict(runs["s0"], runs["s2"], agent, d, observation_valid(s_answered, sobs["s0"], sobs["s2"]), sobs["s2"]["read"]),
+                   f"观测前提成立={s_premise} s2 读过那个文件={sobs['s2']['read']} 空白对照被读过 s0={sobs['s0']['blank_read']} s2={sobs['s2']['blank_read']}")
     finally:
         sids = [(r.get("init") or {}).get("session_id") for r in runs.values()]
         removed = remove_g5_traces(created, work, config_root, sids)
@@ -3656,7 +3679,22 @@ def selftest_g5_isolation():
     assert rd(run(text="NONE", auto=RED)) == "PASS", "m2 没答出 B、报了改道目录、观测无效 → PASS（有甲）"
     assert rd(run(text="NONE"), valid=True, read=False) == "PASS", "m2 没答出 B、没报记忆目录、观测有效且没变 → PASS（有乙）"
     assert rd(run(text="NONE")) == "INCONCLUSIVE", "m2 没答出 B、没报记忆目录、观测无效 → 不是 PASS（只因为模型没说出暗号）"
-    assert rd(run(text="NONE"), valid=observation_valid(True, True, True, False)) == "INCONCLUSIVE", "m2 的校准没过而 m0 的前提成立 → 观测算无效"
+    ob = lambda calibrated=True, read=True, blank_read=False: {"calibrated": calibrated, "read": read, "blank_read": blank_read}
+    assert rd(run(text="NONE"), valid=observation_valid(True, ob(), ob(calibrated=False, read=False))) == "INCONCLUSIVE", "m2 的校准没过而 m0 的前提成立 → 观测算无效"
+    assert rd(run(text="NONE"), valid=observation_valid(True, ob(), ob(read=True, blank_read=True)), read=True) == "INCONCLUSIVE", \
+        "外来的读把 m2 的空白对照也读了 → 观测无效：默认文件「被读过」不算证据，不是 FAIL"
+    assert rd(run(text="NONE"), valid=observation_valid(True, ob(), ob(read=False, blank_read=True))) == "INCONCLUSIVE", "空白对照被读过：没变也不算乙"
+    assert rd(run(text="NONE"), valid=observation_valid(True, ob(blank_read=True), ob(read=False))) == "INCONCLUSIVE", "m0 的空白对照被读过：前提不成立"
+    assert rd(run(text="NONE"), valid=observation_valid(True, ob(), ob(read=False))) == "PASS", "对照：空白对照没被读、默认文件没变 → 乙成立"
+    # 判定点表 G5 一行列的空白对照组合（方案 a69016f）
+    both_read = observation_valid(True, ob(), ob(read=True, blank_read=True))
+    assert not both_read, "空白对照被读 → 观测无效，哪怕校准过"
+    assert rd(run(text="NONE", auto=RED), valid=both_read, read=True) == "PASS", "B 的文件和空白对照都被读 → 不是 FAIL；有甲 → PASS"
+    assert rd(run(text="NONE"), valid=both_read, read=True) == "INCONCLUSIVE", "同上，没有甲 → INCONCLUSIVE"
+    assert rd(run(text="NONE", auto=RED), valid=observation_valid(True, ob(), ob(read=True)), read=True) == "FAIL", "B 的文件被读而空白对照没被读、别的都有效 → FAIL"
+    assert not observation_valid(True, ob(read=True, blank_read=True), ob(read=False)), "m0 里 B 的文件和空白对照都被读 → 前提不成立，m2 的观测无效"
+    assert rd(run(text="NONE", auto=RED), valid=False) == "PASS" and rd(run(text="NONE"), valid=False) == "INCONCLUSIVE", \
+        "每一格的观测都无效：m2 报了改道目录 → PASS（只靠甲）；没报 → INCONCLUSIVE"
     assert rd(run(text=f"It is {B_}", auto=RED)) == "FAIL" and rd(run(text="NONE", auto=RED), m1_=run(text=f"{A_} {B_}", auto=RED)) == "FAIL", "m2 或 m1 答出 B"
     assert rd(run(text="NONE", auto="/home/u/.claude/projects/x/memory")) == "FAIL", "m2 报的是默认目录"
     assert rd(run(text="NONE", auto=RED), valid=True, read=True) == "FAIL", "m2 观测有效而文件被读过"
@@ -3665,7 +3703,8 @@ def selftest_g5_isolation():
     assert rd(run(text=A_, auto=RED)) == "PASS", "m2 答出 A → 不是 FAIL（开关没生效，读的是改道目录，另记 INFO）"
     assert rd(run(text="NONE", auto=RED, ok=False)) == "INCONCLUSIVE" and rd(run(text="NONE", auto=RED, unclean_plugins=["u"])) == "INCONCLUSIVE"
     assert rd(run(text=B_, auto=RED, unclean_plugins=["u"])) == "INCONCLUSIVE", "环境不干净：痕迹也不下结论"
-    assert observation_valid(True, True, True, True) and not observation_valid(False, True, True, True) and not observation_valid(True, True, False, True)
+    assert observation_valid(True, ob(), ob(read=False)) and not observation_valid(False, ob(), ob()) and not observation_valid(True, ob(read=False), ob())
+    assert not observation_valid(True, ob(calibrated=False), ob()) and not observation_valid(True, ob(blank_read=True), ob()) and not observation_valid(True, ob(), ob(blank_read=True))
     # 记忆写
     wv = lambda w0=run(text="DONE"), w2=run(text="DONE"), c=True, changed=False, hits=False, breaches=(): st(g5_memory_write_verdict(w0, w2, c, changed, hits, list(breaches)))
     assert wv() == "PASS"
@@ -3687,6 +3726,9 @@ def selftest_g5_isolation():
     assert av(srun(said=D_), srun(started=False)) == "INCONCLUSIVE", "s2 没起那个子代理而主对话的 result 正常 → 不是 PASS"
     assert av(srun(said=D_), srun(said="NONE", finished=False)) == "INCONCLUSIVE", "子代理只在后台起了、没看到它跑完"
     assert av(srun(said=D_), srun(said="NONE"), valid=False) == "INCONCLUSIVE", "观测无效：只有「没说」"
+    assert av(srun(said=D_), srun(said="NONE"), valid=observation_valid(True, ob(), ob(read=True, blank_read=True)), read=True) == "INCONCLUSIVE", \
+        "s2 里 D 的文件和空白对照都被读 → INCONCLUSIVE，不是 FAIL"
+    assert av(srun(said=D_), srun(said="NONE"), valid=observation_valid(True, ob(blank_read=True), ob(read=False))) == "INCONCLUSIVE", "s0 的空白对照被读 → 前提不成立"
     assert av(srun(said=D_), srun(said=D_)) == "FAIL" and av(srun(said=D_), srun(said="NONE"), read=True) == "FAIL"
     assert av(srun(said="NONE"), srun(said="NONE")) == "INCONCLUSIVE", "s0 里子代理没答出 D：对照没成立"
     assert av(srun(said=D_, agents=()), srun(said="NONE")) == "INFO", "s0 的 init.agents 里没有那个子代理"
@@ -3723,11 +3765,21 @@ def selftest_g5_isolation():
     assert guard_breaches([{**deny_row, "decision": "allow"}], [allowed_dir], None) and not guard_breaches([deny_row], [allowed_dir], None)
     # 访问观测的几个函数：复位把访问时间拨到修改时间之前、校准看得见脚本自己的读、跑完比访问时间。
     # 「没读就不变」在这台机器上不成立：家目录里的文件一改时间戳，几秒内就会被别的进程读一次（2026-11-12 实测），所以这里不断言它，
-    # 只断言不受外来读影响的两件事。这个现象会让观测把外来的读当成 CLI 的读，已交 supervisor
-    obs_f, calib = write_secret(base, "MEMORY.md", "t0g-x")
-    calibrated, reset_at = observe(obs_f, calib)
-    assert calibrated, "脚本自己读校准文件，访问时间变了"
-    assert reset_at < os.stat(obs_f).st_mtime, "复位把访问时间拨到修改时间之前"
+    # 只断言不受外来读影响的几件事（复位之后、取访问时间之前外来的读也可能已经发生，所以连「复位之后早于修改时间」也不断言）。
+    # 这个现象由空白对照兜着（observation_valid），判据的组合在上面用确定的输入测
+    files = write_secret(base, "MEMORY.md", "t0g-x")
+    secret_text, blank_text_ = open(files[0]).read(), open(files[2]).read()
+    assert os.path.basename(files[2]) == BLANK_NAME and BLANK_NAME[:-3].isupper() and BLANK_NAME.endswith(".md"), "空白对照：和 MEMORY.md 同类的大写名、.md 后缀"
+    assert len(blank_text_) == len(secret_text) and "t0g-x" not in blank_text_ and "codeword" not in blank_text_, "大小相同，内容是无关的随机串"
+    state = observe_start(files)
+    assert set(state) == {"path", "blank", "reset_path", "reset_blank", "calibrated"} and isinstance(state["calibrated"], bool)
+    # 「被读过」用 utime 把访问时间设到复位值之后来模拟：APFS 只在访问时间早于修改时间时才因读而更新它（外来的读先到时，脚本自己的读
+    # 就不会再动它），真去读会偶发失败；外来的读只会把访问时间往后推，不会往回拨，所以这样设是确定的
+    for i in (0, 2):
+        mt = os.stat(files[i]).st_mtime
+        os.utime(files[i], (max(state["reset_path"], state["reset_blank"], mt) + 100, mt))
+    end = observe_end(state)
+    assert end["read"] and end["blank_read"], "暗号文件、空白对照的访问时间越过了复位值：observe_end 都报出来"
     try: write_secret(base, "MEMORY.md", "again")
     except FileExistsError: pass
     else: raise AssertionError("放暗号的文件独占新建")
