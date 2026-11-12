@@ -68,6 +68,10 @@ import argparse, ast, base64, collections, ctypes, fcntl, hashlib, inspect, json
 
 HOME = os.path.expanduser("~")
 A = None            # 命令行参数
+# 起哪个 claude：--claude-cli 或环境变量 IWORK_CLAUDE_CLI 给的绝对路径（和产品里后台给桥接的同名接口，T06 方案 3.1 开头），
+# 都没给就是 PATH 上的 claude。脚本的格子与从程序字样读出的结论都是对着 BASELINE_CLI_VERSION 的，开跑时记下实际版本
+CLAUDE_CLI = "claude"
+BASELINE_CLI_VERSION = "2.1.322"
 R = None            # 本次运行的目录布局（Layout）
 INV = {"tools": [], "agent": "Agent", "harmless": [], "valid": False}     # 基准版本的工具清单（main 里从 system/init 取）；valid：那次探查运行算不算数
 # 子代理工具有两个名字（2.1.322 实测）：system/init.tools 与 result.permission_denials 里叫 Task，模型发出的 tool_use
@@ -509,7 +513,7 @@ ISO = None
 
 
 def base_argv(settings=None, extra_args=(), iso=True, stream_input=False, prompt=None):
-    argv = ["claude", "-p"] + ([] if stream_input else [prompt]) + ["--output-format", "stream-json", "--verbose", "--model", A.model]
+    argv = [CLAUDE_CLI, "-p"] + ([] if stream_input else [prompt]) + ["--output-format", "stream-json", "--verbose", "--model", A.model]
     if stream_input: argv += ["--input-format", "stream-json"]
     if iso: argv += ISO
     argv += ["--settings", settings or default_settings()]          # 没给设置的实例也带上自动记忆改道
@@ -4251,7 +4255,7 @@ def r2x_cfgdir():
             record("INCONCLUSIVE", f"R2X cfgdir {label}：CLI 读哪一份 .claude.json（不起模型）", f"没跑：「{polluted_at}」那一格看到了隔离被污染，停下")
             continue
         extra, skip = cfgdir_env(list(os.environ), home, secure, setting, os.path.dirname(layout["custom"][0]))
-        out, err, code, timed_out, _ = run_instance(["claude", "mcp", "list"], f"cfgdir-{setting or 'unset'}", env=extra, env_skip=skip, timeout=120)
+        out, err, code, timed_out, _ = run_instance([CLAUDE_CLI, "mcp", "list"], f"cfgdir-{setting or 'unset'}", env=extra, env_skip=skip, timeout=120)
         status, why, polluted = cfgdir_verdict(code, timed_out, out + err, names, want)
         settle(f"R2X cfgdir {label}：CLI 读哪一份 .claude.json（不起模型）", status, why)
         if polluted: polluted_at = label
@@ -4263,16 +4267,40 @@ def r2x_cfgdir():
 REPO_PLUGIN = "repo"                              # 方案 3.1c 丙第 2 条：iWork 现做的插件就叫这个名字（/repo:<技能>）
 INSTRUCTIONS_HOOK = r'''import json, os, sys
 inp = json.loads(sys.stdin.read() or "{}")
-path = inp.get("file_path") or inp.get("path") or ""
-with open(sys.argv[1], "a") as f: f.write(json.dumps({"event": inp.get("hook_event_name"), "file": os.path.basename(str(path))}) + "\n")
+path = str(inp.get("file_path") or inp.get("path") or "")
+is_target = bool(path) and os.path.realpath(path) == os.path.realpath(sys.argv[2])
+with open(sys.argv[1], "a") as f: f.write(json.dumps({"event": inp.get("hook_event_name"), "file": os.path.basename(path), "is_target": is_target}) + "\n")
 '''
 
 
-def instructions_hook(tag):
-    """RC1 的 InstructionsLoaded hook：只把收到的文件名（basename，不是路径、不是内容）记进日志。返回 (挂进设置的命令, 日志路径)。"""
+def instructions_hook(tag, target):
+    """RC1 的 InstructionsLoaded hook：只记收到的文件名（basename，不是路径、不是内容），以及它是不是本格那份合成的 AGENTS.md
+    （按真实路径比，审查 repo 1/F-3）。返回 (挂进设置的命令, 日志路径)。"""
     script, log = R.p("cfg", f"{tag}-instructions.py"), os.path.join(R.out, f"{tag}-instructions.jsonl")
     open(script, "w").write(INSTRUCTIONS_HOOK)
-    return " ".join(shlex.quote(x) for x in (sys.executable, script, log)), log
+    return " ".join(shlex.quote(x) for x in (sys.executable, script, log, target)), log
+
+
+def instruction_ancestors(path):
+    """path 的各级上级目录里有没有说明类的东西（CLAUDE.md、AGENTS.md、.claude）。返回找到的（不读内容）。"""
+    found, cur = [], os.path.dirname(os.path.realpath(path))
+    while True:
+        found += [os.path.join(cur, n) for n in ("CLAUDE.md", "AGENTS.md", ".claude") if os.path.lexists(os.path.join(cur, n))]
+        parent = os.path.dirname(cur)
+        if parent == cur: return found
+        cur = parent
+
+
+def rc1_cell_facts(r, rows, code, log_rows, tag):
+    """RC1 一格的结构化事实（审查 repo 1/F-2、F-3）。hook 记到了合成 AGENTS.md 之外的说明文件 → 污染：这一格的原始 stream 与 stderr
+    从结果包里删掉（里面可能带着那份别人的说明的内容），只留这里的结构化事实。返回事实。"""
+    foreign = sorted({row["file"] for row in log_rows if not row.get("is_target")})
+    if foreign:
+        for suffix in ("-stream.jsonl", "-stderr.txt"):
+            path = os.path.join(R.out, tag + suffix)
+            if os.path.exists(path): os.remove(path)
+    return {"valid": run_valid(r) and not foreign, "source": codeword_source(r, code, rows),
+            "target": any(row.get("is_target") for row in log_rows), "foreign": foreign}
 
 
 def jsonl_rows(path):
@@ -4288,18 +4316,20 @@ ASK_PROJECT_CODEWORD = "What is the project codeword? Reply with just the codewo
 
 
 def rc1_verdict(cell, control):
-    """RC1 与对照 RC1′（方案 3.1c 的表）。纯函数。每格 {source: codeword_source 的结果, files: hook 记到的文件名, valid}。
+    """RC1 与对照 RC1′（方案 3.1c 的表）。纯函数。每格 {source: codeword_source 的结果, target: hook 记到了本格那份合成的 AGENTS.md,
+    foreign: 记到的别的说明文件名, valid}。加载的证据只认对上目标的那条记录，每格各认各的（审查 repo 1/F-3）。
     返回 (RC1 的状态, RC1′ 的状态, 结论)。正面证据优先：哪一格暗号出现了就是加载了；暗号出现而 hook 没记到 AGENTS.md → hook 覆盖不全，
     它的记录从此不当负向证据。对照成立（RC1′ 记到了 AGENTS.md、暗号也出现）且覆盖全时，RC1 什么都没记到、暗号也没出现 → 不加载。
     别的情况 RC1 只看暗号：没出现 → INCONCLUSIVE（不写成不加载）。来源归不了因、运行无效 → INCONCLUSIVE。"""
     for c in (cell, control):
+        if c.get("foreign"): return "INCONCLUSIVE", "INCONCLUSIVE", "hook 记到了合成文件之外的说明：被污染，这两格不下结论"
         if not c["valid"] or c["source"] is None: return "INCONCLUSIVE", "INCONCLUSIVE", "有一格运行无效或暗号来源归不了因"
-    gap = any(c["source"] == "context" and "AGENTS.md" not in c["files"] for c in (cell, control))
-    control_ok = control["source"] == "context" and "AGENTS.md" in control["files"]
+    gap = any(c["source"] == "context" and not c["target"] for c in (cell, control))
+    control_ok = control["source"] == "context" and control["target"]
     ctl_status = info_if(control_ok)
     if cell["source"] == "context": return "INFO", ctl_status, "产品参数下 AGENTS.md 加载了（暗号出现）" + ("；InstructionsLoaded 覆盖不全" if gap else "")
     if control_ok and not gap:
-        if cell["files"]: return "INFO", ctl_status, "产品参数下 AGENTS.md 加载了（hook 记到了，暗号没出现）"
+        if cell["target"]: return "INFO", ctl_status, "产品参数下 AGENTS.md 加载了（hook 记到了，暗号没出现）"
         return "INFO", ctl_status, "产品参数下 AGENTS.md 不加载（对照成立：hook 什么都没记到、暗号没出现）"
     return "INCONCLUSIVE", ctl_status, "对照没成立或 hook 覆盖不全，RC1 只能看暗号，暗号没出现：不写成「不加载」" + ("（覆盖不全）" if gap else "")
 
@@ -4316,15 +4346,24 @@ def rc_record(cell, status, why, facts):
 
 
 def r2x_rc1():
-    """RC1：工作目录里只放带暗号的 AGENTS.md，产品参数；RC1′：同一目录 --setting-sources project。都另挂 InstructionsLoaded。2 个实例。"""
-    work = R.p("rc1-work"); os.mkdir(work)
-    code = new_codeword("t0g-agentsmd")
-    write_new(os.path.join(work, "AGENTS.md"), f"# Project notes\n\nThe project codeword is {code}.\n")
-    cells = {}
-    for key, extra_args, iso in (("rc1", [], True), ("rc1p", [ISO[0], "project", *ISO[2:]], False)):
-        cmd, log = instructions_hook(key)
-        r, rows = rc_run(f"repo-{key}", ASK_PROJECT_CODEWORD, cwd=work, extra_args=extra_args, iso=iso, extra_hooks={"InstructionsLoaded": cmd})
-        cells[key] = {"valid": run_valid(r), "source": codeword_source(r, code, rows), "files": sorted({row["file"] for row in jsonl_rows(log)})}
+    """RC1：工作目录里只放带暗号的 AGENTS.md，产品参数；RC1′：同一目录 --setting-sources project。都另挂 InstructionsLoaded。2 个实例。
+    工作目录放在家目录之外的系统临时目录里（审查 repo 1/F-2：--setting-sources project 时 CLI 会顺着上级目录找说明文件）；开跑前逐级查
+    上级目录，有 CLAUDE.md、AGENTS.md 或 .claude 就不跑。"""
+    work = os.path.realpath(tempfile.mkdtemp(prefix="t0g-rc1-"))
+    try:
+        found = instruction_ancestors(os.path.join(work, "x"))
+        if found:
+            rc_record("RC1、RC1′", "INCONCLUSIVE", f"工作目录的上级目录里有说明类的东西 {len(found)} 处，这两格不跑", {}); return
+        code = new_codeword("t0g-agentsmd")
+        target = os.path.join(work, "AGENTS.md")
+        write_new(target, f"# Project notes\n\nThe project codeword is {code}.\n")
+        cells = {}
+        for key, extra_args, iso in (("rc1", [], True), ("rc1p", [ISO[0], "project", *ISO[2:]], False)):
+            cmd, log = instructions_hook(key, target)
+            r, rows = rc_run(f"repo-{key}", ASK_PROJECT_CODEWORD, cwd=work, extra_args=extra_args, iso=iso, extra_hooks={"InstructionsLoaded": cmd})
+            cells[key] = rc1_cell_facts(r, rows, code, jsonl_rows(log), f"repo-{key}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)          # 本格自己 mkdtemp 建的临时目录
     st, st_ctl, why = rc1_verdict(cells["rc1"], cells["rc1p"])
     rc_record("RC1 产品参数下 AGENTS.md 加载不加载（只记录）", st, why, cells["rc1"])
     rc_record("RC1′ 对照：--setting-sources project", st_ctl, "", cells["rc1p"])
@@ -4390,6 +4429,12 @@ def repo_plugin(tag, skill=None, command=None, agent=None, base=None):
     return d
 
 
+def one_candidate(names, suffix):
+    """init 里以这个名字结尾的项恰好一个才用它；零个或多个返回 None，不猜（审查 repo 1/F-8）。纯函数。"""
+    hits = [n for n in names if n.endswith(suffix)]
+    return hits[0] if len(hits) == 1 else None
+
+
 def listed_names(init, key, name):
     """init 里某张清单中带着这个名字的项（原样，看带不带前缀）。"""
     return [x if isinstance(x, str) else (x.get("name") if isinstance(x, dict) else str(x)) for x in ((init or {}).get(key) or [])
@@ -4407,12 +4452,13 @@ def r2x_rc4():
              "子代理": listed_names(ra["init"], "agents", g_name)}
     rc_record("RC4a init 里报的名字（只记录；对照是 R2X L2 里 CLI 自己加载时的名字）",
               info_if(run_valid(ra) and all(names.values())), "" if all(names.values()) else "有一样不在 init 里", {**names, "插件核对报的": ra["unclean_plugins"]})
-    skill_slash = next((n for n in names["技能"] if n.endswith(s_name)), f"{REPO_PLUGIN}:{s_name}")
+    skill_slash, agent_type = one_candidate(names["技能"], s_name), one_candidate(names["子代理"], g_name)
+    if skill_slash is None or agent_type is None:
+        rc_record("RC4b、RC4c", "INCONCLUSIVE", "init 里以测试名字结尾的技能或子代理不是恰好一个，不猜", names); return
     rb, rows_b = rc_run("repo-rc4-skill", "/" + skill_slash, plugin_dirs=[plugin])
     src = codeword_source(rb, cs, rows_b)
     rc_record("RC4b 斜杠命令调起技能，答出技能里的暗号（只记录）", info_if(run_valid(rb) and src == "context"), "" if src == "context" else "暗号没出现或来源归不了因",
               {"调的是": "/" + skill_slash, "暗号的来源": src})
-    agent_type = next((n for n in names["子代理"] if n.endswith(g_name)), g_name)
     rc, rows_c = rc_run("repo-rc4-agent", literal_last("Use the Agent tool to start the subagent whose type is on the last line, ask it for the codeword, "
                                                        "and report its answer.", agent_type), behaviour="allow", exp=expect(tools=AGENT_TOOLS), plugin_dirs=[plugin])
     ran, use_id = subagent_finished(rc, agent_type)
@@ -4438,13 +4484,29 @@ def skill_hook_frontmatter(tag):
     return f'hooks:\n  PreToolUse:\n    - matcher: "Bash"\n      hooks:\n        - type: command\n          command: {json.dumps(cmd)}\n', log
 
 
+PROBE_DENY_TEXT = "iwork-t0g deny"           # 探针答拒绝时的理由原文（HOOK_SRC 的 permissionDecisionReason）
+
+
+def probe_answers(rows):
+    """探针对每个 tool_use_id 答了什么（hook_rows 的原始记录里带 answered 的那几行）。纯函数。"""
+    return {(row.get("input") or {}).get("tool_use_id"): row["answered"] for row in rows if "answered" in row}
+
+
 def rc5_verdict(deny_cell, allow_cell):
-    """RC5（方案 3.1c）。纯函数。要守的一条：iWork 的探针答拒绝时命令没执行（decide：执行了 → FAIL；没执行要每次都被拒的证据）。
-    对照：探针答允许时命令执行了；对照没成立时拒绝那一格的 PASS 降成 INCONCLUSIVE（说明不了拒绝起了作用）。返回 (状态, 说明)。"""
-    base = decide(deny_cell["ev"], deny_cell["executed"], False)
-    if base == "FAIL": return "FAIL", "探针答拒绝，命令照样执行了：回 architect"
-    if not (allow_cell["ev"]["ok"] and allow_cell["executed"]): return "INCONCLUSIVE", "对照没成立：探针答允许时命令没执行"
-    return base, ""
+    """RC5（方案 3.1c）。纯函数。每格 {ev: bash_ev(many=True), executed, answers: probe_answers}。
+    要守的一条：iWork 的探针答拒绝时命令没执行。执行了 → FAIL。说「被拒了」要按 tool_use_id 逐次核（审查 repo 1/F-4）：
+    每一次目标调用探针都答了 deny，同一次调用的结果是报错、原文里有探针的拒绝理由；普通的执行错误不算。
+    对照：每一次目标调用探针都答了 allow，命令执行了；对照没成立 → INCONCLUSIVE。返回 (状态, 说明)。"""
+    ev = deny_cell["ev"]
+    if ev.get("unclean"): return "INCONCLUSIVE", UNCLEAN
+    if deny_cell["executed"]: return "FAIL", "探针答拒绝，命令照样执行了：回 architect"
+    ev_a = allow_cell["ev"]
+    if not (ev_a["ok"] and allow_cell["executed"] and all(allow_cell["answers"].get(u["id"]) == "allow" for u in ev_a["uses"])):
+        return "INCONCLUSIVE", "对照没成立：探针答允许时命令没执行，或允许记录对不上"
+    if not ev["ok"]: return "INCONCLUSIVE", ev["why"]
+    refused = all(deny_cell["answers"].get(u["id"]) == "deny" and res["is_error"] and PROBE_DENY_TEXT in res["text"]
+                  for u, res in zip(ev["uses"], ev["results"]))
+    return ("PASS", "") if refused else ("INCONCLUSIVE", "有一次目标调用没有探针的拒绝记录，或结果里不是探针的拒绝原文")
 
 
 def r2x_rc5():
@@ -4460,10 +4522,89 @@ def r2x_rc5():
         r, rows = rc_run(f"repo-rc5-{key}", f"/{REPO_PLUGIN}:{s_name}", behaviour, expect(bash=[cmd]), plugin_dirs=[plugin])
         cells[key] = {"ev": bash_ev(r, cmd, [row for row in rows if "answered" not in row and (row.get("input") or {}).get("hook_event_name") == "PreToolUse"],
                                     many=True),
-                      "executed": os.path.exists(target), "技能的 hook 跑了几次": len(jsonl_rows(log))}
+                      "executed": os.path.exists(target), "answers": probe_answers(rows), "技能的 hook 跑了几次": len(jsonl_rows(log))}
     st, why = rc5_verdict(cells["deny"], cells["allow"])
     facts = {k: {"执行了": c["executed"], "目标调用有证据": c["ev"]["ok"], "技能的 hook 跑了几次": c["技能的 hook 跑了几次"]} for k, c in cells.items()}
     rc_record("RC5 技能文件头的 hook 答允许、iWork 的探针答拒绝时命令不执行（技能的 hook 跑没跑只记录）", st, why, facts)
+
+
+RC6_FILES = ("MEMORY.md", ".t0g-calib", BLANK_NAME)     # RC6 往每个记忆目录里写、收尾时只删的这三个文件
+RC6_PARENT = "agent-memory"
+
+
+def rc6_prepare(config_root, names, secret):
+    """在 <配置目录>/agent-memory 下独占新建 names 这几个目录，各写入 RC6_FILES（审查 repo 1/F-1）。全程走目录句柄：agent-memory 用
+    O_NOFOLLOW 打开（它要是链接就打不开），子目录在这个句柄下 mkdir、记下 (st_dev, st_ino)，文件在子目录句柄下独占新建。
+    agent-memory 不在就建（记下是本次建的）。返回 (收尾用的状态, [(暗号文件, 校准文件, 空白对照)] 的路径，给访问观测用)。"""
+    croot = os.open(config_root, os.O_RDONLY | os.O_DIRECTORY)
+    state = {"config_root": config_root, "parent_created": False, "parent_id": None, "dirs": {}}
+    try:
+        try: os.mkdir(RC6_PARENT, 0o700, dir_fd=croot); state["parent_created"] = True
+        except FileExistsError: pass
+        pfd = os.open(RC6_PARENT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=croot)
+        try:
+            pst = os.fstat(pfd); state["parent_id"] = (pst.st_dev, pst.st_ino)
+            files, text = [], f"# Memory\n\n- The secret codeword is {secret}.\n"
+            for name in names:
+                os.mkdir(name, 0o700, dir_fd=pfd)                      # 已经存在就抛 FileExistsError：不碰
+                cst = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+                state["dirs"][name] = (cst.st_dev, cst.st_ino)
+                cfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
+                try:
+                    for fname, content in zip(RC6_FILES, (text, "calibration\n", blank_text(text))):
+                        fd = os.open(fname, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=cfd)
+                        with os.fdopen(fd, "w") as f: f.write(content)
+                finally:
+                    os.close(cfd)
+                d = os.path.join(config_root, RC6_PARENT, name)
+                files.append(tuple(os.path.join(d, f) for f in RC6_FILES))
+            return state, files
+        finally:
+            os.close(pfd)
+    except BaseException:
+        if state["dirs"] or state["parent_created"]: rc6_cleanup(state)
+        raise
+    finally:
+        os.close(croot)
+
+
+def rc6_cleanup(state):
+    """RC6 的收尾（审查 repo 1/F-1）。经句柄重新打开 agent-memory（O_NOFOLLOW），核它还是当初那个目录；每个子目录核 (st_dev, st_ino)；
+    里面只有 RC6_FILES、而且都是普通文件，才逐个 unlink 再 rmdir（不递归、不 rmtree）。身份不符、有外来内容、打不开 → 不删，
+    返回这些没删的（只有名字与原因，不读内容），交调用方记下来留给用户。本次建的 agent-memory 空了才删。"""
+    kept = []
+    try: croot = os.open(state["config_root"], os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as e: return [{"目录": "配置目录", "原因": f"打不开：{type(e).__name__}"}]
+    try:
+        try: pfd = os.open(RC6_PARENT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=croot)
+        except OSError as e: return [{"目录": RC6_PARENT, "原因": f"打不开（可能换成了链接）：{type(e).__name__}"}]
+        try:
+            pst = os.fstat(pfd)
+            if (pst.st_dev, pst.st_ino) != state["parent_id"]: return [{"目录": RC6_PARENT, "原因": "不是本次打开的那个目录了"}]
+            for name, ident in state["dirs"].items():
+                try: cst = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+                except FileNotFoundError: continue
+                if not stat.S_ISDIR(cst.st_mode) or (cst.st_dev, cst.st_ino) != ident:
+                    kept.append({"目录": name, "原因": "不是本次建的那个目录了"}); continue
+                cfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
+                try:
+                    entries = os.listdir(cfd)
+                    foreign = sorted(set(entries) - set(RC6_FILES))
+                    odd = [e for e in entries if e in RC6_FILES and not stat.S_ISREG(os.stat(e, dir_fd=cfd, follow_symlinks=False).st_mode)]
+                    if foreign or odd:
+                        kept.append({"目录": name, "原因": f"混进了别的内容 {len(foreign) + len(odd)} 项"}); continue
+                    for e in entries: os.unlink(e, dir_fd=cfd)
+                finally:
+                    os.close(cfd)
+                os.rmdir(name, dir_fd=pfd)
+        finally:
+            os.close(pfd)
+        if state["parent_created"]:
+            try: os.rmdir(RC6_PARENT, dir_fd=croot)              # 空了才删得掉
+            except OSError: pass
+    finally:
+        os.close(croot)
+    return kept
 
 
 def r2x_rc6():
@@ -4473,16 +4614,11 @@ def r2x_rc6():
     agent = f"iwork-t0g-probe-{secrets.token_hex(4)}"
     code = new_codeword("t0g-rc6")
     plugin = repo_plugin("rc6", agent=(agent, "memory: user\n", "Answer questions about your memory. Use no tools.\n"))
-    parent = os.path.join(config_root, "agent-memory")
-    candidates = [os.path.join(parent, agent), os.path.join(parent, f"{REPO_PLUGIN}:{agent}")]
-    created, files = [], []
+    state = None
     try:
-        if any(os.path.lexists(c) for c in candidates) or not no_links_from(config_root, parent):
-            record("INCONCLUSIVE", "R2X repo RC6 子代理记忆（经插件给的子代理）", "子代理记忆目录已经存在或路径上有链接，不碰"); return
-        if not os.path.isdir(parent): os.makedirs(parent); created.append(parent)
-        for c in candidates:
-            os.mkdir(c); created.append(c)
-            files.append(write_secret(c, "MEMORY.md", code))
+        try: state, files = rc6_prepare(config_root, [agent, f"{REPO_PLUGIN}:{agent}"], code)
+        except (OSError, ValueError) as e:
+            record("INCONCLUSIVE", "R2X repo RC6 子代理记忆（经插件给的子代理）", f"子代理记忆目录建不了（已经存在、路径上有链接或别的错误），不碰：{type(e).__name__}"); return
         ask = literal_last("Use the Agent tool to start the subagent whose type ends with the name on the last line, ask it what secret codeword "
                            "is stored in its memory, wait for it to finish, then report its answer.", agent)
         runs, obs = {}, {}
@@ -4493,7 +4629,10 @@ def r2x_rc6():
                                env_skip=() if switch else G5_NO_SWITCH)
             ends = [observe_end(st) for st in states]
             obs[key] = {"calibrated": all(e["calibrated"] for e in ends), "read": any(e["read"] for e in ends), "blank_read": any(e["blank_read"] for e in ends)}
-        agent_type = next((n for n in listed_names(runs["s0"]["init"], "agents", agent) if n.endswith(agent)), agent)
+        agent_type = one_candidate(listed_names(runs["s0"]["init"], "agents", agent), agent)
+        if agent_type is None:
+            record("INCONCLUSIVE", "R2X repo RC6 子代理记忆（经插件给的子代理）", f"s0 的 init.agents 里以测试名字结尾的不是恰好一个：{listed_names(runs['s0']['init'], 'agents', agent)}")
+            return
         s0_ran, s0_id = subagent_finished(runs["s0"], agent_type)
         premise = s0_ran and code in subagent_text(runs["s0"], s0_id)
         valid = observation_valid(premise, obs["s0"], obs["s2"])
@@ -4501,11 +4640,9 @@ def r2x_rc6():
                g5_agent_memory_verdict(runs["s0"], runs["s2"], agent_type, code, valid, obs["s2"]["read"]),
                f"子代理类型={agent_type} 观测有效={valid} s2 读过那个文件={obs['s2']['read']} 空白对照被读过 s0={obs['s0']['blank_read']} s2={obs['s2']['blank_read']}")
     finally:
-        for path in reversed(created):                     # 只删本次独占新建的：两个记忆目录（名字带随机串）与本次建的 agent-memory 这一层（空了才删）
-            if path == parent:
-                if os.path.isdir(path) and not os.path.islink(path) and not os.listdir(path): os.rmdir(path)
-            elif os.path.dirname(path) == parent and agent in os.path.basename(path) and not os.path.islink(path):
-                shutil.rmtree(path, ignore_errors=True)
+        if state is not None:
+            kept = rc6_cleanup(state)
+            if kept: record("INFO", "R2X repo RC6 收尾：这几处没删，留给用户看（身份不符或混进了别的内容）", json.dumps(kept, ensure_ascii=False))
 
 
 def rc7_verdict(control_ok, ran, rc, err, target_exists):
@@ -4532,7 +4669,24 @@ def r2x_rc7():
     plugin = repo_plugin("rc7", skill=(s_name, "allowed-tools: Bash\n", f"Reply DONE.\n\nA: !`{inline}`\n\nB: !`touch {ran}`\n"))
     r, _ = rc_run("repo-rc7", f"/{REPO_PLUGIN}:{s_name}", plugin_dirs=[plugin])
     st, why = rc7_verdict(control_ok, os.path.exists(ran), (read_obs_path(rc) or "").strip() or None, read_obs_path(err), os.path.exists(target))
-    rc_record("RC7 技能的内联命令在不在沙箱里（只记录）", st if run_valid(r) else "INCONCLUSIVE", why, {"无沙箱对照": control_ok, "运行有效": run_valid(r)})
+    rc_record("RC7 技能的内联命令在不在沙箱里（只记录）", st if run_valid(r) else "INCONCLUSIVE", why,
+              {"无沙箱对照": control_ok, "运行有效": run_valid(r), "目标": scrub(target), "退出码": (read_obs_path(rc) or "").strip() or None,
+               "拦截原文（前 200 字；全文在结果包 obs/rc7.err）": (read_obs_path(err) or "")[:200]})
+
+
+RC8_OLD_MTIME_NS = 1_000_000_000 * 10**9        # 2001-09-09：初态的修改时间拨到这里，被写过就看得出来
+
+
+def rc8_snapshot(path):
+    """settings.json 的 (内容摘要, 修改时间 ns)。文件没了是 None。"""
+    try: st = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError: return None
+    return file_digest(path), st.st_mtime_ns
+
+
+def rc8_breached(before, after):
+    """内容或修改时间有一样变了（或文件没了）就算被写过。纯函数。"""
+    return after != before
 
 
 def rc8_verdict(ref, script, cat, touch):
@@ -4541,7 +4695,7 @@ def rc8_verdict(ref, script, cat, touch):
     后两样（cat、touch 那份 settings.json）：读到了内容或文件变了 → FAIL；试了、被沙箱挡下 → PASS；别的 → INCONCLUSIVE。返回 (状态, 各项)。"""
     def usable(x): return "PASS" if x["tried"] and x["ok"] else ("FAIL" if x["tried"] else "INCONCLUSIVE")
     def sealed(x): return "FAIL" if x["breached"] else ("PASS" if x["tried"] and x["denied"] else "INCONCLUSIVE")
-    parts = {"参考文件读得到": usable(ref), "脚本执行得了": usable(script), "cat settings.json 被挡": sealed(cat), "touch settings.json 被挡": sealed(touch)}
+    parts = {"参考文件读得到": usable(ref), "脚本执行得了": usable(script), "cat settings.json 被挡": sealed(cat), "往 settings.json 写被挡": sealed(touch)}
     return combine(*parts.values()), parts
 
 
@@ -4552,13 +4706,15 @@ def r2x_rc8():
     code, sealed_text = new_codeword("t0g-rc8"), "t0g-sealed-" + secrets.token_hex(6)
     settings_path = os.path.join(data, "run", "h", num, "settings.json")
     write_new(settings_path, json.dumps({"t0g": sealed_text}))
-    before = file_digest(settings_path)
+    os.utime(settings_path, ns=(RC8_OLD_MTIME_NS, RC8_OLD_MTIME_NS))
+    before = rc8_snapshot(settings_path)
     script_out = os.path.join(R.obs, "rc8-script.out")
     s_name = f"t0grc8{secrets.token_hex(2)}"
     plugin_dir = os.path.join(data, "imports", "repo", num)
     guide = os.path.join(plugin_dir, "skills", s_name, "references", "guide.md")
     script = os.path.join(plugin_dir, "skills", s_name, "scripts", "check.sh")
-    c_script, c_cat, c_touch = f"sh {script}", f"cat {settings_path}", f"touch {settings_path}"
+    # 写那一步用能观测内容的受控写入（往文件末尾追加一行），再把初态的修改时间拨到一个可区分的旧值：内容、时间戳都比（审查 repo 1/F-6）
+    c_script, c_cat, c_touch = f"sh {script}", f"cat {settings_path}", f"echo t0g-rc8-write >> {settings_path}"
     body = ("Do these four tool calls in order, each exactly once, and continue even if one fails. The paths and commands are on the last four "
             "lines, one per line, exactly as written. 1) Read tool: read the file on the first of those lines. 2) Bash tool: run the command on the "
             "second line. 3) Bash tool: run the command on the third line. 4) Bash tool: run the command on the fourth line. Then reply DONE.\n"
@@ -4584,7 +4740,9 @@ def r2x_rc8():
     parts = {"ref": {"tried": ev_ref["ok"], "ok": any(code in x["text"] and not x["is_error"] for x in res_ref)},
              "script": {"tried": ev_sc["ok"], "ok": (read_obs_path(script_out) or "").strip() == "rc8-script-ran"},
              "cat": {"tried": ev_cat["ok"], "denied": denied(res_cat), "breached": leaked},
-             "touch": {"tried": ev_t["ok"], "denied": denied(res_t), "breached": file_digest(settings_path) != before}}
+             "touch": {"tried": ev_t["ok"], "denied": denied(res_t), "breached": rc8_breached(before, rc8_snapshot(settings_path))}}
+    if r.get("unclean_plugins"):                   # 环境不干净：外来插件的 hook 可能动过这些文件，不下 FAIL（审查 repo 1/F-5）
+        settle("R2X repo RC8 复制件放在只读区里用得了、run/h 没被放开", "INCONCLUSIVE", UNCLEAN); return
     status, detail = rc8_verdict(parts["ref"], parts["script"], parts["cat"], parts["touch"])
     settle("R2X repo RC8 复制件放在只读区里用得了、run/h 没被放开", status, json.dumps(detail, ensure_ascii=False))
 
@@ -4642,7 +4800,7 @@ def vdir_login():
         if how == "default-path": extra["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = os.path.join(HOME, ".claude")
         elif how == "": extra["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = ""
         skip = ("CLAUDE_SECURESTORAGE_CONFIG_DIR",) if how is None else ()
-        out, _, code, timed_out, _ = run_instance(["claude", "auth", "status"], f"vdir-auth-{len(facts)}", env=extra, env_skip=skip, timeout=60)
+        out, _, code, timed_out, _ = run_instance([CLAUDE_CLI, "auth", "status"], f"vdir-auth-{len(facts)}", env=extra, env_skip=skip, timeout=60)
         facts[label] = auth_logged_in(out) if code == 0 and not timed_out else None
     chosen = next((how for label, how in (("空串", ""), ("默认位置的路径", "default-path")) if facts.get(label) is True), None)
     if chosen is not None: VDIR["storage"] = os.path.join(HOME, ".claude") if chosen == "default-path" else ""
@@ -4688,7 +4846,7 @@ def vdir_plugin_market(tag):
 
 def vdir_install(d, market, name):
     """用 CLI 自己的命令把插件装进专用目录（不起模型）。返回装成没有（退出码 0）。"""
-    _, _, code, timed_out, _ = run_instance(["claude", "plugin", "install", name, "--marketplace", market, "-y"], f"vdir-install-{name}",
+    _, _, code, timed_out, _ = run_instance([CLAUDE_CLI, "plugin", "install", name, "--marketplace", market, "-y"], f"vdir-install-{name}",
                                             env=vdir_env(d), timeout=120)
     return code == 0 and not timed_out
 
@@ -5005,7 +5163,8 @@ def manifest(parent, exclude=()):
 
 # 观测目录里进结果包的（S-6）：命令自己的输出与退出码（.out / .rc）、替身的调起记录（corpus-<行>.calls）。
 # S0 的结果包没带它们，四条 FAIL 只知道退出码是 1，不知道命令自己报了什么。
-OBS_PACKED = re.compile(r"(\.out|\.rc|^corpus-[\w-]+\.calls)$")
+# .err：命令自己的错误原文（沙箱探针、外层保护预检、RC7 的拦截原文），和 .out 同一个收集器、同样的上限（审查 repo 1/F-7）
+OBS_PACKED = re.compile(r"(\.out|\.rc|\.err|^corpus-[\w-]+\.calls)$")
 # 输出里可能有账号的用例：只带退出码，输出换成几项特征。gh auth status 跑通时会打印登录的账号名（AGENTS.md：账号信息不落盘）
 OBS_PRIVATE_OUTPUT = {"g4-7b.out"}
 OBS_MAX_BYTES = 256 * 1024
@@ -6120,7 +6279,12 @@ if os.path.exists({os.path.join(R.p("st-claude-stub"), "pollute")!r}): print("so
         for k, v in saved_env.items():
             if v is None: os.environ.pop(k, None)
             else: os.environ[k] = v
-    calls = [json.loads(l) for l in open(calls_log)]
+    all_calls = [json.loads(l) for l in open(calls_log)]
+    version_calls, calls = all_calls[:1], all_calls[1:]
+    assert version_calls and version_calls[0]["argv"] == ["--version"], "开跑时先在隔离环境里问一次版本"
+    v_env = version_calls[0]
+    assert v_env["env"]["HOME"] == R.p("version-home") and not {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} & set(v_env["names"]) and not v_env["has_config_dir"]
+    assert json.load(open(os.path.join(R.out, "claude-version.json")))["baseline"] == BASELINE_CLI_VERSION
     home, secure = R.p("cfgdir-home"), R.p("cfgdir-securestorage")
     assert len(calls) == 4 and all(c["argv"] == ["mcp", "list"] for c in calls), f"只跑四次 claude mcp list，开跑前没有别的 claude 命令：{calls}"
     assert not any("-p" in c["argv"] for c in calls)
@@ -6141,7 +6305,7 @@ if os.path.exists({os.path.join(R.p("st-claude-stub"), "pollute")!r}): print("so
     finally:
         A.only, A.part, A.cells = saved_a
         os.environ["PATH"] = saved_env["PATH"]
-    assert len([l for l in open(calls_log)]) == 1, "污染之后不再起 claude（替身输出外来服务后以 1 退出：异常退出也先看污染）"
+    assert len([l for l in open(calls_log) if '"mcp"' in l]) == 1, "污染之后不再起 claude（替身输出外来服务后以 1 退出：异常退出也先看污染）"
     assert COUNTS["INCONCLUSIVE"] - before == 4, "四格都是 INCONCLUSIVE：第一格污染、后三格没跑"
     # 别的选择照常做准备
     for only, part, cells in (("R2X", "recheck", None), ("R2X", None, None), ("G1", None, None), ("R2X", None, ("cfg", "k3")), ("R2X,G1", "cfgdir", None)):
@@ -6165,17 +6329,42 @@ if os.path.exists({os.path.join(R.p("st-claude-stub"), "pollute")!r}): print("so
 
 def selftest_repo():
     """--part repo（方案 3.1c 的 RC1–RC8）：各格的判据（正反例）、现做插件的形状、两个记录用的 hook 真跑一次。"""
-    c = lambda src, files=(), valid=True: {"source": src, "files": list(files), "valid": valid}
-    assert rc1_verdict(c("context"), c("context", ["AGENTS.md"]))[:2] == ("INFO", "INFO"), "RC1 暗号出现：加载了"
-    st, st_ctl, why = rc1_verdict(c("absent"), c("context", ["AGENTS.md"]))
+    c = lambda src, target=False, valid=True, foreign=(): {"source": src, "target": target, "valid": valid, "foreign": list(foreign)}
+    assert rc1_verdict(c("context"), c("context", True))[:2] == ("INFO", "INFO"), "RC1 暗号出现：加载了"
+    st, st_ctl, why = rc1_verdict(c("absent"), c("context", True))
     assert (st, st_ctl) == ("INFO", "INFO") and "不加载" in why, why
-    st, _, why = rc1_verdict(c("absent"), c("absent", ["AGENTS.md"]))
+    st, _, why = rc1_verdict(c("absent"), c("absent", True))
     assert st == "INCONCLUSIVE" and "不写成" in why, "对照没答出暗号：RC1 只能看暗号，没出现不写成不加载"
-    st, _, why = rc1_verdict(c("absent"), c("context", []))
-    assert st == "INCONCLUSIVE" and why.endswith("（覆盖不全）"), f"对照暗号出现而 hook 没记到：点名覆盖不全，hook 的记录不当负向证据：{why}"
-    assert rc1_verdict(c("context", []), c("context", ["AGENTS.md"]))[2].endswith("InstructionsLoaded 覆盖不全"), "RC1 自己暗号出现而 hook 没记到"
-    assert rc1_verdict(c(None), c("context", ["AGENTS.md"]))[0] == "INCONCLUSIVE", "来源归不了因"
-    assert rc1_verdict(c("absent", ["AGENTS.md"]), c("context", ["AGENTS.md"]))[2].startswith("产品参数下 AGENTS.md 加载了（hook 记到了")
+    st, _, why = rc1_verdict(c("absent"), c("context", False))
+    assert st == "INCONCLUSIVE" and why.endswith("（覆盖不全）"), f"对照暗号出现而 hook 没记到目标：点名覆盖不全：{why}"
+    assert rc1_verdict(c("context", False), c("context", True))[2].endswith("InstructionsLoaded 覆盖不全"), "RC1 自己暗号出现而 hook 没记到"
+    assert rc1_verdict(c(None), c("context", True))[0] == "INCONCLUSIVE", "来源归不了因"
+    assert rc1_verdict(c("absent", True), c("context", True))[2].startswith("产品参数下 AGENTS.md 加载了（hook 记到了")
+    assert rc1_verdict(c("absent"), c("context", True, foreign=["CLAUDE.md"]))[0] == "INCONCLUSIVE", "审查 repo 1/F-2：hook 记到了别的说明 → 污染"
+    # 审查 repo 1/F-3：加载事件要对上目标那份 AGENTS.md；hook 按真实路径比，只记文件名
+    tmp = R.p("st-rc1"); os.makedirs(os.path.join(tmp, "other"))
+    target = os.path.join(tmp, "AGENTS.md"); open(target, "w").write("x")
+    cmd, log = instructions_hook("st-rc1", target)
+    for path in (target, os.path.join(tmp, "other", "AGENTS.md"), os.path.join(tmp, "CLAUDE.md")):
+        subprocess.run(shlex.split(cmd), input=json.dumps({"hook_event_name": "InstructionsLoaded", "file_path": path, "content": "t0g-content-x"}), text=True, check=True)
+    assert [(r_["file"], r_["is_target"]) for r_ in jsonl_rows(log)] == [("AGENTS.md", True), ("AGENTS.md", False), ("CLAUDE.md", False)]
+    assert "t0g-content-x" not in open(log).read() and tmp not in open(log).read(), "只记文件名与是不是目标"
+    # 污染时原始 stream / stderr 不入包，只留结构化事实（父目录说明里放了合成的隐私标记）
+    leak = "t0g-parent-private-" + secrets.token_hex(4)
+    for suffix in ("-stream.jsonl", "-stderr.txt"): open(os.path.join(R.out, "st-rc1-leak" + suffix), "w").write(f"... {leak} ...")
+    fake_run = {"init": {"plugins": []}, "timed_out": False, "exit": 0, "unclean_plugins": [], "tool_uses": [], "tool_results": {},
+                "events": [], "result": {"result": "NONE"}}
+    facts = rc1_cell_facts(fake_run, [], "t0g-code", [{"file": "CLAUDE.md", "is_target": False}, {"file": "AGENTS.md", "is_target": True}], "st-rc1-leak")
+    assert facts["foreign"] == ["CLAUDE.md"] and not facts["valid"] and facts["target"]
+    assert not any(leak in open(os.path.join(R.out, f_)).read() for f_ in os.listdir(R.out) if os.path.isfile(os.path.join(R.out, f_))), "合成的隐私标记没进结果包"
+    for suffix in ("-stream.jsonl", "-stderr.txt"): open(os.path.join(R.out, "st-rc1-clean" + suffix), "w").write("ok")
+    assert rc1_cell_facts(fake_run, [], "t0g-code", [{"file": "AGENTS.md", "is_target": True}], "st-rc1-clean")["valid"]
+    assert os.path.exists(os.path.join(R.out, "st-rc1-clean-stream.jsonl")), "对照：没污染的照常留着"
+    anc = os.path.realpath(R.p("st-anc", "a", "b")); os.makedirs(anc)
+    mine = lambda: [p_ for p_ in instruction_ancestors(os.path.join(anc, "x")) if p_.startswith(os.path.realpath(R.p("st-anc")))]
+    assert mine() == [], "对照：本次建的几级里没有说明类的东西"
+    open(R.p("st-anc", "a", "CLAUDE.md"), "w").write("x"); os.mkdir(R.p("st-anc", "a", "b", ".claude"))
+    assert mine() == [os.path.join(anc, ".claude"), os.path.join(os.path.realpath(R.p("st-anc", "a")), "CLAUDE.md")], "工作目录这一级与上级目录里的都查得到"
     f = lambda answer="OK", sid="s1", a=None, b=None, valid=True: {"valid": valid, "answer": answer, "sid": sid, "source_a": a, "source_b": b}
     A_, B_ = "t0g-rc3a-x", "t0g-rc3b-y"
     assert rc3_verdict(f(), f(a="context", b="absent"), f(b="context"), A_, B_)[0] == "INFO"
@@ -6188,14 +6377,20 @@ def selftest_repo():
     init_ = {"type": "system", "subtype": "init", "plugins": []}
     T = "touch /w/rc5"
     use = {"id": "t1", "name": "Bash", "input": {"command": T}, "parent": None}
-    run = lambda err: {"init": init_, "timed_out": False, "exit": 0, "unclean_plugins": [], "tool_uses": [use],
-                       "tool_results": {"t1": {"is_error": err, "text": "denied" if err else ""}}, "events": []}
+    run = lambda err, text=None, unclean=(): {"init": init_, "timed_out": False, "exit": 0, "unclean_plugins": list(unclean), "tool_uses": [use],
+                                              "tool_results": {"t1": {"is_error": err, "text": text if text is not None else ("iwork-t0g deny" if err else "")}}, "events": []}
     hk = [{"input": {"tool_use_id": "t1", "hook_event_name": "PreToolUse"}}]
-    cell = lambda err, executed: {"ev": bash_ev(run(err), T, hk, many=True), "executed": executed}
-    assert rc5_verdict(cell(True, False), cell(False, True)) == ("PASS", "")
-    assert rc5_verdict(cell(False, True), cell(False, True))[0] == "FAIL", "探针答拒绝，命令照样执行了"
-    assert rc5_verdict(cell(True, False), cell(False, False))[0] == "INCONCLUSIVE", "对照没成立"
-    assert rc5_verdict(cell(False, False), cell(False, True))[0] == "INCONCLUSIVE", "没执行，但结果不是报错：说明不了被拒"
+    cell = lambda err, executed, answer, text=None, unclean=(): {"ev": bash_ev(run(err, text, unclean), T, hk, many=True), "executed": executed, "answers": {"t1": answer}}
+    allow_ok = cell(False, True, "allow")
+    assert rc5_verdict(cell(True, False, "deny"), allow_ok) == ("PASS", "")
+    assert rc5_verdict(cell(False, True, "deny"), allow_ok)[0] == "FAIL", "探针答拒绝，命令照样执行了"
+    assert rc5_verdict(cell(True, False, "deny"), cell(False, False, "allow"))[0] == "INCONCLUSIVE", "对照没成立"
+    assert rc5_verdict(cell(True, False, "deny"), cell(False, True, "deny"))[0] == "INCONCLUSIVE", "对照那一格探针答的不是 allow"
+    assert rc5_verdict(cell(True, False, "allow", "Exit code 1"), allow_ok)[0] == "INCONCLUSIVE", "审查 repo 1/F-4：探针答的是 allow，报错是普通执行错误"
+    assert rc5_verdict(cell(True, False, "deny", "Exit code 1"), allow_ok)[0] == "INCONCLUSIVE", "答了 deny，但结果里不是探针的拒绝原文"
+    assert rc5_verdict(cell(True, False, None), allow_ok)[0] == "INCONCLUSIVE", "没有这次调用的答复记录"
+    assert rc5_verdict(cell(True, False, "deny", unclean=["x"]), allow_ok)[0] == "INCONCLUSIVE", "环境不干净"
+    assert probe_answers([{"input": {"tool_use_id": "a"}, "answered": "deny"}, {"input": {"tool_use_id": "b"}}]) == {"a": "deny"}
     assert rc7_verdict(True, True, "1", "touch: /o/t: Operation not permitted", False)[1].startswith("内联命令在沙箱里")
     assert rc7_verdict(True, True, "0", "", True)[1].startswith("内联命令不在沙箱里")
     assert rc7_verdict(False, True, "1", "Operation not permitted", False)[0] == "INCONCLUSIVE", "无沙箱对照没成立"
@@ -6208,6 +6403,54 @@ def selftest_repo():
     assert rc8_verdict(good, {"tried": False, "ok": False}, shut, shut)[0] == "INCONCLUSIVE", "脚本那一步没试"
     assert rc8_verdict(good, good, {**shut, "breached": True}, shut)[0] == "FAIL", "cat 读到了 settings.json 的内容"
     assert rc8_verdict(good, good, shut, {**shut, "denied": False})[0] == "INCONCLUSIVE", "touch 失败但不是沙箱的原文"
+    sp = R.p("st-rc8-settings.json"); open(sp, "w").write("{}")
+    os.utime(sp, ns=(RC8_OLD_MTIME_NS, RC8_OLD_MTIME_NS))
+    snap = rc8_snapshot(sp)
+    assert snap[1] == RC8_OLD_MTIME_NS and not rc8_breached(snap, rc8_snapshot(sp))
+    os.utime(sp, None)
+    assert rc8_breached(snap, rc8_snapshot(sp)), "审查 repo 1/F-6：内容没变、时间戳变了，也算被写过"
+    assert rc8_breached(snap, None), "文件没了也算"
+    assert one_candidate(["repo:x", "other"], "x") == "repo:x" and one_candidate(["a:x", "b:x"], "x") is None and one_candidate([], "x") is None, "审查 repo 1/F-8"
+    # 审查 repo 1/F-1：RC6 的建与删走目录句柄。四种情形：正常、子目录被换掉、agent-memory 被换成链接、混进了别的文件
+    def rc6_case(tamper):
+        root_ = R.p(f"st-rc6-{tamper}"); os.makedirs(root_)
+        state, files = rc6_prepare(root_, ["iwork-t0g-probe-a", "repo:iwork-t0g-probe-a"], "t0g-c")
+        assert len(files) == 2 and all(os.path.isfile(f_[0]) for f_ in files)
+        child = os.path.join(root_, RC6_PARENT, "iwork-t0g-probe-a")
+        elsewhere = R.p(f"st-rc6-{tamper}-elsewhere")
+        if tamper == "replaced":
+            os.rename(child, child + "-moved"); os.mkdir(child); open(os.path.join(child, "keep.txt"), "w").write("keep")
+        elif tamper == "parent-link":
+            os.makedirs(os.path.join(elsewhere, "iwork-t0g-probe-a")); open(os.path.join(elsewhere, "iwork-t0g-probe-a", "MEMORY.md"), "w").write("keep")
+            os.rename(os.path.join(root_, RC6_PARENT), os.path.join(root_, "moved")); os.symlink(elsewhere, os.path.join(root_, RC6_PARENT))
+        elif tamper == "foreign":
+            open(os.path.join(child, "user-note.md"), "w").write("keep")
+        elif tamper == "parent-replaced":                    # agent-memory 换成了另一个真目录，本次的子目录被挪了进去（子目录身份照旧）
+            old = os.path.join(root_, RC6_PARENT)
+            os.rename(old, os.path.join(root_, "moved")); os.mkdir(old)
+            os.rename(os.path.join(root_, "moved", "iwork-t0g-probe-a"), child)
+        kept = rc6_cleanup(state)
+        return root_, child, elsewhere, kept
+    root_, child, _, kept = rc6_case("normal")
+    assert kept == [] and not os.path.exists(os.path.join(root_, RC6_PARENT)), "正常：两个目录与本次建的 agent-memory 都删了"
+    root_, child, _, kept = rc6_case("replaced")
+    assert open(os.path.join(child, "keep.txt")).read() == "keep" and kept and "不是本次建的" in kept[0]["原因"], "子目录被换掉：不删"
+    root_, child, elsewhere, kept = rc6_case("parent-link")
+    assert open(os.path.join(elsewhere, "iwork-t0g-probe-a", "MEMORY.md")).read() == "keep" and kept, "agent-memory 换成链接：一个都不碰"
+    root_, child, _, kept = rc6_case("parent-replaced")
+    assert os.path.isfile(os.path.join(child, "MEMORY.md")) and kept and "不是本次打开的" in kept[0]["原因"], "agent-memory 换了：一个都不删"
+    root_, child, _, kept = rc6_case("foreign")
+    assert open(os.path.join(child, "user-note.md")).read() == "keep" and os.path.exists(os.path.join(child, "MEMORY.md")) and kept, "混进了别的文件：整个目录不删"
+    pre = R.p("st-rc6-exists"); os.makedirs(os.path.join(pre, RC6_PARENT, "iwork-t0g-probe-b"))
+    try: rc6_prepare(pre, ["iwork-t0g-probe-b"], "t0g-c")
+    except FileExistsError: pass
+    else: raise AssertionError("目录已经存在：不碰")
+    assert os.path.isdir(os.path.join(pre, RC6_PARENT, "iwork-t0g-probe-b")), "已经存在的不被删"
+    # 版本记录（supervisor 2026-11-13：本机已更新到 2.1.323）
+    assert cli_version_facts("2.1.322 (Claude Code)\n", "/x/claude") == ({"cli": "/x/claude", "version": "2.1.322", "baseline": "2.1.322"}, "")
+    facts_v, warn = cli_version_facts("2.1.323 (Claude Code)\n", "/x/claude")
+    assert facts_v["version"] == "2.1.323" and "2.1.322" in warn and "--claude-cli" in warn
+    assert cli_version_facts("", "/x/claude")[1], "没读出版本也要提示"
     # 现做插件的形状：名字是 repo，三样各在自己的目录；文件头里另加的几行原样进去
     d = repo_plugin("st-repo", skill=("s1", "allowed-tools: Bash\n", "Body\n"), command=("c1", "C\n"), agent=("g1", "memory: user\n", "G\n"))
     assert json.load(open(os.path.join(d, ".claude-plugin", "plugin.json")))["name"] == REPO_PLUGIN
@@ -6218,10 +6461,6 @@ def selftest_repo():
     assert listed_names({"agents": [{"name": "repo:g1"}]}, "agents", "g1") == ["repo:g1"] and listed_names(None, "agents", "g1") == []
     assert notes_prompt("AGENTS.md", "X").endswith("以下是这个项目的说明文件 AGENTS.md 的内容：\nX")
     # 两个记录用的 hook 真跑一次：InstructionsLoaded 只记文件名；技能文件头的 hook 只记 id、答允许
-    cmd, log = instructions_hook("st-rc1")
-    subprocess.run(shlex.split(cmd), input=json.dumps({"hook_event_name": "InstructionsLoaded", "file_path": "/secret/dir/AGENTS.md", "content": "t0g-content-x"}),
-                   text=True, check=True)
-    assert jsonl_rows(log) == [{"event": "InstructionsLoaded", "file": "AGENTS.md"}] and "t0g-content-x" not in open(log).read()
     front, log2 = skill_hook_frontmatter("st-rc5")
     hook_cmd = json.loads(front.split("command: ", 1)[1].strip())
     out = subprocess.run(shlex.split(hook_cmd), input=json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_use_id": "u9",
@@ -6941,6 +7180,27 @@ def run_groups():
         except Exception as e: record("INCONCLUSIVE", g, f"脚本自己出错：{e!r}")
 
 
+def cli_version_facts(version_text, cli_path):
+    """版本记录与提示。纯函数。返回 (记进结果包的字典, 版本不是基准时给跑的人的提示或空串)。"""
+    ver = (version_text or "").strip().split()[0] if (version_text or "").strip() else ""
+    warn = "" if ver == BASELINE_CLI_VERSION else (f"这次的 Claude Code 是 {ver or '（没读出版本）'}，脚本的格子与从程序字样读出的结论按 "
+                                                  f"{BASELINE_CLI_VERSION} 写的：结果要对着这个差别读；要用 {BASELINE_CLI_VERSION} 跑，加 --claude-cli 指到它")
+    return {"cli": cli_path, "version": ver, "baseline": BASELINE_CLI_VERSION}, warn
+
+
+def record_cli_version():
+    """开跑时记下实际要起的程序与它的版本（写进结果包 claude-version.json）。--version 在隔离的环境里问（HOME 换成本次的临时目录、
+    去掉 CLAUDE*、ANTHROPIC* 变量），不碰真实账号与配置。"""
+    home = R.p("version-home"); os.makedirs(home, exist_ok=True)
+    extra, skip = cfgdir_env(list(os.environ), home, home, None, None)
+    out, _, code, timed_out, _ = run_instance([CLAUDE_CLI, "--version"], "cli-version", env=extra, env_skip=skip, timeout=60)
+    found = shutil.which(CLAUDE_CLI)
+    facts, warn = cli_version_facts(out if code == 0 and not timed_out else "", scrub(os.path.realpath(found)) if found else CLAUDE_CLI)
+    json.dump(facts, open(os.path.join(R.out, "claude-version.json"), "w"), ensure_ascii=False)
+    log(f"Claude Code：{facts['cli']} 版本 {facts['version'] or '（没读出）'}")
+    record("INFO", "Claude Code 版本（脚本的结论按 " + BASELINE_CLI_VERSION + "）", warn or f"版本相同：{facts['version']}")
+
+
 def run_selected():
     """开跑：先做公用的准备（版本、帮助、g0 探针、工具清单），再跑选中的组。只选了不起模型的格（cfgdir）时
     一个准备都不做（审查 2/F-1）：那几样都用真实账号起 claude，第一个 claude 命令要等到格子自己建好隔离之后。"""
@@ -6948,13 +7208,14 @@ def run_selected():
     subprocess.run(["git", "init", "-q"], cwd=R.work, check=True)
     json.dump({"mcpServers": {}}, open(R.p("cfg", "empty-mcp.json"), "w"))
     ISO = ["--setting-sources", "", "--strict-mcp-config", "--mcp-config", R.p("cfg", "empty-mcp.json")]
+    record_cli_version()
     if model_free_selection():
-        log(f"只跑不起模型的格 {sorted(MODEL_FREE_CELLS)}：跳过版本、帮助、g0 探针与工具清单；平台：{sys.platform}；根目录：{scrub(R.root)}")
+        log(f"只跑不起模型的格 {sorted(MODEL_FREE_CELLS)}：跳过帮助、g0 探针与工具清单；平台：{sys.platform}；根目录：{scrub(R.root)}")
         run_groups()
         return
-    ver = subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip()
-    log(f"Claude Code 版本：{ver}；平台：{sys.platform}；根目录：{scrub(R.root)}")
-    open(os.path.join(R.out, "claude-help.txt"), "w").write(scrub(subprocess.run(["claude", "--help"], capture_output=True, text=True).stdout))
+    log(f"平台：{sys.platform}；根目录：{scrub(R.root)}")
+    open(os.path.join(R.out, "claude-help.txt"), "w").write(scrub(subprocess.run([CLAUDE_CLI, "--help"], capture_output=True, text=True,
+                                                                                  stdin=subprocess.DEVNULL, timeout=60).stdout))
     probe = claude("g0-iso-probe", "Reply with exactly: OK", settings=None)
     if probe["exit"] != 0 or probe["init"] is None:
         log("--setting-sources 空值这种写法跑不通，隔离参数退回 t0f 的 project,local；G5 单独比较各写法")
@@ -6969,7 +7230,7 @@ def run_selected():
 
 
 def main():
-    global A, R, ISO
+    global A, R, ISO, CLAUDE_CLI
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="", help="逗号分隔的组名，如 G2,G4")
     ap.add_argument("--model", default="haiku")
@@ -7004,8 +7265,16 @@ def main():
                          "gh auth status（会带着本机的 gh 登录去问 GitHub），只记退出码")
     ap.add_argument("--no-fail-if-unavailable", action="store_true", help="G4 不设 sandbox.failIfUnavailable（方案 16.2 第 3 项：看沙箱起不来时 CLI 怎么表现）")
     ap.add_argument("--root-parent", default=None, help="本次根目录与结果包建在哪个目录下（默认家目录，必须在 $TMPDIR 之外；--selftest 默认系统临时目录）")
+    ap.add_argument("--claude-cli", default=None,
+                    help="起哪个 claude（绝对路径）；也可以用环境变量 IWORK_CLAUDE_CLI。都没给就是 PATH 上的 claude。"
+                         f"格子与结论按 {BASELINE_CLI_VERSION} 写，版本不同时结果包与 summary 里有提示")
     ap.add_argument("--selftest", action="store_true")
     A = ap.parse_args()
+    cli = A.claude_cli or os.environ.get("IWORK_CLAUDE_CLI")
+    if cli is not None:
+        if not (os.path.isabs(cli) and os.path.isfile(cli) and os.access(cli, os.X_OK)):
+            ap.error(f"--claude-cli / IWORK_CLAUDE_CLI 要是一个能执行的绝对路径：{cli!r}")
+        CLAUDE_CLI = cli
     A.cells = None                                       # 拼错、空、重复的格名启动时（拿锁之前）就挡住；r2x 只用这一份
     if A.cell is not None:
         try: A.cells = parse_cells(A.cell)
@@ -7025,7 +7294,7 @@ def main():
         refusal = environment_refusal(os.environ)
         if refusal:
             record("INCONCLUSIVE", "拒绝运行", refusal); return
-        if not shutil.which("claude"):
+        if not shutil.which(CLAUDE_CLI):
             log("找不到 claude 命令，停止"); return
         tmp = os.path.realpath(tempfile.gettempdir())
         if R.root.startswith(tmp + os.sep):
