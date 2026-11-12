@@ -3392,6 +3392,21 @@ def tool_result_texts(events, ids):
     return out
 
 
+# k、b、n 格量的是「带沙箱时」的进程关系与事件流：探针用 allow-sandboxed（沙箱外重试一律拒绝），流里只要出现过一次带
+# dangerouslyDisableSandbox 的 Bash（哪怕被拒了），这一格就不当成带沙箱的证据（审查 2/F-1）。产品的 allowUnsandboxedCommands 不动
+UNSANDBOXED_ABSENT = "流里没有带 dangerouslyDisableSandbox 的 Bash 调用"
+
+
+def r2x_live_settings(name, exp, **kw):
+    """k1–k3、b1、b2、n1 的设置：产品设置（r2x_settings），探针只放行登记的调用、沙箱外重试一律拒绝（allow-sandboxed）。"""
+    return r2x_settings(name, "allow-sandboxed", exp, **kw)
+
+
+def no_unsandboxed_calls(events):
+    """常驻会话的事件里（含子代理的），有没有带 dangerouslyDisableSandbox 的 Bash 调用。没有 → 真。纯函数。"""
+    return not any(u["name"] == "Bash" and u["input"].get("dangerouslyDisableSandbox") for o in events for u in stream_tool_uses(o))
+
+
 def subagent_tool_listed(tools):
     """init.tools 里有没有子代理工具，叫什么。"""
     return [t for t in (tools or []) if t in AGENT_TOOLS]
@@ -3433,7 +3448,7 @@ def r2x_kill_case(kind):
     k4 在同一格里顺带记：那个 shell 的父进程号、进程组号、会话号（D2 的 b′ 按后代找找不找得到）。只记录。"""
     late = os.path.join(R.obs, f"r2x-{kind}-late")
     cmd = f"/bin/sleep {LONG_SLEEP}; touch {late}"
-    s, _ = r2x_settings(f"r2x-{kind}", "allow", expect(bash=[cmd]))
+    s, _ = r2x_live_settings(f"r2x-{kind}", expect(bash=[cmd]))
     live = Live(f"r2x-{kind}", s)
     facts = {}
     try:
@@ -3463,7 +3478,8 @@ def r2x_kill_case(kind):
                 while time.time() - t0 < 70: time.sleep(1)
                 facts["70 秒后哨兵出现了（命令接着跑完）"] = os.path.exists(late)
         label = {"k1": "k1 前台命令跑着时 SIGKILL CLI 的进程组", "k2": "k2 前台命令跑着时只关输入", "k3": "k3 前台命令跑着时给 CLI 发 SIGTERM"}[kind]
-        status, why = r2x_live_record(evs, alive_now, 0, {SLEEP_SEEN: target is not None, FOREGROUND_SEEN: fg, "发信号时 CLI 还在": cli_running})
+        status, why = r2x_live_record(evs, alive_now, 0, {SLEEP_SEEN: target is not None, FOREGROUND_SEEN: fg, "发信号时 CLI 还在": cli_running,
+                                                           UNSANDBOXED_ABSENT: no_unsandboxed_calls(evs)})
         record(status, f"R2X {label}（只记录；k4 的进程号也在这一行）", "；".join(x for x in (why, json.dumps(facts, ensure_ascii=False)) if x))
     finally:
         live.close(escape_expected=True)          # 命令脱组是这几格要量的事，不另记「进程组」FAIL；还活着的由收尾清掉
@@ -3482,7 +3498,7 @@ def r2x_background(kind, env):
         cmd = f"touch {sentinel}"
         prompt = literal_last("Use a subagent (the Agent tool) whose only job is to run the Bash command on the last line once, character for character. Then reply DONE.", cmd)
         exp = expect(bash=[cmd], tools=AGENT_TOOLS + INV["harmless"])
-    s, logdir = r2x_settings(f"r2x-{kind}", "allow", exp, session_start=True)
+    s, logdir = r2x_live_settings(f"r2x-{kind}", exp, session_start=True)
     live = Live(f"r2x-{kind}", s, env=env)
     try:
         t0 = live.user(prompt)
@@ -3501,7 +3517,7 @@ def r2x_background(kind, env):
         if kind == "b2":
             facts["目标调用的结果（前 200 字）"] = tool_result_texts(evs, {u["id"] for u in bash_uses})
         label = {"b1": "b1 关后台任务时调子代理", "b2": "b2 关后台任务时后台跑 Bash", "n1": "n1 不关后台任务时调子代理"}[kind]
-        extra = {"目标 Bash 调用发出过": bool(bash_uses)}
+        extra = {"目标 Bash 调用发出过": bool(bash_uses), UNSANDBOXED_ABSENT: no_unsandboxed_calls(evs)}
         if kind != "b2":                                 # 子代理格：要看见真实的子代理工具调用，目标 Bash 的父调用就是它（1/F-3）
             extra["看见了子代理工具调用、目标 Bash 的 parent_tool_use_id 对得上它"] = subagent_ran_target(uses, cmd)
         status, why = r2x_live_record(evs, alive_now, 1, extra)
@@ -3877,8 +3893,20 @@ def r2x_handler(item):
     return hits[0]
 
 
+def parse_cells(text):
+    """--cell 的值：逗号分隔的格名，启动时解析一次，执行时用同一份（审查 2/F-2）。空项（「k3,」、空串）、重复项（同一格跑两次
+    会复用哨兵和日志）、不在格子表里的名字一律报 ValueError。返回格名的元组。纯函数。"""
+    items = text.split(",")
+    if any(not x.strip() for x in items): raise ValueError(f"--cell {text!r} 里有空的格名")
+    items = [x.strip() for x in items]
+    dup = sorted({x for x in items if items.count(x) > 1})
+    if dup: raise ValueError(f"--cell 里格名重复：{dup}（同一格跑两次会复用哨兵和日志）")
+    for x in items: r2x_handler(x)
+    return tuple(items)
+
+
 def r2x():
-    wanted = A.cell.split(",") if A.cell else R2X_PARTS[A.part] if A.part else sum(R2X_PARTS.values(), ())
+    wanted = A.cells or (R2X_PARTS[A.part] if A.part else sum(R2X_PARTS.values(), ()))
     for item in wanted: r2x_handler(item)()
 
 GROUPS = {"G1": g1, "G2": g2, "G3": g3, "G4": g4, "G5": g5, "G6": g6, "G7": g7, "G8": g8, "G9": g9, "R2X": r2x}
@@ -4855,6 +4883,39 @@ def selftest_r2x_settings():
     assert json.load(open(r2x_settings("st-r2x-set3", "allow", session_start=True)[0]))["hooks"].get("SessionStart"), "别的参数照传"
 
 
+def selftest_r2x_sandbox_and_cells():
+    """审查 2/F-1：k、b、n 格的探针拒沙箱外重试，流里出现过沙箱外调用就 INCONCLUSIVE。2/F-2：--cell 拿锁之前拒空项、重复项。"""
+    cmd = "/bin/sleep 61; touch /r/obs/x"
+    init_ok, res_ = {"type": "system", "subtype": "init", "plugins": []}, {"type": "result"}
+    bash = lambda flag: {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash",
+                                                                         "input": {"command": cmd, **({"dangerouslyDisableSandbox": True} if flag else {})}}]}}
+    assert no_unsandboxed_calls([init_ok, bash(False)]) and not no_unsandboxed_calls([init_ok, bash(False), bash(True)])
+    sub = {**bash(True), "parent_tool_use_id": "a1"}
+    assert not no_unsandboxed_calls([init_ok, sub]), "子代理里的也算"
+    assert r2x_live_record([init_ok, bash(False), res_], True, 1, {UNSANDBOXED_ABSENT: no_unsandboxed_calls([bash(False)])})[0] == "INFO"
+    st, why = r2x_live_record([init_ok, bash(True), res_], True, 1, {UNSANDBOXED_ABSENT: no_unsandboxed_calls([bash(True)])})
+    assert st == "INCONCLUSIVE" and UNSANDBOXED_ABSENT in why, why
+    # 这几格的设置文件：探针行为是 allow-sandboxed，产品的 allowUnsandboxedCommands 原样
+    sp, _ = r2x_live_settings("st-r2x-sb", expect(bash=[cmd]))
+    st_ = json.load(open(sp))
+    assert " allow-sandboxed " in st_["hooks"]["PreToolUse"][0]["hooks"][0]["command"] and st_["sandbox"]["allowUnsandboxedCommands"] is True
+    exp_p = R.p("cfg", "expect-st-r2x-sb.json")
+    hook_out = lambda ti: json.loads(subprocess.run([sys.executable, hook_path(), "allow-sandboxed", R.p("out", "st-r2x-sb"), R.root, exp_p],
+                                                    input=json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": ti}),
+                                                    capture_output=True, text=True).stdout)["hookSpecificOutput"]["permissionDecision"]
+    assert hook_out({"command": cmd}) == "allow" and hook_out({"command": cmd, "dangerouslyDisableSandbox": True}) == "deny", "登记的命令带沙箱外参数：拒"
+    # --cell
+    assert parse_cells("k3") == ("k3",) and parse_cells("k3,k2c") == ("k3", "k2c") and parse_cells(" k3 , h1") == ("k3", "h1")
+    for bad in ("k2c,k2c", "k3,", ",k3", "", "zz", "k3,,h1"):
+        try: parse_cells(bad)
+        except ValueError as e: assert ("空的格名" in str(e)) == (bad in ("k3,", ",k3", "", "k3,,h1")), (bad, e)
+        else: raise AssertionError(f"--cell {bad!r} 应当被拒")
+    # 拿锁之前就拒：这次 selftest 正拿着锁，校验要是排在拿锁之后，报的会是「不跑：另一次 iwork-t0g 正在跑」
+    for bad in ("k2c,k2c", "k3,", ""):
+        out = subprocess.run([sys.executable, os.path.abspath(__file__), "--only", "R2X", "--cell", bad], capture_output=True, text=True, timeout=60)
+        assert out.returncode == 2 and "--cell" in out.stderr and "另一次 iwork-t0g" not in out.stderr + out.stdout, (bad, out.returncode, out.stderr[-300:])
+
+
 def selftest_prompts():
     """要逐字照抄的命令、路径、名字在提示的最后一行，后面不跟标点（R2X 分析第 9 节第 2 条：b1、n1 的句点被抄进了命令）。"""
     last = lambda prompt: prompt.splitlines()[-1]
@@ -4884,6 +4945,7 @@ def selftest():
     selftest_run_isolation()
     selftest_prompts()
     selftest_r2x_settings()
+    selftest_r2x_sandbox_and_cells()
     selftest_r2x_skill()
     # 根目录名只有小写字母和数字（CLI 编码工作目录时会改写 _ 之类的字符，R2 分析 6.2）
     assert re.fullmatch(r"iwork-t0g-[a-z0-9]{8}", os.path.basename(R.root)), R.root
@@ -5516,7 +5578,7 @@ def main():
                     help="只给 --only R2X：d = k1–k3、b1、b2（5 个实例，先跑，定 D2、D5）；rest = c1、n1 与工具清单（8 个）；"
                          "net = 沙箱联网 p1、p2、p4 两格（4 个）；skill = 仓库技能加不加载 L1、L2，内联命令 K3b、K3c，"
                          "allowed-tools 的故障探针 K2c，插件 hook 对 iWork hook H1（6 个，日常账号下 K2c 另加 1 个预检）；不给就都跑")
-    ap.add_argument("--cell", default="",
+    ap.add_argument("--cell", default=None,
                     help="只给 --only R2X：逗号分隔的格名，只跑这几格（优先于 --part），如 --cell k3（带产品设置重记 k3、k4，1 个实例）")
     ap.add_argument("--quick", action="store_true", help="G2 只跑普通 Bash 一行（结论只能是 INCONCLUSIVE，不能进已验证表）")
     ap.add_argument("--disposable-env", action="store_true",
@@ -5533,8 +5595,9 @@ def main():
     ap.add_argument("--root-parent", default=None, help="本次根目录与结果包建在哪个目录下（默认家目录，必须在 $TMPDIR 之外；--selftest 默认系统临时目录）")
     ap.add_argument("--selftest", action="store_true")
     A = ap.parse_args()
-    for item in filter(None, A.cell.split(",")):          # 拼错的格名启动时就挡住
-        try: r2x_handler(item)
+    A.cells = None                                       # 拼错、空、重复的格名启动时（拿锁之前）就挡住；r2x 只用这一份
+    if A.cell is not None:
+        try: A.cells = parse_cells(A.cell)
         except ValueError as e: ap.error(str(e))
     unknown = [g for g in (x.strip() for x in A.only.split(",")) if g and g not in GROUPS]
     if unknown:                                            # 先挡住拼错的组名：不然要先花掉一次探查运行，才在组循环里报错
