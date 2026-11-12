@@ -819,7 +819,10 @@ def obs_verdict(ev, obs, want_ok, expect_out=None, denied=None):
     正面证据两样：目标调用（evidence）与观测文件。缺一样就是没测成。
     「该失败」的用例：退出码 0 → FAIL（跑成了）。说「被挡住了」要三样都有（supervisor 2026-11-13，和 k1–k3 的沙箱探针同一条）：
     同一个程序写工作区的对照成功（ctl_rc 是 0）；命令自己写下的非零退出码；输出里有拦截的原文（默认 SANDBOX_DENIED_TEXT，
-    格子可以给自己的 denied）。命令不存在、目录不存在、Permission denied、对照失败或没有对照 → INCONCLUSIVE，不当成被挡。"""
+    格子可以给自己的 denied）。命令不存在、目录不存在、Permission denied、对照失败或没有对照 → INCONCLUSIVE，不当成被挡。
+    「该失败」的格子先看观测（审查 4/F-1 的同类）：命令自己写下了退出码 0，就是跑成了，运行超时、证据不齐也照样 FAIL；
+    观测文件只有登记的那一条命令会写（探针只放行它）。"""
+    if not want_ok and obs is not None and obs["rc"] == "0": return "FAIL"
     if not ev["ok"] or obs is None: return "INCONCLUSIVE"
     ok = obs["rc"] == "0" and (expect_out is None or obs["out"].strip() == expect_out)
     if want_ok: return "PASS" if ok else "FAIL"
@@ -4191,13 +4194,15 @@ def mcp_list_parse(output):
 def cfgdir_verdict(code, timed_out, output, names, want):
     """一种情况的结论。纯函数。names：{份: 条目名}；want：该读到的那一份。按严格解析出的服务名精确判，不按全文子串。
     返回 (状态, 说明, 是否污染)。污染 = 列出了三个合成名之外的服务（还登录着、或带进了别的配置）：INCONCLUSIVE，调用方要停下。
+    污染先看，退出码与超时后看：异常结束时已经收到的输出里有外来服务，照样算污染。
     命令报错、超时、有认不出的行、一条服务行都没有 → INCONCLUSIVE（不污染，但这一格测不成）；
     列出的恰好是该读的那一份 → PASS；列出的是别的合成份（不管该读的那份在不在）→ FAIL。"""
-    if timed_out or code != 0: return "INCONCLUSIVE", f"命令没正常结束（退出码={code} 超时={timed_out}）", False
+    # 先看已经收到的输出里有没有污染（审查 4/F-1）：超时、异常退出时输出照样收了，污染的证据不能被退出码盖住
     listed, unknown = mcp_list_parse(output)
     synthetic = {n: k for k, n in names.items()}
     foreign = sorted(set(listed) - set(synthetic))
-    if foreign: return "INCONCLUSIVE", f"输出里有三个合成条目之外的服务 {len(foreign)} 个：隔离被污染，停下不再跑", True
+    if foreign: return "INCONCLUSIVE", f"输出里有三个合成条目之外的服务 {len(foreign)} 个：隔离被污染，停下不再跑（退出码={code} 超时={timed_out}）", True
+    if timed_out or code != 0: return "INCONCLUSIVE", f"命令没正常结束（退出码={code} 超时={timed_out}）", False
     if unknown: return "INCONCLUSIVE", f"输出里有认不出的行 {len(unknown)} 条，这一格不下结论", False
     if not listed: return "INCONCLUSIVE", "输出里一条服务行都没有", False
     seen = sorted({synthetic[n] for n in listed})
@@ -5405,6 +5410,10 @@ def selftest_recheck_and_p4():
     assert cfgdir_verdict(0, False, line("t0g-home-a") + "some-remote https://x (needs auth)\n", nm, "home")[0] == "INCONCLUSIVE", "一条不合正则的外来服务行"
     assert cfgdir_verdict(0, False, "Checking MCP server health…\n\n" + line("t0g-home-a"), nm, "home")[0] == "PASS", "固定标题与空行可以忽略"
     assert cfgdir_verdict(0, False, line("t0g-home-a-extra"), nm, "home")[2] is True, "名字只是包含合成名：是外来服务（污染），不是命中"
+    foreign_line = "someone-elses: npx remote-thing - Connected\n"
+    assert cfgdir_verdict(1, False, foreign_line, nm, "home")[::2] == ("INCONCLUSIVE", True), "审查 4/F-1：退出码 1 也要先看污染"
+    assert cfgdir_verdict(0, True, foreign_line, nm, "home")[::2] == ("INCONCLUSIVE", True), "超时也要先看污染"
+    assert cfgdir_verdict(1, False, line("t0g-home-a"), nm, "home")[::2] == ("INCONCLUSIVE", False), "对照：异常退出、没有外来服务，不算污染"
     assert list(CFGDIR_CASES) == ["没设", "设成空串", "显式设成默认目录", "自定义目录"] and CFGDIR_CASES["设成空串"][1] == "home"
     lay_home = R.p("st-cfgdir-home"); os.mkdir(lay_home)
     lay = cfgdir_layout(lay_home, "st")
@@ -5452,7 +5461,7 @@ keep = ("HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR")
 with open({calls_log!r}, "a") as f:
     f.write(json.dumps({{"argv": sys.argv[1:], "env": {{k: os.environ.get(k) for k in keep}}, "has_config_dir": "CLAUDE_CONFIG_DIR" in os.environ,
                         "names": sorted(k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC", "AWS_")))}}) + "\\n")
-if os.path.exists({os.path.join(R.p("st-claude-stub"), "pollute")!r}): print("someone-elses: npx remote-thing  - ✓ Connected")
+if os.path.exists({os.path.join(R.p("st-claude-stub"), "pollute")!r}): print("someone-elses: npx remote-thing  - ✓ Connected"); sys.exit(1)
 """)
     os.chmod(stub, 0o755)
     planted = {"ANTHROPIC_API_KEY": "planted-not-a-key", "CLAUDE_CODE_OAUTH_TOKEN": "planted-login", "CLAUDE_SECURESTORAGE_CONFIG_DIR": "/planted/real-store",
@@ -5491,7 +5500,7 @@ if os.path.exists({os.path.join(R.p("st-claude-stub"), "pollute")!r}): print("so
     finally:
         A.only, A.part, A.cells = saved_a
         os.environ["PATH"] = saved_env["PATH"]
-    assert len([l for l in open(calls_log)]) == 1, "污染之后不再起 claude"
+    assert len([l for l in open(calls_log)]) == 1, "污染之后不再起 claude（替身输出外来服务后以 1 退出：异常退出也先看污染）"
     assert COUNTS["INCONCLUSIVE"] - before == 4, "四格都是 INCONCLUSIVE：第一格污染、后三格没跑"
     # 别的选择照常做准备
     for only, part, cells in (("R2X", "recheck", None), ("R2X", None, None), ("G1", None, None), ("R2X", None, ("cfg", "k3")), ("R2X,G1", "cfgdir", None)):
@@ -5926,6 +5935,9 @@ def selftest():
     assert obs_verdict(ev_ok, o("1", "Read-only file system"), False) == "PASS", "Linux 的拦截原文"
     assert obs_verdict(ev_ok, o("1", "blocked by policy X"), False, denied=("blocked by policy X",)) == "PASS", "格子自己给的拒绝文字"
     assert obs_verdict(ev_ok, o("0", ctl="1"), False) == "FAIL", "跑成了就是 FAIL，不看对照"
+    ev_bad = bash_ev({**good_ok, "timed_out": True}, T)
+    assert obs_verdict(ev_bad, o("0"), False) == "FAIL", "审查 4/F-1 的同类：运行超时，但命令自己写下了退出码 0，照样 FAIL"
+    assert obs_verdict(ev_bad, o("1"), False) == "INCONCLUSIVE" and obs_verdict(ev_bad, o("0"), True) == "INCONCLUSIVE", "对照：被挡的证据、该成功的格子仍要运行有效"
     # observed() 的对照：touch、cat 才有，同一个程序、目标在工作区里；真跑一遍
     c_touch, rd = observed("st-ctl-touch", f"touch {R.outside}/st-ctl-x")
     subprocess.run(["sh", "-c", c_touch], check=True)
