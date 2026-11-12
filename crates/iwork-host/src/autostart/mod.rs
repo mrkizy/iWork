@@ -95,17 +95,39 @@ fn failed(tool: &Path, args: &[&str], out: &std::process::Output) -> AutostartEr
     }
 }
 
-/// 写文件：临时文件 + 改名，目录不存在就建。
+/// 写定义文件，目录不存在就建。经 `iwork_rootfs::replace_file`：同目录独占新建临时文件（`O_CREAT|O_EXCL`，
+/// 不跟随链接）写完再改名；目标本身是符号链接时拒绝。不会顺着链接覆写别的文件。
 fn write_atomically(path: &Path, text: &str) -> Result<(), AutostartError> {
-    let io = |e: std::io::Error| AutostartError::Failed {
+    let fail = |e: &dyn std::fmt::Display| AutostartError::Failed {
         message: format!("写 {} 失败：{e}", path.display()),
     };
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(io)?;
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(fail(&"不是文件路径"));
+    };
+    std::fs::create_dir_all(dir).map_err(|e| fail(&e))?;
+    iwork_rootfs::replace_file(dir, Path::new(name), text.as_bytes()).map_err(|e| fail(&e))
+}
+
+/// 读定义文件：不存在是 `None`。
+fn read_definition(path: &Path) -> Result<Option<String>, AutostartError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(AutostartError::Failed {
+            message: format!("读 {} 失败：{e}", path.display()),
+        }),
     }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, text).map_err(io)?;
-    std::fs::rename(&tmp, path).map_err(io)
+}
+
+/// 两半合成一个状态：`definition` 是定义文件里认出的程序路径（文件不在为 `None`；在但认不出为空路径），
+/// `live` 是服务管理器认不认它。
+fn combine(definition: Option<PathBuf>, live: bool) -> iwork_ports::autostart::AutostartState {
+    use iwork_ports::autostart::AutostartState;
+    match (definition, live) {
+        (Some(program), true) => AutostartState::Registered { program },
+        (None, false) => AutostartState::NotRegistered,
+        _ => AutostartState::Partial,
+    }
 }
 
 fn remove(path: &Path) -> Result<(), AutostartError> {
@@ -120,7 +142,8 @@ fn remove(path: &Path) -> Result<(), AutostartError> {
 
 #[cfg(test)]
 pub(crate) mod test_tool {
-    //! 记录参数的假命令替身：每次调用往日志追加一行参数；`FAIL_ON` 文件里写的词出现在参数里时以 1 退出。
+    //! 假命令替身：记下每次改动类调用的参数；`fail_on` 文件里写的词出现在参数里时以 1 退出；用 `live` 文件
+    //! 模拟服务管理器那一半的状态，查询类调用（`print` / `is-enabled`）按它回答。
 
     use std::path::{Path, PathBuf};
 
@@ -132,9 +155,23 @@ pub(crate) mod test_tool {
         pub fn new() -> FakeTool {
             let dir = tempfile::tempdir().unwrap();
             let script = format!(
-                "#!/bin/sh\necho \"$@\" >> '{log}'\nif [ -f '{fail}' ]; then for a in \"$@\"; do grep -qx -- \"$a\" '{fail}' && exit 1; done; fi\nexit 0\n",
+                r#"#!/bin/sh
+# 查询（launchctl print / systemctl is-enabled）按 live 文件回答，不记进日志
+case " $* " in
+  *" print "*) [ -f '{live}' ] && exit 0; echo "Could not find service" >&2; exit 113 ;;
+  *" is-enabled "*) if [ -f '{live}' ]; then echo enabled; exit 0; else echo disabled; exit 1; fi ;;
+esac
+echo "$@" >> '{log}'
+if [ -f '{fail}' ]; then for a in "$@"; do grep -qx -- "$a" '{fail}' && exit 1; done; fi
+case " $* " in
+  *" bootstrap "*|*" enable "*) : > '{live}' ;;
+  *" bootout "*|*" disable "*) rm -f '{live}' ;;
+esac
+exit 0
+"#,
                 log = dir.path().join("calls.log").display(),
                 fail = dir.path().join("fail_on").display(),
+                live = dir.path().join("live").display(),
             );
             // 可执行文件交给子进程（cp）去写：本进程若开着它的写句柄，同一时刻别的测试线程 fork 出的子进程
             // 会继承这个句柄直到它 exec，期间执行这个文件在 Linux 上报 ETXTBSY（CI 实测）。
@@ -167,6 +204,20 @@ pub(crate) mod test_tool {
 
         pub fn fail_on(&self, word: &str) {
             std::fs::write(self.dir.path().join("fail_on"), format!("{word}\n")).unwrap();
+        }
+
+        pub fn stop_failing(&self) {
+            std::fs::remove_file(self.dir.path().join("fail_on")).unwrap();
+        }
+
+        /// 服务管理器那一半：在不在（bootstrap / enable 之后在，bootout / disable 之后不在）。
+        pub fn live(&self) -> bool {
+            self.dir.path().join("live").exists()
+        }
+
+        /// 模拟用户或系统在 iWork 之外卸下了服务。
+        pub fn drop_live(&self) {
+            let _ = std::fs::remove_file(self.dir.path().join("live"));
         }
 
         pub fn home(&self) -> &Path {

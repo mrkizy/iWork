@@ -4,14 +4,19 @@
 //!   `RestartSec=10`、`StartLimitIntervalSec=300`、`StartLimitBurst=10`、`WantedBy=default.target`。
 //! - **不加 `RestartForceExitStatus=SIGTERM`**：被要求停下（SIGTERM 等）不自动再拉，systemd 的默认正合这个意思。
 //!   和 launchd 只在后台装上信号处理之前那一小段不一样（方案 2.12 如实写了）。
-//! - 开：写单元、`daemon-reload`、`enable --now`；关：`disable --now`、删文件、`daemon-reload`。
+//! - 状态两半：单元文件在不在 + `systemctl --user is-enabled` 是不是 `enabled`。
+//! - 开：写单元、`daemon-reload`、`enable --now`（已在跑时不重启）。
+//! - 关：`disable`（只撤启用、不停）、删文件、`daemon-reload`，最后 `stop`。`stop` 会结束服务名下的实例——可能就是
+//!   调用者自己，那时定义文件和启用都已经撤掉，下次登录不会再起。
 //! - 没有 systemd 用户实例 → `Unsupported`。
 
 use std::path::{Path, PathBuf};
 
 use iwork_ports::autostart::{AutostartError, AutostartPort, AutostartState};
 
-use super::{AutostartConfig, SERVICE_ARG, failed, remove, run, write_atomically};
+use super::{
+    AutostartConfig, SERVICE_ARG, combine, failed, read_definition, remove, run, write_atomically,
+};
 
 pub const UNIT: &str = "iwork-daemon.service";
 
@@ -106,6 +111,23 @@ impl UserUnit {
             .unwrap_or_else(|| PathBuf::from("systemctl"))
     }
 
+    /// 服务管理器那一半：`is-enabled` 报 `enabled`（禁用、不认识这个单元时报别的，并以非零退出）。
+    async fn enabled(&self) -> Result<bool, AutostartError> {
+        let out = run(&self.tool(), &["--user", "is-enabled", UNIT]).await?;
+        Ok(String::from_utf8_lossy(&out.stdout).trim() == "enabled")
+    }
+
+    /// `stop`：单元已经不认识（没在跑、文件也删了）不算错。
+    async fn stop(&self) -> Result<(), AutostartError> {
+        let args = ["--user", "stop", UNIT];
+        let out = run(&self.tool(), &args).await?;
+        if out.status.success() || String::from_utf8_lossy(&out.stderr).contains("not loaded") {
+            Ok(())
+        } else {
+            Err(failed(&self.tool(), &args, &out))
+        }
+    }
+
     async fn systemctl(&self, args: &[&str]) -> Result<(), AutostartError> {
         let mut all = vec!["--user"];
         all.extend_from_slice(args);
@@ -120,15 +142,9 @@ impl UserUnit {
 
 impl AutostartPort for UserUnit {
     async fn state(&self) -> Result<AutostartState, AutostartError> {
-        match std::fs::read_to_string(self.unit_path()) {
-            Ok(text) => Ok(AutostartState::Registered {
-                program: exec_start(&text).map(|(p, _)| p).unwrap_or_default(),
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AutostartState::NotRegistered),
-            Err(e) => Err(AutostartError::Failed {
-                message: format!("读 {} 失败：{e}", self.unit_path().display()),
-            }),
-        }
+        let definition = read_definition(&self.unit_path())?
+            .map(|text| exec_start(&text).map(|(p, _)| p).unwrap_or_default());
+        Ok(combine(definition, self.enabled().await?))
     }
 
     /// 有没有 systemd 用户实例：`$XDG_RUNTIME_DIR/systemd/private` 是用户实例的控制 socket。
@@ -152,23 +168,31 @@ impl AutostartPort for UserUnit {
     async fn set(&self, enabled: bool) -> Result<(), AutostartError> {
         self.supported()?;
         let path = self.unit_path();
-        let want = unit_text(&self.cfg.program);
-        let current = std::fs::read_to_string(&path).ok();
+        let current = read_definition(&path)?;
+        let live = self.enabled().await?;
         if enabled {
-            if current.as_deref() == Some(want.as_str()) {
+            let want = unit_text(&self.cfg.program);
+            let same = current.as_deref() == Some(want.as_str());
+            if same && live {
                 return Ok(());
             }
-            write_atomically(&path, &want)?;
+            if !same {
+                write_atomically(&path, &want)?;
+            }
+            // 失败时单元文件留着、没启用：state 报 Partial，下次对齐从这里再来
             self.systemctl(&["daemon-reload"]).await?;
             self.systemctl(&["enable", "--now", UNIT]).await
         } else {
-            if current.is_none() {
+            if current.is_none() && !live {
                 return Ok(());
             }
-            // 从托管实例自己调用时，disable --now 会结束本进程（调用方只在 bind 之前这么做）
-            self.systemctl(&["disable", "--now", UNIT]).await?;
+            if live {
+                self.systemctl(&["disable", UNIT]).await?;
+            }
             remove(&path)?;
-            self.systemctl(&["daemon-reload"]).await
+            self.systemctl(&["daemon-reload"]).await?;
+            // 最后才停：从托管实例自己调用时在这里被结束，定义文件与启用都已撤掉
+            self.stop().await
         }
     }
 }
@@ -233,9 +257,65 @@ mod tests {
         assert_eq!(
             &t.calls()[2..],
             [
-                "--user disable --now iwork-daemon.service",
-                "--user daemon-reload"
+                "--user disable iwork-daemon.service",
+                "--user daemon-reload",
+                "--user stop iwork-daemon.service"
             ]
+        );
+    }
+
+    /// 注销时 stop 没完成（托管实例自己调用时被结束；这里用失败模拟）：单元文件与启用都已撤掉，下次登录不会再起。
+    #[tokio::test]
+    async fn linux_unregister_withdraws_before_stop() {
+        let t = FakeTool::new();
+        let u = unit(&t, "/opt/iwork/iwork-daemon", None, true);
+        u.set(true).await.unwrap();
+        t.fail_on("stop");
+        u.set(false).await.unwrap_err();
+        assert!(!u.unit_path().exists());
+        assert!(!t.live());
+        assert_eq!(u.state().await.unwrap(), AutostartState::NotRegistered);
+    }
+
+    /// enable 失败 → 单元文件在、没启用：state 报 Partial（不是 Registered）；下次 set(true) 补 reload 与 enable。
+    #[tokio::test]
+    async fn linux_enable_failure_is_partial_and_retried() {
+        let t = FakeTool::new();
+        let u = unit(&t, "/opt/iwork/iwork-daemon", None, true);
+        t.fail_on("enable");
+        u.set(true).await.unwrap_err();
+        assert!(u.unit_path().exists());
+        assert_eq!(u.state().await.unwrap(), AutostartState::Partial);
+        t.stop_failing();
+        u.set(true).await.unwrap();
+        assert_eq!(
+            u.state().await.unwrap(),
+            AutostartState::Registered {
+                program: PathBuf::from("/opt/iwork/iwork-daemon")
+            }
+        );
+        assert_eq!(
+            &t.calls()[2..],
+            [
+                "--user daemon-reload",
+                "--user enable --now iwork-daemon.service"
+            ]
+        );
+    }
+
+    /// 单元在 iWork 之外被禁用 → Partial；set(false) 不再 disable，照样删文件、reload、stop。
+    #[tokio::test]
+    async fn linux_disabled_outside_is_partial_and_cleaned() {
+        let t = FakeTool::new();
+        let u = unit(&t, "/opt/iwork/iwork-daemon", None, true);
+        u.set(true).await.unwrap();
+        t.drop_live();
+        assert_eq!(u.state().await.unwrap(), AutostartState::Partial);
+        u.set(false).await.unwrap();
+        assert!(!u.unit_path().exists());
+        assert_eq!(
+            &t.calls()[2..],
+            ["--user daemon-reload", "--user stop iwork-daemon.service"]
         );
     }
 
@@ -248,7 +328,7 @@ mod tests {
         assert_eq!(t.calls().len(), 2);
         u.set(false).await.unwrap();
         u.set(false).await.unwrap();
-        assert_eq!(t.calls().len(), 4);
+        assert_eq!(t.calls().len(), 5);
     }
 
     /// 路径有空格、变了 → 重写。

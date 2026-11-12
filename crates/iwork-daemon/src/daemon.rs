@@ -444,8 +444,8 @@ async fn unregister_if_disabled(port: &Autostart, store: &Arc<Store>) {
         return;
     }
     match port.state().await {
-        Ok(AutostartState::Registered { .. }) => {
-            tracing::info!("自启已关而本托管实例还注册着：注销（服务管理器会结束本进程）");
+        Ok(AutostartState::Registered { .. } | AutostartState::Partial) => {
+            tracing::info!("自启已关而注册项还在（全部或一半）：注销（服务管理器会结束本进程）");
             if let Err(e) = port.set(false).await {
                 tracing::warn!(error = %e, "注销自启失败，继续启动");
             }

@@ -7,14 +7,17 @@
 use std::future::Future;
 use std::path::PathBuf;
 
-/// 系统里现在的注册状态。
+/// 系统里现在的注册状态。注册项由两半组成：定义文件（plist / 单元文件）与服务管理器里的状态（已加载 / 已启用）；
+/// 两半都以实际查到的为准，不看上次 `set` 返回了什么。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutostartState {
-    /// 已注册，`program` 是注册项里写的后台程序路径。
-    Registered {
-        program: PathBuf,
-    },
+    /// 两半都在：定义文件在、服务管理器认它。`program` 是定义文件里写的后台程序路径。
+    Registered { program: PathBuf },
+    /// 两半都不在。
     NotRegistered,
+    /// 只剩一半：注册到一半失败（文件写了、加载或启用没成），或注销到一半被打断（文件删了、服务还在）。
+    /// 对齐任务按意图把它补齐或清掉。
+    Partial,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -36,8 +39,10 @@ pub trait AutostartPort: Send + Sync {
     fn state(&self) -> impl Future<Output = Result<AutostartState, AutostartError>> + Send;
     /// 这个平台能不能做自启。只读，不改任何东西。
     fn supported(&self) -> Result<(), AutostartError>;
-    /// 幂等：已是目标状态时什么都不做。
+    /// 幂等：已是目标状态时什么都不做；从 [`AutostartState::Partial`] 出发也能走到目标状态。
     /// `set(true)` 会让服务管理器**立刻**起一个托管实例（它撞锁后等锁接班）。
-    /// `set(false)` 会**结束**服务管理器名下正在跑的那个实例——可能就是调用者自己。
+    /// `set(false)` 会**结束**服务管理器名下正在跑的那个实例——可能就是调用者自己，所以调用可能不返回。
+    /// 实现必须先删定义文件、最后才结束服务：调用者在任何一步被结束，留下的都只是服务管理器里的状态
+    /// （下次登录不会再起），下次对齐查到 `Partial` 再清。
     fn set(&self, enabled: bool) -> impl Future<Output = Result<(), AutostartError>> + Send;
 }

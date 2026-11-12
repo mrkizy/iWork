@@ -36,6 +36,10 @@ pub fn decide(intent: bool, state: &AutostartState, managed: bool, program: &Pat
         (false, AutostartState::Registered { .. }) if managed => Action::KeepUntilNextBoot,
         (false, AutostartState::Registered { .. }) => Action::Unregister,
         (false, AutostartState::NotRegistered) => Action::Nothing,
+        // 只剩一半（注册或注销到一半）：按意图补齐或清掉；托管实例清它可能结束自己，同样留到下次启动
+        (true, AutostartState::Partial) => Action::Register,
+        (false, AutostartState::Partial) if managed => Action::KeepUntilNextBoot,
+        (false, AutostartState::Partial) => Action::Unregister,
     }
 }
 
@@ -184,6 +188,20 @@ mod tests {
             Action::KeepUntilNextBoot,
             "托管实例运行中不调 set(false)"
         );
+        let partial = AutostartState::Partial;
+        for managed in [false, true] {
+            assert_eq!(
+                decide(true, &partial, managed, me),
+                Action::Register,
+                "注册到一半 → 补齐"
+            );
+        }
+        assert_eq!(
+            decide(false, &partial, false, me),
+            Action::Unregister,
+            "注销到一半 → 清掉"
+        );
+        assert_eq!(decide(false, &partial, true, me), Action::KeepUntilNextBoot);
     }
 
     struct World {

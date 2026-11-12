@@ -23,10 +23,27 @@ impl Tool {
     fn new(sb: &Sandbox) -> Tool {
         let dir = sb.home.join("tool");
         std::fs::create_dir_all(&dir).unwrap();
+        // 查询（print / is-enabled）按 live 文件回答、不记日志；bootstrap / enable 之后 live，bootout / disable 之后不；
+        // 设了 kill-on-unregister 时，结束服务的那一步（macOS bootout、Linux stop）把调用者（后台）用 SIGTERM 结束
         let script = format!(
-            "#!/bin/sh\necho \"$@\" >> '{log}'\nfor a in \"$@\"; do\n  case \"$a\" in bootout|disable) [ -f '{flag}' ] && kill -TERM $PPID ;; esac\ndone\nexit 0\n",
+            r#"#!/bin/sh
+case " $* " in
+  *" print "*) [ -f '{live}' ] && exit 0; echo "Could not find service" >&2; exit 113 ;;
+  *" is-enabled "*) if [ -f '{live}' ]; then echo enabled; exit 0; else echo disabled; exit 1; fi ;;
+esac
+echo "$@" >> '{log}'
+case " $* " in
+  *" bootstrap "*|*" enable "*) : > '{live}' ;;
+  *" bootout "*|*" disable "*) rm -f '{live}' ;;
+esac
+case " $* " in
+  *" bootout "*|*" stop "*) [ -f '{flag}' ] && kill -TERM $PPID ;;
+esac
+exit 0
+"#,
             log = dir.join("calls.log").display(),
             flag = dir.join("kill-on-unregister").display(),
+            live = dir.join("live").display(),
         );
         crate::support::write_script(&dir.join("tool"), &script);
         Tool { dir }
@@ -49,6 +66,11 @@ impl Tool {
             .iter()
             .filter(|c| c.contains("bootout") || c.contains("disable"))
             .count()
+    }
+
+    /// 服务管理器那一半在（登录时已加载 / 已启用）。
+    fn set_live(&self) {
+        std::fs::write(self.dir.join("live"), b"").unwrap();
     }
 
     fn kill_on_unregister(&self) {
@@ -169,6 +191,7 @@ fn managed_boot_with_intent_off_unregisters_before_bind() {
     let tool = Tool::new(&sb);
     tool.kill_on_unregister();
     write_registration(&sb, Path::new(DAEMON));
+    tool.set_live();
     let mut d = sb.spawn(&["--service"], &[("IWORK_DEV_AUTOSTART_TOOL", &tool.env())]);
     let status = d.wait_exit(START);
     assert_eq!(
@@ -178,6 +201,10 @@ fn managed_boot_with_intent_off_unregisters_before_bind() {
         d.stderr()
     );
     assert_eq!(tool.unregisters(), 1, "{:?}", tool.calls());
+    assert!(
+        !registration(&sb).exists(),
+        "被服务管理器结束之前定义文件已删：下次登录不会再起"
+    );
     assert!(!sb.run_dir().join("d.sock").exists(), "socket 从没出现过");
     assert_eq!(
         sb.status().unwrap().phase,
@@ -193,8 +220,13 @@ fn unmanaged_instance_unregisters_while_running() {
     let sb = Sandbox::new();
     let tool = Tool::new(&sb);
     write_registration(&sb, Path::new(DAEMON));
+    tool.set_live();
     let d = sb.spawn(&[], &[("IWORK_DEV_AUTOSTART_TOOL", &tool.env())]);
     sb.wait_ready(d.pid(), START);
-    wait_until("对齐任务注销", START, || !registration(&sb).exists());
+    // 先删定义文件、后卸服务：等到卸服务那一步也做了
+    wait_until("对齐任务注销", START, || {
+        !registration(&sb).exists() && tool.unregisters() > 0
+    });
+    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(tool.unregisters(), 1, "{:?}", tool.calls());
 }
