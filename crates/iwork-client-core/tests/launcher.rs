@@ -38,7 +38,11 @@ struct Ctl {
     up: AtomicBool,
     script: Mutex<VecDeque<Step>>,
     attempts: AtomicUsize,
+    /// `DelayThenUp` 的尝试等完、交出连接的次数
+    delayed_done: AtomicUsize,
     spawns: AtomicUsize,
+    /// 拉起返回了几次（卡完 `spawn_delay_ms` 之后）
+    spawns_returned: AtomicUsize,
     spawn_fails: AtomicBool,
     /// 拉起要卡多久（毫秒）
     spawn_delay_ms: AtomicU64,
@@ -82,6 +86,7 @@ impl Connect for FakeConnect {
                 Some(Step::Hang) => std::future::pending().await,
                 Some(Step::DelayThenUp(d)) => {
                     tokio::time::sleep(d).await;
+                    ctl.delayed_done.fetch_add(1, Ordering::SeqCst);
                     Ok(real.unwrap())
                 }
             }
@@ -107,6 +112,7 @@ impl Spawn for FakeSpawn {
         if self.0.spawn_brings_up.load(Ordering::SeqCst) {
             self.0.up.store(true, Ordering::SeqCst);
         }
+        self.0.spawns_returned.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -298,6 +304,8 @@ async fn slow_peer_check_returns_at_deadline_and_attempt_is_reused() {
             t.elapsed()
         );
     }
+    // 等那次尝试自己完成，再调第三次：第三次要验的是「拿到同一次尝试的结果」，不是 1s 内等得到它
+    wait_for(&w.ctl.delayed_done, "那次尝试完成").await;
     assert!(
         l.connect_or_launch().await.is_ok(),
         "第三次拿到那次尝试的结果"
@@ -323,11 +331,22 @@ async fn slow_spawn_returns_at_deadline_and_is_reused() {
         );
         assert_eq!(d.stage, "拉起中");
     }
+    // 等那次拉起返回，再调第三次：第三次要验的是「接着用同一次拉起」，不是 1s 内等得到它
+    wait_for(&w.ctl.spawns_returned, "那次拉起返回").await;
     assert!(
         l.connect_or_launch().await.is_ok(),
         "第三次等到那次拉起返回、连上"
     );
     assert_eq!(w.spawns(), 1, "没有叠新的拉起");
+}
+
+/// 等假件里的计数到 1（真实时钟，上限 20s）。
+async fn wait_for(counter: &AtomicUsize, what: &str) {
+    let limit = std::time::Instant::now() + Duration::from_secs(20);
+    while counter.load(Ordering::SeqCst) < 1 {
+        assert!(std::time::Instant::now() < limit, "20s 内没等到：{what}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// 把会合点的锁文件与状态文件换成 FIFO：打开读会一直卡住，直到有人打开写（模拟很慢的文件系统）。
