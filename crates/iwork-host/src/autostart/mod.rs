@@ -66,8 +66,8 @@ impl AutostartConfig {
 
 fn disabled() -> AutostartError {
     AutostartError::Unsupported {
-        reason: "开发构建没有给自启命令的替身（IWORK_DEV_AUTOSTART_TOOL），不动系统的服务管理器"
-            .into(),
+        // 不写环境变量名：这段代码发布构建里也有，scripts/check-no-dev-trust.sh 不许发布产物里出现开发开关的名字
+        reason: "开发构建没有给自启命令的替身，不动系统的服务管理器".into(),
     }
 }
 
