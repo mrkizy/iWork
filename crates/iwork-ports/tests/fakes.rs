@@ -46,8 +46,8 @@ use iwork_ports::store::{
     StorageError, StoragePort, StoredEvent,
 };
 use iwork_ports::vcs::{
-    BaselineRef, Detection, Diff, DiffRange, ProgressSink, RepoRoot, VcsCapabilities, VcsError,
-    VcsProvider, WorkspaceStatus,
+    BaselineRef, Detection, Diff, DiffRange, PathVersion, ProgressSink, RepoRoot, VcsCapabilities,
+    VcsError, VcsProvider, WorkspaceStatus,
 };
 
 // ---------- 时钟与 ID ----------
@@ -616,6 +616,13 @@ impl VcsProvider for FakeVcs {
     }
     async fn diff(&self, _repo: &RepoRoot, _range: DiffRange) -> Result<Diff, VcsError> {
         Ok(Diff::default())
+    }
+    async fn worktree_versions(
+        &self,
+        _repo: &RepoRoot,
+        paths: &[PathBuf],
+    ) -> Result<Vec<PathVersion>, VcsError> {
+        Ok(vec![PathVersion::Absent; paths.len()])
     }
 }
 

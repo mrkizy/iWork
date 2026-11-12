@@ -1,4 +1,4 @@
-//! 读工作区：`baseline`、`status`、`diff`（gix，技术设计 8.1）。
+//! 读工作区：`baseline`、`status`、`diff`、`worktree_versions`（gix，技术设计 8.1）。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -8,8 +8,10 @@ use gix::status::index_worktree::Item as WorktreeItem;
 use gix::status::{Item, UntrackedFiles};
 use gix::{ObjectId, Repository};
 use iwork_ports::vcs::{
-    BaselineRef, ChangeKind, ChangedPath, Diff, DiffRange, RepoRoot, VcsError, WorkspaceStatus,
+    BaselineRef, ChangeKind, ChangedPath, Diff, DiffRange, PathKind, PathVersion, RepoRoot,
+    VcsError, WorkspaceStatus,
 };
+use sha2::{Digest, Sha256};
 
 use crate::patch::{EntryMode, Side, file_diff, unsupported_diff};
 
@@ -200,6 +202,25 @@ pub(crate) fn diff(repo_root: &RepoRoot, range: &DiffRange) -> Result<Diff, VcsE
     Ok(Diff { files })
 }
 
+/// 工作区里的普通文件超过这么大就不读、版本记「不知道」（T10a 方案 D10）：每个回合收尾都要读一遍改动过的文件。
+pub(crate) const VERSION_READ_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// 这些路径在工作区里此刻的版本（T10a 方案 D10）。每个路径的样子用 `diff` 读工作区一侧的同一段代码
+/// （[`Worktree::side`]）求出，所以「两个版本相等」和 `diff` 判两版相同是同一个口径；单个路径读不出来记
+/// `Unknown`，不让整批失败。
+pub(crate) fn worktree_versions(
+    repo_root: &RepoRoot,
+    paths: &[PathBuf],
+) -> Result<Vec<PathVersion>, VcsError> {
+    const OP: &str = "worktree_versions";
+    let Opened {
+        repo,
+        external_filters,
+    } = open(repo_root, OP)?;
+    let mut worktree = Worktree::new(&repo, repo_root, external_filters, OP)?;
+    Ok(paths.iter().map(|rel| worktree.version(rel)).collect())
+}
+
 /// 树里一个条目在差异里的样子；目录返回 `None`（它的内容按各自的路径比较）。
 fn tree_side(
     repo: &Repository,
@@ -285,16 +306,56 @@ impl<'repo> Worktree<'repo> {
         })
     }
 
+    /// 逐级看 `rel` 是什么（`iwork-rootfs`，任何一级都不跟随链接）。上级目录被换成了链接时返回 `None`：按 git 的
+    /// 看法，这个路径在工作区里已经不存在（链接本身另算一个路径）。
+    fn inspect(&self, rel: &Path) -> Result<Option<iwork_rootfs::EntryKind>, VcsError> {
+        match iwork_rootfs::inspect(self.root, rel) {
+            Ok(kind) => Ok(Some(kind)),
+            Err(iwork_rootfs::RootedError::ThroughSymlink { .. }) => Ok(None),
+            Err(e) => Err(failed(self.op, e.to_string())),
+        }
+    }
+
+    /// `rel` 此刻的版本。普通文件先看长度，超过 [`VERSION_READ_LIMIT`] 不读（交给 `side` 之前，因为 `side` 会整个
+    /// 读进来）；别的照 `side` 的结果映射。要外部过滤程序的文件不运行它，散列文件原样的字节。
+    fn version(&mut self, rel: &Path) -> PathVersion {
+        match self.try_version(rel) {
+            Ok(version) => version,
+            Err(_) => PathVersion::Unknown,
+        }
+    }
+
+    fn try_version(&mut self, rel: &Path) -> Result<PathVersion, VcsError> {
+        let op = self.op;
+        let Some(kind) = self.inspect(rel)? else {
+            return Ok(PathVersion::Absent);
+        };
+        if let iwork_rootfs::EntryKind::File { .. } = kind {
+            // 逐级检查刚通过，这里取的是最后一级本身（不跟随）的长度
+            let len = std::fs::symlink_metadata(self.root.join(rel))
+                .map_err(|e| failed(op, format!("{}：{e}", rel.display())))?
+                .len();
+            if len > VERSION_READ_LIMIT {
+                return Ok(PathVersion::Unknown);
+            }
+        }
+        Ok(match self.side(rel, None)? {
+            WorktreeSide::Absent => PathVersion::Absent,
+            WorktreeSide::Present(side) => present(side.mode, &side.data),
+            WorktreeSide::NeedsExternalFilter { mode, .. } => {
+                let raw = iwork_rootfs::read_file(self.root, rel)
+                    .map_err(|e| failed(op, e.to_string()))?
+                    .unwrap_or_default();
+                present(mode, &raw)
+            }
+        })
+    }
+
     /// `rel` 在工作区里的样子；`old` 是基线一侧，用来在不认执行位的文件系统上沿用原 mode。
     fn side(&mut self, rel: &Path, old: Option<&Side>) -> Result<WorktreeSide, VcsError> {
         let op = self.op;
-        let kind = match iwork_rootfs::inspect(self.root, rel) {
-            Ok(kind) => kind,
-            // 上级目录被换成了链接：按 git 的看法，这个路径在工作区里已经不存在（链接本身另算一个路径）
-            Err(iwork_rootfs::RootedError::ThroughSymlink { .. }) => {
-                return Ok(WorktreeSide::Absent);
-            }
-            Err(e) => return Err(failed(op, e.to_string())),
+        let Some(kind) = self.inspect(rel)? else {
+            return Ok(WorktreeSide::Absent);
         };
         match kind {
             iwork_rootfs::EntryKind::File { executable } => {
@@ -370,11 +431,9 @@ impl<'repo> Worktree<'repo> {
         let mut out = Vec::new();
         for (path, mode, stat, id) in entries {
             let rel = to_path(path.as_ref());
-            let kind = match iwork_rootfs::inspect(self.root, &rel) {
-                Ok(kind) => kind,
-                // 上级目录被换成链接：路径已不在，gix 会报删除
-                Err(iwork_rootfs::RootedError::ThroughSymlink { .. }) => continue,
-                Err(e) => return Err(failed(op, e.to_string())),
+            // 上级目录被换成链接：路径已不在，gix 会报删除
+            let Some(kind) = self.inspect(&rel)? else {
+                continue;
             };
             let changed = if mode == Mode::COMMIT {
                 self.checked_out_submodule_head(&rel, kind)?
@@ -480,6 +539,20 @@ impl<'repo> Worktree<'repo> {
         sub.head_id()
             .map(|id| Some(id.detach()))
             .map_err(|e| failed(op, format!("读子模块 {} 的 HEAD 失败：{e}", rel.display())))
+    }
+}
+
+/// 一个工作区条目的版本：种类照 mode，内容取 SHA-256。
+fn present(mode: EntryMode, data: &[u8]) -> PathVersion {
+    let kind = match mode {
+        EntryMode::Regular => PathKind::File,
+        EntryMode::Executable => PathKind::ExecutableFile,
+        EntryMode::Symlink => PathKind::Symlink,
+        EntryMode::Gitlink => PathKind::Submodule,
+    };
+    PathVersion::Present {
+        kind,
+        digest: Sha256::digest(data).into(),
     }
 }
 

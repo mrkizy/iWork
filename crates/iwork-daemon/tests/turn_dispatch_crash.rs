@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use iwork_app::codec::ProtoEventCodec;
 use iwork_core::turn::{
-    Decided, PermissionDecider, SessionLine, TurnEntry, TurnPlan, TurnPorts, VoidPlanError,
+    Decided, PermissionDecider, RunTag, SessionLine, TurnEntry, TurnPlan, TurnPorts, VoidPlanError,
 };
 use iwork_domain::approval::VoidReason;
 use iwork_domain::assistant::{Assistant, AssistantConfig, AssistantVersion, Avatar};
@@ -276,6 +276,8 @@ fn model() -> ModelSelection {
 
 fn plan(turn: Turn) -> TurnPlan {
     TurnPlan {
+        changes: None,
+        run: RunTag(1),
         entry: TurnEntry::New,
         turn,
         assistant_name: "小助手".into(),
