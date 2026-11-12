@@ -60,7 +60,14 @@ fn setup(tier: Tier, tools: Tools) -> Setup {
         tools,
         disabled_tools: vec!["CronCreate".into(), "RemoteTrigger".into()],
         plugin_dirs: vec![format!("{DATA}/imports/plugin-a").into()],
+        builtin_tool_allowlist: None,
     }
+}
+
+/// 表外 CLI 版本的会话：带内置工具白名单（方案第 9 节，P11 的 d）。
+fn with_allowlist(mut s: Setup) -> Setup {
+    s.builtin_tool_allowlist = Some(vec!["Bash".into(), "Edit".into(), "Read".into()]);
+    s
 }
 
 fn opening(start: Start) -> Opening {
@@ -131,6 +138,13 @@ fn cases() -> Vec<(&'static str, LaunchPlan)> {
         (
             "ai_review_new",
             plan(&setup(Tier::Manual, Tools::None), new_session()),
+        ),
+        (
+            "unverified_cli_allowlist_new",
+            plan(
+                &with_allowlist(setup(Tier::Manual, Tools::Default)),
+                new_session(),
+            ),
         ),
     ]
 }
@@ -340,4 +354,45 @@ fn relative_cwd_is_refused() {
     )
     .unwrap_err();
     assert_eq!(err.field, "cwd");
+}
+
+/// `--tools` 出现的次数与跟在后面的值。
+fn tools_flags(args: &[String]) -> Vec<&str> {
+    args.windows(2)
+        .filter(|w| w[0] == "--tools")
+        .map(|w| w[1].as_str())
+        .collect()
+}
+
+/// 有白名单 → `--tools a,b,c`，`--disallowedTools` 照旧（两者同用时禁用优先，G8d）。
+#[test]
+fn allowlist_becomes_tools_flag() {
+    let p = plan(
+        &with_allowlist(setup(Tier::Manual, Tools::Default)),
+        new_session(),
+    );
+    assert_eq!(tools_flags(&p.args), ["Bash,Edit,Read"]);
+    let at = p
+        .args
+        .iter()
+        .position(|a| a == "--disallowedTools")
+        .expect("禁用照旧");
+    assert_eq!(p.args[at + 1], "CronCreate,RemoteTrigger");
+}
+
+/// 没有白名单（表内版本）→ 不传 `--tools`。
+#[test]
+fn no_allowlist_no_tools_flag() {
+    let p = plan(&setup(Tier::Manual, Tools::Default), new_session());
+    assert!(tools_flags(&p.args).is_empty(), "{:?}", p.args);
+}
+
+/// AI 审查回合仍是 `--tools ""`：白名单管不到它，两者都有时以它为准，而且只出现一次。
+#[test]
+fn ai_review_turn_keeps_empty_tools() {
+    let p = plan(
+        &with_allowlist(setup(Tier::Manual, Tools::None)),
+        new_session(),
+    );
+    assert_eq!(tools_flags(&p.args), [""]);
 }

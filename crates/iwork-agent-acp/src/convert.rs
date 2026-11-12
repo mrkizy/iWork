@@ -97,6 +97,8 @@ fn session_setup(
         tool_set: Some(tool_set_to_proto(tool_set)),
         disabled_tools: disabled_tools.iter().map(|t| t.0.clone()).collect(),
         plugin_dirs: paths(plugin_dirs)?,
+        // 表外 CLI 版本的内置工具白名单由版本策略（S8）填；在那之前一律不带
+        builtin_tool_allowlist: None,
     })
 }
 

@@ -1,0 +1,48 @@
+{
+  "model": {
+    "modelId": "opus",
+    "effort": "high"
+  },
+  "constraints": {
+    "denyReadWrite": [
+      "~/.ssh",
+      "~/Library/Application Support/iWork"
+    ],
+    "readOnly": [
+      "~/Library/Application Support/iWork/attachments"
+    ],
+    "allowWrite": {
+      "whitelist": {
+        "paths": [
+          "/Users/me/code/iwork",
+          "$TMPDIR"
+        ]
+      }
+    },
+    "excludedCommands": [
+      {
+        "program": "gh",
+        "subcommand": "pr"
+      }
+    ],
+    "allowUnsandboxedRetry": true,
+    "network": "NETWORK_POLICY_OPEN"
+  },
+  "toolSet": {
+    "enabledGroups": [
+      "TOOL_GROUP_READ_AND_SEARCH",
+      "TOOL_GROUP_EDIT_FILES"
+    ],
+    "includeAlwaysOn": true
+  },
+  "disabledTools": [
+    "CronCreate"
+  ],
+  "builtinToolAllowlist": {
+    "tools": [
+      "Bash",
+      "Edit",
+      "Read"
+    ]
+  }
+}
