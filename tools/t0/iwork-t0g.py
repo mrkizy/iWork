@@ -2829,36 +2829,104 @@ def snapshot_dir(path):
     return out
 
 
-def remove_g5_traces(paths, workdir, config_root, session_ids):
-    """G5 跑完的收尾：只删本次独占新建、路径核对过的目录（默认记忆目录、子代理记忆目录、改道目录），和这几个实例的会话记录
-    （默认记忆目录所在的项目目录里名字恰好是「会话编号.jsonl」的普通文件，同方案 5.5 的规矩）。别的不碰。
-    两层上级目录（2/2/F-2）：默认记忆目录所在的项目目录（它对应本次的随机工作目录）删完之后空了就删；agent-memory 这一层
-    只在本次建的（agent-parent）而且空了才删。不空就留着。返回删了什么。子代理记忆目录排在 agent-parent 前面处理。"""
+def dir_ident(path):
+    """一个目录的身份 (st_dev, st_ino)，不跟链接。"""
+    st = os.stat(path, follow_symlinks=False)
+    return st.st_dev, st.st_ino
+
+
+def open_under(config_root, rel_parts):
+    """从配置目录起逐级用 O_NOFOLLOW 打开 rel_parts（每一级都不能是链接）。返回最后一级的目录句柄；调用方负责关。"""
+    fd = os.open(config_root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in rel_parts:
+            nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd); fd = nfd
+        return fd
+    except BaseException:
+        os.close(fd); raise
+
+
+def remove_dir_owned(config_root, path, ident, baseline=frozenset()):
+    """删一个本次用过的目录（审查 repo 同类，supervisor 2026-11-13：照 RC6 收紧）。纯靠句柄：上一级逐级 O_NOFOLLOW 打开，
+    这一级核身份（ident），里面只删「普通文件、而且不在 baseline 里」（baseline = 本次碰它之前就在的名字）；子目录、链接、baseline 里的
+    都不删，留着就不 rmdir（不递归）。返回 (删了的路径列表, 没删的原因或 None)。"""
+    rel = os.path.relpath(path, config_root).split(os.sep)
+    try: pfd = open_under(config_root, rel[:-1])
+    except OSError as e: return [], f"上一级打不开（可能是链接）：{type(e).__name__}"
     removed = []
+    try:
+        try: st = os.stat(rel[-1], dir_fd=pfd, follow_symlinks=False)
+        except FileNotFoundError: return [], None
+        if not stat.S_ISDIR(st.st_mode) or (st.st_dev, st.st_ino) != ident: return [], "不是本次用的那个目录了"
+        cfd = os.open(rel[-1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
+        try:
+            left = []
+            for e in os.listdir(cfd):
+                est = os.stat(e, dir_fd=cfd, follow_symlinks=False)
+                if stat.S_ISREG(est.st_mode) and e not in baseline:
+                    os.unlink(e, dir_fd=cfd); removed.append(os.path.join(path, e))
+                else:
+                    left.append(e)
+        finally:
+            os.close(cfd)
+        if left: return removed, f"里面还有 {len(left)} 项不是本次写的普通文件，目录留着"
+        os.rmdir(rel[-1], dir_fd=pfd); removed.append(path)
+        return removed, None
+    finally:
+        os.close(pfd)
+
+
+def remove_g5_traces(paths, workdir, config_root, session_ids, idents, baselines=None):
+    """G5 跑完的收尾：只删本次用过、路径核对过的目录（默认记忆目录、子代理记忆目录、改道目录），和这几个实例的会话记录
+    （默认记忆目录所在的项目目录里名字恰好是「会话编号.jsonl」的普通文件，同方案 5.5 的规矩）。别的不碰。
+    用户配置目录下的几样都走 remove_dir_owned：核身份（idents，建或照用时记下的）、只删本次出现的普通文件、rmdir 不递归；
+    身份不符、有别的内容 → 不删，原因记进返回值。baselines：{目录: 本次碰它之前就在的名字}（默认记忆目录照用时那一份）。
+    两层上级目录（2/2/F-2）：项目目录删完之后空了就删（核身份）；agent-memory 这一层只在本次建的（agent-parent）而且空了才删。
+    返回 (删了什么, [(路径, 没删的原因)])。子代理记忆目录排在 agent-parent 前面处理。"""
+    removed, kept = [], []
+    baselines = baselines or {}
     order = {"agent-parent": 1}
     for kind, path in sorted(paths, key=lambda kp: order.get(kp[0], 0)):
-        if kind == "agent-parent":
-            if path != os.path.join(config_root, "agent-memory"): raise ValueError(f"agent-memory 这一层核对没过，不删：{path}")
-            if os.path.isdir(path) and not os.path.islink(path) and not os.listdir(path):
-                os.rmdir(path); removed.append(path)
-            continue
         if path is None: continue
+        if kind == "agent-parent" and path != os.path.join(config_root, "agent-memory"): raise ValueError(f"agent-memory 这一层核对没过，不删：{path}")
         if kind == "memory" and own_memory_dir(path, workdir, config_root) != path: raise ValueError(f"默认记忆目录核对没过，不删：{path}")
         if kind == "agent" and not (os.path.dirname(path) == os.path.join(config_root, "agent-memory")
                                     and os.path.basename(path).startswith("iwork-t0g-probe-")): raise ValueError(f"子代理记忆目录核对没过，不删：{path}")
-        if kind == "redirect" and not in_root(path): raise ValueError(f"改道目录不在本次根目录里，不删：{path}")
-        if os.path.isdir(path) and not os.path.islink(path):
-            shutil.rmtree(path); removed.append(path)
+        if kind == "redirect":
+            if not in_root(path): raise ValueError(f"改道目录不在本次根目录里，不删：{path}")
+            if os.path.isdir(path) and not os.path.islink(path):             # 在本次根目录里，整个删
+                shutil.rmtree(path); removed.append(path)
+            continue
+        if kind == "agent-parent":
+            gone, why = remove_dir_owned(config_root, path, idents.get(path), frozenset(os.listdir(path)) if os.path.isdir(path) else frozenset())
+            removed += gone
+            if why: kept.append((path, why))
+            continue
+        gone, why = remove_dir_owned(config_root, path, idents.get(path), frozenset(baselines.get(path, ())))
+        removed += gone
+        if why: kept.append((path, why))
         if kind == "memory":
             project = os.path.dirname(path)
-            for sid in session_ids:
-                if not sid or not re.fullmatch(r"[0-9a-fA-F-]{8,64}", sid): continue
-                f = os.path.join(project, sid + ".jsonl")
-                if os.path.isfile(f) and not os.path.islink(f):
-                    os.remove(f); removed.append(f)
-            if os.path.isdir(project) and not os.path.islink(project) and not os.listdir(project):
-                os.rmdir(project); removed.append(project)
-    return removed
+            proj_files = {sid + ".jsonl" for sid in session_ids if sid and re.fullmatch(r"[0-9a-fA-F-]{8,64}", sid)}
+            if idents.get(project) is None: continue
+            # 项目目录：只删这几个会话记录（普通文件），别的都算「本次之前就在」；删完空了才 rmdir
+            try: pfd = open_under(config_root, os.path.relpath(project, config_root).split(os.sep))
+            except OSError as e: kept.append((project, f"打不开：{type(e).__name__}")); continue
+            try:
+                pst = os.fstat(pfd)
+                if (pst.st_dev, pst.st_ino) != idents[project]: kept.append((project, "不是本次用的那个目录了")); continue
+                for name in proj_files:
+                    try: est = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+                    except FileNotFoundError: continue
+                    if stat.S_ISREG(est.st_mode): os.unlink(name, dir_fd=pfd); removed.append(os.path.join(project, name))
+            finally:
+                os.close(pfd)
+            others = [e for e in os.listdir(project)] if os.path.isdir(project) else []
+            if not others:
+                gone, why = remove_dir_owned(config_root, project, idents[project])
+                removed += gone
+    return removed, kept
 
 
 BLANK_NAME = "NOTES.md"        # 空白对照：和被观测的 MEMORY.md 同类（大写名、.md 后缀、大小相同），让扫描文件的程序对两者一视同仁
@@ -2905,7 +2973,7 @@ def g5_isolation():
     agent = f"iwork-t0g-probe-{secrets.token_hex(4)}"
     agent_mem = os.path.join(config_root, "agent-memory", agent)
     redirect = R.p("g5-redirect")
-    created = []
+    created, idents, baselines = [], {}, {}
     try:
         agent_preexisting = os.path.lexists(agent_mem) or not no_links_from(config_root, agent_mem)
         blocks = g5_dir_blocks(why_default, os.path.lexists(redirect), agent_preexisting)
@@ -2920,10 +2988,14 @@ def g5_isolation():
                f"已经存在={os.path.isdir(default_mem)} 已有 {len(preexisting)} 项")
         os.mkdir(redirect); created.append(("redirect", redirect))
         os.makedirs(default_mem, exist_ok=True); created.append(("memory", default_mem))
+        # 收尾要核的身份与「本次碰之前就在的」名字（审查 repo 同类：删用户配置目录下的东西照 RC6 收紧）
+        idents[default_mem], idents[os.path.dirname(default_mem)] = dir_ident(default_mem), dir_ident(os.path.dirname(default_mem))
+        baselines[default_mem] = {p_ for p_ in preexisting if "/" not in p_}
         if not agent_preexisting:
             if not os.path.isdir(os.path.dirname(agent_mem)):         # agent-memory 这一层是本次建的：收尾时空了就一并删
                 os.makedirs(os.path.dirname(agent_mem)); created.append(("agent-parent", os.path.dirname(agent_mem)))
-            os.mkdir(agent_mem); created.append(("agent", agent_mem))
+                idents[os.path.dirname(agent_mem)] = dir_ident(os.path.dirname(agent_mem))
+            os.mkdir(agent_mem); created.append(("agent", agent_mem)); idents[agent_mem] = dir_ident(agent_mem)
         allowed = [work, default_mem, redirect] + ([] if agent_preexisting else [agent_mem])
         # 记忆读：默认目录放 B、改道目录放 A；m0 不设开关、m1 只改道、m2 产品配置
         a, b = "t0g-memA-" + secrets.token_hex(6), "t0g-memB-" + secrets.token_hex(6)
@@ -2999,8 +3071,9 @@ def g5_isolation():
                    f"观测前提成立={s_premise} s2 读过那个文件={sobs['s2']['read']} 空白对照被读过 s0={sobs['s0']['blank_read']} s2={sobs['s2']['blank_read']}")
     finally:
         sids = [(r.get("init") or {}).get("session_id") for r in runs.values()]
-        removed = remove_g5_traces(created, work, config_root, sids)
+        removed, kept = remove_g5_traces(created, work, config_root, sids, idents, baselines)
         record("INFO", "G5 收尾（只动本次新建的记忆目录、子代理记忆目录、改道目录与这几个实例的会话记录）", f"删了 {len(removed)} 项")
+        if kept: record("INFO", "G5 收尾：这几处没删，留给用户看（身份不符或有不是本次写的内容）", json.dumps([(scrub(p_), w) for p_, w in kept], ensure_ascii=False))
 
 
 def read_obs_file_plain(path):
@@ -5818,8 +5891,9 @@ def selftest_g5_isolation():
     proj = os.path.dirname(mem)
     sid, keep = "0" * 8 + "-1111-4222-8333-" + "4" * 12, "9" * 8 + "-1111-4222-8333-" + "4" * 12
     for n in (sid, keep): open(os.path.join(proj, n + ".jsonl"), "w").write("{}")
-    removed = remove_g5_traces([("redirect", red), ("memory", mem), ("agent", agent_mem)], work, cfg_root, [sid, None, "../x"])
-    assert sorted(removed) == sorted([red, mem, os.path.join(proj, sid + ".jsonl"), agent_mem]), removed
+    ids = {p_: dir_ident(p_) for p_ in (mem, proj, agent_mem)}
+    removed, kept = remove_g5_traces([("redirect", red), ("memory", mem), ("agent", agent_mem)], work, cfg_root, [sid, None, "../x"], ids)
+    assert sorted(removed) == sorted([red, os.path.join(mem, "MEMORY.md"), mem, os.path.join(proj, sid + ".jsonl"), agent_mem]) and kept == [], (removed, kept)
     assert os.path.exists(os.path.join(proj, keep + ".jsonl")), "别的会话记录不碰"
     # 2/2/F-2 的例外（方案 b63977a）：默认记忆目录已经存在也照用，要四条前提；改道目录、子代理记忆目录没有例外
     os.makedirs(mem)
@@ -5842,14 +5916,47 @@ def selftest_g5_isolation():
     os.makedirs(mem); open(os.path.join(mem, "MEMORY.md"), "w").write("x")
     os.remove(os.path.join(proj, keep + ".jsonl")); open(os.path.join(proj, sid + ".jsonl"), "w").write("{}")
     parent = os.path.join(cfg_root, "agent-memory"); os.makedirs(agent_mem)
-    removed = remove_g5_traces([("agent-parent", parent), ("memory", mem), ("agent", agent_mem)], work, cfg_root, [sid])
+    ids = {p_: dir_ident(p_) for p_ in (mem, proj, parent, agent_mem)}
+    removed, _ = remove_g5_traces([("agent-parent", parent), ("memory", mem), ("agent", agent_mem)], work, cfg_root, [sid], ids)
     assert proj in removed and parent in removed and not os.path.exists(proj) and not os.path.exists(parent), removed
     os.makedirs(os.path.join(parent, "someone-else")); os.makedirs(agent_mem)
-    removed = remove_g5_traces([("agent-parent", parent), ("agent", agent_mem)], work, cfg_root, [])
-    assert parent not in removed and os.path.isdir(os.path.join(parent, "someone-else")), "agent-memory 里还有别人的目录：不删"
+    ids = {p_: dir_ident(p_) for p_ in (parent, agent_mem)}
+    removed, kept = remove_g5_traces([("agent-parent", parent), ("agent", agent_mem)], work, cfg_root, [], ids)
+    assert parent not in removed and os.path.isdir(os.path.join(parent, "someone-else")) and kept, "agent-memory 里还有别人的目录：不删"
+    # 照 RC6 收紧（supervisor 2026-11-13）：默认记忆目录被换掉、上级换成链接、混进了子目录、本次之前就在的文件，都不删
+    def g5_case(tamper):
+        root_ = R.p(f"st-g5-{tamper}"); w_ = os.path.join(root_, "w"); os.makedirs(w_)
+        e_ = re.sub(r"/", "-", w_)
+        m_ = os.path.join(root_, "projects", e_, "memory"); os.makedirs(m_)
+        open(os.path.join(m_, "old.md"), "w").write("keep")                   # 本次之前就在
+        idsx = {m_: dir_ident(m_), os.path.dirname(m_): dir_ident(os.path.dirname(m_))}
+        open(os.path.join(m_, "MEMORY.md"), "w").write("ours")
+        elsewhere = R.p(f"st-g5-{tamper}-elsewhere")
+        if tamper == "replaced":
+            os.rename(m_, m_ + "-moved"); os.mkdir(m_); open(os.path.join(m_, "MEMORY.md"), "w").write("keep")
+        elif tamper == "linked-parent":
+            os.makedirs(os.path.join(elsewhere, "memory")); open(os.path.join(elsewhere, "memory", "MEMORY.md"), "w").write("keep")
+            proj_ = os.path.dirname(m_); os.rename(proj_, proj_ + "-moved"); os.symlink(elsewhere, proj_)
+        elif tamper == "subdir":
+            os.mkdir(os.path.join(m_, "nested")); open(os.path.join(m_, "nested", "x"), "w").write("keep")
+        elif tamper == "link":
+            os.makedirs(elsewhere); open(os.path.join(elsewhere, "target"), "w").write("keep")
+            os.symlink(os.path.join(elsewhere, "target"), os.path.join(m_, "link.md"))
+        kept_ = remove_g5_traces([("memory", m_)], w_, root_, [], idsx, {m_: {"old.md"}})[1]
+        return m_, elsewhere, kept_
+    m_, _, kept_ = g5_case("normal")
+    assert open(os.path.join(m_, "old.md")).read() == "keep" and not os.path.exists(os.path.join(m_, "MEMORY.md")) and kept_, "本次之前就在的文件不删，目录因此留着"
+    m_, _, kept_ = g5_case("replaced")
+    assert open(os.path.join(m_, "MEMORY.md")).read() == "keep" and kept_ and "不是本次用的" in kept_[0][1], "默认记忆目录被换掉：不删"
+    m_, elsewhere, kept_ = g5_case("linked-parent")
+    assert open(os.path.join(elsewhere, "memory", "MEMORY.md")).read() == "keep" and kept_, "上级换成链接：不碰链接那头"
+    m_, _, kept_ = g5_case("subdir")
+    assert open(os.path.join(m_, "nested", "x")).read() == "keep" and kept_, "混进子目录：不递归，目录留着"
+    m_, elsewhere, kept_ = g5_case("link")
+    assert os.path.islink(os.path.join(m_, "link.md")) and open(os.path.join(elsewhere, "target")).read() == "keep" and kept_, "混进链接：链接不删，指向的不碰"
     for kind, bad in (("memory", os.path.join(cfg_root, "projects", other_enc, "memory")), ("agent", os.path.join(cfg_root, "agent-memory", "someone-else")),
                       ("redirect", os.path.join(HOME, "x")), ("agent-parent", os.path.join(cfg_root, "agent-memory-x"))):
-        try: remove_g5_traces([(kind, bad)], work, cfg_root, [])
+        try: remove_g5_traces([(kind, bad)], work, cfg_root, [], {})
         except ValueError: pass
         else: raise AssertionError(f"核对没过的 {kind} 目录应当拒绝，不删")
 
