@@ -1,0 +1,13 @@
+Control(ControlResponse { request_id: Some("init-1"), success: true, current_permission_mode: Some("dontAsk") })
+Report(Model { id: "claude-haiku-5-5", effort: "low" })
+ToolCall { id: "toolu_iwork0001", name: "Bash", raw_input: Object {"command": String("seq 1 300"), "description": String("Print numbers 1 through 300, one per line")} }
+Report(Quota([QuotaWindow { window: "seven_day", used_pct: 74, resets_at_secs: 1794855600 }]))
+Control(ControlResponse { request_id: Some("c-int"), success: true, current_permission_mode: None })
+ToolCallUpdate { id: "toolu_iwork0001", failed: true, content: "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.\n\nNote: The user's next message may contain a correction or preference. Pay close attention — if they explain what went wrong or how they'd prefer you to work, consider saving that to memory for future sessions." }
+Report(Usage(Usage { input_tokens: 2, output_tokens: 87, cache_read_tokens: 14591, cache_write_tokens: 6726, cost_usd: Some(0.0015348100000000002) }))
+End(Cancelled)
+Report(Model { id: "claude-haiku-5-5", effort: "low" })
+Control(ControlResponse { request_id: Some("c-model"), success: true, current_permission_mode: None })
+Text("AFTER")
+Report(Usage(Usage { input_tokens: 2, output_tokens: 6, cache_read_tokens: 21317, cache_write_tokens: 287, cost_usd: Some(0.00027377) }))
+End(Completed)

@@ -3,12 +3,17 @@
 
 mod support;
 
+#[path = "../../iwork-core/tests/support/history.rs"]
+#[allow(dead_code, reason = "这里只用默认值")]
+mod history;
+
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use history::FakeHistory;
 use iwork_agent_acp::AcpRuntime;
 use iwork_core::turn::{
-    Decided, PermissionDecider, SessionLine, TurnPlan, TurnPorts, VoidPlanError,
+    Decided, PermissionDecider, SessionLine, TurnEntry, TurnPlan, TurnPorts, VoidPlanError,
 };
 use iwork_domain::approval::VoidReason;
 use iwork_domain::event::{ApprovalVoided, DomainEvent};
@@ -79,6 +84,18 @@ fn waiting_script() -> serde_json::Value {
     ]}]})
 }
 
+/// 同上，但拒绝之后先睡 20 秒（会被 `session/cancel` 打断）再写正文：这一轮不会在取消到达之前自己结束。
+/// 不这样的话，编排停止受理、处理方答出拒绝之后，假运行时马上走完 denied 分支、结束这一轮；慢机器上编排随后调
+/// `cancel()` 时适配器已经看到 prompt 收尾，照约定什么都不做，`session/cancel` 就不会发（CI 上偶发，T04 组 3）。
+fn waiting_script_held_after_denial() -> serde_json::Value {
+    json!({ "turns": [{ "steps": [
+        { "type": "tool_call", "id": "t1", "name": "Bash", "input": { "command": "rm -rf build" } },
+        { "type": "permission", "tool_call_id": "t1",
+          "allowed": [ { "type": "tool_result", "id": "t1", "ok": true }, { "type": "text", "text": "删好了" } ],
+          "denied": [ { "type": "sleep", "ms": 20000 }, { "type": "text", "text": "不删" } ] }
+    ]}]})
+}
+
 struct Run {
     h: Arc<Harness>,
     decider: Arc<Gated>,
@@ -108,6 +125,7 @@ fn start(fake: &Fake) -> Run {
     let canceller = line.canceller();
     let runtime = AcpRuntime::new(fake.launch.clone());
     let plan = TurnPlan {
+        entry: TurnEntry::New,
         turn: queued_turn(&h.ids),
         assistant_name: "小助手".into(),
         context_project_id: None,
@@ -118,12 +136,14 @@ fn start(fake: &Fake) -> Run {
     let task = {
         let h = h.clone();
         tokio::spawn(async move {
+            let history = FakeHistory::default();
             let ports = TurnPorts {
                 store: &h.store,
                 clock: &h.clock,
                 ids: &h.ids,
                 live: &h.live,
                 timer: &h.timer,
+                history: &history,
             };
             line.run_turn(&runtime, ports, plan).await.unwrap()
         })
@@ -234,7 +254,7 @@ async fn process_death_while_waiting_fails_turn_and_voids_approval() {
 /// 「已取消」），而且排在 `session/cancel` 之前（T06 方案 2.6 第 3、5 条）。
 #[tokio::test(flavor = "multi_thread")]
 async fn cancel_while_waiting_voids_approval_and_answers_reject_before_cancel() {
-    let fake = Fake::new(&waiting_script());
+    let fake = Fake::new(&waiting_script_held_after_denial());
     let run = start(&fake);
     wait_until(Duration::from_secs(10), || {
         run.h.store.last_turn_state() == Some(TurnState::WaitingApproval)
@@ -259,8 +279,8 @@ async fn cancel_while_waiting_voids_approval_and_answers_reject_before_cancel() 
             "turn finished Cancelled",
         ]
     );
-    // 拒绝之后假运行时走 denied 分支，「不删」可能赶在取消之前写进正文
-    assert!(tail[3].starts_with("message Interrupted"), "{tail:?}");
+    // 拒绝之后假运行时停在 denied 分支的 sleep 上，被取消打断，「不删」不会写出来
+    assert_eq!(tail[3], "message Interrupted \"\"", "{tail:?}");
     let answers: Vec<_> = fake
         .records()
         .into_iter()

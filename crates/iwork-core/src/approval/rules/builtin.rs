@@ -21,8 +21,9 @@ use sha2::{Digest, Sha256};
 use crate::approval::env::{EnvPaths, Platform};
 use crate::approval::registry::{self, ToolClass};
 
-/// 内置规则集版本。改任何条目都要升号（m1-2：加 UserDeny 层三条内置拒绝条目，T07 收口）。
-pub const RULESET_VERSION: &str = "m1-2";
+/// 内置规则集版本。改任何条目都要升号（m1-2：加 UserDeny 层三条内置拒绝条目，T07 收口；
+/// m1-3：永久禁用工具多六个，T06 方案 P13）。
+pub const RULESET_VERSION: &str = "m1-3";
 
 pub fn version() -> RuleSetVersion {
     RuleSetVersion(RULESET_VERSION.into())

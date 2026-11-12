@@ -10,6 +10,7 @@ pub mod reference_projection;
 
 pub mod engine_fakes;
 pub mod fold_fx;
+pub mod history;
 pub mod judges;
 pub mod ordered_decider;
 pub mod step_store;

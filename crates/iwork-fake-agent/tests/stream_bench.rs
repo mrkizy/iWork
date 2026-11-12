@@ -10,11 +10,16 @@
 
 mod support;
 
+#[path = "../../iwork-core/tests/support/history.rs"]
+#[allow(dead_code, reason = "这里只用默认值")]
+mod history;
+
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use history::FakeHistory;
 use iwork_agent_acp::AcpRuntime;
-use iwork_core::turn::{SessionLine, StubDecider, TurnPlan, TurnPorts};
+use iwork_core::turn::{SessionLine, StubDecider, TurnEntry, TurnPlan, TurnPorts};
 use iwork_domain::turn::TurnState;
 use iwork_ports::live::{LivePublisher, MessageDelta};
 use serde_json::json;
@@ -91,14 +96,17 @@ async fn run_scenario(members: usize, secs: u64) -> Report {
             let clock = RealClock::default();
             let ids = CountingIds::default();
             let timer = TokioTimer;
+            let history = FakeHistory::default();
             let ports = TurnPorts {
                 store: &store,
                 clock: &clock,
                 ids: &ids,
                 live: &*live,
                 timer: &timer,
+                history: &history,
             };
             let plan = TurnPlan {
+                entry: TurnEntry::New,
                 turn: queued_turn(&ids),
                 assistant_name: "压测".into(),
                 context_project_id: None,

@@ -13,9 +13,9 @@
   --bd2:#D8DFE8;
   --tx:#13334D;
   --tx2:#475A6E;
-  --tx3:#6B7785;
+  --tx3:#5F6A76;
   --brand:#13334D;
-  --acc:#C9562E;
+  --acc:#B44D29;
   --accTx:#FFFFFF;
   --mus:#D9A93A;
   --pri:#13334D;
@@ -50,6 +50,26 @@
   --ch2:#E8C15F;
   --ch3:#13334D;
   --ch4:#7FB0DE;
+  --ch5:#7FBF8E;
+  --ch5d:#5FA777;
+  --ch6:#B3A6E0;
+  --ch7:#5CB8B2;
+  --ch8:#F2A0B0;
+  --ch9:#C0925F;
+  --ch10:#2B2226;
+  --ch11:#EBBE6C;
+  --ch12:#E07B39;
+  --ch13:#3E6FC2;
+  --cdK:#A3412A;
+  --cdF:#1F5F99;
+  --cdS:#2D754B;
+  --cdN:#895E10;
+  --cdC:#5F6974;
+  --cdT:#6B4FA0;
+  --cdAdd:#2D754B;
+  --cdDel:#AA4927;
+  --cdAddBg:rgba(47,125,79,.10);
+  --cdDelBg:rgba(180,77,41,.10);
   --chInk:#1E1A24;
   --chInk3:#FFFFFF;
   --chHat:#C9562E;
@@ -69,7 +89,7 @@
   --tx3:#8593A2;
   --brand:#8DB8E2;
   --acc:#E2683F;
-  --accTx:#FFFFFF;
+  --accTx:#0F1720;
   --mus:#E8C15F;
   --pri:#E8EEF5;
   --priTx:#0F1720;
@@ -103,6 +123,26 @@
   --ch2:#E8C15F;
   --ch3:#8DB8E2;
   --ch4:#7FB0DE;
+  --ch5:#7FBF8E;
+  --ch5d:#5FA777;
+  --ch6:#B3A6E0;
+  --ch7:#5CB8B2;
+  --ch8:#F2A0B0;
+  --ch9:#C0925F;
+  --ch10:#6E5D66;
+  --ch11:#EBBE6C;
+  --ch12:#E07B39;
+  --ch13:#3E6FC2;
+  --cdK:#F0906B;
+  --cdF:#7FB0DE;
+  --cdS:#8CCB9E;
+  --cdN:#E8C15F;
+  --cdC:#909DA9;
+  --cdT:#B9A6F0;
+  --cdAdd:#8CCB9E;
+  --cdDel:#F0906B;
+  --cdAddBg:rgba(140,203,158,.12);
+  --cdDelBg:rgba(240,144,107,.13);
   --chInk:#14202E;
   --chInk3:#14202E;
   --chHat:#E2683F;
@@ -123,7 +163,7 @@
     --tx3:#8593A2;
     --brand:#8DB8E2;
     --acc:#E2683F;
-    --accTx:#FFFFFF;
+    --accTx:#0F1720;
     --mus:#E8C15F;
     --pri:#E8EEF5;
     --priTx:#0F1720;
@@ -157,6 +197,26 @@
     --ch2:#E8C15F;
     --ch3:#8DB8E2;
     --ch4:#7FB0DE;
+    --ch5:#7FBF8E;
+    --ch5d:#5FA777;
+    --ch6:#B3A6E0;
+    --ch7:#5CB8B2;
+    --ch8:#F2A0B0;
+    --ch9:#C0925F;
+    --ch10:#6E5D66;
+    --ch11:#EBBE6C;
+    --ch12:#E07B39;
+    --ch13:#3E6FC2;
+    --cdK:#F0906B;
+    --cdF:#7FB0DE;
+    --cdS:#8CCB9E;
+    --cdN:#E8C15F;
+    --cdC:#909DA9;
+    --cdT:#B9A6F0;
+    --cdAdd:#8CCB9E;
+    --cdDel:#F0906B;
+    --cdAddBg:rgba(140,203,158,.12);
+    --cdDelBg:rgba(240,144,107,.13);
     --chInk:#14202E;
     --chInk3:#14202E;
     --chHat:#E2683F;
@@ -195,6 +255,9 @@
   --shadow-dialog: 0 20px 50px rgba(0,0,0,.2);
 
   --sidebar-w: 296px;     /* 侧栏外宽（含内边距与右边框，box-sizing: border-box），与画布截图一致 */
+  --sidebar-w-min: 240px; /* 可拖动调宽的下限（ui-m1 2a 第 12 条） */
+  --sidebar-w-max: 390px; /* 完整侧栏上限；运行时还要保证主区域至少 480px */
+  --sidebar-w-rail: 64px; /* 仅头像形态的固定宽度；拖到约 160px 以下收成它 */
   --content-max: 720px;   /* 对话内容列 */
   --composer-max: 760px;  /* 输入框 */
 }

@@ -921,6 +921,7 @@ fn session_bound_writes_runtime_session_id_only() {
         TurnSessionBound {
             turn_id: tid(20),
             runtime_session_id: "sess-a".into(),
+            replaced: None,
         }
         .into(),
         TurnStateChanged {
@@ -954,6 +955,11 @@ fn session_bound_writes_runtime_session_id_only() {
         TurnSessionBound {
             turn_id: tid(20),
             runtime_session_id: "sess-b".into(),
+            // 续接时记录用不了、用摘要新开（T06 方案 5.2a）：审计字段不影响投影
+            replaced: Some(iwork_domain::event::SessionReplaced {
+                old_runtime_session_id: "sess-a".into(),
+                reason: iwork_domain::session::SessionLostReason::NotFound,
+            }),
         }
         .into(),
     ]);

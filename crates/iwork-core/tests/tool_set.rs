@@ -62,9 +62,46 @@ fn disabling_edit_group_removes_edit_tools() {
             "CronCreate",
             "CronDelete",
             "CronList",
-            "ScheduleWakeup"
+            "ScheduleWakeup",
+            "DesignSync",
+            "PushNotification",
+            "SendMessage",
+            "Workflow",
+            "EnterWorktree",
+            "ExitWorktree"
         ]
     );
+}
+
+/// 产品负责人 2026-11-12 定（T06 方案 P13，技术设计 7.1）：这六个内置工具在成员会话里永久禁用。
+/// 启动参数（`tools_to_disable`）、工具集判断（`in_tool_set`）与内置规则（三档拒绝）三处都要有它们。
+#[test]
+fn p13_tools_permanently_disabled() {
+    const P13: [&str; 6] = [
+        "DesignSync",
+        "PushNotification",
+        "SendMessage",
+        "Workflow",
+        "EnterWorktree",
+        "ExitWorktree",
+    ];
+    let full = tool_set_for(TurnKind::Assistant, &ToolGroups::new());
+    let off = tools_to_disable(&full);
+    let rules = builtin_rules(&env());
+    for t in P13 {
+        assert!(off.iter().any(|o| o == t), "{t} 应在启动时的关闭清单里");
+        assert!(!in_tool_set(t, &full), "{t} 不应在助手会话的工具集里");
+        let rule = rules
+            .iter()
+            .find(|e| e.matcher == RuleMatcher::ToolName(t.into()))
+            .unwrap_or_else(|| panic!("{t} 应有一条按工具名拒绝的内置规则"));
+        assert_eq!(rule.effect, RuleEffect::Deny, "{t}");
+        assert_eq!(rule.layer, RuleLayer::ToolConfig, "{t}");
+    }
+    // 对照：没禁的同类工具照常在工具集里
+    for t in ["Skill", "TaskStop", "ToolSearch"] {
+        assert!(in_tool_set(t, &full), "{t} 不应被禁");
+    }
 }
 
 #[test]
@@ -167,7 +204,7 @@ fn snapshot_includes_scoped_user_lists_and_transient_sensitive() {
             .sensitive_dirs
             .contains(&cp("/home/u/iWork/assistants/bob"))
     );
-    assert_eq!(s.ruleset_version.0, "m1-2");
+    assert_eq!(s.ruleset_version.0, "m1-3");
 }
 
 /// 统一成 `/` 分隔再比：测试环境是 Unix 形状的路径，Windows 上 `join` 拼出的那一段用 `\`。

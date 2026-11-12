@@ -17,7 +17,7 @@ mod artifact_refs;
 mod assistants;
 mod attachments;
 mod conversations;
-mod messages;
+pub(crate) mod messages;
 pub(crate) mod owner;
 mod projects;
 mod rules;

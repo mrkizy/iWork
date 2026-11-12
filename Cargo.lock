@@ -2859,8 +2859,15 @@ dependencies = [
 name = "iwork-bridge-claude"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.3.4",
  "iwork-claude-hook",
  "iwork-proto",
+ "libc",
+ "proptest",
+ "prost",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

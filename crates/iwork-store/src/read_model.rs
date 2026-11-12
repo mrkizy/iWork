@@ -10,20 +10,23 @@ use std::sync::Arc;
 use iwork_domain::approval::Approval;
 use iwork_domain::assistant::Assistant;
 use iwork_domain::common::{ArtifactRef, Timestamp};
-use iwork_domain::id::{ConversationId, ProjectId};
-use iwork_domain::message::{Message, MessageBody, MessageStatus};
+use iwork_domain::event::{DomainEvent, StreamKind};
+use iwork_domain::id::{ConversationId, ProjectId, TurnId};
+use iwork_domain::message::{Author, Message, MessageBody, MessageStatus};
 use iwork_domain::rule::RuleEntry;
 use iwork_domain::runtime::{QuotaWindow, Runtime};
 use iwork_domain::settings::GlobalSettings;
-use iwork_domain::turn::{Turn, TurnState};
+use iwork_domain::turn::{Turn, TurnKind, TurnState};
 use iwork_domain::user_action::{UserActionStateKind, UserActionTriggerKind, next_kind};
 use iwork_ports::read_model::{
     AgentsMdDraftCard, ConversationSummary, ConversationView, MessagePage, PendingItem,
-    ProjectSummary, ReadModelPort, ResumeCard, RuntimeQuota, Unsettled,
+    ProjectSummary, ReadModelPort, ResumeCard, RuntimeQuota, SummaryLine, SummarySource,
+    SummaryText, SummaryWho, Unsettled,
 };
 use iwork_ports::store::{EventCodec, StorageError};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
+use crate::projector::messages::author_kind;
 use crate::reader::ReaderPool;
 use crate::snapshot::{
     approval_state_from_columns, decode_approval, decode_assistant, decode_card,
@@ -502,6 +505,15 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
         })
     }
 
+    fn summary_source(
+        &self,
+        turn: TurnId,
+        line: Option<ProjectId>,
+        recent_limit: u32,
+    ) -> impl Future<Output = Result<SummarySource, StorageError>> + Send {
+        self.query(move |conn, codec| summary_source(conn, codec, turn, line, recent_limit))
+    }
+
     fn artifact_is_referenced(
         &self,
         r: &ArtifactRef,
@@ -516,6 +528,170 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
             .map_err(sql_err)
         })
     }
+}
+
+/// 续接摘要的原料（T06 方案 5.2a）。一个读连接里取完：
+/// 1. 回合所在的对话；
+/// 2. 上界 = 排这个回合的那次提交（`TurnQueued` 是回合流上的第一条事件）的起始 seq。这一轮的请求和
+///    `TurnQueued` 同一次提交写下，自然在界外；这一轮之后追加的（被中断那一轮的半截回复、之后别的回合）也在界外。
+///    不是由用户消息触发的回合（系统回合）同样有这个界，不靠认出请求；
+/// 3. 界内、这条会话线上（`context_project_id == line`）的用户消息与助手回复，按 id 升序扫一遍。
+///    这条路只在续接失败时走一次，全扫一个对话的消息可以接受；系统消息与正文为空的不取。
+fn summary_source<C: EventCodec + ?Sized>(
+    conn: &Connection,
+    codec: &C,
+    turn: TurnId,
+    line: Option<ProjectId>,
+    recent_limit: u32,
+) -> Result<SummarySource, StorageError> {
+    let turn_key = turn.to_string();
+    let conversation: String = conn
+        .prepare_cached("SELECT conversation_id FROM turns WHERE id = ?1")
+        .and_then(|mut s| s.query_row([&turn_key], |r| r.get(0)).optional())
+        .map_err(sql_err)?
+        .ok_or_else(|| StorageError::NotFound {
+            entity: "turn",
+            id: turn_key.clone(),
+        })?;
+    let bound = queued_commit_start(conn, codec, &turn_key, &conversation)?;
+    let snapshots = blobs(
+        conn,
+        "SELECT snapshot FROM messages WHERE conversation_id = ?1 AND author_kind <> ?2 \
+         AND appended_seq < ?3 ORDER BY id",
+        params![conversation, author_kind(&Author::System), bound],
+    )?;
+    let mut first_user = None;
+    let mut after_first = Vec::new();
+    for s in snapshots {
+        let mut m = decode_message(codec, &s)?;
+        if m.context_project_id != line {
+            continue;
+        }
+        fill_streaming_body(conn, &mut m)?;
+        let Some(entry) = summary_line(conn, &m)? else {
+            continue;
+        };
+        // 第一条用户消息之前的（如添加项目时系统回合的草稿）不算这条线上的对话
+        match (&first_user, &entry.who) {
+            (None, SummaryWho::User) => first_user = Some(entry),
+            (None, SummaryWho::Assistant { .. }) => {}
+            (Some(_), _) => after_first.push(entry),
+        }
+    }
+    let keep = after_first.len().min(recent_limit as usize);
+    let unfetched = u32::try_from(after_first.len() - keep).unwrap_or(u32::MAX);
+    let earlier = after_first.into_iter().rev().take(keep).collect();
+    Ok(SummarySource {
+        first_user,
+        earlier,
+        unfetched,
+    })
+}
+
+/// 排这个回合的那次提交的起始 seq。回合流上的第一条事件必须是 `TurnQueued`，不是就报错点名。
+///
+/// 「这一轮的请求落在界外」靠的是请求和 `TurnQueued` 同一次提交写下（受理 `SendMessage` 的形状，T10a 核对）。
+/// 所以用户消息触发的回合（`TurnKind::Assistant`）在这次提交的 seq 区间里必须有这个对话的一条用户消息，
+/// 没有就报错点名回合：分两次提交时请求会落在界内、被当成「已完成」收进摘要，不能悄悄放过。系统回合没有触发
+/// 它的用户消息，不查。
+fn queued_commit_start<C: EventCodec + ?Sized>(
+    conn: &Connection,
+    codec: &C,
+    turn_key: &str,
+    conversation: &str,
+) -> Result<i64, StorageError> {
+    let first: Option<(String, Vec<u8>, i64, i64)> = conn
+        .prepare_cached(
+            "SELECT e.type, e.payload, c.first_seq, c.last_seq FROM events e \
+             JOIN commands c ON c.command_id = e.command_id \
+             WHERE e.stream_kind = ?1 AND e.stream_id = ?2 ORDER BY e.seq LIMIT 1",
+        )
+        .and_then(|mut s| {
+            s.query_row(params![StreamKind::Turn.to_text(), turn_key], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .optional()
+        })
+        .map_err(sql_err)?;
+    let Some((kind, payload, first_seq, last_seq)) = first else {
+        return Err(crate::sql::bad_column(
+            "events",
+            "stream_id",
+            format!("回合 {turn_key} 在投影里、事件日志里却没有它的流"),
+        ));
+    };
+    let DomainEvent::TurnQueued(queued) = codec.decode(&kind, &payload)? else {
+        return Err(crate::sql::bad_column(
+            "events",
+            "type",
+            format!("回合 {turn_key} 流上的第一条事件是 {kind}，不是 turn_queued"),
+        ));
+    };
+    if queued.turn.kind == TurnKind::Assistant {
+        let requests: i64 = conn
+            .prepare_cached(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1 AND author_kind = ?2 \
+                 AND appended_seq BETWEEN ?3 AND ?4",
+            )
+            .and_then(|mut s| {
+                s.query_row(
+                    params![
+                        conversation,
+                        author_kind(&Author::User),
+                        first_seq,
+                        last_seq
+                    ],
+                    |r| r.get(0),
+                )
+            })
+            .map_err(sql_err)?;
+        if requests == 0 {
+            return Err(crate::sql::bad_column(
+                "commands",
+                "first_seq",
+                format!(
+                    "回合 {turn_key} 由用户消息触发，排它的那次提交（seq {first_seq}–{last_seq}）里却没有用户消息"
+                ),
+            ));
+        }
+    }
+    Ok(first_seq)
+}
+
+/// 一条消息在摘要原料里的样子；系统消息与正文、附件都为空的返回 `None`。附件只取文件名。
+fn summary_line(conn: &Connection, m: &Message) -> Result<Option<SummaryLine>, StorageError> {
+    let who = match &m.author {
+        Author::User => SummaryWho::User,
+        Author::Assistant { name_snapshot, .. } => SummaryWho::Assistant {
+            name: name_snapshot.clone(),
+        },
+        Author::System => return Ok(None),
+    };
+    let text = match &m.body {
+        MessageBody::Inline(t) => SummaryText::Inline(t.clone()),
+        MessageBody::Artifact(_) => SummaryText::Stored,
+    };
+    if text == SummaryText::Inline(String::new()) && m.attachments.is_empty() {
+        return Ok(None);
+    }
+    let mut attachments = Vec::with_capacity(m.attachments.len());
+    for id in &m.attachments {
+        let key = id.to_string();
+        let name: String = conn
+            .prepare_cached("SELECT name FROM attachments WHERE id = ?1")
+            .and_then(|mut s| s.query_row([&key], |r| r.get(0)).optional())
+            .map_err(sql_err)?
+            .ok_or(StorageError::NotFound {
+                entity: "attachment",
+                id: key,
+            })?;
+        attachments.push(name);
+    }
+    Ok(Some(SummaryLine {
+        who,
+        text,
+        attachments,
+    }))
 }
 
 fn unread_u32(v: i64) -> u32 {

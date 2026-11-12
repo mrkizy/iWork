@@ -6,6 +6,7 @@
 //!
 //! 加一种错误码 = [`map`] 里加一行，桥接那边照同一份字符串写。
 
+use iwork_domain::session::SessionLostReason;
 use iwork_ports::agent::{AgentError, ModelUnavailableReason};
 use serde_json::Value;
 
@@ -49,6 +50,10 @@ fn model_reason(reason: &str) -> ModelUnavailableReason {
     }
 }
 
+fn lost(reason: SessionLostReason) -> AgentError {
+    AgentError::SessionLost { reason }
+}
+
 fn protocol(message: &str) -> AgentError {
     AgentError::Protocol {
         message: message.into(),
@@ -73,7 +78,10 @@ pub fn map(data: Option<&Value>, cx: &ErrorContext) -> Option<AgentError> {
         "hook_inactive" => protocol("审批 hook 没有生效，会话已停止"),
         "isolation_broken" => protocol("用户配置进入了会话，会话已停止"),
         "approval_backstop" => protocol("审批等待兜底触发，会话已停止"),
-        "session_not_found" => protocol("运行时会话记录不存在，无法续接"),
+        // 续接时记录用不了，三类分开报：编排据此用摘要新开会话线（T06 方案 5.2a）
+        "session_not_found" => lost(SessionLostReason::NotFound),
+        "session_corrupt" => lost(SessionLostReason::Corrupt),
+        "session_incompatible" => lost(SessionLostReason::Incompatible),
         "sandbox_unavailable" => protocol("沙箱不可用，会话没有启动"),
         "channel_failed" => protocol("审批通道建立失败"),
         "cli_error" => AgentError::Protocol {
@@ -170,10 +178,17 @@ mod tests {
             mapped("approval_backstop", None),
             proto("审批等待兜底触发，会话已停止")
         );
-        assert_eq!(
-            mapped("session_not_found", None),
-            proto("运行时会话记录不存在，无法续接")
-        );
+        for (code, reason) in [
+            ("session_not_found", SessionLostReason::NotFound),
+            ("session_corrupt", SessionLostReason::Corrupt),
+            ("session_incompatible", SessionLostReason::Incompatible),
+        ] {
+            assert_eq!(
+                mapped(code, None),
+                Some(AgentError::SessionLost { reason }),
+                "{code}"
+            );
+        }
         assert_eq!(
             mapped("sandbox_unavailable", None),
             proto("沙箱不可用，会话没有启动")
@@ -230,5 +245,11 @@ mod tests {
     fn verifying_is_retryable_and_incompatible_is_not() {
         assert!(mapped("verification_required", None).unwrap().retryable());
         assert!(!mapped("verification_failed", None).unwrap().retryable());
+    }
+
+    /// 记录用不了不靠原样重试解决（编排走摘要新开），所以不可重试。
+    #[test]
+    fn session_lost_is_not_retryable() {
+        assert!(!mapped("session_not_found", None).unwrap().retryable());
     }
 }

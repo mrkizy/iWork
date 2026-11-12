@@ -35,6 +35,8 @@ use super::{WS, assistant, conversation, cp, env, fold_fx, fs, project, snapshot
 pub trait Judge: Send + Sync + 'static {
     type D: PermissionDecider;
     const NAME: &'static str;
+    /// 有没有拒绝记忆（AC05：被拒的动作在用户下一条消息前自动拒绝）。参照判定方只管 R1–R3，没有
+    const DENIAL_MEMORY: bool;
     /// 布景（`seed_world`）之后建。
     fn make(store: &MemStore) -> impl Future<Output = Self> + Send;
     fn decider(&self) -> Arc<Self::D>;
@@ -56,6 +58,7 @@ impl Reference {
 impl Judge for Reference {
     type D = OrderedDecider;
     const NAME: &'static str = "reference";
+    const DENIAL_MEMORY: bool = false;
     async fn make(store: &MemStore) -> Self {
         Self::new(store)
     }
@@ -135,6 +138,7 @@ impl RealEngine {
 impl Judge for RealEngine {
     type D = EngineDecider;
     const NAME: &'static str = "engine";
+    const DENIAL_MEMORY: bool = true;
     async fn make(store: &MemStore) -> Self {
         Self::start(store).await
     }

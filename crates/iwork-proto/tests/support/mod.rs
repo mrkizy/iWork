@@ -84,7 +84,7 @@ sample_types! {
     SessionConstraints => [b::session_constraints],
     SessionToolSet => [b::session_tool_set],
     SessionModel => [b::session_model],
-    SessionSetup => [b::session_setup, b::session_setup_2],
+    SessionSetup => [b::session_setup, b::session_setup_2, b::session_setup_allowlist],
     RuntimeReport => [
         b::runtime_report_model,
         b::runtime_report_usage,
@@ -158,6 +158,7 @@ sample_types! {
         b::ev_approval_evaluated_rule_paths,
         b::ev_approval_evaluated_grant,
         b::ev_approval_delivered,
+        b::ev_turn_session_bound_replaced,
     ],
 }
 
