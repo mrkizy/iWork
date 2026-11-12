@@ -1387,7 +1387,8 @@ where
         let asked = within(
             self.ports.timer,
             CHANGE_SUMMARY_LIMIT,
-            catch_unwind(probe.summary()),
+            // 调用本身也放进保护里：端口可能在交出 future 之前就同步 panic（审查 1/F-1）
+            catch_unwind(async { probe.summary().await }),
         )
         .await;
         let why = match asked {

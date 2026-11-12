@@ -10,6 +10,8 @@ use iwork_ports::vcs::ChangeProbe;
 enum Answer {
     Summary(Option<ChangeSummary>),
     Panic,
+    /// 交出 future 之前就同步 panic
+    PanicBeforeFuture,
     Hang,
 }
 
@@ -30,10 +32,14 @@ impl FakeProbe {
 impl ChangeProbe for FakeProbe {
     fn summary(&self) -> Pin<Box<dyn Future<Output = Option<ChangeSummary>> + Send + '_>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Answer::PanicBeforeFuture = self.answer {
+            panic!("探针在交出 future 之前坏了");
+        }
         Box::pin(async move {
             match &self.answer {
                 Answer::Summary(s) => s.clone(),
                 Answer::Panic => panic!("探针坏了"),
+                Answer::PanicBeforeFuture => unreachable!("上面已经 panic"),
                 Answer::Hang => std::future::pending().await,
             }
         })
@@ -149,11 +155,16 @@ async fn cancelled_and_failed_turns_skip_probe() {
     }
 }
 
-/// 收尾那一问报错（给不出）、panic、不返回：回合照常 Completed，不带摘要、不盖章。不返回的那格用暂停的时钟，
+/// 收尾那一问报错（给不出）、future 里 panic、交出 future 之前同步 panic、不返回：回合照常 Completed，不带摘要、不盖章。不返回的那格用暂停的时钟，
 /// 等满 `CHANGE_SUMMARY_LIMIT` 就放手。
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn change_probe_never_blocks_completion() {
-    for answer in [Answer::Summary(None), Answer::Panic, Answer::Hang] {
+    for answer in [
+        Answer::Summary(None),
+        Answer::Panic,
+        Answer::PanicBeforeFuture,
+        Answer::Hang,
+    ] {
         let b = Bench::new();
         let probe = FakeProbe::new(answer);
         let started = tokio::time::Instant::now();
