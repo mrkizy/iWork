@@ -523,8 +523,8 @@ mod tests {
         }
     }
 
-    /// 采样在阻塞线程池里做：单线程运行时上，一次很慢的扫描（300ms）期间，定时器照常触发。
-    /// 扫描若跑在异步线程上，这里会出现 ≥300ms 的停顿。
+    /// 采样在阻塞线程池里做，不占异步线程：单线程运行时上，扫描闭包跑在别的线程上。
+    /// 直接比线程，不比停顿时长（CI 机器的调度抖动就能有上百毫秒，和「扫描卡住异步线程」分不开）。
     #[test]
     fn slow_scan_does_not_block_the_async_thread() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -532,13 +532,14 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            let (tx, rx) = watch::channel(None);
-            let scans = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let counter = scans.clone();
+            // 单线程运行时：所有异步任务都在 block_on 的这个线程上跑
+            let async_thread = std::thread::current().id();
+            let (tx, mut rx) = watch::channel(None);
+            let scan_threads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let record = scan_threads.clone();
             let sampler = tokio::spawn(sample_loop(
                 move || {
-                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    std::thread::sleep(Duration::from_millis(300));
+                    record.lock().unwrap().push(std::thread::current().id());
                     Some(ResourceSample {
                         rss_bytes: 1,
                         cpu_percent: 0.0,
@@ -547,26 +548,17 @@ mod tests {
                 },
                 tx,
             ));
-            let start = tokio::time::Instant::now();
-            let mut worst = Duration::ZERO;
-            let mut last = start;
-            // 覆盖首次扫描与一次周期扫描
-            while start.elapsed() < Duration::from_millis(2600) {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-                let now = tokio::time::Instant::now();
-                worst = worst.max(now - last);
-                last = now;
-            }
+            tokio::time::timeout(Duration::from_secs(60), rx.changed())
+                .await
+                .expect("60s 内没收到第一份样本")
+                .unwrap();
             sampler.abort();
-            assert!(
-                scans.load(std::sync::atomic::Ordering::SeqCst) >= 2,
-                "对照：期间确实扫了两次"
-            );
             assert!(rx.borrow().is_some(), "对照：样本送到了");
-            eprintln!("最长停顿 {worst:?}");
+            let threads = scan_threads.lock().unwrap().clone();
+            assert!(!threads.is_empty(), "对照：确实扫过");
             assert!(
-                worst < Duration::from_millis(150),
-                "异步线程被卡了 {worst:?}"
+                threads.iter().all(|t| *t != async_thread),
+                "扫描跑在了异步线程 {async_thread:?} 上：{threads:?}"
             );
         });
     }
