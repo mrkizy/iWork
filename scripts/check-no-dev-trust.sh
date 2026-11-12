@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 发布构建里不存在 --dev-trust（AGENTS.md 安全不变量；T03 任务卡验收 2；方案 S3）。三步证据：
 #   ① feature 图：cargo metadata 的解析结果里，iwork-ipc / iwork-client-core / iwork-daemon / iwork-client
-#      在工作区默认构建下都没有开 `dev`（这是 feature 依赖图，不是字符串）；
+#      在工作区默认构建下都没有开 `dev`；iwork-bridge-claude 没有开 `fault-injection` 与 `fake-cli`（T06 方案 4.3、
+#      15.1：前者让环境变量改 hook 的 timeout，后者是测试用的假 CLI）。这是 feature 依赖图，不是字符串；
 #   ② 产物：release 构建的 iwork-daemon（以及 --artifacts 给的打包产物）里 grep 不到 dev-trust 与 IWORK_DEV_；
 #      同一份源码开 dev 构建出来的必须 grep 得到（阳性对照，证明 grep 真能找到）；
 #   ③ 行为：release 的 iwork-daemon 带 --dev-trust 启动，退出码非 0、stderr 有「未知参数」、不留 socket。
@@ -45,6 +46,19 @@ if [ -n "$bad" ]; then
   exit 1
 fi
 echo "通过：iwork-ipc、iwork-client-core、iwork-daemon、iwork-client 都没有开 dev"
+bad="$(printf '%s' "$meta" | jq -r '
+  . as $m
+  | [$m.packages[] | select(.source == null and .name == "iwork-bridge-claude") | .id] as $ids
+  | $m.resolve.nodes[]
+  | select(.id as $id | $ids | index($id))
+  | .features[]
+  | select(. == "fault-injection" or . == "fake-cli")')"
+if [ -n "$bad" ]; then
+  echo "check-no-dev-trust: iwork-bridge-claude 在工作区默认构建下开了：" >&2
+  echo "$bad" >&2
+  exit 1
+fi
+echo "通过：iwork-bridge-claude 没有开 fault-injection、fake-cli"
 [ "$GRAPH_ONLY" -eq 1 ] && exit 0
 
 EXE=""

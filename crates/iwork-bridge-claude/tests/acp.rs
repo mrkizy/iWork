@@ -457,6 +457,214 @@ async fn big_output_and_big_prompt_do_not_deadlock() {
     );
 }
 
+/// 发一条消息，等到第一段正文出来，返回更新流（之后由测试决定取消）。
+async fn started(
+    s: &impl AgentSession,
+) -> (impl iwork_ports::agent::UpdateStream, Vec<AgentUpdate>) {
+    use iwork_ports::agent::{ContentBlock, UpdateStream};
+    let mut updates = s
+        .prompt(vec![ContentBlock::Text("hi".into())])
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    loop {
+        let u = tokio::time::timeout(std::time::Duration::from_secs(10), updates.next())
+            .await
+            .expect("10 秒内有更新")
+            .expect("还没结束");
+        let text = matches!(u, AgentUpdate::Text { .. });
+        seen.push(u);
+        if text {
+            return (updates, seen);
+        }
+    }
+}
+
+async fn rest(mut updates: impl iwork_ports::agent::UpdateStream) -> Vec<AgentUpdate> {
+    let mut all = Vec::new();
+    while let Some(u) = tokio::time::timeout(std::time::Duration::from_secs(15), updates.next())
+        .await
+        .expect("15 秒内有更新或结束")
+    {
+        all.push(u);
+    }
+    all
+}
+
+/// 5.1：取消 → 桥接发 `interrupt` → CLI 给出这一轮的 `result` → 桥接马上回 prompt。客户端（T05）在 prompt 结束后
+/// 总会结束进程树、报 `Cancelled`（会话靠续接接着用），所以这里看的是：CLI 收到了 `interrupt`；从取消到收尾
+/// 远小于 3 秒（客户端等 prompt 结束才清树，桥接不回 prompt 要等满 3 秒）；没发 SIGTERM。
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_interrupts_and_answers_the_prompt() {
+    let rig = Rig::new(script(vec![
+        read_user(),
+        init(),
+        text("m1", "开始"),
+        json!({ "step": "read_line" }),
+        result(
+            json!({ "subtype": "error_during_execution", "is_error": true, "terminal_reason": "aborted_streaming" }),
+        ),
+    ]));
+    let s = rig.open(rig.spec(), allow_all()).await.unwrap();
+    let (updates, _) = started(&s).await;
+    let cancelled_at = std::time::Instant::now();
+    s.cancel().await.unwrap();
+    let after = rest(updates).await;
+    assert_eq!(
+        ends(&after),
+        [&AgentUpdate::Finished(TurnOutcome::Cancelled)],
+        "{after:?}"
+    );
+    assert!(
+        cancelled_at.elapsed() < std::time::Duration::from_millis(2500),
+        "桥接回了 prompt，客户端没有等满 3 秒：{:?}",
+        cancelled_at.elapsed()
+    );
+    let log = rig.log();
+    assert!(
+        !log.iter().any(|v| v["kind"] == "got_signal"),
+        "等到了 result，不发 SIGTERM"
+    );
+    let stdin: Vec<Value> = log
+        .iter()
+        .filter(|v| v["kind"] == "stdin")
+        .map(|v| serde_json::from_str(v["line"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(stdin[2]["type"], "control_request");
+    assert_eq!(stdin[2]["request"]["subtype"], "interrupt", "{stdin:?}");
+}
+
+/// 5.1 第 1 步：取消时还在等的 hook 全部答拒绝（和后台撤票同一句），命令不执行。
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_denies_waiting_hooks() {
+    struct Pending(Arc<Answers>);
+    impl iwork_ports::agent::PermissionHandler for Pending {
+        async fn on_permission(
+            &self,
+            req: iwork_ports::agent::PermissionRequest,
+        ) -> PermissionDecision {
+            self.0.seen.lock().unwrap().push(req);
+            std::future::pending().await
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("ran");
+    let input = json!({ "command": "touch", "marker": marker.display().to_string() });
+    let rig = Rig::new(script(vec![
+        read_user(),
+        init(),
+        text("m1", "开始"),
+        json!({ "step": "tool", "id": "toolu_1", "name": "Bash", "input": input }),
+        json!({ "step": "read_line" }),
+        result(
+            json!({ "subtype": "error_during_execution", "is_error": true, "terminal_reason": "aborted_tools" }),
+        ),
+    ]));
+    let answers = Arc::new(Answers::default());
+    let s = rig
+        .open(rig.spec(), Pending(answers.clone()))
+        .await
+        .unwrap();
+    let (updates, _) = started(&s).await;
+    for _ in 0..200 {
+        if !answers.seen.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(answers.seen.lock().unwrap().len(), 1, "权限请求到了后台");
+    s.cancel().await.unwrap();
+    let after = rest(updates).await;
+    assert_eq!(
+        ends(&after),
+        [&AgentUpdate::Finished(TurnOutcome::Cancelled)],
+        "{after:?}"
+    );
+    let tool = rig.log().into_iter().find(|v| v["kind"] == "tool").unwrap();
+    assert_eq!(tool["decision"], "deny");
+    assert_eq!(tool["reason"], "回合已结束，权限请求作废");
+    assert!(!marker.exists());
+}
+
+/// 5.1 第 2 步：发了 `interrupt` 1.5 秒还没有 `result` → 只给 CLI 发 SIGTERM（假 CLI 收到的是 15，不是被 SIGKILL）。
+/// CLI 退了，桥接照「CLI 退出」那条路收；客户端（T05）在取消后总会结束进程树，那一层照样报 `Cancelled`。
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_sends_sigterm_after_interrupt_gets_no_result() {
+    let rig = Rig::new(Value::Array({
+        let mut v = opening();
+        v.extend([
+            read_user(),
+            init(),
+            text("m1", "开始"),
+            json!({ "step": "wait_for_sigterm" }),
+        ]);
+        v
+    }));
+    let s = rig.open(rig.spec(), allow_all()).await.unwrap();
+    let (updates, _) = started(&s).await;
+    let cancelled_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    s.cancel().await.unwrap();
+    let after = rest(updates).await;
+    // 客户端在取消后总会结束进程树，这一层照样报 Cancelled；桥接这一段看的是下面的 SIGTERM
+    assert_eq!(
+        ends(&after),
+        [&AgentUpdate::Finished(TurnOutcome::Cancelled)],
+        "{after:?}"
+    );
+    let got = rig
+        .log()
+        .into_iter()
+        .find(|v| v["kind"] == "got_signal")
+        .expect("假 CLI 收到了信号");
+    assert_eq!(got["signal"], 15, "SIGTERM");
+    let waited = got["at_ms"].as_u64().unwrap() - cancelled_at;
+    assert!(
+        (1400..2500).contains(&waited),
+        "取消后约 1.5 秒：{waited}ms"
+    );
+}
+
+/// 3.1a（D5）：后台任务的两个信号，看到任何一样这一轮按 `cli_error`（`background_task`）失败，会话收掉。
+#[tokio::test(flavor = "multi_thread")]
+async fn background_task_event_fails_the_turn() {
+    for signal in [
+        json!({ "type": "system", "subtype": "task_started", "task_id": "a", "is_backgrounded": true }),
+        json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [{ "task_id": "a" }] }),
+    ] {
+        let rig = Rig::new(script(vec![
+            read_user(),
+            init(),
+            emit(signal.clone()),
+            result_ok(),
+        ]));
+        let s = rig.open(rig.spec(), allow_all()).await.unwrap();
+        let updates = turn(&s, "hi").await.unwrap();
+        assert!(
+            matches!(ends(&updates)[..], [AgentUpdate::Failed(AgentError::Protocol { message })] if message.contains("background_task")),
+            "{signal}：{updates:?}"
+        );
+    }
+    // 对照：前台子代理（is_backgrounded: false）与空的任务清单不算
+    let rig = Rig::new(script(vec![
+        read_user(),
+        init(),
+        emit(
+            json!({ "type": "system", "subtype": "task_started", "task_id": "a", "is_backgrounded": false }),
+        ),
+        emit(json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [] })),
+        result_ok(),
+    ]));
+    let s = rig.open(rig.spec(), allow_all()).await.unwrap();
+    let updates = turn(&s, "hi").await.unwrap();
+    assert_eq!(
+        ends(&updates),
+        [&AgentUpdate::Finished(TurnOutcome::Completed)]
+    );
+}
+
 /// 审查 1/F-2：后台选了允许、改写后的输入却不合法：交给 hook 的是拒绝，对账也按拒绝记。CLI 之后照样回了
 /// 这个编号的成功结果（没经允许就执行了）→ `hook_inactive`。修之前对账按后台的「允许」记，这一轮当成完成。
 #[tokio::test(flavor = "multi_thread")]
@@ -597,4 +805,78 @@ async fn startup_permission_mismatch_preserves_kind() {
             "{mode:?}"
         );
     }
+}
+
+/// 4.4、4.6 第 14 行在 ACP 这一层：hook 在等答复时死了（被 CLI 杀掉、自己到期），桥接看到 hook 断开，
+/// 这一轮以 `approval_backstop` 失败、会话收掉，不等后台以后的答复。后台这边一直不答。
+#[tokio::test(flavor = "multi_thread")]
+async fn hook_lost_while_waiting_ends_the_session() {
+    struct Never;
+    impl iwork_ports::agent::PermissionHandler for Never {
+        async fn on_permission(
+            &self,
+            _req: iwork_ports::agent::PermissionRequest,
+        ) -> PermissionDecision {
+            std::future::pending().await
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("ran");
+    let input = json!({ "command": "touch", "marker": marker.display().to_string() });
+    let rig = Rig::new(script(vec![
+        read_user(),
+        init(),
+        json!({ "step": "tool", "id": "toolu_1", "name": "Bash", "input": input, "kill_hook_after_ms": 300 }),
+    ]));
+    let s = rig.open(rig.spec(), Never).await.unwrap();
+    let updates = tokio::time::timeout(std::time::Duration::from_secs(10), turn(&s, "跑一下"))
+        .await
+        .expect("hook 死了之后 10 秒内这一轮结束")
+        .unwrap();
+    assert!(
+        matches!(ends(&updates)[..], [AgentUpdate::Failed(AgentError::Protocol { message })] if message.contains("兜底")),
+        "{updates:?}"
+    );
+    assert!(!marker.exists());
+}
+
+/// 5.1：取消之后（interrupt 已发、这一轮还没结束）CLI 又起了一次工具调用：hook 拿到「回合已结束」的拒绝，
+/// 不交给后台，命令不执行（`TurnGate::hook` 在取消中给 `DenyTurnGone`）。
+#[tokio::test(flavor = "multi_thread")]
+async fn hook_after_cancel_is_denied_without_asking() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("ran");
+    let input = json!({ "command": "touch", "marker": marker.display().to_string() });
+    let rig = Rig::new(script(vec![
+        read_user(),
+        init(),
+        text("m1", "开始"),
+        json!({ "step": "read_line" }),
+        json!({ "step": "tool", "id": "toolu_late", "name": "Bash", "input": input }),
+        result(json!({
+            "subtype": "error_during_execution", "is_error": true, "terminal_reason": "aborted_tools"
+        })),
+    ]));
+    let answers = Arc::new(Answers::default());
+    let s = rig
+        .open(rig.spec(), Handler(answers.clone()))
+        .await
+        .unwrap();
+    let (updates, _) = started(&s).await;
+    s.cancel().await.unwrap();
+    let after = rest(updates).await;
+    assert_eq!(
+        ends(&after),
+        [&AgentUpdate::Finished(TurnOutcome::Cancelled)],
+        "{after:?}"
+    );
+    let tool = rig
+        .log()
+        .into_iter()
+        .find(|v| v["kind"] == "tool")
+        .expect("取消后 hook 照样问了");
+    assert_eq!(tool["decision"], "deny");
+    assert_eq!(tool["reason"], "回合已结束，权限请求作废");
+    assert!(!marker.exists());
+    assert!(answers.seen.lock().unwrap().is_empty(), "没交给后台");
 }

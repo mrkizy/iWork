@@ -68,13 +68,14 @@ fn setup(tier: Tier, tools: Tools) -> Setup {
 }
 
 /// 桥接自己的环境（假的值）：会被原样交给 CLI（3.1a，P14 不筛选）。继承来的自动记忆开关是 `0`（强制打开）。
-const INHERITED: [(&str, &str); 6] = [
+const INHERITED: [(&str, &str); 7] = [
     ("PATH", "/usr/bin:/bin"),
     ("HOME", "/Users/u"),
     ("HTTPS_PROXY", "http://proxy.invalid:3128"),
     ("ANTHROPIC_API_KEY", "sk-fake-not-a-key"),
     ("CLAUDE_CODE_PLUGIN_DIRS", "/Users/u/fake-plugins"),
     ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "0"),
+    ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "0"),
 ];
 
 fn inherited() -> LaunchEnv {
@@ -389,13 +390,12 @@ fn relative_cwd_is_refused() {
 #[test]
 fn launch_env_inherits_everything_else() {
     let p = plan(&setup(Tier::Manual, Tools::Default), new_session());
-    for (k, v) in INHERITED
-        .iter()
-        .filter(|(k, _)| *k != "CLAUDE_CODE_DISABLE_AUTO_MEMORY")
-    {
+    for (k, v) in INHERITED.iter().filter(|(k, _)| {
+        *k != "CLAUDE_CODE_DISABLE_AUTO_MEMORY" && *k != "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
+    }) {
         assert_eq!(p.env.get(k), Some(std::ffi::OsStr::new(v)), "{k}");
     }
-    // 只多出关自动记忆与 hook 通道这五个
+    // 只多出 hook 通道这四个（两个开关是覆盖继承来的，不是新加的）
     let extra: Vec<_> = p
         .env
         .vars()
@@ -426,6 +426,29 @@ fn launch_env_forces_auto_memory_off() {
         .map(|(_, v)| v.clone())
         .collect();
     assert_eq!(all, [OsString::from("1")]);
+}
+
+/// D5（M1 关后台任务）：继承来的是 `0` 也变成 `1`，而且只有一条（3.1a）。
+#[test]
+fn launch_env_forces_background_tasks_off() {
+    let p = plan(&setup(Tier::Manual, Tools::Default), new_session());
+    let all: Vec<_> = p
+        .env
+        .vars()
+        .iter()
+        .filter(|(k, _)| k == "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
+        .map(|(_, v)| v.clone())
+        .collect();
+    assert_eq!(all, [OsString::from("1")]);
+}
+
+/// P4 选 a：三档都写 `sandbox.failIfUnavailable: true`，沙箱起不来 CLI 就不启动（第 8 节）。
+#[test]
+fn settings_fail_if_sandbox_unavailable() {
+    for tier in [Tier::Manual, Tier::Auto, Tier::FullAccess] {
+        let p = plan(&setup(tier, Tools::Default), new_session());
+        assert_eq!(p.settings["sandbox"]["failIfUnavailable"], true, "{tier:?}");
+    }
 }
 
 /// 设置里有 autoMemoryDirectory，指向会话目录里的空目录 m/（3.1a、3.3）。

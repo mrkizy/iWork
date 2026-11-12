@@ -5,9 +5,9 @@
 //! - `session/new` / `session/load`：解 `SessionSetup`，按 3.5 的次序开会话（[`startup::open`]）；成功后会话交给
 //!   一个后台任务（[`run_session`]）独占：CLI 的输出、hook 通道、权限答复、prompt 请求都在它一个循环里处理，
 //!   回合之外到的东西也有人收。
-//! - 这条会话的沙箱（`_meta.iwork.sandbox`）报 `unavailable`：第 8 节要求只有证据时才报 `enforced`（`system/init`
-//!   里的沙箱状态字段，或 `failIfUnavailable` 保证起不来就退出），这两样现在都没有（P4 未定），静态的「平台支持」
-//!   不许冒充会话的实际状态。
+//! - 这条会话的沙箱（`_meta.iwork.sandbox`）报 `unavailable`：第 8 节要求只有证据时才报 `enforced`。设置里已经
+//!   写了 `failIfUnavailable`（P4 选 a），但「沙箱起不来 CLI 就真的退出」在 macOS 上还没实测成立，成立之前不改，
+//!   静态的「平台支持」不许冒充会话的实际状态。
 //! - 致命错误（输出坏了、隔离失效、对账不成立、兜底）：正在跑的 prompt 回点名错误码，杀掉 CLI，会话作废。
 //!   怎么停才不留下命令（5.4a）归 S6-5；取消（`session/cancel`）归 S6-4。
 
@@ -18,13 +18,14 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    AgentCapabilities, ContentBlock, ContentChunk, Implementation, InitializeRequest,
-    InitializeResponse, LoadSessionRequest, LoadSessionResponse, Meta, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PermissionOptionKind, PromptCapabilities, PromptRequest,
-    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SessionCapabilities, SessionId, SessionInfoUpdate, SessionNotification,
-    SessionSystemPromptCapabilities, SessionUpdate, StopReason, SystemPrompt, TextContent,
-    ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Implementation,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, Meta,
+    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
+    PromptCapabilities, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SessionCapabilities, SessionId,
+    SessionInfoUpdate, SessionNotification, SessionSystemPromptCapabilities, SessionUpdate,
+    StopReason, SystemPrompt, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate,
+    ToolCallUpdateFields,
 };
 use agent_client_protocol::{Agent, Client, Lines};
 use base64::Engine as _;
@@ -36,10 +37,10 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::cli::errors::TurnEnd;
 use crate::cli::facts::{IsolationBroken, SessionExpect};
-use crate::cli::input::{InputBlock, user_line};
+use crate::cli::input::{InputBlock, control_request_line, user_line};
 use crate::cli::map::{Fatal, Out, Report, StreamMapper};
 use crate::cli::process::{InputError, InputQueue, ReadError};
-use crate::deadlines::deadlines;
+use crate::deadlines::{CANCEL_TERM_AFTER, deadlines};
 use crate::hook_server::HookEvent;
 use crate::hook_server::input::{self as hook_input, HookInput};
 use crate::hook_server::pending::{BackendAnswer, CallId, Delivery};
@@ -48,6 +49,7 @@ use crate::launch::{BridgeEnv, Opening, Start};
 use crate::rewrite::{CommandRewriter, NoRewrite};
 use crate::setup;
 use crate::startup::{self, OpenRequest, OpenSession};
+use crate::turn_gate::{HookVerdict, TurnGate};
 
 /// iWork 在 ACP `_meta` 里占用的键（方案 2.5；和 `iwork-agent-acp::convert` 同一份字符串，由端到端测试对拍）。
 const META_KEY: &str = "iwork";
@@ -65,6 +67,11 @@ const REJECT_ID: &str = "reject-once";
 /// 回合之外到的工具调用、解析不了的 hook 输入，回给模型的话。
 pub const REASON_NO_TURN: &str = "iWork 当前没有进行中的回合，这次调用没有执行";
 pub const REASON_BAD_HOOK_INPUT: &str = "iWork 无法解析这次工具调用，没有执行";
+/// 取消时还在等的 hook 答的话：和后台撤票用的同一句（T05 的 `TURN_GONE_MESSAGE`）。
+pub const REASON_TURN_GONE: &str = "回合已结束，权限请求作废";
+/// 桥接发的 `interrupt` 控制请求的编号。
+const INTERRUPT_REQUEST_ID: &str = "iwork-interrupt";
+
 /// 后台拒绝却没给原因时（不该发生）。
 const REASON_DENIED: &str = "iWork 拒绝了这次调用";
 
@@ -107,10 +114,29 @@ impl BridgeConfig {
                 hook_program,
                 inherited: crate::launch::env::LaunchEnv::from_vars(std::env::vars_os().collect()),
             },
-            hook_timeout: Duration::from_secs(crate::launch::settings::HOOK_TIMEOUT_SECS),
+            hook_timeout: hook_timeout()?,
             startup_limit: startup::STARTUP_LIMIT,
         })
     }
+}
+
+/// 故障注入时把 hook 的 timeout 调短（秒，正整数）。只在 `fault-injection` feature 下认。
+#[cfg(feature = "fault-injection")]
+pub const ENV_HOOK_TIMEOUT: &str = "IWORK_BRIDGE_HOOK_TIMEOUT_SECS";
+
+/// PreToolUse hook 的 timeout：产品里是写死的常量；`fault-injection` 构建可以用环境变量改（方案 4.3）。
+fn hook_timeout() -> Result<Duration, String> {
+    let product = Duration::from_secs(crate::launch::settings::HOOK_TIMEOUT_SECS);
+    #[cfg(feature = "fault-injection")]
+    if let Some(v) = std::env::var_os(ENV_HOOK_TIMEOUT) {
+        return v
+            .to_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|n| *n >= 5)
+            .map(Duration::from_secs)
+            .ok_or_else(|| format!("{ENV_HOOK_TIMEOUT} 要是不小于 5 的整数秒"));
+    }
+    Ok(product)
 }
 
 type Conn = ConnectionTo<Client>;
@@ -152,6 +178,8 @@ enum Command {
         blocks: Vec<InputBlock>,
         done: oneshot::Sender<Result<StopReason, agent_client_protocol::Error>>,
     },
+    /// `session/cancel`（5.1）
+    Cancel,
 }
 
 /// 桥接进程里那一条会话。会话任务是它的唯一写入方（开会话时放进发送端，结束时记下原因、拿走发送端）。
@@ -182,7 +210,7 @@ where
     let config = Arc::new(config);
     let slot = Arc::new(Mutex::new(Slot::default()));
     let (c1, c2, c3) = (config.clone(), config.clone(), config.clone());
-    let (s1, s2, s3) = (slot.clone(), slot.clone(), slot.clone());
+    let (s1, s2, s3, s4) = (slot.clone(), slot.clone(), slot.clone(), slot.clone());
     Agent
         .v1()
         .name("iwork-bridge-claude")
@@ -250,6 +278,16 @@ where
                 })
             },
             agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |_n: CancelNotification, _cx| {
+                // 会话还没开、或已经没了：没有可取消的
+                if let Some(commands) = &s4.lock().expect("锁没有中毒").commands {
+                    let _ = commands.send(Command::Cancel);
+                }
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
         )
         .connect_to(transport)
         .await
@@ -383,7 +421,7 @@ async fn open(
         rewriter: Box::new(NoRewrite),
         mapper,
         reconciler: Reconciler::default(),
-        turn: None,
+        gate: TurnGate::default(),
     };
     // 开会话期间收下的行（`init` 可能已经在里面）先过映射与对账：这时确认的致命错误（隔离失效、没经允许的工具
     // 结果）让开会话失败，不留到之后（审查 1/F-5）。失败时 `session` 在这里丢掉：CLI 被杀、通道停、目录删
@@ -456,9 +494,12 @@ struct Worker {
     rewriter: Box<dyn CommandRewriter>,
     mapper: StreamMapper,
     reconciler: Reconciler,
-    /// 正在跑的那一轮：结束时往这里回
-    turn: Option<oneshot::Sender<Result<StopReason, agent_client_protocol::Error>>>,
+    /// 这一轮的状态（接不接 prompt、取消、SIGTERM 期限、hook 转不转）：只在这一处（`turn_gate.rs`）
+    gate: TurnGate<Done, tokio::time::Instant>,
 }
+
+/// prompt 的回复通道。
+type Done = oneshot::Sender<Result<StopReason, agent_client_protocol::Error>>;
 
 /// 一次权限请求的结论，回到会话任务里交给 hook。
 struct Answered {
@@ -521,6 +562,11 @@ impl From<Fatal> for SessionFatal {
                     _ => None,
                 },
             },
+            Fatal::BackgroundTask => Self {
+                code: "cli_error",
+                reason: Some("background_task"),
+                plugin: None,
+            },
         }
     }
 }
@@ -557,9 +603,11 @@ async fn run_session(
     // stdin 交给单独的写任务：写卡住时这里照样读 stdout、收 hook 事件（审查 1/F-1）
     let mut input = s.cli.input_queue();
     let fatal = loop {
+        let term_at = w.gate.term_at();
         let result = tokio::select! {
             cmd = commands.recv() => match cmd {
                 Some(Command::Prompt { blocks, done }) => w.begin(&input, blocks, done),
+                Some(Command::Cancel) => w.cancel(&s, &input),
                 // 连接没了：没有人再发 prompt，会话到此为止
                 None => break None,
             },
@@ -570,6 +618,10 @@ async fn run_session(
             },
             Some(a) = answered.recv() => w.on_answered(&s, a),
             () = input.failed() => Err(CLI_EXITED),
+            _ = async { tokio::time::sleep_until(term_at.expect("有期限才进这一支")).await }, if term_at.is_some() => {
+                w.term_cli(&s);
+                Ok(())
+            }
         };
         if let Err(f) = result {
             break Some(f);
@@ -577,7 +629,7 @@ async fn run_session(
     };
     if let Some(f) = &fatal {
         tracing::warn!(code = f.code, reason = ?f.reason, "会话出现致命错误，结束 CLI");
-        if let Some(done) = w.turn.take() {
+        if let Some(done) = w.gate.end() {
             let _ = done.send(Err(f.to_error()));
         }
     }
@@ -674,7 +726,8 @@ impl Worker {
                 // 桥接在会话里不发别的控制请求（取消归 S6-4）
                 Out::Control(_) => {}
                 Out::End(end) => {
-                    if let Some(done) = self.turn.take() {
+                    // 这一轮结束：回复通道交回，取消中的话 SIGTERM 期限随之作废（`TurnGate::finish`）
+                    if let Some(done) = self.gate.finish() {
                         let _ = done.send(match end {
                             TurnEnd::Completed => Ok(StopReason::EndTurn),
                             TurnEnd::Cancelled => Ok(StopReason::Cancelled),
@@ -694,9 +747,9 @@ impl Worker {
         &mut self,
         input: &InputQueue,
         blocks: Vec<InputBlock>,
-        done: oneshot::Sender<Result<StopReason, agent_client_protocol::Error>>,
+        done: Done,
     ) -> Result<(), SessionFatal> {
-        if self.turn.is_some() {
+        if self.gate.in_turn() {
             let _ = done.send(Err(named_error("setup_invalid", Some("prompt"))));
             return Ok(());
         }
@@ -719,10 +772,50 @@ impl Worker {
                 return Err(CLI_EXITED);
             }
         }
-        self.turn = Some(done);
+        if let Err((done, why)) = self.gate.begin(done) {
+            // 上面已经排除了在跑的回合；会话结束之后会话任务不再收 prompt。两样都不该走到这里
+            tracing::warn!(?why, "prompt 没被接下");
+            let _ = done.send(Err(CLI_EXITED.to_error()));
+            return Ok(());
+        }
         let outs = self.mapper.begin_turn();
         self.emit(outs);
         Ok(())
+    }
+
+    /// 取消（5.1，D2 选 b″）：在跑的回合第一次取消时，还在等的 hook 全部拒绝 → `interrupt` 放进输入队列 →
+    /// 映射按取消收这一轮；[`CANCEL_TERM_AFTER`] 内没等到 `result` 就给 CLI 发 SIGTERM（[`Self::term_cli`]）。
+    /// 别的时候什么都不做（`TurnGate::cancel`）。
+    fn cancel(&mut self, s: &OpenSession, input: &InputQueue) -> Result<(), SessionFatal> {
+        let Some(plan) = self
+            .gate
+            .cancel(tokio::time::Instant::now() + CANCEL_TERM_AFTER)
+        else {
+            return Ok(());
+        };
+        let denied = s.pending.deny_all(REASON_TURN_GONE);
+        tracing::info!(denied, term_at = ?plan.term_at, "取消：还在等的 hook 已拒绝，发 interrupt");
+        self.mapper.request_cancel();
+        input
+            .send(&control_request_line(INTERRUPT_REQUEST_ID, "interrupt"))
+            .map_err(|_| CLI_EXITED)
+    }
+
+    /// 取消后到点还没等到这一轮结束：只给 CLI 发 SIGTERM（不发给进程组），让它自己收拾、写完会话记录再退。
+    /// 它退了之后照「CLI 退出」那条路回报；后台 3 秒后照样结束整棵树，正确性不靠这一步（5.1 第 3 步）。
+    fn term_cli(&mut self, s: &OpenSession) {
+        if !self.gate.term_due() {
+            return;
+        }
+        let Some(pid) = s.cli.id().and_then(|p| i32::try_from(p).ok()) else {
+            return;
+        };
+        tracing::warn!(pid, "取消后没等到这一轮结束，给 CLI 发 SIGTERM");
+        // SAFETY: 只对我们自己起的、还没被等到退出的 CLI 进程号发信号
+        let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+        if rc != 0 {
+            tracing::warn!(error = %std::io::Error::last_os_error(), "给 CLI 发 SIGTERM 失败");
+        }
     }
 
     fn on_line(&mut self, line: Result<Option<String>, ReadError>) -> Result<(), SessionFatal> {
@@ -791,9 +884,16 @@ impl Worker {
                 return;
             }
         };
-        if !self.mapper.in_turn() {
-            s.pending.answer(id, reject(REASON_NO_TURN));
-            return;
+        match self.gate.hook() {
+            HookVerdict::Forward => {}
+            HookVerdict::DenyNoTurn => {
+                s.pending.answer(id, reject(REASON_NO_TURN));
+                return;
+            }
+            HookVerdict::DenyTurnGone => {
+                s.pending.answer(id, reject(REASON_TURN_GONE));
+                return;
+            }
         }
         if let Some(out) =
             self.mapper

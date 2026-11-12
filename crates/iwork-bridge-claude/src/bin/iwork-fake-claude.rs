@@ -55,7 +55,12 @@ enum Step {
         id: String,
         name: String,
         input: Value,
+        /// 给了的话：hook 起来这么多毫秒后把它杀掉（hook 在等答复时死了，桥接那边看到的是 hook 断开）
+        #[serde(default)]
+        kill_hook_after_ms: Option<u64>,
     },
+    /// 不理 stdin，等 SIGTERM：收到就记一笔、以 0 退出（测试据此确认桥接发的是 SIGTERM、不是 SIGKILL）
+    WaitForSigterm,
     SleepMs {
         ms: u64,
     },
@@ -64,6 +69,27 @@ enum Step {
     },
     /// 一直读 stdin 到关掉（之后接着下一步）
     WaitStdinEof,
+}
+
+/// 把 SIGTERM 屏蔽掉，再用 sigwait 同步地等它（不装处理函数），返回收到的信号号。
+#[cfg(unix)]
+fn wait_for_sigterm() -> i32 {
+    // SAFETY: 假 CLI 是单线程的；set 与 got 都是本地变量，调用顺序照 sigwait(3) 的要求
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        let mut got: libc::c_int = 0;
+        libc::sigwait(&set, &mut got);
+        got
+    }
+}
+
+/// M1 不支持 Windows（AGENTS.md）：用到这一步的测试只在 unix 上跑。
+#[cfg(not(unix))]
+fn wait_for_sigterm() -> i32 {
+    unimplemented!("wait_for_sigterm 只在 unix 上")
 }
 
 fn success() -> String {
@@ -181,7 +207,17 @@ impl Fake {
                 self.out(&json!({ "type": "system", "subtype": "big", "pad": "x".repeat(bytes) }));
                 self.log("emitted", json!({ "bytes": bytes }));
             }
-            Step::Tool { id, name, input } => self.tool(&id, &name, input),
+            Step::Tool {
+                id,
+                name,
+                input,
+                kill_hook_after_ms,
+            } => self.tool(&id, &name, input, kill_hook_after_ms),
+            Step::WaitForSigterm => {
+                let sig = wait_for_sigterm();
+                self.log("got_signal", json!({ "signal": sig }));
+                std::process::exit(0);
+            }
             Step::SleepMs { ms } => std::thread::sleep(Duration::from_millis(ms)),
             Step::Exit { code } => {
                 self.log("exit", json!({ "code": code }));
@@ -228,7 +264,7 @@ impl Fake {
     }
 
     /// 一次工具调用：问 hook，按决定「执行」。
-    fn tool(&self, id: &str, name: &str, input: Value) {
+    fn tool(&self, id: &str, name: &str, input: Value, kill_hook_after_ms: Option<u64>) {
         let stdin = json!({
             "session_id": "fake",
             "hook_event_name": "PreToolUse",
@@ -250,6 +286,10 @@ impl Fake {
             .expect("stdin 是 piped")
             .write_all(stdin.to_string().as_bytes())
             .expect("hook 的 stdin 写得进去");
+        if let Some(ms) = kill_hook_after_ms {
+            std::thread::sleep(Duration::from_millis(ms));
+            let _ = child.kill();
+        }
         let out = child.wait_with_output().expect("等得到 hook");
         let decided: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
         let d = &decided["hookSpecificOutput"];

@@ -30,8 +30,6 @@ pub const SELECTED: SelectedConfig = SelectedConfig {
 };
 
 /// 生成的设置文件。
-///
-/// P4 未定：S6 开工前定了再加 `sandbox.failIfUnavailable`，带快照（方案第 8 节最后一行、18 节 P4）。
 pub fn settings_json(constraints: &Constraints, hook_program: &str, memory_dir: &Path) -> Value {
     let hook = shell_quote(hook_program);
     json!({
@@ -76,6 +74,8 @@ fn sandbox_json(c: &Constraints) -> Value {
     };
     json!({
         "enabled": true,
+        // P4 选 a（2026-11-12）：本该有沙箱的平台上沙箱起不来，CLI 不启动，会话开不了
+        "failIfUnavailable": true,
         // 沙箱内也不自动放行：问不问由 iWork 定
         "autoAllowBashIfSandboxed": false,
         "allowUnsandboxedCommands": c.allow_unsandboxed_retry,

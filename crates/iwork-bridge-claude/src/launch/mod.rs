@@ -12,7 +12,7 @@ use std::time::Duration;
 use iwork_claude_hook::client::{ENV_BRIDGE_PID, ENV_DEADLINE, ENV_SOCK, ENV_TOKEN};
 use serde_json::Value;
 
-use self::env::{DISABLE_AUTO_MEMORY, LaunchEnv};
+use self::env::{DISABLE_AUTO_MEMORY, DISABLE_BACKGROUND_TASKS, LaunchEnv};
 use crate::setup::{Setup, SetupInvalid};
 
 /// 桥接这个进程的事实，和会话无关。
@@ -63,7 +63,7 @@ pub struct LaunchPlan {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
-    /// CLI 的完整环境：桥接的环境原样，再设上关自动记忆与 hook 通道的五个（3.1a）
+    /// CLI 的完整环境：桥接的环境原样，再设上两个开关与 hook 通道的四个（3.1a）
     pub env: LaunchEnv,
     pub settings: Value,
     pub mcp: Value,
@@ -88,6 +88,7 @@ pub fn build_launch(
             &env.inherited,
             &[
                 (DISABLE_AUTO_MEMORY, "1".to_owned()),
+                (DISABLE_BACKGROUND_TASKS, "1".to_owned()),
                 (ENV_SOCK, files.socket.display().to_string()),
                 (ENV_TOKEN, channel.token_hex.clone()),
                 (ENV_BRIDGE_PID, channel.bridge_pid.to_string()),
