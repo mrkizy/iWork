@@ -116,6 +116,8 @@ pub struct VerifiedTools {
 }
 
 /// 一种会话形状：这些工具被禁用时，`system/init.tools` 是什么。
+///
+/// 名字照 `init.tools` 记。子代理工具在这里叫 `Task`，在工具调用、hook 输入里叫 `Agent`（审批登记表按后者）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolShape {
     pub disabled: &'static [&'static str],
@@ -126,7 +128,9 @@ pub struct ToolShape {
 pub const VERIFIED_TOOLS: &[VerifiedTools] = &[VerifiedTools {
     adapter_name: "iwork-bridge-claude",
     cli_version: "2.1.322",
-    // t0-findings 2.4：G1a（默认 25 个）、G8c（禁掉 Bash 后多出 Glob、Grep）
+    // R2（2026-11-12，干净环境，结果包 iwork-t0g-results-20261112-141011-8ff1ae）：什么都不禁时 24 个；
+    // G8c 禁 Bash、CronCreate、RemoteTrigger 时 22 个（Monitor 也不在了，多出 Glob、Grep）。S0 记的 25 个多一个
+    // ToolSearch，是带着用户插件的环境；只禁 Bash 的形状 R2 没量，不登记
     shapes: &[
         ToolShape {
             disabled: &[],
@@ -151,7 +155,6 @@ pub const VERIFIED_TOOLS: &[VerifiedTools] = &[VerifiedTools {
                 "SendMessage",
                 "Skill",
                 "TaskStop",
-                "ToolSearch",
                 "WebFetch",
                 "WebSearch",
                 "Workflow",
@@ -159,10 +162,9 @@ pub const VERIFIED_TOOLS: &[VerifiedTools] = &[VerifiedTools {
             ],
         },
         ToolShape {
-            disabled: &["Bash"],
+            disabled: &["Bash", "CronCreate", "RemoteTrigger"],
             tools: &[
                 "Task",
-                "CronCreate",
                 "CronDelete",
                 "CronList",
                 "DesignSync",
@@ -172,17 +174,14 @@ pub const VERIFIED_TOOLS: &[VerifiedTools] = &[VerifiedTools {
                 "Glob",
                 "Grep",
                 "ListAgents",
-                "Monitor",
                 "NotebookEdit",
                 "PushNotification",
                 "Read",
-                "RemoteTrigger",
                 "ReportFindings",
                 "ScheduleWakeup",
                 "SendMessage",
                 "Skill",
                 "TaskStop",
-                "ToolSearch",
                 "WebFetch",
                 "WebSearch",
                 "Workflow",
@@ -289,8 +288,8 @@ mod tests {
         }
     }
 
-    /// 2.1.322 的两种形状（期望值手写，t0-findings 2.4 G1a、G8c）：默认 25 个、没有 Grep 与 Glob；禁掉 Bash 时
-    /// 少了 Bash、多出 Grep 与 Glob，别的一样。
+    /// 2.1.322 的两种形状（期望值手写，R2 的 G0 与 G8c）：默认 24 个，没有 Grep、Glob、ToolSearch；禁掉 Bash、
+    /// CronCreate、RemoteTrigger 时这三个和 Monitor 都不在了，多出 Grep 与 Glob，别的一样。
     #[test]
     fn claude_2_1_322_shapes() {
         let v = VERIFIED_TOOLS
@@ -308,11 +307,20 @@ mod tests {
                 .collect()
         };
         let default = shape(&[]);
-        assert_eq!(default.len(), 25);
-        assert!(default.contains("Bash") && !default.contains("Grep") && !default.contains("Glob"));
+        assert_eq!(default.len(), 24);
+        assert!(
+            default.contains("Bash") && default.contains("Monitor") && default.contains("Task")
+        );
+        for absent in ["Grep", "Glob", "ToolSearch", "Agent"] {
+            assert!(!default.contains(absent), "{absent}");
+        }
         let mut expected = default.clone();
-        expected.remove("Bash");
+        for gone in ["Bash", "CronCreate", "RemoteTrigger", "Monitor"] {
+            assert!(expected.remove(gone), "{gone}");
+        }
         expected.extend(["Grep", "Glob"]);
-        assert_eq!(shape(&["Bash"]), expected);
+        let no_bash = shape(&["Bash", "CronCreate", "RemoteTrigger"]);
+        assert_eq!(no_bash.len(), 22);
+        assert_eq!(no_bash, expected);
     }
 }
