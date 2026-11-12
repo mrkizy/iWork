@@ -93,11 +93,12 @@
   color: var(--idle);
   cursor: not-allowed;
 }
-/* 全开：赭红粗体、底色淡赭红，常驻醒目（2 节第 9 条） */
+/* 全开：赭红粗体、底色淡赭红，常驻醒目（2 节第 9 条）。底色 6%：12% 时赭红字只有 4.41 / 4.24:1（浅 / 深），
+   6% 时 4.80 / 4.57（UI 审查 5/F-1 的同类，client/tests/mixed-contrast.test.ts） */
 .iw-pill--full {
   color: var(--acc);
   font-weight: 700;
-  background: color-mix(in srgb, var(--acc) 12%, transparent);
+  background: color-mix(in srgb, var(--acc) 6%, transparent);
 }
 .iw-pill__override {
   color: var(--mus);

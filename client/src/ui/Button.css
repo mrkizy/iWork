@@ -41,7 +41,9 @@
   color: var(--accTx);
 }
 .iw-btn--accent:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--acc) 90%, var(--surf));
+  /* 只淡一点：90% 时浅色主题白字只有 4.35:1（UI 审查 5/F-1），96% 浅色 4.85、深色 5.08。
+     混色底上的对比度由 client/tests/mixed-contrast.test.ts 按两套主题算 */
+  background: color-mix(in srgb, var(--acc) 96%, var(--surf));
 }
 .iw-btn--accent:disabled {
   background: color-mix(in srgb, var(--acc) 45%, var(--surf));
