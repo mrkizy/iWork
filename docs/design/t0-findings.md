@@ -186,6 +186,82 @@ S0 合计 PASS 506、FAIL 46、INCONCLUSIVE 217、INFO 19。FAIL 里 34 个是 G
 
 **运行前后核对**：家目录下原有 1 项，没变。登记之外的调用 86 次，都被探针拒了。
 
+#### R2 补测（2026-11-12 下午，Claude Code 2.1.322，日常账号，普通终端起，模型 `claude-haiku-5-5`；四个结果包 `…153126-79f269`、`…161127-fe1169`、`…161240-a5754c`、`…161328-5de10e`，26 个实例加 4 个探查）
+
+只收有结构化证据的。分析全文在 architect 的报告 `r2x-analysis.md`；据此定的 D2、D5、P3、P15 见 T06 方案 18 节。
+
+**先看这一条：哪些格子是在什么设置下量的。** 脚本的权限模式和沙箱都只从设置文件来。下表「没带产品设置」的格子，设置文件里只有 hook 和记忆改道：`init` 报的权限模式是 `default`，**命令不在沙箱里跑**。R2 的 G7 各格（上文「G7 流式输入、中断、续接、进程」里 R2 那一轮的进程事实）也是这样。所以**下面的进程关系与信号行为都是没开沙箱时的**；产品里命令在沙箱里跑，CLI 到命令之间可能多一层，SIGTERM 时 CLI 收不收拾沙箱里的命令没量过。脚本已改成这几格带产品设置（main `af0b6a5`），k3 待重跑。
+
+| 格子 | 设置 |
+| --- | --- |
+| k1–k3（含 k4）、b1、b2、n1、工具清单五格 | **没带产品设置**：`default`、没开沙箱 |
+| ①c′、①d′、p1、p2、p4 两格 | 带了：`dontAsk`，沙箱照产品那样 |
+| G5 各格 | `dontAsk`；这几格不跑命令，沙箱设置没核对 |
+
+**停 CLI 的三种办法**（前台命令 `/bin/sleep 61; touch <哨兵>` 跑着时；没开沙箱）
+
+| 格 | 做法 | 结果 |
+| --- | --- | --- |
+| k1 | SIGKILL CLI 的进程组 | `sleep` 活着；70 秒后哨兵出现，命令接着跑完了 |
+| k2 | 只关输入 | CLI 30 秒内没退，`sleep` 还在；流里有一条 30 秒的心跳，没有 `result`。命令跑完之后退不退没量 |
+| k3 | 给 CLI 发 SIGTERM | 5 秒内 `sleep` 没了，那次调用的工具结果是 `Exit code 137`；CLI 退出，这一轮不出 `result` |
+
+- **进程关系（k4，三格一致，没开沙箱）**：命令的 shell 是 CLI 的直接子进程，自成一个会话（会话号 = 进程组号 = shell 自己的进程号）；`sleep` 的父进程是 shell，进程组号、会话号跟 shell。hook 进程是 CLI 的直接子进程，进程组号是它自己。
+- R2 里「关输入后 CLI 30 秒内自己退出」量的是 CLI 空闲、只有后台命令时；有前台命令在跑时不成立（k2）。
+
+**`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`**（常驻的流式输入；没带产品设置）
+
+| 格 | 变量 | 结果 |
+| --- | --- | --- |
+| b1 | 设 | 子代理前台跑：`task_started` 带 `is_backgrounded: false`，子代理工具的结果当场带回子代理的最终报告；一个 `init`、一个 `result`；子代理里的 Bash 调用进了 hook，hook 输入带子代理 id。（这一格脚本记的是 INCONCLUSIVE：提示词里命令后面紧跟一个句点，模型抄进了命令，探针照规矩拒了；上面几样都有正面证据） |
+| b2 | 设 | 带 `run_in_background: true` 的 Bash 调用被 CLI 拒掉，工具结果是 `InputValidationError: … An unexpected parameter run_in_background`，**这一次不进 hook**；模型改成不带这个参数重发，进 hook、执行 |
+| n1 | 不设 | 子代理工具当场返回「Async agent launched」，`task_started` 带 `is_backgrounded: true`，流里有 `background_tasks_changed`。次序：`init` → `result` → 子代理的 Bash 调用（进 hook、执行）→ `task_notification` → `init` → `result`。主回合的 `result` 出来时子代理还没开始干活 |
+
+- 设了变量，`init.tools` 仍是 24 个，`Monitor` 还在。
+- 厂商文档说这个变量还会停掉「超时的命令自动挪到后台」，没实测。
+
+**沙箱翻译**（带产品设置）：去掉 `sandbox.credentials.files` 之后，读、写假凭据目录里只读区之外的文件仍被挡（①c′ `cat: … Operation not permitted`，①d′ `touch: … Operation not permitted`，退出码都是 1，没发起沙箱外重试）。所以数据目录只进 `denyRead` + `denyWrite`、不进 `credentials.files`，别的部分照样挡得住。
+
+**沙箱联网**（带产品设置：`allowedDomains: ["*"]`）
+
+| 格 | 结果 |
+| --- | --- |
+| p1 沙箱里命令拿到的代理类环境变量（只记名字，不读值） | 23 个：`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY`、`FTP_PROXY`、`GRPC_PROXY`（各有小写版）、`RSYNC_PROXY`、`DOCKER_HTTP_PROXY`、`DOCKER_HTTPS_PROXY`、`CLOUDSDK_PROXY_ADDRESS` / `PORT` / `TYPE` / `USERNAME` / `PASSWORD`、`GIT_SSH_COMMAND`、`SRT_SSH_PROXY_COMMAND`、`SANDBOX_RUNTIME` |
+| p2 用 `SRT_SSH_PROXY_COMMAND` 连 `github.com 22` | 读到 `SSH-2.0-`，退出码 0。会走代理的程序，非 HTTP 协议、非 HTTP 端口也出得去 |
+| p4 连脚本在沙箱外起的本机监听（只绑 127.0.0.1） | 带 `sandbox.network.allowLocalBinding: true`：读到问候，监听端接到 1 次连接。不带：连接失败，退出码 1，监听端 0 次 |
+
+**工具名与工具清单**（没带产品设置；带产品设置的 6 个实例 `init.tools` 也是同样的 24 个）
+
+| 参数 | `init.tools` |
+| --- | --- |
+| `--tools Read,Task` | `Task`、`Read` |
+| `--tools Read,Agent` | `Task`、`Read` |
+| `--disallowedTools Task` | 23 个，没有 `Task` |
+| `--disallowedTools Agent` | 23 个，没有 `Task` |
+| `--disallowedTools Bash` | 24 个：少了 `Bash` **和 `Monitor`**，多了 `Glob`、`Grep` |
+
+子代理工具的两个名字 CLI 都认；`init.tools` 里报的总是 `Task`。
+
+**自动记忆**（G5 重跑，`dontAsk`；工作目录是本次新建的）
+
+| 格 | 配置 | `init.memory_paths` | 结果 |
+| --- | --- | --- | --- |
+| m0 | 不设开关、不改道 | `auto` = `~/.claude/projects/<编码后的工作目录>/memory/` | 没用任何工具就答出了放在那里的暗号 |
+| m1 | 不设开关、设置里 `autoMemoryDirectory` 改道 | `auto` = 改道目录 | 答出了放在改道目录里的暗号。改道经 `--settings` 生效 |
+| m2 | `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` 加改道（产品配置） | **没有这个键** | 没答出暗号 |
+| w0 | 不设开关，给 Write、Edit | 同 m0 | 模型用 Write 把暗号写进了默认记忆目录 |
+| w2 | 产品配置，给 Write、Edit | 没有这个键 | 没有任何工具调用；默认目录的文件没变 |
+
+- 这一轮 9 个 G5 实例里，设了开关的 4 个 `init` 都没有 `memory_paths` 键，没设的 5 个都有。和 R2 的 105 比 2 同一个规律。
+- 访问时间在这台机器上不能当证据：m0 的空白对照文件被别的程序读过。
+- 环境行：带着指向测试插件的 `CLAUDE_CODE_PLUGIN_DIRS` 时 `init.plugins` 里有它，干净时没有。
+
+**仓库里的子代理**（G5 守卫预检那一格，`dontAsk`，`--setting-sources ""`）：工作目录 `.claude/agents/` 里放的测试子代理不在 `init.agents` 里（只有 5 个内置的：`claude`、`Explore`、`general-purpose`、`Plan`、`statusline-setup`），调它时工具结果是「Agent type '…' not found」。**只有这一格，没有阳性对照**；对照等 `--part skill` 的 L2。
+
+**没量到的**：产品设置下的进程关系与 SIGTERM 的效果；SIGTERM 时后台命令的去向；SIGTERM 之后这条会话能不能续接；关输入后命令跑完 CLI 退不退；子代理的 `memory` 字段在记忆开关下的效果；回合中途发第二条用户消息时 CLI 怎么处理（评估报告里设计了格子，没跑）。
+
+**运行前后核对**：三个包 PASS。`…161328-5de10e` 报 FAIL：变化的 52 项全在另一个 `~/iwork-t0g-<随机>/` 根目录下，是同一时间有人跑 `--selftest` 留下的（文件名只出自脚本的 selftest 函数），原有的 10 个结果包与 `~/.npmrc` 没变，四格联网的结论不受影响。脚本已改：selftest 与实测互斥（main `af0b6a5`）。
+
 ### 2.3 不采用的接法：claude-agent-acp
 
 `@agentclientprotocol/claude-agent-acp` 0.101.0 实测：新会话**沿用用户的 auto 模式**，此时不发任何权限请求，客户端选“拒绝”无效；强制 `session/set_mode` 为 `default`（Manual）后，写文件与联网会请求且拒绝生效，但 echo 等被它视为只读的命令不请求；它不使用客户端终端与客户端文件读写，iWork 无法把命令包进沙箱。保留为可选接法，不用于 M1。
