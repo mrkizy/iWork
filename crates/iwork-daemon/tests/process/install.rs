@@ -452,7 +452,7 @@ fn identity_failure_mid_install_is_relaunched() {
         err.contains("逻辑退出码 14") && err.contains("包没装齐"),
         "{err}"
     );
-    assert!(sb.untouched(), "不拿锁、不写状态");
+    sb.assert_untouched(); // 不拿锁、不写状态
 
     // 另一格：包是齐的，第 1 步期间程序文件被改写（测试的子进程改它的修改时间）
     inst.put_manifest(&[("iwork-daemon", "A"), ("iwork-client", "A")]);
@@ -482,7 +482,7 @@ fn identity_failure_mid_install_is_relaunched() {
         "{}",
         d.stderr()
     );
-    assert!(sb.untouched());
+    sb.assert_untouched();
 
     // 装齐、去掉注入：下一次拉起到就绪
     start(&sb, &inst, &["--service"]);
@@ -503,7 +503,7 @@ fn identity_failure_on_settled_install_exits_zero() {
     );
     let (status, err) = run_installed(&sb, &inst, &[], &[FAIL_IDENTITY]);
     assert_eq!(status, Some(10), "{err}");
-    assert!(sb.untouched());
+    sb.assert_untouched();
 }
 
 /// S7g（1/F-8）：升级 `exec` 的那一瞬间接手的新进程，冷却从它自己的启动算起。三个入口共用的后半段：

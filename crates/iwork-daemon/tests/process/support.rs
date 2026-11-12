@@ -188,9 +188,32 @@ impl Sandbox {
         Client::connect(&LocalConnector, endpoint.endpoint(), &own, cfg).await
     }
 
-    /// 家目录里有没有 iWork 的任何东西（参数错一类的用例：不碰锁与状态文件）。
-    pub fn untouched(&self) -> bool {
-        !self.data_root().exists() && !self.run_dir().exists()
+    /// 断言家目录里没有 iWork 的任何东西（参数错、身份失败一类的用例：不拿锁、不写状态、不建数据目录）。
+    /// 不成立时把证据写进 panic：哪个目录在、家目录下的全部条目（类型、大小、修改时刻），以及会合点里状态文件与
+    /// 锁文件的内容（锁文件里记着是哪个 pid 写的）。T09 的 CI 上红过一次而当时看不出是谁动的（run 43228211480）。
+    #[track_caller]
+    pub fn assert_untouched(&self) {
+        let present: Vec<PathBuf> = [self.data_root(), self.run_dir()]
+            .into_iter()
+            .filter(|p| p.exists())
+            .collect();
+        if present.is_empty() {
+            return;
+        }
+        let mut report = format!(
+            "家目录里出现了 iWork 的东西：{present:?}\n家目录 {} 下的条目：\n",
+            self.home.display()
+        );
+        list_tree(&self.home, &self.home, &mut report, 0);
+        let run = self.run_dir();
+        for name in [rendezvous::STATUS_FILE, rendezvous::LOCK_FILE] {
+            let path = run.join(name);
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                let cut: String = text.chars().take(2000).collect();
+                report.push_str(&format!("--- {}：\n{cut}\n", path.display()));
+            }
+        }
+        panic!("{report}");
     }
 }
 
@@ -205,6 +228,44 @@ impl Drop for Sandbox {
 pub fn alive(pid: u32) -> bool {
     // SAFETY：kill 的第二个参数为 0 只探测，不发信号
     unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+/// 递归列出 `dir` 下的条目（相对 `root`），最多 6 层、300 条。不跟随符号链接。
+fn list_tree(root: &Path, dir: &Path, out: &mut String, depth: usize) {
+    if depth > 6 || out.lines().count() > 300 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let path = e.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let kind = if meta.is_dir() {
+            "目录"
+        } else if meta.file_type().is_symlink() {
+            "链接"
+        } else {
+            "文件"
+        };
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_millis());
+        out.push_str(&format!(
+            "  {kind} {} {} 字节 mtime_ms={modified}\n",
+            path.strip_prefix(root).unwrap_or(&path).display(),
+            meta.len()
+        ));
+        if meta.is_dir() {
+            list_tree(root, &path, out, depth + 1);
+        }
+    }
 }
 
 pub fn kill9(pid: u32) {
