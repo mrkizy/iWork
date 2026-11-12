@@ -159,6 +159,11 @@ impl HookServer {
         Arc::clone(&self.ctx.pending)
     }
 
+    /// 在后台跑 [`HookServer::serve`]；返回的句柄丢掉时服务端停下、连接全部断开。
+    pub fn spawn(self) -> Serving {
+        Serving(tokio::spawn(self.serve()))
+    }
+
     /// 接连接，直到这个 future 被丢弃。连接任务挂在它名下，一起丢弃时连接全部断开（hook 读到 EOF 按拒绝处理）。
     pub async fn serve(self) {
         let mut conns = JoinSet::new();
@@ -178,6 +183,16 @@ impl HookServer {
                 Some(_) = conns.join_next(), if !conns.is_empty() => {}
             }
         }
+    }
+}
+
+/// 跑着的服务端。丢掉即停（`JoinHandle` 丢掉只是脱离、不会停任务，所以包一层）。
+#[derive(Debug)]
+pub struct Serving(tokio::task::JoinHandle<()>);
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

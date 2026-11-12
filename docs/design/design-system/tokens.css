@@ -262,6 +262,7 @@
   --anchor-gutter: 52px;  /* 宽形态下头像左边缘到主区域左边缘 = 导轨 44 + 间隙 8（ui-m1 2a 第 11 条）；对话区左内边距 = calc(var(--anchor-gutter) - 24px)（扣掉行自带的 24px），右内边距 0；主区域 < 600px 切窄形态，回到 ≥ 620px 切回 */
   --content-max: 720px;   /* 对话内容列 */
   --composer-max: 760px;  /* 输入框 */
+  --window-min-w: 880px;  /* 窗口最小宽度（ui-m1 2a 第 12b 条）；完整侧栏实际上限 = min(--sidebar-w-max, 窗口宽 - 568px)，568 = 窄形态内容列 520 + 行内边距 48 */
 }
 
 body {
