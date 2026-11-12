@@ -2,6 +2,8 @@
 //!
 //! 文件写进会话目录后桥接不再改它（CLI 会热加载设置文件）。数据目录对 Agent 禁读禁写，Agent 改不了它。
 
+use std::path::Path;
+
 use iwork_claude_hook::client::ENV_TOKEN;
 use serde_json::{Value, json};
 
@@ -30,9 +32,12 @@ pub const SELECTED: SelectedConfig = SelectedConfig {
 /// 生成的设置文件。
 ///
 /// P4 未定：S6 开工前定了再加 `sandbox.failIfUnavailable`，带快照（方案第 8 节最后一行、18 节 P4）。
-pub fn settings_json(constraints: &Constraints, hook_program: &str) -> Value {
+pub fn settings_json(constraints: &Constraints, hook_program: &str, memory_dir: &Path) -> Value {
     let hook = shell_quote(hook_program);
     json!({
+        // 3.1a：自动记忆的目录改到会话目录里的空目录（开关另由环境变量 CLAUDE_CODE_DISABLE_AUTO_MEMORY 给）。
+        // 经 --settings 生效待 R2 的 G5 记忆行核实；不成立时只剩开关（P15）
+        "autoMemoryDirectory": memory_dir.display().to_string(),
         // 显式写出：命令行这一层压过项目层，仓库里写 true 也关不掉
         "disableAllHooks": false,
         "permissions": {

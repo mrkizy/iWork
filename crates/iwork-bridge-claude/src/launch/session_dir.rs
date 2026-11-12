@@ -1,4 +1,5 @@
-//! 会话目录 `<数据目录>/run/h/<12 位十六进制>/`（T06 方案 3.3）：里面只有 socket、设置文件、MCP 配置、属主文件。
+//! 会话目录 `<数据目录>/run/h/<12 位十六进制>/`（T06 方案 3.3）：里面只有 socket、设置文件、MCP 配置、属主文件，
+//! 和自动记忆改道用的空目录 `m/`（3.1a）。
 //!
 //! - 一定放在数据目录里：设置文件会被 CLI 热加载，Agent 要是改得了它就能关掉 hook；数据目录是系统底线。
 //! - 名字写得短：Unix socket 路径有长度上限（macOS 103 字节，Linux 107）。建之前先算，超了报错点名路径。
@@ -10,11 +11,13 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// 会话目录里的四个名字。
+/// 会话目录里的四个文件名。
 pub const SOCKET: &str = "s";
 pub const SETTINGS: &str = "settings.json";
 pub const MCP: &str = "mcp.json";
 pub const OWNER: &str = "owner";
+/// 自动记忆改道的目录（3.1a）：桥接建好之后不往里放东西；CLI 万一写了，删会话目录时连同它一起删。
+pub const MEMORY: &str = "m";
 
 /// 随机部分的字节数（十六进制后 12 个字符）。
 #[cfg(unix)]
@@ -37,6 +40,8 @@ pub struct Files {
     pub settings: PathBuf,
     pub mcp: PathBuf,
     pub owner: PathBuf,
+    /// 自动记忆改道的空目录
+    pub memory: PathBuf,
 }
 
 impl Files {
@@ -46,6 +51,7 @@ impl Files {
             settings: dir.join(SETTINGS),
             mcp: dir.join(MCP),
             owner: dir.join(OWNER),
+            memory: dir.join(MEMORY),
         }
     }
 }
@@ -212,6 +218,11 @@ mod imp {
                     &dir.files().owner,
                     std::process::id().to_string().as_bytes(),
                 )?;
+                let memory = dir.files().memory;
+                DirBuilder::new()
+                    .mode(0o700)
+                    .create(&memory)
+                    .map_err(|e| DirError(format!("建不了 {}（{e}）", memory.display())))?;
                 return Ok(dir);
             }
             Err(DirError(format!(
@@ -233,16 +244,32 @@ mod imp {
         }
     }
 
-    /// 只删会话目录里那四个名字，再删目录本身；目录里有别的东西就留着不删（不是自己建的那种）。
+    /// 只删会话目录里那几个名字，再删目录本身；目录里有别的东西就留着不删（不是自己建的那种）。
+    /// `m/` 是真目录（不是链接）才删，连同 CLI 可能写进去的内容（`remove_dir_all` 不跟里面的链接走）。
     fn remove_known(dir: &Path) -> io::Result<()> {
         for entry in fs::read_dir(dir)? {
             let name = entry?.file_name();
-            if ![SOCKET, SETTINGS, MCP, OWNER].iter().any(|n| name == *n) {
+            if ![SOCKET, SETTINGS, MCP, OWNER, MEMORY]
+                .iter()
+                .any(|n| name == *n)
+            {
                 return Err(io::Error::other(format!(
                     "{} 里有不认识的文件 {name:?}，不删",
                     dir.display()
                 )));
             }
+        }
+        let memory = dir.join(MEMORY);
+        match fs::symlink_metadata(&memory) {
+            Ok(m) if m.file_type().is_dir() => fs::remove_dir_all(&memory)?,
+            Ok(_) => {
+                return Err(io::Error::other(format!(
+                    "{} 不是目录（可能是链接），不删",
+                    memory.display()
+                )));
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
         }
         for name in [SOCKET, SETTINGS, MCP, OWNER] {
             match fs::remove_file(dir.join(name)) {
