@@ -2,7 +2,9 @@
 //! 这里把它要用的系统命令换成假程序（`launchctl`、`pgrep`、`open`、`lsof`、`ps`，包目录里的 `check-install`、
 //! `ipcprobe`），在临时 HOME 里跑，证：前置检查会拒、数据根被钉死、取证读不到凭据、日志缺一类就停、失败照样收尾。
 //! 假的 `open` 只按它收到的 `IWORK_DATA_DIR` 写后台日志：数据根没钉住，日志就写到别处，演练等不到记录。
-//! 成功跑完全程的那一遍只在真演练里有（它要真的后台自己重启）；那一遍的取证由脚本收尾时自己搜虚构凭据标记。
+//! 默认的假后台只是一个长睡的进程（不会自己重启，跑到第 2 类记录那一步就停）；状态里放了 `reactive` 时换成会看磁盘的
+//! 假后台：装上的包变了就过一会儿记「自行重启」「就绪」、换上新映像，客户端还开着就重新连上；配上假的 `codesign`
+//! 按映像报 CDHash。这样演练能跑完全程（U1–U4、9.6–9.8）到成功收尾（审查 1/F-8）。
 #![cfg(target_os = "macos")]
 
 use std::path::{Path, PathBuf};
@@ -68,7 +70,11 @@ impl World {
     }
 
     fn write_fakes(&self) {
-        let (st, calls) = (self.state.display(), self.calls.display());
+        let (st, calls, bin) = (
+            self.state.display(),
+            self.calls.display(),
+            self.bin.display(),
+        );
         let ms = "perl -MTime::HiRes=time -e 'printf \"%d\", time*1000'";
         write_exe(
             &self.bin.join("launchctl"),
@@ -104,6 +110,30 @@ echo "open $*" >> '{calls}'
 d=""; for a in "$@"; do case "$a" in IWORK_DATA_DIR=*) d="${{a#IWORK_DATA_DIR=}}" ;; esac; done
 [ -n "$d" ] || d="$IWORK_DATA_DIR"
 echo "$d" > '{st}/opened_root'
+if [ -f '{st}/reactive' ]; then
+  sleep 0.05
+  mkdir -p "$d/logs" "$d/run"
+  dest="$HOME/Applications/iWork.app/Contents/MacOS/iwork-daemon"
+  dpid=$(cat '{st}/pids/iwork-daemon' 2>/dev/null)
+  if [ -z "$dpid" ] || ! kill -0 "$dpid" 2>/dev/null; then
+    cat "$dest" > '{st}/image'
+    '{bin}/fake-daemon' "$d" >/dev/null 2>&1 & echo $! > '{st}/pids/iwork-daemon'
+    sleep 0.1
+  fi
+  sleep 300 >/dev/null 2>&1 & echo $! > '{st}/pids/iwork-client'
+  client=$(cat '{st}/pids/iwork-client')
+  sleep 0.02
+  ts=$({ms})
+  # 形态 A（不签名）的客户端连不上不同版的后台：被拒，后台立刻做一次安装检查；形态 B 先连上
+  case "$(cat "$dest")" in *-unsigned) unsigned=1 ;; *) unsigned= ;; esac
+  if [ -n "$unsigned" ] && [ "$(cat '{st}/image')" != "$(cat "$dest")" ]; then
+    echo '{{"ts":'$ts',"target":"iwork.ipc.audit","fields":{{"event":"peer_rejected","role":"server","pid":'$client'}}}}' >> "$d/logs/daemon.log"
+    echo '{{"ts":'$ts',"target":"iwork_daemon::tasks::install_watch","fields":{{"message":"有客户端被拒，立刻做一次安装检查"}}}}' >> "$d/logs/daemon.log"
+  else
+    echo '{{"ts":'$ts',"target":"iwork_ipc","fields":{{"message":"连接已建立","pid":'$client'}}}}' >> "$d/logs/daemon.log"
+  fi
+  exit 0
+fi
 sleep 300 >/dev/null 2>&1 & echo $! > '{st}/pids/iwork-client'
 sleep 300 >/dev/null 2>&1 & echo $! > '{st}/pids/iwork-daemon'
 client=$(cat '{st}/pids/iwork-client')
@@ -124,6 +154,7 @@ exit 0
 echo "lsof $*" >> '{calls}'
 d=$(cat '{st}/opened_root')
 [ -f '{st}/lsof_outside' ] && d=/elsewhere/iWork
+[ -f '{st}/lsof_substring' ] && d="/unexpected$d"
 echo "p$2"; echo "n$d/iwork.db"; echo "n$d/run/daemon.lock"; echo "n$d/logs/daemon.log"
 "#
             ),
@@ -138,6 +169,54 @@ case "$2" in
   comm=) echo "$HOME/Applications/iWork.app/Contents/MacOS/iwork-daemon" ;;
   args=) echo "$HOME/Applications/iWork.app/Contents/MacOS/iwork-daemon" ;;
 esac
+"#
+            ),
+        );
+        // 会看磁盘的假后台（只在 reactive 时由假 open 起）：起来记「就绪」；装上的包变了，过 0.3 秒记「自行重启」、
+        // 换上新映像、记「就绪」，客户端还开着就记它重新连上。每条之间隔 20 毫秒，时刻严格递增
+        write_exe(
+            &self.bin.join("fake-daemon"),
+            &format!(
+                r#"#!/bin/bash
+d=$1
+dest="$HOME/Applications/iWork.app/Contents/MacOS/iwork-daemon"
+log="$d/logs/daemon.log"
+line() {{ echo '{{"ts":'$({ms})','"$1"'}}' >> "$log"; sleep 0.02; }}
+unsigned_manifest() {{ case "$(cat '{st}/image')" in *-unsigned) line '"target":"iwork.ipc.audit","fields":{{"event":"manifest_loaded","self_listed":true}}' ;; esac; }}
+line '"target":"iwork_daemon","fields":{{"message":"后台服务就绪"}}'
+unsigned_manifest
+while :; do
+  cur=$(cat "$dest" 2>/dev/null || true)
+  if [ -n "$cur" ] && [ "$cur" != "$(cat '{st}/image')" ]; then
+    sleep 0.3
+    line '"target":"iwork_daemon::tasks::install_watch","fields":{{"message":"磁盘上装齐了另一版，自行重启"}}'
+    cat "$dest" > '{st}/image'
+    line '"target":"iwork_daemon","fields":{{"message":"后台服务就绪"}}'
+    unsigned_manifest
+    c=$(cat '{st}/pids/iwork-client' 2>/dev/null)
+    if [ -n "$c" ] && kill -0 "$c" 2>/dev/null; then
+      line '"target":"iwork_ipc","fields":{{"message":"连接已建立","pid":'$c'}}'
+    fi
+  fi
+  sleep 0.1
+done
+"#
+            ),
+        );
+        // 假 codesign：给进程号就按假后台当前的映像、给路径就按文件内容报 CDHash；另外吐一行假凭据，取证要是整份记下来就会露
+        write_exe(
+            &self.bin.join("codesign"),
+            &format!(
+                r#"#!/bin/sh
+echo "codesign $*" >> '{calls}'
+for a in "$@"; do last=$a; done
+case "$last" in
+  *[!0-9]*) content=$(cat "$last" 2>/dev/null) ;;
+  *) content=$(cat '{st}/image' 2>/dev/null) ;;
+esac
+echo "Authority={SECRET}" >&2
+[ -n "$content" ] && echo "CDHash=$(printf %s "$content" | shasum | cut -c1-40)" >&2
+exit 0
 "#
             ),
         );
@@ -182,6 +261,7 @@ exit 1
             .env("IWORK_DRILL_SETTLE_SECS", "0")
             .env("IWORK_DRILL_WAIT_SECS", "2")
             .env("IWORK_DRILL_STOP_SECS", "2")
+            .env("IWORK_DRILL_COOLDOWN_SECS", "0")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -391,38 +471,128 @@ fn drill_record_has_no_env_secrets() {
     refused.flag("registered");
     for w in [&failing, &refused] {
         let out = w.drill();
-        assert!(!text(&out).contains(SECRET), "终端输出里有假凭据");
-        let mut stack = vec![w.out.clone()];
-        while let Some(d) = stack.pop() {
-            for e in std::fs::read_dir(&d).unwrap() {
-                let p = e.unwrap().path();
-                if p.is_dir() {
-                    stack.push(p);
-                } else {
-                    let bytes = std::fs::read(&p).unwrap();
-                    assert!(
-                        !String::from_utf8_lossy(&bytes).contains(SECRET),
-                        "{} 里有假凭据",
-                        p.display()
-                    );
-                }
-            }
-        }
-        for line in w.calls().lines() {
-            if let Some(args) = line.strip_prefix("ps ") {
+        assert_no_secret(w, &out);
+    }
+}
+
+/// 独立核对一次演练没读、没记假凭据：终端输出与输出目录里每个文件都搜不到；ps 没带 e 调过；getenv 只问过
+/// IWORK_DATA_DIR；脚本自己的虚构凭据标记检查也没响。
+fn assert_no_secret(w: &World, out: &Output) {
+    assert!(!text(out).contains(SECRET), "终端输出里有假凭据");
+    let mut stack = vec![w.out.clone()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                let bytes = std::fs::read(&p).unwrap();
                 assert!(
-                    !args
-                        .split_whitespace()
-                        .any(|a| a == "e" || a == "-E" || a == "-e"),
-                    "{line}"
+                    !String::from_utf8_lossy(&bytes).contains(SECRET),
+                    "{} 里有假凭据",
+                    p.display()
                 );
             }
-            if let Some(rest) = line.strip_prefix("launchctl getenv ") {
-                assert_eq!(rest.trim(), "IWORK_DATA_DIR", "{line}");
-            }
         }
-        assert!(!w.record().contains("搜到了虚构凭据标记"), "{}", w.record());
     }
+    for line in w.calls().lines() {
+        if let Some(args) = line.strip_prefix("ps ") {
+            assert!(
+                !args
+                    .split_whitespace()
+                    .any(|a| a == "e" || a == "-E" || a == "-e"),
+                "{line}"
+            );
+        }
+        if let Some(rest) = line.strip_prefix("launchctl getenv ") {
+            assert_eq!(rest.trim(), "IWORK_DATA_DIR", "{line}");
+        }
+    }
+    assert!(!w.record().contains("搜到了虚构凭据标记"), "{}", w.record());
+}
+
+/// R12 + 审查 1/F-8：会看磁盘的假后台让演练跑完全程（U1–U4、9.6、9.7 四遍、9.8 两格）到成功收尾。各格的判定是 PASS，
+/// 收尾删了装上的包与留底、数据根改名留证；整个过程同样读不到、记不下假凭据（后半段的取证也在覆盖里）。
+#[test]
+fn drill_success_run_has_no_secrets_and_cleans_up() {
+    let w = World::new();
+    w.flag("reactive");
+    let out = w.drill();
+    let record = w.record();
+    assert_eq!(out.status.code(), Some(0), "{}\n{record}", text(&out));
+    assert!(record.contains("演练跑完"), "{record}");
+    assert!(record.contains("U1 PASS"), "{record}");
+    for round in [
+        "b-signed→a-signed",
+        "a-signed→b-signed",
+        "b-signed→b-unsigned",
+        "b-unsigned→a-signed",
+    ] {
+        assert!(
+            record.contains(&format!("9.7 {round} PASS")),
+            "{round}：{record}"
+        );
+    }
+    assert!(record.contains("W1 PASS"), "{record}");
+    assert!(record.contains("W2 PASS"), "{record}");
+    assert!(!record.contains("FAIL："), "没有记成失败的格：{record}");
+    assert_no_secret(&w, &out);
+    let apps = w.home.join("Applications");
+    for name in [
+        "iWork.app",
+        "iWork.prev.app",
+        "iWork.incoming.app",
+        "iWork.failed.app",
+    ] {
+        assert!(!apps.join(name).exists(), "{name} 收尾删了");
+    }
+    assert!(!w.data_root().exists(), "数据根改名留证了");
+}
+
+/// 审查 1/F-2：Applications 下已经有别人的 iWork.prev.app / iWork.incoming.app / iWork.failed.app → 前置检查停（退出 3），
+/// 不起进程，那几个目录原样留着。
+#[test]
+fn drill_refuses_foreign_app_siblings_and_keeps_them() {
+    for name in ["iWork.prev.app", "iWork.incoming.app", "iWork.failed.app"] {
+        let w = World::new();
+        let keep = w.home.join("Applications").join(name).join("keep.txt");
+        std::fs::create_dir_all(keep.parent().unwrap()).unwrap();
+        std::fs::write(&keep, "keep").unwrap();
+        let out = w.drill();
+        assert_eq!(out.status.code(), Some(3), "{name}：{}", text(&out));
+        assert!(w.record().contains(name), "{}", w.record());
+        assert!(!w.calls().contains("open "), "没起任何进程");
+        assert_eq!(
+            std::fs::read_to_string(&keep).unwrap(),
+            "keep",
+            "{name} 原样留着"
+        );
+    }
+}
+
+/// 审查 1/F-2：`--out` 指向已有目录（里面的 record.txt 是指到别处的链接）→ 不用它（退出 3），链接指向的文件没被截断。
+#[test]
+fn drill_refuses_existing_out_dir_and_leaves_link_target() {
+    let w = World::new();
+    std::fs::create_dir_all(&w.out).unwrap();
+    let target = w.state.join("outside-record");
+    std::fs::write(&target, "precious").unwrap();
+    std::os::unix::fs::symlink(&target, w.out.join("record.txt")).unwrap();
+    let out = w.drill();
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
+    assert!(!w.calls().contains("launchctl"), "什么都没查、没动");
+}
+
+/// 审查 1/F-7：lsof 报的库在 `/unexpected<D>/` 下（路径里含 D、但不在 D 里）→ 演练失败、点出那个路径。
+#[test]
+fn drill_fails_when_open_path_only_contains_root_as_substring() {
+    let w = World::new();
+    w.flag("lsof_substring");
+    let out = w.drill();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(w.record().contains("数据根之外"), "{}", w.record());
+    assert!(w.record().contains("/unexpected"), "{}", w.record());
 }
 
 /// R12 `drill_script_has_no_env_dump_commands`（第二道，读脚本文本）：没有会吐整份环境的命令；getenv 只问 IWORK_DATA_DIR。

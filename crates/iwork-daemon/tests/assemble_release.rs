@@ -11,6 +11,9 @@ use std::sync::OnceLock;
 use iwork_ipc::peer::{ImageId, MANIFEST_FILE, Manifest, Want, file_image_ids};
 use package_support::*;
 
+/// 装配在自己建的目录里放的归属标记（scripts/lib/owned-paths.sh 的 OWNED_MARK）。
+const OWNED_MARK: &str = ".iwork-owned";
+
 /// 跑脚本用的 bash：macOS 上是系统自带的 3.2（打包命令实际用的就是它），别的平台用 PATH 里的。
 const BASH: &str = if cfg!(target_os = "macos") {
     "/bin/bash"
@@ -163,10 +166,12 @@ fn digest_tree(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     out
 }
 
+/// 成品目录里除了装配自己的归属标记之外的条目。
 fn dist_entries(dist: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dist)
         .map(|rd| {
             rd.map(|e| e.unwrap().file_name().into_string().unwrap())
+                .filter(|n| n != OWNED_MARK)
                 .collect()
         })
         .unwrap_or_default();
@@ -387,6 +392,25 @@ fn write_executable(path: &Path, text: &str) {
 mod macos {
     use super::*;
 
+    /// 审查 1/F-1：Tauri 的包里 Contents/MacOS 是指向包外的目录链接 → 装配拒绝，包外的 iwork-daemon 没被改写。
+    #[test]
+    fn bundle_with_symlinked_dir_is_refused_and_outside_untouched() {
+        let i = Inputs::new("a");
+        let outside = i.root.join("outside-bin");
+        let macos = i.app.join("Contents/MacOS");
+        std::fs::rename(&macos, &outside).unwrap();
+        std::fs::write(outside.join(DAEMON), "keep-original").unwrap();
+        std::os::unix::fs::symlink(&outside, &macos).unwrap();
+        let out = i.assemble();
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(stderr(&out).contains("有链接"), "{}", stderr(&out));
+        assert_eq!(
+            std::fs::read_to_string(outside.join(DAEMON)).unwrap(),
+            "keep-original"
+        );
+        assert!(!i.product().exists());
+    }
+
     /// R9 `assemble_stops_when_app_missing`：`--app` 指的位置没有包 → 停。
     #[test]
     fn assemble_stops_when_app_missing() {
@@ -543,5 +567,44 @@ fn shell_vars_before_non_ascii_are_braced() {
     assert!(
         bad.is_empty(),
         "这些行的 $变量 后面紧跟非 ASCII 字节，要写成 ${{变量}}：{bad:?}"
+    );
+}
+
+/// 审查 1/F-1：成品目录下的形态目录是指向别处的链接（别处有一个 .old-* 与它的内容）→ 装配拒绝，链接目标里的
+/// 东西一个都没动。
+#[test]
+fn form_dir_symlink_is_refused_and_untouched() {
+    let i = Inputs::new("a");
+    let elsewhere = i.root.join("unrelated");
+    std::fs::create_dir_all(elsewhere.join(".old-important")).unwrap();
+    std::fs::write(elsewhere.join(".old-important/keep.txt"), "keep").unwrap();
+    // 先正常装配一次：成品目录是装配建的（带归属标记）；再把形态目录换成指向别处的链接
+    ok(&i.assemble());
+    let form = if cfg!(target_os = "macos") {
+        "unsigned"
+    } else {
+        "linux"
+    };
+    std::fs::remove_dir_all(i.dist.join(form)).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, i.dist.join(form)).unwrap();
+    let before = digest_tree(&elsewhere);
+    let out = i.assemble();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("不是真目录"), "{}", stderr(&out));
+    assert_eq!(digest_tree(&elsewhere), before, "链接目标没被动过");
+}
+
+/// 审查 1/F-1：成品目录本身已有别人的东西（不是装配建的、不是空的）→ 拒绝，不动。
+#[test]
+fn foreign_dist_dir_is_refused() {
+    let i = Inputs::new("a");
+    std::fs::create_dir_all(&i.dist).unwrap();
+    std::fs::write(i.dist.join("someone-elses.txt"), "keep").unwrap();
+    let out = i.assemble();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("没有归属标记"), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(i.dist.join("someone-elses.txt")).unwrap(),
+        "keep"
     );
 }

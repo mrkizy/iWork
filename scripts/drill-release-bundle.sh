@@ -24,6 +24,7 @@ LABEL=com.iwork.daemon
 SETTLE="${IWORK_DRILL_SETTLE_SECS:-15}"   # 查进程两次之间（launchd 管着的后台退出约 10 秒后会被重拉）
 WAIT="${IWORK_DRILL_WAIT_SECS:-75}"       # 等一条记录、一个进程的上限
 STOP_WAIT="${IWORK_DRILL_STOP_SECS:-60}"  # 收尾时等后台走完停机的上限
+COOLDOWN="${IWORK_DRILL_COOLDOWN_SECS:-31}"  # 回退窗口：B 版后台就绪后等过它自己的启动冷却（30 秒）再回退
 
 die_usage() { echo "用法：$0 --packages <目录> [--out <输出目录>]" >&2; exit 2; }
 PKG="" OUT=""
@@ -38,9 +39,22 @@ done
 [ "$(uname -s)" = Darwin ] || { echo "drill-release-bundle：只在 macOS 上跑" >&2; exit 2; }
 for c in jq perl; do command -v "$c" >/dev/null || { echo "drill-release-bundle：需要 $c" >&2; exit 2; }; done
 PKG="$(cd "$PKG" && pwd -P)"
+# 路径归属：删、写、改名都经过这一处（只碰这一次建的、不走链接、不跨文件系统改名、按目录边界判归属）
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# shellcheck source=lib/owned-paths.sh
+source "$ROOT/scripts/lib/owned-paths.sh"
+# shellcheck source=lib/drill-window.sh
+source "$ROOT/scripts/lib/drill-window.sh"
+# 路径归属不成立：前置检查阶段（什么都没动）退出 3，演练开始后算演练失败、退出 1（都走记录，有记录的话）
+OWNED_FAIL_RC=3
+owned_paths_fail() {
+  if [ -n "${RECORD:-}" ] && [ -f "$RECORD" ]; then note "路径归属不成立：$*"; else echo "drill-release-bundle：$*" >&2; fi
+  exit "$OWNED_FAIL_RC"
+}
+# 输出目录只独占新建：已有的（哪怕只是一个链接）一律不用，免得截断、覆盖别处的文件
 OUT="${OUT:-$PKG/out-$(date +%Y%m%dT%H%M%S)}"
-mkdir -p "$OUT"
-OUT="$(cd "$OUT" && pwd -P)"
+owned_mkdir "$OUT"
+OUT="$(canonical "$OUT")"
 RECORD="$OUT/record.txt"
 : > "$RECORD"
 exec > >(tee -a "$OUT/terminal.txt") 2>&1
@@ -58,7 +72,7 @@ now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 
 # ---------------------------------------------------------------- 哨兵与虚构凭据标记（9.2 的两个反例）
 SENT="$OUT/sentinel"
-mkdir -p "$SENT"
+owned_mkdir "$SENT"
 echo marker > "$SENT/marker"
 tree_digest() {
   (cd "$1" && find . | LC_ALL=C sort | while IFS= read -r f; do
@@ -100,13 +114,21 @@ any_iwork_running && stop_before "隔 ${SETTLE} 秒再查，有 iwork-daemon 或
 DATA_DIR_STATE="$(launchd_data_dir_state)"
 note "launchd 用户环境里的 IWORK_DATA_DIR：$DATA_DIR_STATE"
 [ "$DATA_DIR_STATE" = 别的值 ] && stop_before "launchd 用户环境里的 IWORK_DATA_DIR 指向别处"
-if [ -e "$D" ] && [ -n "$(ls -A "$D" 2>/dev/null)" ]; then stop_before "数据根 D 不是空的"; fi
-[ -e "$DEST" ] && stop_before "$DEST 已经有一个包"
+# 演练要放东西、事后要删或改名的每个位置，开始时都必须空着（或是空的真目录）：不是这一次建的，脚本一概不碰
+if _exists "$D"; then
+  real_dir "$D" || stop_before "数据根 D 不是真目录（是链接或文件）"
+  [ -z "$(ls -A "$D" 2>/dev/null)" ] || stop_before "数据根 D 不是空的"
+fi
+if _exists "$APPS"; then real_dir "$APPS" || stop_before "${APPS} 不是真目录（是链接或文件）"; fi
+for p in "$DEST" "${DEST%.app}.prev.app" "${DEST%.app}.incoming.app" "${DEST%.app}.failed.app"; do
+  _exists "$p" && stop_before "${p} 已经有东西（不是这一次建的）"
+done
 for p in a-unsigned a-signed b-unsigned b-signed; do
   "$PKG/check-install" "$PKG/$p/iWork.app/Contents/MacOS" >> "$OUT/check-install-$p.txt" 2>&1 \
     || stop_before "包 $p 过不了 check-install（见 check-install-$p.txt）"
 done
 note "前置检查都过了"
+OWNED_FAIL_RC=1
 
 # ---------------------------------------------------------------- 收尾（成功、失败、被中断都执行）
 FAILURES=()
@@ -132,17 +154,27 @@ cleanup() {
     note "收尾：注销了演练中出现的自启注册（之后：$(autostart_state)）"
     rc=1
   fi
-  rm -rf "$DEST" "${DEST%.app}.prev.app" "${DEST%.app}.incoming.app" "${DEST%.app}.failed.app"
-  if [ -e "$D" ]; then
+  # 只删这一次登记过的（前置检查保证开始时这些位置都空着）
+  for p in "$DEST" "${DEST%.app}.prev.app" "${DEST%.app}.incoming.app" "${DEST%.app}.failed.app"; do
+    _exists "$p" && { is_owned "$p" && owned_rm "$p" || note "收尾：${p} 不是这一次建的，没删"; }
+  done
+  # 数据根：开始时不存在或是空的真目录，之后的内容都是演练的后台写的 → 归演练，改名留证
+  if _exists "$D"; then
+    own "$D"
     local kept="$D.drill-$(date +%Y%m%dT%H%M%S)"
-    mv "$D" "$kept" && note "收尾：数据根留作证据：$kept"
+    ( owned_mv "$D" "$kept" ) && note "收尾：数据根留作证据：${kept}" || note "收尾：数据根没能改名留证"
   fi
   if [ "$(tree_digest "$SENT")" != "$SENT_BEFORE" ]; then
     note "哨兵目录被改过（数据根没管住）"; rc=1
   fi
-  if grep -rqF "$SENT/" "$OUT"/lsof-*.txt 2>/dev/null; then
-    note "lsof 看到了哨兵目录下的路径"; rc=1
-  fi
+  # 和 verify_root 一样按目录边界判（不找子串）
+  local f path
+  for f in "$OUT"/lsof-*.txt; do
+    [ -f "$f" ] || continue
+    while IFS= read -r path; do
+      [ -n "$path" ] && under_dir "$path" "$SENT" && { note "lsof 看到了哨兵目录下的路径：$path"; rc=1; }
+    done < "$f"
+  done
   if grep -rqF "$FAKE_CRED" "$OUT"; then
     note "记录里搜到了虚构凭据标记（IWORK_DRILL_FAKE_CREDENTIAL），这份记录要按 S9 处理"; rc=1
   fi
@@ -154,17 +186,30 @@ trap cleanup EXIT
 # ---------------------------------------------------------------- 动作
 # 9.3 唯一的装法：新包先完整复制到旁边，旧包整个改名留底，新包整个改名到位
 install_package() {
-  local new="$PKG/$1/iWork.app"
-  mkdir -p "$APPS"
-  rm -rf "${DEST%.app}.incoming.app"
-  ditto "$new" "${DEST%.app}.incoming.app"
-  if [ -e "$DEST" ]; then rm -rf "${DEST%.app}.prev.app"; mv "$DEST" "${DEST%.app}.prev.app"; fi
-  mv "${DEST%.app}.incoming.app" "$DEST"
-  note "装上 $1（整包替换）"
+  local new="$PKG/$1/iWork.app" incoming="${DEST%.app}.incoming.app" prev="${DEST%.app}.prev.app"
+  _exists "$APPS" || owned_mkdir "$APPS"
+  _exists "$incoming" && owned_rm "$incoming"
+  dest_free "$incoming"
+  ditto "$new" "$incoming"
+  own "$incoming"
+  if _exists "$DEST"; then
+    _exists "$prev" && owned_rm "$prev"
+    owned_mv "$DEST" "$prev"
+  fi
+  owned_mv "$incoming" "$DEST"
+  note "装上 ${1}（整包替换）"
+}
+# U2、U4 故意用的错误装法：把包合并盖到装上的那份上。只盖这一次装的（登记过、是真目录、里面没有链接）
+overlay_package() {
+  is_owned "$DEST" && real_dir "$DEST" || fail_drill "${DEST} 不是这一次装的，不往上盖"
+  no_links_in "$DEST"
+  ditto "$PKG/$1/iWork.app" "$DEST"
 }
 roll_back() {
-  rm -rf "${DEST%.app}.failed.app"
-  mv "$DEST" "${DEST%.app}.failed.app" && mv "${DEST%.app}.prev.app" "$DEST"
+  local failed="${DEST%.app}.failed.app"
+  _exists "$failed" && owned_rm "$failed"
+  owned_mv "$DEST" "$failed"
+  owned_mv "${DEST%.app}.prev.app" "$DEST"
   note "回退：留底的包换回来了"
 }
 
@@ -199,9 +244,14 @@ verify_root() {
   local relevant outside
   relevant="$(grep -E 'iwork\.db|daemon\.lock|/logs/' "$f" || true)"
   [ -n "$relevant" ] || fail_drill "lsof 没看到后台 $pid 打开库、锁或日志（${label}）"
-  outside="$(printf '%s\n' "$relevant" | grep -vF "$D/" || true)"
+  # 按规范化后的目录边界判（不找子串：/unexpected<D>/iwork.db 不在 D 下；经过链接的路径按真实路径判）
+  outside=""
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    under_dir "$path" "$D" || outside="${outside}${path} "
+    under_dir "$path" "$SENT" && fail_drill "后台 $pid 打开了哨兵目录下的文件（${label}）：$path"
+  done <<< "$relevant"
   [ -z "$outside" ] || fail_drill "后台 $pid 打开了数据根之外的文件（${label}）：$outside"
-  grep -qF "$SENT/" "$f" && fail_drill "后台 $pid 打开了哨兵目录下的文件（${label}）"
   note "数据根核实（${label}）：后台 $pid 打开的库、锁、日志都在 D 下"
 }
 
@@ -291,7 +341,7 @@ note "日志自检三类都看到了"
 # ---------------------------------------------------------------- 8.2 的 U2–U4（只记录 / 救法）
 T3="$(now_ms)"
 I_BEFORE="$(stat -f %i "$DEST/Contents/MacOS/iwork-daemon")"
-ditto "$PKG/a-unsigned/iWork.app" "$DEST"
+overlay_package a-unsigned
 note "U2：ditto 直接盖到正在运行的包上（同形态 A 版）；inode 前 ${I_BEFORE}、后 $(stat -f %i "$DEST/Contents/MacOS/iwork-daemon")"
 if wait_event "U2 自行重启" "$T3" "$F_RESTART" >/dev/null; then
   note "U2：后台 $(pids_of iwork-daemon) 自己重启了（原 pid $DAEMON_PID 还在：$(kill -0 "$DAEMON_PID" 2>/dev/null && echo 是 || echo 否)）"
@@ -306,7 +356,7 @@ else
   note "U3 INCONCLUSIVE：没有人手做"
 fi
 # U4：合并覆盖着换形态（旧清单会留下）→ 预期两种形态都判不齐；再整包替换救回来
-ditto "$PKG/b-signed/iWork.app" "$DEST"
+overlay_package b-signed
 if "$PKG/check-install" "$DEST/Contents/MacOS" >> "$OUT/check-install-u4.txt" 2>&1; then
   note "U4：合并覆盖之后 check-install 竟然过了（和 N5 E2 不符），记下"
 else
@@ -346,39 +396,63 @@ upgrade_round b-signed b-unsigned
 upgrade_round b-unsigned a-signed   # 换形态：形态 A → 形态 B
 
 # ---------------------------------------------------------------- 9.8 回退窗口
+# 一格的证据：t1 之后后台日志里相关的记录，一行「<日志行号> <ts> <标签>」，交给 window_verdict 判（标签见 lib/drill-window.sh）
+window_rows() {
+  local since=$1 pid=$2
+  [ -f "$LOG_FILE" ] || return 0
+  jq -R -r --argjson since "$since" "fromjson? | select(.ts >= \$since)
+    | (if ($(connected_filter "$pid")) then \"connected\"
+       elif ($F_REJECTED and .fields.pid == $pid) then \"rejected\"
+       elif ($F_RESTART) then \"restart\"
+       elif ($F_REJECT_CHECK) then \"reject_check\"
+       elif ($F_DROPPED) then \"dropped\"
+       else empty end) as \$tag
+    | \"\\(input_line_number) \\(.ts) \\(\$tag)\"" "$LOG_FILE" 2>/dev/null || true
+}
+# t4 之后跑着的后台：还是回退前那个进程（原地重启），而且跑的是 A 版 → A；进程换了或映像不是 A → other；取不到 → unknown
+window_image() {
+  local before=$1 a=$2 now hash
+  now="$(pids_of iwork-daemon | head -1)"
+  [ -n "$now" ] || { echo unknown; return; }
+  [ "$now" = "$before" ] || { echo other; return; }
+  hash="$(cdhash_of_pid "$now")"
+  [ -n "$hash" ] || { echo unknown; return; }
+  [ "$hash" = "$(cdhash_of_file "$PKG/$a/iWork.app/Contents/MacOS/iwork-daemon")" ] && echo A || echo other
+}
 window_cell() { # <格> <A 版包> <B 版包> <期望 t2：connected|rejected>
   local cell=$1 a=$2 b=$3 expect=$4 attempt
   for attempt in 1 2 3; do
-    install_package "$a"; sleep 1; install_package "$b"
-    local tb; tb="$(now_ms)"
-    wait_event "$cell B 版就绪" "$tb" "$F_READY" >/dev/null || true
-    sleep 31   # 过了 B 版后台自己的启动冷却
+    install_package "$a"; sleep 1
+    local tb ready=no pid
+    tb="$(now_ms)"
+    install_package "$b"
+    # 回退前 B 版后台必须真的就绪、跑的是 B 版；不是就记进证据（这一次 INCONCLUSIVE），不吞掉
+    if wait_event "$cell B 版就绪" "$tb" "$F_READY" >/dev/null; then
+      pid="$(pids_of iwork-daemon | head -1)"
+      [ -n "$pid" ] && [ "$(cdhash_of_pid "$pid")" = "$(cdhash_of_file "$PKG/$b/iWork.app/Contents/MacOS/iwork-daemon")" ] && ready=yes
+    fi
+    pid="$(pids_of iwork-daemon | head -1)"
+    sleep "$COOLDOWN"
     roll_back
-    local t1; t1="$(now_ms)"
+    local t1 rows="$OUT/window-$cell-$attempt.txt" i image verdict
+    t1="$(now_ms)"
     start_client
-    local first t2 t3 t4 kind
-    first="$(wait_event "$cell t2" "$t1" "($(connected_filter "$CLIENT_PID")) or ($F_REJECTED and .fields.pid == $CLIENT_PID)")" || first=""
-    t3="$(wait_event "$cell t3" "$t1" "$F_RESTART" | jq -r '.ts' 2>/dev/null || true)"
-    t4=""
-    [ -n "$t3" ] && t4="$(wait_event "$cell t4" "$t3" "$(connected_filter "$CLIENT_PID")" | jq -r '.ts' 2>/dev/null || true)"
-    t2="$(printf '%s' "$first" | jq -r '.ts' 2>/dev/null || true)"
-    kind="$(printf '%s' "$first" | jq -r 'if .fields.event == "peer_rejected" then "rejected" else "connected" end' 2>/dev/null || true)"
+    # 等到「重启之后又连上」出现或到点；等不等得到都往下走，缺什么由 window_verdict 判成 INCONCLUSIVE
+    for i in $(seq 1 $((WAIT * 5))); do
+      window_rows "$t1" "$CLIENT_PID" > "$rows"
+      awk '$3 == "restart" { r = 1 } r && $3 == "connected" { f = 1 } END { exit !f }' "$rows" && break
+      sleep 0.2
+    done
+    image="$(window_image "$pid" "$a")"
     quit_client
-    if [ -z "$t2" ] || [ -z "$t3" ] || [ -z "$t4" ] || [ "$t2" -ge "$t3" ] || [ "$t3" -ge "$t4" ] \
-       || [ -n "$(events_since "$t1" "$F_DROPPED")" ]; then
-      note "$cell 第 $attempt 次 INCONCLUSIVE（t1=$t1 t2=${t2:-无} t3=${t3:-无} t4=${t4:-无}）"
-      continue
-    fi
-    local verdict=PASS
-    [ "$kind" = "$expect" ] || verdict=FAIL
-    [ $((t4 - t1)) -le $((WAIT * 1000)) ] || verdict=FAIL
-    if [ "$expect" = rejected ]; then
-      [ -n "$(events_since "$t2" "$F_REJECT_CHECK")" ] || verdict=FAIL
-    else
-      [ -z "$(events_since "$t1" "$F_REJECTED and .fields.pid == $CLIENT_PID")" ] || verdict=FAIL
-    fi
-    confirm "${cell}：窗口里的表现和方案 9.8 写的一样" || verdict=FAIL
-    note "$cell ${verdict}：t1=$t1 t2=${t2}（${kind}） t3=$t3 t4=$t4"
+    window_rows "$t1" "$CLIENT_PID" > "$rows"
+    verdict="$(window_verdict "$expect" "$t1" $((WAIT * 1000)) "$ready" "$image" < "$rows")"
+    case "$verdict" in
+      INCONCLUSIVE*) note "$cell 第 $attempt 次 ${verdict}"; continue ;;
+      PASS*) confirm "${cell}：窗口里的表现和方案 9.8 写的一样" || verdict="FAIL 人工确认窗口表现不对；${verdict#PASS }" ;;
+    esac
+    note "$cell ${verdict}"
+    case "$verdict" in FAIL*) FAILURES+=("$cell ${verdict}") ;; esac
     return 0
   done
   note "$cell 三次都 INCONCLUSIVE，交回 architect"
