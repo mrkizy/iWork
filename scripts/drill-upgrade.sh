@@ -23,8 +23,9 @@ bad() {
   exit 1
 }
 
-cargo build -q -p iwork-daemon --features dev || exit 2
-BIN="$ROOT/target/debug/iwork-daemon"
+cargo build -q -p iwork-daemon --features dev --bin iwork-daemon || exit 2
+BIN="${CARGO_TARGET_DIR:-$ROOT/target}/debug/iwork-daemon"
+[ -x "$BIN" ] || { echo "drill-upgrade: 构建之后找不到 $BIN" >&2; exit 2; }
 
 WORK="$(cd "$(mktemp -d /tmp/iwu-XXXXXX)" && pwd -P)"
 PID=""

@@ -16,9 +16,11 @@ command -v jq >/dev/null || { echo "drill-rollback: 需要 jq" >&2; exit 2; }
 say() { printf '== %s\n' "$*"; }
 bad() { printf 'drill-rollback: 不符：%s\n' "$*" >&2; exit 1; }
 
-cargo build -q -p iwork-daemon --features dev --example lifecycle-tool || exit 2
-BIN="$ROOT/target/debug/iwork-daemon"
-TOOL="$ROOT/target/debug/examples/lifecycle-tool"
+# 后台程序与调试工具都由本脚本自己构建（只 build example 不会产出后台程序，干净检出上会缺，1/F-6）
+cargo build -q -p iwork-daemon --features dev --bin iwork-daemon --example lifecycle-tool || exit 2
+BIN="${CARGO_TARGET_DIR:-$ROOT/target}/debug/iwork-daemon"
+TOOL="${CARGO_TARGET_DIR:-$ROOT/target}/debug/examples/lifecycle-tool"
+for f in "$BIN" "$TOOL"; do [ -x "$f" ] || { echo "drill-rollback: 构建之后找不到 $f" >&2; exit 2; }; done
 
 WORK="$(cd "$(mktemp -d /tmp/iwd-XXXXXX)" && pwd -P)"
 PID=""
