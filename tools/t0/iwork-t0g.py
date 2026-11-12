@@ -814,13 +814,19 @@ def blocked(ev, trace):
     return ev["ok"] and all_errors(ev) and not trace
 
 
-def obs_verdict(ev, obs, want_ok, expect_out=None):
+def obs_verdict(ev, obs, want_ok, expect_out=None, denied=None):
     """命令把自己的退出码写进观测文件的那类用例（observed() 包出来的命令）。纯函数。
     正面证据两样：目标调用（evidence）与观测文件。缺一样就是没测成。
-    「该失败」的用例，证据是命令自己写下的非零退出码，不是「没看到文件」。"""
+    「该失败」的用例：退出码 0 → FAIL（跑成了）。说「被挡住了」要三样都有（supervisor 2026-11-13，和 k1–k3 的沙箱探针同一条）：
+    同一个程序写工作区的对照成功（ctl_rc 是 0）；命令自己写下的非零退出码；输出里有拦截的原文（默认 SANDBOX_DENIED_TEXT，
+    格子可以给自己的 denied）。命令不存在、目录不存在、Permission denied、对照失败或没有对照 → INCONCLUSIVE，不当成被挡。"""
     if not ev["ok"] or obs is None: return "INCONCLUSIVE"
     ok = obs["rc"] == "0" and (expect_out is None or obs["out"].strip() == expect_out)
-    return "PASS" if ok == want_ok else "FAIL"
+    if want_ok: return "PASS" if ok else "FAIL"
+    if obs["rc"] == "0": return "FAIL"
+    control = obs.get("ctl_rc") == "0"
+    text = any(t in obs.get("out", "") for t in (denied or SANDBOX_DENIED_TEXT))
+    return "PASS" if control and text else "INCONCLUSIVE"
 
 
 def affirm(proofs, ok):
@@ -941,14 +947,35 @@ def tools_verdict(r, pred):
 
 
 def observed(case_id, body):
-    """把 body 包一层，退出码与输出落到工作区里的观测文件（沙箱内可写）。返回 (命令, 读结果的函数)。"""
+    """把 body 包一层，退出码与输出落到工作区里的观测文件（沙箱内可写）。返回 (命令, 读结果的函数)。
+    body 是一条 touch 或 cat 时，前面先跑一条同一个程序、目标在工作区里的对照（observed_control），它的退出码与输出另存：
+    「该失败」的格子要靠它排除「程序找不到、本来就跑不起来」（审查 1/F-1 的同类，supervisor 2026-11-13）。
+    读结果：{rc, out, ctl_rc, ctl_out}；没有对照的 ctl_* 是 None。"""
     out, rc = os.path.join(R.obs, case_id + ".out"), os.path.join(R.obs, case_id + ".rc")
-    for p in (out, rc): remove_obs_path(p)
-    cmd = f"( {body} ) > {shlex.quote(out)} 2>&1; echo $? > {shlex.quote(rc)}"
+    c_out, c_rc = os.path.join(R.obs, case_id + ".ctl.out"), os.path.join(R.obs, case_id + ".ctl.rc")
+    for p in (out, rc, c_out, c_rc): remove_obs_path(p)
+    control = observed_control(case_id, body)
+    pre = f"( {control} ) > {shlex.quote(c_out)} 2>&1; echo $? > {shlex.quote(c_rc)}; " if control else ""
+    cmd = f"{pre}( {body} ) > {shlex.quote(out)} 2>&1; echo $? > {shlex.quote(rc)}"
     def read():
         code = read_obs_path(rc)
-        return None if code is None else {"rc": code.strip(), "out": read_obs_path(out) or ""}
+        if code is None: return None
+        c_code = read_obs_path(c_rc) if control else None
+        return {"rc": code.strip(), "out": read_obs_path(out) or "", "ctl_rc": None if c_code is None else c_code.strip(),
+                "ctl_out": read_obs_path(c_out) if control else None}
     return cmd, read
+
+
+def observed_control(case_id, body):
+    """body 的对照：同一个程序，目标换成工作区里本次建的文件（touch 建一个；cat 读一个事先写好的）。认不出程序返回 None。"""
+    words = body.split()
+    if len(words) != 2 or words[0] not in ("touch", "cat"): return None
+    target = os.path.join(R.obs, case_id + ".ctl-target")
+    if words[0] == "cat":
+        open(target, "w").write("t0g control\n")
+    else:
+        remove_obs_path(target)
+    return f"{words[0]} {shlex.quote(target)}"
 
 
 # 设置文件里 defaultMode 写 manual，CLI 当 default 的别名收下，system/init 报的是 default（2.1.322 打包代码：设置校验先把 manual 换成 default，init 报的是内部名）
@@ -1347,12 +1374,16 @@ def guard_settings(name, exp, cfg, extra):
     return make_settings(name, "allow", exp, timeout=HOOK_TIMEOUT_SECS, on_failure=cfg["on_failure"], extra=extra, session_start=True)
 
 
-def bash_guard_verdict(call_ok, ctl_rc, ctl_exists, write_rc, write_exists, read_rc, read_leaked):
-    """Bash 两项外层保护的预检结论。纯函数。对照没成立（调用没有正面证据、工作区里那一笔没写成）：两项都不算成立。
-    每项「拦住了」都要有正面证据：那一步确实跑了并留下了非零的退出码，而且没有留下痕迹。"""
-    control = call_ok and ctl_rc == "0" and ctl_exists
-    return {"bash-write": control and write_rc not in (None, "0") and not write_exists,
-            "bash-read": control and read_rc not in (None, "0") and not read_leaked}
+def bash_guard_verdict(call_ok, obs):
+    """Bash 两项外层保护的预检结论。纯函数。obs：bash_guards 读回来的观测（值没写出来是 None）。
+    对照没成立（调用没有正面证据、工作区里那一笔没写成）：两项都不算成立。每项「拦住了」都要有正面证据（supervisor 2026-11-13）：
+    那一步确实跑了并留下了非零的退出码、没有留下痕迹，错误原文是沙箱挡下的那几句（SANDBOX_DENIED_TEXT）；
+    读那一项另要同一个程序读工作区里的文件成功（读的对照）。命令不存在、目录不存在、Permission denied 都不算拦住。"""
+    control = call_ok and obs["ctl_rc"] == "0" and obs["ctl_exists"]
+    denied = lambda err: any(t in (err or "") for t in SANDBOX_DENIED_TEXT)
+    return {"bash-write": bool(control and obs["write_rc"] not in (None, "0") and not obs["write_exists"] and denied(obs["write_err"])),
+            "bash-read": bool(control and obs["read_ctl_rc"] == "0" and obs["read_rc"] not in (None, "0") and not obs["read_leaked"]
+                              and denied(obs["read_err"]))}
 
 
 def file_guard_verdict(r, in_w, out_w, out_secret, secret, in_exists, out_exists):
@@ -1386,11 +1417,15 @@ def bash_guards(cfg, tag, out_secret, secret):
     工作区外写不进、读不到 out_secret。返回 {"bash-write": 真假, "bash-read": 真假}。"""
     ctl, out_w, got = os.path.join(R.obs, tag + "-ctl"), os.path.join(R.outside, tag + "-w"), os.path.join(R.obs, tag + "-read.out")
     rc = lambda n: os.path.join(R.obs, f"{tag}-{n}.rc")
-    cmd = (f"touch {ctl}; echo $? > {rc(1)}; touch {out_w}; echo $? > {rc(2)}; cat {out_secret} > {got} 2>/dev/null; echo $? > {rc(3)}")
+    err = lambda n: os.path.join(R.obs, f"{tag}-{n}.err")
+    cmd = (f"touch {ctl}; echo $? > {rc(1)}; touch {out_w} 2> {err(2)}; echo $? > {rc(2)}; cat {ctl} > /dev/null; echo $? > {rc(4)}; "
+           f"cat {out_secret} > {got} 2> {err(3)}; echo $? > {rc(3)}")
     s, _ = guard_settings(tag + "-b", expect(bash=[cmd]), cfg, g2_settings_extra(cfg))
     rb = claude(tag + "-b", ask_bash(cmd), settings=s, extra_args=cfg["flags"] + ["--tools", "Bash"], timeout=180)
     val = lambda p: (lambda t: None if t is None else t.strip())(read_obs_path(p))
-    return bash_guard_verdict(bash_exact(rb, cmd), val(rc(1)), os.path.exists(ctl), val(rc(2)), os.path.exists(out_w), val(rc(3)), secret in (val(got) or ""))
+    return bash_guard_verdict(bash_exact(rb, cmd), {"ctl_rc": val(rc(1)), "ctl_exists": os.path.exists(ctl), "write_rc": val(rc(2)),
+                                                    "write_exists": os.path.exists(out_w), "write_err": read_obs_path(err(2)), "read_ctl_rc": val(rc(4)),
+                                                    "read_rc": val(rc(3)), "read_err": read_obs_path(err(3)), "read_leaked": secret in (val(got) or "")})
 
 
 def outer_guards(cfg):
@@ -5612,11 +5647,10 @@ def selftest():
     uses4 = uses3 + [wp("/out/w", "w3")]
     assert fg(run(uses4, {"w1": fine, "w2": err, "w3": err, "r1": err}))["file-write"] is True, "S-5：外面那次写重发了，两次都报错，算拦住"
     assert fg(run(uses4, {"w1": fine, "w2": err, "w3": fine, "r1": err}))["file-write"] is False, "S-5：重发的那次结果不是报错，不算拦住"
-    bg = bash_guard_verdict
-    assert bg(True, "0", True, "1", False, "1", False) == {"bash-write": True, "bash-read": True}
-    assert bg(False, "0", True, "1", False, "1", False) == {"bash-write": False, "bash-read": False}, "调用没有正面证据"
-    assert bg(True, "0", True, None, False, None, False) == {"bash-write": False, "bash-read": False}, "那两步没留下退出码：不算拦住"
-    assert bg(True, "0", True, "1", False, "0", True)["bash-read"] is False
+    gb = {"ctl_rc": "0", "ctl_exists": True, "write_rc": "1", "write_exists": False, "write_err": "Operation not permitted",
+          "read_ctl_rc": "0", "read_rc": "1", "read_err": "Operation not permitted", "read_leaked": False}
+    assert bash_guard_verdict(True, {**gb, "write_rc": None, "read_rc": None}) == {"bash-write": False, "bash-read": False}, "那两步没留下退出码：不算拦住"
+    assert bash_guard_verdict(True, {**gb, "read_rc": "0", "read_leaked": True})["bash-read"] is False
     # 3/F-2：运行门按能力判；拒写不顶替拒读；声明一次性环境才整体放行
     all_ok = {c: True for c in ("bash-write", "bash-read", "file-write", "file-read", "excluded-probe", "mcp-only")}
     assert gate(CAPS["read"], {**all_ok, "file-read": False}, False) == (False, ["file-read"]), "只验证了拒写，Read 格子不许跑"
@@ -5723,7 +5757,8 @@ def selftest():
     assert "wait until its result" in cp and "Never send them in parallel" in cp and "do not retry" in cp, "G1c（S-8）：提示写明一前一后、不并行、不重发"
     assert cp.index("cd /w/sub") < cp.index("pwd > /o"), "两条命令按次序逐字给出"
     # G2 的两项预检
-    o = lambda rc, out="": {"rc": rc, "out": out}
+    # 「该失败」的观测要对照成功、输出里有拦截原文（supervisor 2026-11-13）；o(rc) 默认给齐，反例另造
+    o = lambda rc, out="touch: x: Operation not permitted\n", ctl="0": {"rc": rc, "out": out, "ctl_rc": ctl, "ctl_out": ""}
     assert excluded_guard_verdict(ev_ok, True, ev_ok, o("1"), False, True) is True
     assert excluded_guard_verdict(ev_ok, True, ev_ok, None, False, True) is False, "清单内预检：别的命令没留下退出码，不算被挡"
     assert excluded_guard_verdict(ev_ok, False, ev_ok, o("1"), False, True) is False, "清单内预检：对照没成立（探针的哨兵没出现）"
@@ -5753,6 +5788,34 @@ def selftest():
     assert g3_verdict(bash_ev(run([use, use2], {"t1": err, "t2": fine}), T, hook("t1", "t2"), many=True), False, True) == "INCONCLUSIVE", "G3：有一次结果不是报错"
     # G4：观测文件
     assert obs_verdict(ev_ok, o("1"), False) == "PASS" and obs_verdict(ev_ok, o("0"), False) == "FAIL" and obs_verdict(ev_ok, o("0", "x\n"), True, "x") == "PASS"
+    for bad, why in ((o("127", "sh: touch: command not found"), "命令不存在"), (o("1", "touch: /o/x: No such file or directory"), "目录不存在"),
+                     (o("1", "cat: /o/x: Permission denied"), "Permission denied 不是沙箱的原文"), (o("1", ctl="1"), "对照失败"),
+                     (o("1", ctl=None), "没有对照")):
+        assert obs_verdict(ev_ok, bad, False) == "INCONCLUSIVE", why
+    assert obs_verdict(ev_ok, o("1", "Read-only file system"), False) == "PASS", "Linux 的拦截原文"
+    assert obs_verdict(ev_ok, o("1", "blocked by policy X"), False, denied=("blocked by policy X",)) == "PASS", "格子自己给的拒绝文字"
+    assert obs_verdict(ev_ok, o("0", ctl="1"), False) == "FAIL", "跑成了就是 FAIL，不看对照"
+    # observed() 的对照：touch、cat 才有，同一个程序、目标在工作区里；真跑一遍
+    c_touch, rd = observed("st-ctl-touch", f"touch {R.outside}/st-ctl-x")
+    subprocess.run(["sh", "-c", c_touch], check=True)
+    got = rd()
+    assert got["ctl_rc"] == "0" and got["rc"] == "0" and c_touch.startswith("( touch ") and R.obs in c_touch.split(";")[0], (c_touch, got)
+    c_cat, rd2 = observed("st-ctl-cat", f"cat {R.outside}/st-ctl-none")
+    subprocess.run(["sh", "-c", c_cat], check=True)
+    got2 = rd2()
+    assert got2["ctl_rc"] == "0" and got2["rc"] != "0" and "t0g control" in got2["ctl_out"], got2
+    assert obs_verdict(ev_ok, got2, False) == "INCONCLUSIVE", "沙箱外真跑：文件不存在是普通错误，不当成被挡"
+    assert observed_control("x", "cd /a && npm install") is None and observed_control("x", "curl https://e") is None
+    assert ".ctl.rc" not in observed("st-ctl-none", "printf hi")[0], "认不出程序：不加对照"
+    # 外层保护的 Bash 预检（supervisor 2026-11-13 ②）：对照之外还要拦截原文
+    gobs = {"ctl_rc": "0", "ctl_exists": True, "write_rc": "1", "write_exists": False, "write_err": "touch: x: Operation not permitted",
+            "read_ctl_rc": "0", "read_rc": "1", "read_err": "cat: x: Operation not permitted", "read_leaked": False}
+    assert bash_guard_verdict(True, gobs) == {"bash-write": True, "bash-read": True}
+    assert bash_guard_verdict(True, {**gobs, "write_err": "touch: x: No such file or directory"})["bash-write"] is False, "目录不存在不算拦住"
+    assert bash_guard_verdict(True, {**gobs, "read_err": "cat: x: Permission denied"})["bash-read"] is False, "Permission denied 不算"
+    assert bash_guard_verdict(True, {**gobs, "read_ctl_rc": "1"})["bash-read"] is False, "读的对照失败"
+    assert bash_guard_verdict(True, {**gobs, "ctl_rc": "127"}) == {"bash-write": False, "bash-read": False}, "写的对照失败（命令不存在）"
+    assert bash_guard_verdict(False, gobs) == {"bash-write": False, "bash-read": False}, "调用没有正面证据"
     assert obs_verdict(ev_ok, None, False) == "INCONCLUSIVE", "G4：观测文件没写出来，不能当成「被挡住了」"
     assert obs_verdict(bash_ev({**good_ok, "exit": 1}, T), o("1"), False) == "INCONCLUSIVE", "G4：运行无效"
     assert st(g4_no_retry_verdict(["PASS", "PASS", "PASS"], [False] * 3)) == "PASS"
