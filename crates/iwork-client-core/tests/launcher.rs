@@ -1,5 +1,7 @@
-//! 客户端拉起（T04 方案 2.7；S3、S11d、S14、S19）。连接尝试与拉起进程用假的；连上的那一刻用假后台
-//! （`iwork-fake-daemon`，真的 Unix socket + ipc 服务端）给出一条真连接。
+//! 客户端拉起（T04 方案 2.7；S3、S11d、S14、S19）。连接尝试与拉起进程用假的；连上的那一刻交出一条
+//! 事先连好的真连接（`iwork-fake-daemon`，真的 Unix socket + ipc 服务端）。事先连好是因为真握手要校验
+//! 对端身份，Linux 上要对整个测试程序算 SHA-256，耗时随构建大小与机器负载变；放进预算里量，测的就是
+//! 机器快不快，不是拉起逻辑。
 #![cfg(unix)]
 
 use std::collections::VecDeque;
@@ -40,7 +42,8 @@ struct Ctl {
     spawn_fails: AtomicBool,
     /// 拉起后后台是否真的起来
     spawn_brings_up: AtomicBool,
-    real: Mutex<Option<iwork_client_core::launcher::IpcConnect>>,
+    /// 事先和假后台握好手的那一条连接；每个用例最多连上一次
+    real: Mutex<Option<(Client, Incoming)>>,
 }
 
 #[derive(Clone)]
@@ -58,16 +61,26 @@ impl Connect for FakeConnect {
         } else {
             Some(ctl.script.lock().unwrap().pop_front().unwrap_or(Step::Io))
         };
-        let real = ctl.real.lock().unwrap().clone();
+        let real = || {
+            ctl.real
+                .lock()
+                .unwrap()
+                .take()
+                .expect("假后台没起，或者这条连接已经交出去过")
+        };
+        let real = match step {
+            None | Some(Step::DelayThenUp(_)) => Some(real()),
+            _ => None,
+        };
         async move {
             match step {
-                None => real.expect("假后台没起").connect().await,
+                None => Ok(real.unwrap()),
                 Some(Step::Io) => Err(ConnectError::Io(std::io::ErrorKind::NotFound.into())),
                 Some(Step::Err(f)) => Err(f()),
                 Some(Step::Hang) => std::future::pending().await,
                 Some(Step::DelayThenUp(d)) => {
                     tokio::time::sleep(d).await;
-                    real.expect("假后台没起").connect().await
+                    Ok(real.unwrap())
                 }
             }
         }
@@ -113,11 +126,12 @@ impl World {
             let d = iwork_fake_daemon::FakeDaemon::start(dir.path().join("d.sock"))
                 .await
                 .unwrap();
-            *ctl.real.lock().unwrap() = Some(iwork_client_core::launcher::IpcConnect {
+            let real = iwork_client_core::launcher::IpcConnect {
                 endpoint: d.endpoint(),
                 own: iwork_fake_daemon::self_trusting_identity().unwrap(),
                 cfg: ClientConfig::new(pb::ClientKind::Desktop, "t"),
-            });
+            };
+            *ctl.real.lock().unwrap() = Some(real.connect().await.expect("和假后台握手"));
             Some(d)
         } else {
             None
