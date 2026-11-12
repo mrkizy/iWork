@@ -13,6 +13,8 @@ const ENV_LOG: &str = "IWORK_BRIDGE_LOG";
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     init_logging();
+    let leader = become_group_leader();
+    watch_hangup();
     let sub = std::env::args().nth(1);
     let result = match sub.as_deref() {
         None | Some("acp") => match iwork_bridge_claude::acp::BridgeConfig::from_process() {
@@ -21,10 +23,52 @@ async fn main() {
         },
         Some(other) => Err(format!("不认识的子命令：{other}")),
     };
-    if let Err(message) = result {
+    if let Err(message) = &result {
         tracing::error!(%message, "桥接退出");
         eprintln!("iwork-bridge-claude: {message}");
+    }
+    // ACP 连接结束（后台没了或关了我们），CLI 已经收拾过：最后对自己的进程组发 SIGKILL，连自己一起，
+    // CLI 直接起的、还留在组里的进程也一起结束（5.4a 第 5 条第二种）。不是组长时不发，免得杀到别人的组
+    if leader {
+        // SAFETY: killpg 只读两个整数参数；组号是自己的进程号
+        unsafe { libc::killpg(libc::getpid(), libc::SIGKILL) };
+    }
+    if result.is_err() {
         std::process::exit(2);
+    }
+}
+
+/// 确认自己是进程组组长（后台以 `process_group(0)` 起桥接时本来就是）；不是就自立一组：开发时从 shell 直接起
+/// 桥接，最后那一下 `killpg` 不能把 shell 的进程组一起杀掉（方案 5.4）。返回最后能不能对自己的组发信号。
+#[cfg(unix)]
+fn become_group_leader() -> bool {
+    // SAFETY: 这几个调用只读写整数
+    unsafe {
+        if libc::getpgrp() == libc::getpid() {
+            return true;
+        }
+        if libc::setpgid(0, 0) == 0 {
+            return true;
+        }
+    }
+    tracing::warn!(error = %std::io::Error::last_os_error(), "没能自立进程组，退出时不对进程组发信号");
+    false
+}
+
+/// 给 SIGHUP 装处理函数（不是忽略：忽略会被 CLI 继承，处理函数不会）。后台死在冻结中途时系统给这一组发
+/// SIGHUP、SIGCONT，桥接要活下来，接着从 stdin 读到结束、走自己收尾那条路（5.4a 第 5 条）。
+#[cfg(unix)]
+fn watch_hangup() {
+    use tokio::signal::unix::{SignalKind, signal};
+    match signal(SignalKind::hangup()) {
+        Ok(mut hup) => {
+            tokio::spawn(async move {
+                while hup.recv().await.is_some() {
+                    tracing::warn!("收到 SIGHUP：后台可能没了，等 stdin 读到结束后自己收尾");
+                }
+            });
+        }
+        Err(e) => tracing::warn!(error = %e, "装不上 SIGHUP 处理函数"),
     }
 }
 

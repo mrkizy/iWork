@@ -125,7 +125,7 @@ async fn startup_initialize_timeout_is_permission_mode() {
     let response = b.open(&rig).await;
     assert_eq!(
         response["error"]["data"]["iwork"],
-        json!({ "code": "isolation_broken", "reason": "permission_mode" }),
+        json!({ "code": "isolation_broken", "reason": "permission_mode", "session_ended": true }),
         "{response}"
     );
 }

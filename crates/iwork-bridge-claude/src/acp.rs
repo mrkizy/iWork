@@ -33,14 +33,14 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use iwork_proto::pb;
 use prost::Message as _;
 use serde_json::{Map, Value, json};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::cli::errors::TurnEnd;
 use crate::cli::facts::{IsolationBroken, SessionExpect};
 use crate::cli::input::{InputBlock, control_request_line, user_line};
 use crate::cli::map::{Fatal, Out, Report, StreamMapper};
-use crate::cli::process::{InputError, InputQueue, ReadError};
-use crate::deadlines::{CANCEL_TERM_AFTER, deadlines};
+use crate::cli::process::{CliProcess, InputError, InputQueue, ReadError};
+use crate::deadlines::{BRIDGE_TERM_WAIT, CANCEL_TERM_AFTER, TEARDOWN_WAIT, deadlines};
 use crate::hook_server::HookEvent;
 use crate::hook_server::input::{self as hook_input, HookInput};
 use crate::hook_server::pending::{BackendAnswer, CallId, Delivery};
@@ -54,6 +54,8 @@ use crate::turn_gate::{HookVerdict, TurnGate};
 /// iWork 在 ACP `_meta` 里占用的键（方案 2.5；和 `iwork-agent-acp::convert` 同一份字符串，由端到端测试对拍）。
 const META_KEY: &str = "iwork";
 const PERMISSION_WAIT_LIMIT_KEY: &str = "permissionWaitLimitSecs";
+/// 错误里「这条会话已经结束」的标记（`error.data.iwork.session_ended`），和 `iwork-agent-acp` 的 `bridge_error` 同一份字符串。
+const SESSION_ENDED_KEY: &str = "session_ended";
 const SANDBOX_PLATFORM_KEY: &str = "sandboxPlatform";
 const SANDBOX_KEY: &str = "sandbox";
 const REPORT_KEY: &str = "report";
@@ -162,6 +164,20 @@ fn named_error_with(
     agent_client_protocol::Error::internal_error().data(json!({ META_KEY: inner }))
 }
 
+/// 「这条会话已经结束」的错误：在点名错误码之外带 `session_ended: true`，后台见到就清树（5.4a 第 5 条；
+/// `iwork-agent-acp` 的 `bridge_error::session_ended`）。
+fn session_ended_error(
+    code: &str,
+    reason: Option<&str>,
+    plugin: Option<&str>,
+) -> agent_client_protocol::Error {
+    let mut e = named_error_with(code, reason, plugin);
+    if let Some(inner) = e.data.as_mut().and_then(|d| d.get_mut(META_KEY)) {
+        inner[SESSION_ENDED_KEY] = json!(true);
+    }
+    e
+}
+
 fn iwork_meta(inner: Value) -> Meta {
     let mut meta = Map::new();
     meta.insert(META_KEY.into(), inner);
@@ -182,14 +198,30 @@ enum Command {
     Cancel,
 }
 
-/// 桥接进程里那一条会话。会话任务是它的唯一写入方（开会话时放进发送端，结束时记下原因、拿走发送端）。
-#[derive(Default)]
+/// 桥接进程里那一条会话。会话任务是它的唯一写入方（开会话时放进发送端，结束时记下原因、拿走发送端、把 CLI
+/// 停放在这里）。
 struct Slot {
     /// 会话任务在跑时有值
     commands: Option<mpsc::UnboundedSender<Command>>,
     opened: bool,
     /// 会话为什么结束了：之后来的 prompt 拿到的就是它，不是泛泛的 `cli_exited`（审查 S6-3 1/F-5）
     ended: Option<SessionFatal>,
+    /// 会话结束后停放的 CLI：桥接不杀它、不给它发信号，等后台来清树（5.4a 第 5 条）；等不到才自己收拾
+    parked: Option<CliProcess>,
+    /// 会话任务结束、CLI 已停放时变成 `true`
+    stopped: watch::Sender<bool>,
+}
+
+impl Default for Slot {
+    fn default() -> Self {
+        Self {
+            commands: None,
+            opened: false,
+            ended: None,
+            parked: None,
+            stopped: watch::Sender::new(false),
+        }
+    }
 }
 
 impl Slot {
@@ -197,7 +229,7 @@ impl Slot {
     fn ended_error(&self) -> agent_client_protocol::Error {
         match &self.ended {
             Some(f) => f.to_error(),
-            None => named_error("cli_exited", None),
+            None => session_ended_error("cli_exited", None, None),
         }
     }
 }
@@ -224,7 +256,7 @@ where
     let config = Arc::new(config);
     let (c1, c2, c3) = (config.clone(), config.clone(), config.clone());
     let (s1, s2, s3, s4) = (slot.clone(), slot.clone(), slot.clone(), slot.clone());
-    Agent
+    let connection = Agent
         .v1()
         .name("iwork-bridge-claude")
         .on_receive_request(
@@ -313,9 +345,44 @@ where
             },
             agent_client_protocol::on_receive_notification!(),
         )
-        .connect_to(transport)
-        .await
-        .map_err(|e| format!("ACP 连接出错：{e}"))
+        .connect_to(transport);
+    tokio::pin!(connection);
+    // 收摊（5.4a 第 5 条）：会话结束、CLI 停放之后等后台来清树，最多 TEARDOWN_WAIT
+    let mut stopped = slot.lock().expect("锁没有中毒").stopped.subscribe();
+    let teardown_due = async move {
+        let _ = stopped.wait_for(|s| *s).await;
+        tokio::time::sleep(TEARDOWN_WAIT).await;
+    };
+    let ended = tokio::select! {
+        r = &mut connection => Some(r),
+        () = teardown_due => None,
+    };
+    let result = match ended {
+        Some(r) => r,
+        None => {
+            // 后台没来清（多半是致命错误发生在回合外，没有请求能把错误带回去）：自己收拾 CLI，但不退出，
+            // 接着回答请求，下一次 prompt 照样拿到致命原因（带「会话已结束」，后台见到就清树）
+            tracing::warn!("收摊后后台没来清树，自己结束 CLI");
+            terminate_parked(&slot).await;
+            connection.await
+        }
+    };
+    // 连接没了：后台没了或者关了我们。会话还在跑就让它收摊、把 CLI 停放好，再自己收拾（尽力而为）
+    let running = slot.lock().expect("锁没有中毒").commands.take().is_some();
+    if running {
+        let mut stopped = slot.lock().expect("锁没有中毒").stopped.subscribe();
+        let _ = stopped.wait_for(|s| *s).await;
+    }
+    terminate_parked(&slot).await;
+    result.map_err(|e| format!("ACP 连接出错：{e}"))
+}
+
+/// 桥接自己收拾停放的 CLI：SIGTERM，等 [`BRIDGE_TERM_WAIT`] 让它结束自己的命令，再 SIGKILL（5.4a 第 5 条第二种）。
+async fn terminate_parked(slot: &Mutex<Slot>) {
+    let cli = slot.lock().expect("锁没有中毒").parked.take();
+    if let Some(mut cli) = cli {
+        cli.terminate(BRIDGE_TERM_WAIT).await;
+    }
 }
 
 /// 在 stdin / stdout 上说 ACP（`acp` 子命令）。
@@ -451,14 +518,15 @@ async fn open(
     let (tx, rx) = mpsc::unbounded_channel();
     slot.lock().expect("锁没有中毒").commands = Some(tx);
     let owner = Arc::clone(slot);
-    // 起不来的话闭包连同 `session` 一起丢掉，目录照样删（`SessionDir` 自己负责）
-    cx.spawn(async move {
-        let ended = run_session(worker, session, rx).await;
+    // 不挂在连接上（`tokio::spawn`）：连接断了它还要接着跑完收摊，把 CLI 停放好，再由 `serve_with` 收拾
+    tokio::spawn(async move {
+        let (ended, cli) = run_session(worker, session, rx).await;
         let mut slot = owner.lock().expect("锁没有中毒");
         slot.commands = None;
         slot.ended = ended;
-        Ok(())
-    })?;
+        slot.parked = Some(cli);
+        slot.stopped.send_replace(true);
+    });
     Ok(())
 }
 
@@ -563,7 +631,7 @@ impl SessionFatal {
     }
 
     fn to_error(&self) -> agent_client_protocol::Error {
-        named_error_with(self.code, self.reason, self.plugin.as_deref())
+        session_ended_error(self.code, self.reason, self.plugin.as_deref())
     }
 }
 
@@ -628,13 +696,13 @@ fn isolation_kind(i: &IsolationBroken) -> &'static str {
 const BACKSTOP: SessionFatal = SessionFatal::code("approval_backstop");
 const CLI_EXITED: SessionFatal = SessionFatal::code("cli_exited");
 
-/// 会话任务：独占 CLI、hook 通道与映射，直到致命错误或连接断开。返回致命原因（连接断开为 `None`）。
+/// 会话任务：独占 CLI、hook 通道与映射，直到致命错误或连接断开。返回致命原因（连接断开为 `None`）和停放的 CLI。
 /// `s` 归它所有：它结束（或者这个 future 被丢掉）时 CLI 被杀、hook 通道停、会话目录删（`SessionDir` 自己负责）。
 async fn run_session(
     mut w: Worker,
     mut s: OpenSession,
     mut commands: mpsc::UnboundedReceiver<Command>,
-) -> Option<SessionFatal> {
+) -> (Option<SessionFatal>, CliProcess) {
     let (answered_tx, mut answered) = mpsc::unbounded_channel::<Answered>();
     // stdin 交给单独的写任务：写卡住时这里照样读 stdout、收 hook 事件（审查 1/F-1）
     let mut input = s.cli.input_queue();
@@ -669,10 +737,12 @@ async fn run_session(
             let _ = done.send(Err(f.to_error()));
         }
     }
-    // 停在这里的还在等的 hook 一律拒绝；怎么停才不留下命令（5.4a）归 S6-5
+    // 收摊（5.4a 第 5 条）：还在等的 hook 一律拒绝；hook 通道停掉、会话目录删掉，之后来的 hook 连不上，照样是拒。
+    // CLI 不杀、不发信号，交回去停放，等后台来清树：这时 CLI 还活着，它起的命令顺父链找得全
     s.pending.deny_all(REASON_NO_TURN);
-    let _ = s.cli.kill().await;
-    fatal
+    drop(input);
+    let OpenSession { cli, .. } = s;
+    (fatal, cli)
 }
 
 impl Worker {
@@ -1100,7 +1170,7 @@ mod tests {
             let slot = Arc::new(Mutex::new(Slot {
                 commands: Some(tx),
                 opened: true,
-                ended: None,
+                ..Slot::default()
             }));
             let config = BridgeConfig {
                 data_dir: "/nonexistent".into(),
