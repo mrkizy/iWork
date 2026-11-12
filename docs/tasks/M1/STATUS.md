@@ -50,6 +50,26 @@
 
 - **收窄（产品负责人 2026-11-11）**（已结束：T05、T07 合入，T04 开工）：机器负载 30、磁盘 12G，先让 T05 补丁与 T07 走完合入，T06、T09 暂停跑重测试（只推送让 CI 跑）；合入后删对应 worktree 腾磁盘，再放开 T06、T09。
 
+## 3a 进行中快照（2026-11-12 16:20，清上下文前）
+
+**worker 与在途任务**
+| worker | 角色 | 在做 | 下一步 |
+| --- | --- | --- | --- |
+| `e5b90212` | developer | T04 组 3 第 1 轮修完（HEAD `bd5c883`，CI 绿；F-9 照 `9b6bdc1` 退出码 14） | reviewer `5166257f` 第 2 轮；**F-7 卡在打包**：tauri build 产物里没有后台程序和清单，要定打包方式（a tauri.conf 加 externalBin sidecar；b tauri build 后脚本放后台、写清单）与归属，待 supervisor/产品负责人定 |
+| `b20e49db` | developer | T09 2b 第 5 轮修复中（`cao/165268d4`，HEAD `81d257c` 之后）：5/F-2 小幅滚动取消、5/F-1 强调按钮悬停对比度、13 个形象预览场景；5/F-3 选了行级游标 A（`before_seq/after_seq`），**等 architect 改 T09 方案 G11、2.2 第 4 条、R5、第 3 节的提交号再动 proto** | 下一轮是 2b 的第 3 轮（任务 round 6，最后一轮），code `e036441c` + UI `dbe31771`；预览 1444（PID 23651）。4/F-6 未关（随 5/F-2）；4/F-3 等设计窗口（1024 宽锚点导轨）|
+| `4ea1efca` | developer | T06 S6-1 已送审（`cao/4ea1efca-s6-1` `9157424`，reviewer `6114386d` 第 1 轮，疑 hook 断开不发失败事件）；**在补 hook cold_start 基准**（9ef3808 对 9157424 交替 3 轮），之后做 S6-2 | S6 共 5 批（方案 `3096cb7`）：S6-4 合入等 D2、D5 |
+| `b57765cc` | developer | 实测脚本 script4（`--part skill`，6 格）第 1 轮 5 条已修（`575e80c`） | reviewer `ad7b3f77` 第 2 轮；过了合入 main，请产品负责人跑 `--only R2X --part skill`。另：selftest 与真实运行同时在家目录跑会让「运行前后原有文件核对」误报，待单开 |
+| `47737e78` | architect（T06） | ① 借改 T09 方案（行级游标，5/F-3）；② 写 R2 补测分析报告（结果解压在 scratchpad `r2x/`），给 D2、D5 推荐并改 T06 方案 | — |
+| `93d94e7c` | architect（T10d） | T10d 方案三轮审过（`25c4b14`），1/F-2、1/F-4 等 PD-6、PD-9 | 等产品负责人定 PD-1～PD-4、PD-6～PD-9（PD-5 等实测 A2） |
+| `da37bce2` | architect（T10e） | T10e 方案第 2 轮不过（2/F-1～F-4），在改，第 3 轮是最后一轮；reviewer `8036b426` | Q1～Q6、K1～K5 等产品负责人 |
+| `a2c030fb` | architect（T10f） | T10f 方案第 2 版 `5460e55`，reviewer `9a5980a0` 第 2 轮在审 | PD-1～PD-9 等产品负责人；1/F-8（仓库技能 hooks/allowed-tools，改动前就有）等 `--part skill` 结果交产品负责人 |
+
+**R2 补测已跑（产品负责人，2026-11-12 15:27–16:13）**：D2：SIGKILL CLI 进程组后前台命令照样跑完（k1），只关输入 CLI 不退（k2），**SIGTERM 时 CLI 自己收拾前台命令并退出（k3）**；D5：设 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` 后子代理在前台跑、`run_in_background` 被拒后模型改前台重发（b1/b2），不设时子代理后台跑、2 个 init 2 个 result（n1）；D4 ①c′①d′ PASS；net：经隧道连 github:22 读到问候，带 allowLocalBinding 能连本机监听、不带连不上；`--tools`/`--disallowedTools` 认 Task 和 Agent 两个名字；G5 记忆写 PASS、记忆读 INCONCLUSIVE（脚本没跟上 b543196 放宽的甲）、子代理记忆守卫预检没过（改 R3）。**等 architect 报告后问产品负责人 D2、D5、P3 远端连接、P15**。
+
+**等产品负责人的**：T10d PD 8 条（已发表格，推荐全按推荐）；T10e、T10f 的问题等审完整理；D2/D5/P3/P15 等分析；仓库 CLAUDE.md 在 `--setting-sources ""` 下不加载（等 `--part skill` 的 L1/L2）；要真机试：选择框「取消后再弹」与「重新定位」入口、Option 切「完全退出」、侧栏拖动（做好后）。
+
+**待排**：侧栏可拖动调宽（T09，2b 合入后）；CI 两张小卡（Ubuntu test job 余量、e2e reload 预热）；Windows outbox 测试偶发（T04 组 3 CI）；iwork-vcs-git 测试 ETXTBSY 隐患；rootfs 临时文件名可预测（T04 g3 报）。
+
 ## 4 合入时要处理
 
 - ADR：main 已用 0001–0012；T04/T06/T07/T09 方案里 `ADR-T0X-a…` 占位，合入时让 developer 在分支上定号。
