@@ -327,6 +327,15 @@ pub const REGISTRY: &[Scenario] = &[
         timeline_cap: None,
     },
     Scenario {
+        name: "dock-drill-preview-only",
+        about: "演练用：客户端开着 15 秒后来一条审批（关窗后看 Dock 角标与跳动，T09 验收 9）。`pnpm -C client dev:fake dock-drill-preview-only`",
+        build: dock_drill,
+        focus: Some("c-approval"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
         name: "back-to-latest-notice",
         about: "Q9：停在旧消息上时断线、重连给的是快照：回到最新并提示「已重新连接，回到最新」",
         build: back_to_latest_notice,
@@ -1301,6 +1310,33 @@ fn switch_rows() -> Vec<Step> {
     s.push(a(f::model_changed(c, "fake-large")));
     s.push(a(f::approval_mode_changed(c, pb::ApprovalMode::Manual)));
     s.extend(dm_round("sw3", PROJECT, "fake-large", "回到 demo", "好"));
+    s
+}
+
+/// 演练 Dock：已有一条待审批；打开对话（开发入口起客户端）后等一段时间再来一条，期间关窗、切到别的应用。
+fn dock_drill() -> Vec<Step> {
+    let c = "c-approval";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(exchange(c, "dock", "清一下构建目录", "需要你批准。"));
+    s.push(a(f::approval(
+        "ap-dock-1",
+        c,
+        "t-dock",
+        f::command_action("rm -rf target"),
+        pb::ApprovalKind::Ask,
+        &[],
+    )));
+    s.push(Step::OpenHere);
+    s.push(Step::Sleep(Duration::from_secs(15)));
+    s.push(a(f::approval(
+        "ap-dock-2",
+        c,
+        "t-dock",
+        f::command_action("git push origin main"),
+        pb::ApprovalKind::Ask,
+        &[],
+    )));
     s
 }
 
