@@ -876,6 +876,7 @@ pub fn session_setup() -> SessionSetup {
         tool_set: Some(session_tool_set()),
         disabled_tools: Vec::new(),
         plugin_dirs: Vec::new(),
+        builtin_tool_allowlist: None,
     }
 }
 
@@ -887,6 +888,21 @@ pub fn session_setup_2() -> SessionSetup {
         tool_set: Some(session_tool_set()),
         disabled_tools: vec![s("CronCreate"), s("RemoteTrigger")],
         plugin_dirs: vec![s("/data/iwork/imports/plugins/p1")],
+        builtin_tool_allowlist: None,
+    }
+}
+
+/// 表外 CLI 版本的会话：带内置工具白名单（T06 方案第 9 节，P11 的 d）。
+pub fn session_setup_allowlist() -> SessionSetup {
+    SessionSetup {
+        model: model_sel(),
+        constraints: Some(session_constraints()),
+        tool_set: Some(session_tool_set()),
+        disabled_tools: vec![s("CronCreate")],
+        plugin_dirs: Vec::new(),
+        builtin_tool_allowlist: Some(BuiltinToolAllowlist {
+            tools: vec![s("Bash"), s("Edit"), s("Read")],
+        }),
     }
 }
 

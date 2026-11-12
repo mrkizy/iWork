@@ -63,7 +63,7 @@ fn builtin_ids_unique_and_versioned() {
     let ids: BTreeSet<_> = rules.iter().map(|e| e.id).collect();
     assert_eq!(ids.len(), rules.len());
     assert!(rules.iter().all(|e| e.is_builtin() && !revocable(e)));
-    assert_eq!(builtin::version().0, "m1-2");
+    assert_eq!(builtin::version().0, "m1-3");
 }
 
 /// 需求第 9 章凭据目录清单逐条：期望路径手写，不从条目推。

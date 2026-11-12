@@ -74,6 +74,14 @@ message SessionSetup {
   repeated string disabled_tools = 4;
   // 按会话加载的插件目录（导入区下的绝对路径，设计 9.5）。
   repeated string plugin_dirs = 5;
+  // 内置工具白名单（T06 方案第 9 节，P11 的 d，2026-11-12）：只在 CLI 版本不在已验证表里时由适配器填。
+  // 没有这个字段 = 不限制；有而 tools 为空是无效配置，桥接必须拒绝开会话（不能当成「一个工具都不给」）。
+  BuiltinToolAllowlist builtin_tool_allowlist = 6;
+}
+
+// 包一层消息，好分清「没给」和「给了空的」（裸的 repeated 分不清）。
+message BuiltinToolAllowlist {
+  repeated string tools = 1;
 }
 
 // 运行时向后台上报的事实。编码同 SessionSetup（Protobuf 二进制再做标准 base64），挂在一条
