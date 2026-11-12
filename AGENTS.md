@@ -51,7 +51,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
   - 对端身份探针（dev feature，平台实测用）：`cargo run -p iwork-ipc --features dev --example peer-probe -- --help`
 - 审批引擎交错性质测试完整一轮（T07 方案 6.10.13；默认 256 例随 `cargo test` 跑）：`PROPTEST_CASES=5000 lockf /tmp/iwork-heavy-test.lock cargo test -p iwork-core --test engine_interleavings --test engine_fold`；复现某个种子加 `PROPTEST_RNG_SEED=<种子>`
 - 审批对拍语料：`cargo run -p iwork-core --example dump-credential-corpus` 导出需凭据命令的匹配语料（JSON），供 T06 对固定版本的 Claude Code 实测回填；内置规则集快照更新用 `IWORK_UPDATE_SNAPSHOTS=1 cargo test -p iwork-core --test builtin_rules`（改内置条目必须同时升 `RULESET_VERSION`）
-- 重测试排队（产品负责人 2026-11-10 定：同一时间只跑一张卡的重测试）：`cargo test --workspace`、`cargo clippy --workspace`、崩溃注入、`PROPTEST_CASES` 调大的属性测试、fuzz、`cargo bench`、release 构建、docker 里的测试，一律套 `lockf /tmp/iwork-heavy-test.lock <命令>` 跑（macOS 自带 `lockf`，拿不到锁就排队等）；单个 crate 的少量定向测试不用套。临时验证副本里跑也一样套
+- 重测试排队（产品负责人 2026-11-10 定：同一时间只跑一张卡的重测试）：`cargo test --workspace`、`cargo clippy --workspace`、崩溃注入、`PROPTEST_CASES` 调大的属性测试、fuzz、`cargo bench`、release 构建、docker 里的测试，一律套 `lockf /tmp/iwork-heavy-test.lock <命令>` 跑（macOS 自带 `lockf`，拿不到锁就排队等）。例外：`pnpm -C client e2e:webview` 和 `scripts/bench-approval-engine-ab.sh` 在内部自己套锁，外面再套就会自己等自己、把所有卡的重测试一起卡死（2026-11-12 实测，卡了十几分钟）；单个 crate 的少量定向测试不用套。临时验证副本里跑也一样套
 
 ## 架构约定
 
