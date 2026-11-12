@@ -35,7 +35,7 @@ use crate::stop::{self, StopHooks, StopStep, StopSwitch};
 use crate::supervisor::{RestartPolicy, Supervisor, TaskSpec};
 use crate::tasks::outbox::{self, OutboxRoute};
 use crate::tasks::signals::{self, Signals};
-use crate::tasks::{maintenance, publish_check, sleep_watch, store_health};
+use crate::tasks::{install_watch, maintenance, publish_check, sleep_watch, store_health};
 use crate::time::{MonotonicIds, SystemClock};
 use crate::work::{NoWork, RunningWork};
 
@@ -407,6 +407,23 @@ async fn wait_stop_reason(supervisor: &mut Supervisor, stop: &StopSwitch) -> Sto
 }
 
 #[cfg(not(feature = "dev"))]
+fn install_timing() -> install_watch::Timing {
+    install_watch::Timing::REAL
+}
+
+/// 开发构建：`IWORK_DEV_INSTALL_FAST=<n>` 把安装检查的全部时长除以 n（真进程测试用；单测用暂停的时钟量真值）。
+#[cfg(feature = "dev")]
+fn install_timing() -> install_watch::Timing {
+    match std::env::var("IWORK_DEV_INSTALL_FAST")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        Some(div) => install_watch::Timing::scaled(div),
+        None => install_watch::Timing::REAL,
+    }
+}
+
+#[cfg(not(feature = "dev"))]
 fn outbox_routes() -> Vec<OutboxRoute> {
     Vec::new()
 }
@@ -572,6 +589,26 @@ async fn serve_with<W: RunningWork>(
             let (clock, woke) = (clock.clone(), woke.clone());
             move || sleep_watch::run(clock.clone(), woke.clone(), sleep_watch::INTERVAL)
         }),
+        TaskSpec::restartable("install-watch", {
+            let disk = Arc::new(install_watch::RealDisk {
+                daemon_path: id.exe.clone(),
+                running: id.running_image.clone(),
+                own: id.own.clone(),
+                forms: crate::install::forms(),
+            });
+            let started = tokio::time::Instant::from_std(id.started);
+            let (stop, woke, audit) = (stop_switch.clone(), woke.clone(), audit.clone());
+            move || {
+                install_watch::run(
+                    disk.clone(),
+                    install_timing(),
+                    started,
+                    stop.clone(),
+                    audit.subscribe(),
+                    woke.clone(),
+                )
+            }
+        }),
     ]);
     let mut supervisor = Supervisor::start(specs, RestartPolicy::default());
 
@@ -585,6 +622,7 @@ async fn serve_with<W: RunningWork>(
         interrupted,
         boot_ms = t0.elapsed().as_millis() as u64,
         since_start_ms = id.started.elapsed().as_millis() as u64,
+        image = %id.running_image,
         "后台服务就绪"
     );
 

@@ -12,6 +12,7 @@ mod fixtures;
 mod seed;
 
 mod boot;
+mod install;
 mod instance;
 mod outbox;
 mod recovery;
