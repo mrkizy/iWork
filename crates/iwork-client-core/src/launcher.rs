@@ -141,7 +141,7 @@ pub enum LaunchError {
 /// 现在能看到的全部诊断数据。纯读取，不拉起、不加锁、不结束进程。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Diagnostics {
-    /// 停在哪一步（「连接中」「拉起中」「拉起失败」「等后台就绪」「同一个程序已经说过起不来」）。
+    /// 停在哪一步（「连接中」「读会合点」「拉起中」「拉起失败」「等后台就绪」「同一个程序已经说过起不来」）。
     pub stage: &'static str,
     pub endpoint: Result<PathBuf, String>,
     pub lock: Option<LockInfo>,
@@ -152,9 +152,11 @@ pub struct Diagnostics {
     pub client_protocol_major: u32,
     pub last_error: Option<String>,
     pub spawn_error: Option<String>,
+    /// 锁文件与状态文件在截止时间内读完了。`false` 时 `lock`、`status` 是空的（读得太慢，没等）。
+    pub rendezvous_read: bool,
 }
 
-/// 读会合点，凑一份诊断。
+/// 读会合点，凑一份诊断。同步读文件：`Launcher` 把它放到阻塞线程池上、等它不超过截止时间。
 pub fn diagnose(
     stage: &'static str,
     run_dir: Option<&Path>,
@@ -174,6 +176,7 @@ pub fn diagnose(
         client_protocol_major: iwork_proto::PROTOCOL_MAJOR,
         last_error,
         spawn_error,
+        rendezvous_read: true,
     }
 }
 
@@ -253,6 +256,12 @@ impl Diagnostics {
         if let Some(e) = &self.last_error {
             push("最后一次连接", e.clone());
         }
+        if !self.rendezvous_read {
+            push(
+                "会合点",
+                "期限内没读完锁文件与状态文件（读得太慢），这一页没有后台的状态".into(),
+            );
+        }
         push(
             "客户端",
             format!(
@@ -291,6 +300,17 @@ pub fn should_launch(status: Option<&StartupStatus>, disk_exe: Option<ExeStamp>)
 }
 
 type Attempt = JoinHandle<Result<(Client, Incoming), ConnectError>>;
+
+/// 在阻塞线程池上跑 `f`，等它不超过 `deadline`；到点还没完就不等（任务照跑完，结果丢掉）。
+async fn blocking_until<T: Send + 'static>(
+    deadline: Instant,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    match tokio::time::timeout_at(deadline, tokio::task::spawn_blocking(f)).await {
+        Ok(Ok(v)) => Some(v),
+        Ok(Err(_)) | Err(_) => None,
+    }
+}
 type SpawnJob = JoinHandle<std::io::Result<()>>;
 
 /// 连接或拉起。
@@ -322,19 +342,33 @@ impl<C: Connect, S: Spawn> Launcher<C, S> {
         }
     }
 
-    fn diag(
+    /// 凑诊断：读会合点放到阻塞线程池上，等它不超过 `deadline`；没读完就不等，交出不带会合点内容的诊断
+    /// （组 3 审查 2/F-3：读锁文件、状态文件可能很慢，同步读会越过截止时间）。
+    async fn diag(
         &self,
+        deadline: Instant,
         stage: &'static str,
         last: Option<String>,
         spawn: Option<String>,
     ) -> LaunchError {
-        LaunchError::NotReady(Box::new(diagnose(
+        let (run_dir, endpoint) = (self.cfg.run_dir.clone(), self.cfg.endpoint.clone());
+        let (l, s) = (last.clone(), spawn.clone());
+        let read = blocking_until(deadline, move || {
+            diagnose(stage, run_dir.as_deref(), endpoint, l, s)
+        })
+        .await;
+        LaunchError::NotReady(Box::new(read.unwrap_or_else(|| Diagnostics {
             stage,
-            self.cfg.run_dir.as_deref(),
-            self.cfg.endpoint.clone(),
-            last,
-            spawn,
-        )))
+            endpoint: self.cfg.endpoint.clone(),
+            lock: None,
+            lock_pid_alive: None,
+            status: None,
+            client_version: env!("CARGO_PKG_VERSION").into(),
+            client_protocol_major: iwork_proto::PROTOCOL_MAJOR,
+            last_error: last,
+            spawn_error: spawn,
+            rendezvous_read: false,
+        })))
     }
 
     /// 等这次尝试（没有就开一次）出结果，或者到 `deadline`。到点不取消，留给下一次调用接着等。
@@ -370,21 +404,28 @@ impl<C: Connect, S: Spawn> Launcher<C, S> {
         let err = match self.wait_attempt(deadline).await {
             Waited::Done(Ok(c)) => return Ok(c),
             Waited::Done(Err(e)) => e,
-            Waited::Deadline => return Err(self.diag("连接中", None, None)),
+            Waited::Deadline => return Err(self.diag(deadline, "连接中", None, None).await),
         };
         let ConnectError::Io(io) = err else {
             return Err(LaunchError::Connect(err));
         };
         let mut last = io.to_string();
-        // 第 3 步：照角色表决定拉不拉
-        let status = self
-            .cfg
-            .run_dir
-            .as_deref()
-            .and_then(rendezvous::read_status);
-        let disk = ExeStamp::of(&self.cfg.daemon_exe).ok();
+        // 第 3 步：照角色表决定拉不拉。读状态文件与程序文件的戳放到阻塞线程池上，同样以截止时间为上界
+        let (run_dir, exe) = (self.cfg.run_dir.clone(), self.cfg.daemon_exe.clone());
+        let read = blocking_until(deadline, move || {
+            (
+                run_dir.as_deref().and_then(rendezvous::read_status),
+                ExeStamp::of(&exe).ok(),
+            )
+        })
+        .await;
+        let Some((status, disk)) = read else {
+            return Err(self.diag(deadline, "读会合点", Some(last), None).await);
+        };
         if !force && !should_launch(status.as_ref(), disk) {
-            return Err(self.diag("同一个程序已经说过起不来", Some(last), None));
+            return Err(self
+                .diag(deadline, "同一个程序已经说过起不来", Some(last), None)
+                .await);
         }
         // 第 4 步：拉起（同一个 Launcher 两次至少隔 2s；上一次还没返回就接着等它，不叠新的）
         let now = Instant::now();
@@ -412,15 +453,12 @@ impl<C: Connect, S: Spawn> Launcher<C, S> {
                 Ok(Err(join)) => Err(std::io::Error::other(format!("拉起线程异常结束：{join}"))),
                 Err(_) => {
                     self.pending_spawn = Some(job);
-                    return Err(self.diag("拉起中", Some(last), None));
+                    return Err(self.diag(deadline, "拉起中", Some(last), None).await);
                 }
             };
             if let Err(e) = spawned {
-                return Err(self.diag(
-                    "拉起失败",
-                    Some(last),
-                    Some(format!("{}：{e}", self.cfg.daemon_exe.display())),
-                ));
+                let spawn = Some(format!("{}：{e}", self.cfg.daemon_exe.display()));
+                return Err(self.diag(deadline, "拉起失败", Some(last), spawn).await);
             }
         }
         // 第 5 步：退避重连，每一处等待都以同一个截止时间为上界
@@ -429,13 +467,15 @@ impl<C: Connect, S: Spawn> Launcher<C, S> {
             let wake = (Instant::now() + delay).min(deadline);
             tokio::time::sleep_until(wake).await;
             if Instant::now() >= deadline {
-                return Err(self.diag("等后台就绪", Some(last), None));
+                return Err(self.diag(deadline, "等后台就绪", Some(last), None).await);
             }
             match self.wait_attempt(deadline).await {
                 Waited::Done(Ok(c)) => return Ok(c),
                 Waited::Done(Err(ConnectError::Io(e))) => last = e.to_string(),
                 Waited::Done(Err(e)) => return Err(LaunchError::Connect(e)),
-                Waited::Deadline => return Err(self.diag("等后台就绪", Some(last), None)),
+                Waited::Deadline => {
+                    return Err(self.diag(deadline, "等后台就绪", Some(last), None).await);
+                }
             }
             delay *= 2;
         }

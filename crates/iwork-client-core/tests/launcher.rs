@@ -326,6 +326,84 @@ async fn slow_spawn_returns_at_deadline_and_is_reused() {
     assert_eq!(w.spawns(), 1, "没有叠新的拉起");
 }
 
+/// 把会合点的锁文件与状态文件换成 FIFO：打开读会一直卡住，直到有人打开写（模拟很慢的文件系统）。
+fn slow_rendezvous(dir: &Path) -> Vec<PathBuf> {
+    [rendezvous::LOCK_FILE, rendezvous::STATUS_FILE]
+        .iter()
+        .map(|name| {
+            let p = dir.join(name);
+            let c = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
+            // SAFETY：只在测试的临时目录里建 FIFO
+            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+            p
+        })
+        .collect()
+}
+
+/// 放开卡在 FIFO 上的读：先把 FIFO 改名挪开（之后才来读的直接 NotFound，不会再卡），再在 1s 内反复以非阻塞方式
+/// 打开挪走后的写端又关掉——已经卡在打开或读上的一方读到 EOF。测试结束时运行时要等阻塞线程收尾，不放开就挂住。
+fn release(fifos: &[PathBuf]) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let gone: Vec<PathBuf> = fifos
+        .iter()
+        .map(|p| {
+            let g = p.with_extension("gone");
+            std::fs::rename(p, &g).unwrap();
+            g
+        })
+        .collect();
+    let until = std::time::Instant::now() + Duration::from_secs(1);
+    while std::time::Instant::now() < until {
+        for g in &gone {
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(g);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// 2/F-3：会合点读得很慢（锁文件、状态文件都卡住）→ 起进程前读状态这一步不越过截止时间，返回「读会合点」，
+/// 诊断里写明没读完；不拉起（没读到状态就不知道该不该拉）。
+#[tokio::test]
+async fn slow_status_read_returns_at_deadline() {
+    let w = World::new(false).await;
+    let fifos = slow_rendezvous(w.dir.path());
+    w.script(&[Step::Io]);
+    let t = std::time::Instant::now();
+    let d = not_ready(w.launcher(BUDGET).connect_or_launch().await);
+    assert!(
+        t.elapsed() < BUDGET + Duration::from_millis(300),
+        "{:?}",
+        t.elapsed()
+    );
+    assert_eq!(d.stage, "读会合点");
+    assert!(!d.rendezvous_read);
+    assert!(d.to_view().lines.iter().any(|(k, _)| k == "会合点"));
+    assert_eq!(w.spawns(), 0);
+    release(&fifos);
+}
+
+/// 2/F-3：连接尝试到期（不回话的端点）时凑诊断，会合点读得很慢 → 照样在截止时间返回，不等诊断。
+#[tokio::test]
+async fn slow_diagnostics_do_not_extend_the_deadline() {
+    let w = World::new(false).await;
+    let fifos = slow_rendezvous(w.dir.path());
+    w.script(&[Step::Hang]);
+    let t = std::time::Instant::now();
+    let d = not_ready(w.launcher(BUDGET).connect_or_launch().await);
+    assert!(
+        t.elapsed() < BUDGET + Duration::from_millis(300),
+        "{:?}",
+        t.elapsed()
+    );
+    assert_eq!(d.stage, "连接中");
+    assert!(!d.rendezvous_read);
+    assert!(d.lock.is_none() && d.status.is_none());
+    release(&fifos);
+}
+
 /// S19：一直连不上、拉起了也不起来 → 起进程、退避睡眠都以同一个截止时间为上界：整个调用恰好用完预算。
 #[tokio::test(start_paused = true)]
 async fn deadline_covers_spawn_and_backoff() {
