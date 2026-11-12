@@ -10,6 +10,7 @@ use iwork_domain::attachment::AttachmentOrigin;
 use iwork_domain::common::{ArtifactArea, ArtifactRef};
 use iwork_domain::event::*;
 use iwork_domain::message::{MessageBody, MessageStatus};
+use iwork_domain::turn::TurnState;
 use iwork_ports::artifact::{ArtifactError, ArtifactStore, GcReport};
 use iwork_ports::read_model::ReadModelPort;
 use iwork_ports::store::StoragePort;
@@ -515,7 +516,17 @@ fn gc_after_conversation_deleted_frees_attachment_copy() {
     );
     block(w.store.commit(cmd(
         3,
-        vec![ConversationDeleted { conversation_id: cid(10) }.into()],
+        vec![
+            // 级联删除要求名下回合先到终态（T10a X5）
+            TurnStateChanged {
+                turn_id: tid(20),
+                from: TurnState::Queued,
+                to: TurnState::Cancelled,
+                reason: None,
+            }
+            .into(),
+            ConversationDeleted { conversation_id: cid(10) }.into(),
+        ],
     )))
     .unwrap();
     assert_eq!(
