@@ -52,6 +52,140 @@
 
 `--setting-sources project,local` 仍会加载仓库内的 `.claude/settings.json` 与本地设置（含其中的 hook）；v1.44 曾决定照常加载，v1.63 改为一律不加载（排除写法见 O1 第 ③ 项）。
 
+### 2.4 T06 S0 补测（`tools/t0/iwork-t0g.py`，Claude Code **2.1.322**，macOS arm64，日常账号，模型 `claude-haiku-5-5`，2026-11-11 23:08 – 11-12 00:41）
+
+> 来源三份，都在 2.1.322 上、都是日常账号：① S0 第一轮全量 `iwork-t0g.py --corpus --skip-builds`（结果包 `iwork-t0g-results-20261112-004107-942c1c`，约 766 个实例）；② R1 的五个手工探针（2026-11-12，产品负责人同意）；③ R1x 的七个手工探针（同日）。只收有结构化证据的结论（流里的工具调用与结果、哨兵与观测文件、探针记录）；没测成的项只写现状，不写结论。「R2」指脚本改完后在日常账号的重测，「R3」指一次性环境里的全量 G2 / G5 / G9（T06 方案 16.1、16.2）。
+
+S0 合计 PASS 506、FAIL 46、INCONCLUSIVE 217、INFO 19。FAIL 里 34 个是 G2 的 read 行（真行为，见下）；G1f、G7e、G7f 是用例设计问题；G4 四条与「进程组」四行是真行为。INCONCLUSIVE 里 90 个本来就该在一次性环境跑，另 127 个是脚本问题（子代理工具名、模型重发、MCP 延迟加载、模型并行发调用），脚本已在改，R2 重测。G5、G9d、G4 ⑧、G3 的睡眠时钟、T06 方案 16.2 的手动项、G10 未跑。原 2.1、2.2a 各条在 2.1.322 上的重测（`iwork-t0.sh`、`iwork-t0b.sh`、`iwork-t0f.py`，方案 16.3）不在这一节里。
+
+**G1 工具与 hook 输入**
+
+| 项 | 结论 |
+| --- | --- |
+| G1a 内置工具 | `system/init.tools` 默认 25 个：Task、Bash、CronCreate、CronDelete、CronList、DesignSync、Edit、EnterWorktree、ExitWorktree、ListAgents、Monitor、NotebookEdit、PushNotification、Read、RemoteTrigger、ReportFindings、ScheduleWakeup、SendMessage、Skill、TaskStop、ToolSearch、WebFetch、WebSearch、Workflow、Write。默认没有 Grep、Glob：它们只在没有 Bash 时出现（G8b、G8c） |
+| 子代理工具的名字 | `init.tools` 与 `result.permission_denials` 里叫 `Task`；模型发出的 `tool_use.name` 与 hook 输入的 `tool_name` 叫 `Agent` |
+| 技术设计 7.1 没归类的 | DesignSync、EnterWorktree、ExitWorktree、ListAgents、Monitor、PushNotification、ReportFindings、ScheduleWakeup、SendMessage、ToolSearch、Workflow、CronList。7.1 提到而这个版本没有的：TodoWrite、计划模式工具、单独的「读取后台命令输出」工具（后台输出写进文件，用 Read 读）。差异表交产品负责人（任务卡 5c） |
+| G1b hook 输入顶层字段 | `cwd`、`effort`、`hook_event_name`、`permission_mode`、`prompt_id`、`session_id`、`tool_input`、`tool_name`、`tool_use_id`、`transcript_path` |
+| G1e `tool_input` 字段名 | Bash：`command`、`description`、`run_in_background`（沙箱外重试另带 `dangerouslyDisableSandbox`）；Read：`file_path`；Write：`content`、`file_path`；Edit：`file_path`、`new_string`、`old_string`、`replace_all`；ToolSearch：`max_results`、`query`；WebFetch：`prompt`、`url`；Agent：`description`、`prompt`、`subagent_type`；TaskStop：`task_id` |
+| G1c cd 之后的 cwd | 没测成（模型并行发了调用）。原始记录：cd 跨 Bash 调用保留；cd 之后那条调用的 hook `cwd` 是新目录 |
+| G1d 子代理进不进 hook | 没测成（脚本按 `Task` 登记，把 `Agent` 拒了）。子代理工具本身过 PreToolUse |
+| G1f 结果是否都过 hook | 成功的工具结果都对得上一次 hook 请求。CLI 自己就判了失败的调用不过 hook、直接回报错结果：调用不存在的工具（`No such tool available`）、Bash 内置拦截（前台 `sleep N; …`，`Blocked:`） |
+| 延迟加载 | 工具多时，WebFetch 与 MCP 工具要先经 `ToolSearch` 取定义；`ToolSearch` 过 PreToolUse |
+
+**G2 hook 出事时执不执行（日常账号，8 个候选配置：`default` / `dontAsk` × `onFailure: block`、加 `--permission-prompts none`、加 `denyInsteadOfPrompting`、不设 `onFailure`）**
+
+| 项 | 结论 |
+| --- | --- |
+| hook 明确允许 / 拒绝 | 每类工具都照办。拒绝的结果 `is_error=true`、文字 `PreToolUse:<工具> hook error: <原因>`，计入 `result.permission_denials` |
+| `onFailure: "block"` | hook 非零退出（1、2）、被信号杀掉、超时（`timeout: 5`，之后答允许或拒绝都不算）、程序不存在：调用被拦，文字 `PreToolUse:<工具> hook error: […]: failed; blocking because onFailure is "block"`。Bash、Write、Read、MCP 都如此 |
+| hook 不表态（退出码 0 没输出、输出不是 JSON、没注入 PreToolUse） | CLI 用自己的权限层接着判。Bash（沙箱内、清单内沙箱外）、Write、MCP：拒绝，流里有 `system/permission_denied`；`dontAsk` 下文字是 `Permission to use <工具> has been denied because Claude Code is running in don't ask mode`。**工作目录内的 Read：执行**。**子代理工具：执行**（子代理里的 Bash 被拒，理由是 `Permission prompts are not available in this context`）。S0 的 Bash 各行用的命令是 `touch`；只读命令见下面 R1x 的 x2 |
+| 不设 `onFailure` | hook 失败与超时不拦，同样落到 CLI 权限层：Bash（`touch`）、Write、MCP 拒绝，工作目录内的 Read 执行。这里量的是 `timeout: 5`、带隔离参数、`default` / `dontAsk` 两种模式；原 2.1「hook 超时 = 放行」那一条是在用户自己的配置下量的，要等 `iwork-t0b.sh` 在 2.1.322 上重跑才能改 |
+| 硬前提（T06 方案 3.4） | 「hook 没明确允许时每类工具都不执行」在 2.1.322 上不成立，8 个候选都一样：hook 不表态时，CLI 自己不问的动作照 CLI 的规则执行。产品负责人 2026-11-12 定：硬前提分两类写。**CLI 要问的动作**（只读命令之外的命令、写文件、MCP、工作目录外的读、子代理里的这些调用）仍然不执行，这一句在不注入 hook 时已实测，hook 无输出或乱码时的越界、子代理里的越界、清单内只读命令出不出沙箱待 R3。**CLI 不问的动作**（工作目录内的读，含 Read、Grep、Glob 与只读命令如 `cat`；起子代理）记为已知限制；只读命令一项最坏情况按沙箱算，待 R3 的底线格、沙箱外重试格证实；项目目录包住凭据目录或数据目录时文件工具连系统底线也读得到，记为已知限制（P12）。见 AGENTS.md 安全不变量第 2 条、技术设计第 1 节已知缺口表、方案 3.4。选定配置写死：`dontAsk` + `onFailure: "block"`，hook 程序只有写出完整决定才以 0 退出（方案 3.4a） |
+| 候选配置之间的差别 | 带 `onFailure: "block"` 的六个候选（两种模式 × 不加 / 加 `--permission-prompts none` / 加 `denyInsteadOfPrompting`）逐格结果相同。`default` 与 `dontAsk` 的差别只在拒绝的文字和 `system/init.permissionMode` 报的值（`default` / `dontAsk`）。设置里没给 `defaultMode` 的运行，init 报的都是 `default` |
+| 外层保护 | `permissions.blockReadsOutsideWorkingDirectories` / `blockWritesOutsideWorkingDirectories` 拦住文件工具读写工作目录之外，hook 答允许也照拦。沙箱拦住 Bash 读写工作区外。`--tools ""` 加 `--mcp-config` 时只剩 MCP 工具。六项在 8 个配置下都成立 |
+| 子代理一行、沙箱外重试一行 | 没测成（前者脚本问题，后者只在一次性环境跑） |
+| 模型重发 | hook 报错后模型常把同一个调用原样重发一次（33 个故障格），两次都被拦。判据因此改成：负向结论允许重发、每一次都要有证据；正向结论与读回仍要恰好一次（方案 16.1） |
+
+**R1 读类补测（手工探针，2026-11-12，日常账号，`--tools Read`，`--setting-sources ""`，每条 1 个实例；记录 `r1-out/r1a…r1e.tools.jsonl`）**
+
+| 项 | 设置 | 读什么 | 结论 |
+| --- | --- | --- | --- |
+| r1e（对照） | `dontAsk`，不注入 hook | 工作目录内的文件 | 读到了。复现 S0 的 read 行，探针测得出东西 |
+| r1a | `dontAsk`，不注入 hook | 工作目录**外**的文件 | **没读到**。结果 `is_error=true`：`Permission to use Read has been denied because Claude Code is running in don't ask mode`，计入 `permission_denials` |
+| r1b | `default`，不注入 hook | 工作目录外的文件 | **没读到**。`Claude requested permissions to read from <路径>, but you haven't granted it yet.` |
+| r1c | `dontAsk` + `permissions.ask: ["Read"]`，hook 答允许 | 工作目录内的文件 | **没读到**，结果文字与 r1a 相同。hook 答了允许也过不了 `ask` 规则（探针没记 hook 有没有被调起，这一点靠 r1d 与 r1e 对照：同样的文件，不加 `ask` 读得到，加了读不到，有没有 hook 都一样）。给只读工具加 `ask` 规则这条路走不通 |
+| r1d | `dontAsk` + `permissions.ask: ["Read"]`，不注入 hook | 工作目录内的文件 | 没读到（同上的文字） |
+
+**R1x 补测（手工探针，2026-11-12，日常账号，`dontAsk`、不配 hook、沙箱开、`autoAllowBashIfSandboxed: false`、`allowUnsandboxedCommands: false`，每条只开一个工具、1 个实例；记录 `r1x-out/x1…x7.jsonl`）**
+
+| 项 | 工具与目标 | 结论 |
+| --- | --- | --- |
+| x1 | Bash `cat` 工作目录外的文件 | 拒。`Permission to use Bash has been denied because Claude Code is running in don't ask mode`，流里有 `system/permission_denied` |
+| x2 | Bash `cat` 工作目录内的文件 | **执行了，读到内容**。CLI 对它判为只读、目标在工作目录内的命令不问，`autoAllowBashIfSandboxed` 关着也一样 |
+| x3 | Bash `ls` 工作目录外的目录 | 拒 |
+| x4 | Grep 搜工作目录外 | 拒 |
+| x5 | Glob 列工作目录外 | 拒 |
+| x6 | Write 写工作目录外 | 拒，文件没创建 |
+| x7 | Read 读工作目录内一个指向目录外文件的符号链接 | 拒。CLI 按链接的目标算 |
+
+合起来：没有 hook 时，CLI 对读的规则是「工作目录内放行、工作目录外拒绝」，文件工具与只读命令都这样；Read 在 `default` 与 `dontAsk` 两种模式下都量过，别的只量了 `dontAsk`。
+
+这两批探针**没量到**的（都排进了方案 16.1，括号里是哪一轮）：
+
+- x2 那条 `cat` 是不是在沙箱里跑的：读的是目录内的普通文件，沙箱内外都读得到，证明不了（R3 的底线格）。
+- 两批探针的 `allowUnsandboxedCommands` 都是 `false`，产品手动、自动档是 `true`：只读命令带 `dangerouslyDisableSandbox` 时 CLI 还问不问（R3 的沙箱外重试格）。
+- 需凭据命令清单里的只读命令（如 `git remote -v`）在没有 hook 时执不执行（R3 的出沙箱格，每个条目配对照）。
+- `cat`、`ls` 以外还有哪些命令被 CLI 当成只读：矩阵测不全，方案按「最坏情况按沙箱算」处理。
+- hook 退出码 0 不表态（没输出、乱码）时读工作目录外会怎样（R3 的「工作目录外的读」一类与越界格）。
+- 链接：指向目录外**目录**的链接；Grep、Glob、只读命令经链接读；hook 无输出时的 Read 文件链接（R3 的链接格）。越界目标只用过绝对路径，`..`、`~`、相对路径没量。
+- 子代理里的读与只读命令（R3 的子代理里三格）。
+- Grep、Glob、只读命令、子代理工具在 hook 明确拒绝时（R2 的拒绝格）。S0 里有顺带的证据：探针拒掉没登记的调用时，子代理工具 72 次都没起来，`ls -l`、`find`、`grep -rn` 各一次也没执行；Grep、Glob 一次都没有。
+- 别的内置工具（ToolSearch、TaskStop 等）在没有 hook 时执不执行（R3 的「不问工具」记录行）。
+- hook 允许时文件工具读写工作目录外成不成功（R2）。
+
+**G3 hook timeout 取值**：7200、86400、604800、2147483、2147484、4294968（秒）下，hook 睡 90 秒都没被提前打断，命令没执行。没探到溢出。睡眠时钟没测。
+
+**G4 沙箱固定配置**
+
+| 项 | 结论 |
+| --- | --- |
+| ①a ①b ①g 写 | 工作区内可写；工作区外不可写；`allowWrite` 追加的目录可写 |
+| ①c ①d 假凭据目录 | `denyRead` + `denyWrite` + `credentials.files`（deny）下，读、写都失败 |
+| ①e ①f 只读区 | 写失败（符合预期）。**读也失败**：`denyRead` 目录下用 `allowRead` 放开的子目录，在同一目录又进了 `credentials.files` 时读不到。原因待重测 |
+| ①h | 写 `.git/hooks` 失败（CLI 自带写保护） |
+| ② 联网 | `allowedDomains: ["*"]` 下 HTTPS 通。**非 HTTP 的 TCP（github.com:22）不通；绑定并连接本机端口不通**（同一台机器沙箱外都通） |
+| ⑤ | 禁读 `~/.npmrc` 后 `npm config get registry` 正常 |
+| ⑥ 沙箱外重试 | 写工作区外被挡后，5 次里 3 次模型用同一条命令加 `dangerouslyDisableSandbox: true` 重试（Haiku） |
+| ⑦ | `security list-keychains` 在沙箱内正常；`gh auth status` 在沙箱内失败（沙箱外正常）。`gh` 在需凭据命令清单里，产品里走沙箱外 |
+| ⑧ 最小构建 | 未跑（`--skip-builds`） |
+| ⑨ 全开档 | `allowWrite: ["/"]` 下工作区外可写；假凭据目录仍读不到、写不进；`allowUnsandboxedCommands: false` 下三个用例都没发起沙箱外重试 |
+| ④ 对拍 | 44 行里实测成 17 行，都是 CLI 与我们同判沙箱外（含 `git pull && git push`、`git fetch; git pull`、`(git pull)`、`git pull 2>&1`）。没测成的 27 行里有我们判沙箱内的全部 16 行与判不确定的全部 10 行，**对拍结论不能用**。没测成的原因是每一行替身都多记到一笔沙箱外的调起，推测是 CLI 自己在沙箱外调了 `git`（观测文件没进结果包，没法确认；脚本修正里改成按参数与调用方区分，R2 重测）。语料各行的排除清单不是同一份：44 行里有 3 种，内置的 34 条每行都有 |
+| init 的沙箱状态 | `system/init` 里没有沙箱状态字段 |
+
+**G6 模型与思考强度**
+
+| 项 | 结论 |
+| --- | --- |
+| `--effort` | `low`、`medium`、`high`、`xhigh`、`max` 都能从 hook 输入的 `effort.level` 读回同一个值（Haiku 5.5） |
+| 非法值 | stderr 一行警告 `Unknown --effort value … ignoring it and using the default effort`，照默认值（读回 `medium`）跑，退出码 0 |
+| 不存在的模型 | 进程退出码 1；`result.subtype` 是 `success` 但 `is_error=true`、`api_error_status=404`、`terminal_reason=api_error`；assistant 消息 `model="<synthetic>"`、`error="model_not_found"`；stderr 有 `[claude-code:unrecognized_model]` |
+| 带新模型续接 | `--resume <id> --model sonnet`：init 报新模型，`session_id` 不变，记得上文 |
+| 续接时换 `--append-system-prompt` | 新文本没生效（模型转述，只作参考） |
+
+**G7 流式输入、中断、续接、进程**
+
+| 项 | 结论 |
+| --- | --- |
+| a、a′ | 同一进程多轮，每轮一个 `result`；`--include-partial-messages` 有 `stream_event` |
+| `system/init` 的时机 | 第一条输入之后才出；**每轮开头都有一个**；`set_model` 之后也再出一个 |
+| b′、b″ | SessionStart hook 在第一条输入之前触发，新会话与 `--resume` 都是 |
+| c `initialize` | 响应里有 `models`（14 项，含 `default`、`opus`、`fable`、`sonnet`、`haiku` 等别名与若干具体 ID）、`current_permission_mode`、`hook_on_failure_supported` 等键；**另有 `account` 键，不得保存**（S0 的结果包里 `g7-live-stream.jsonl` 存了这条响应的全文，这份包不要外传；脚本修正里已改成落盘前删掉，分支 `cao/b57765cc` 在审）。S0 只看了键名：`current_permission_mode` 的取值、只发 `initialize` 不发用户消息时有没有响应，待 R2（方案 3.5 的 G7c′） |
+| d 用量与额度 | `result` 键含 `usage`、`modelUsage`、`total_cost_usd`、`permission_denials`、`terminal_reason`、`api_error_status`、`stop_reason`、`num_turns` 等。`rate_limit_event.rate_limit_info`：`utilization` 是 0–1 的小数（0.63），`resetsAt` 是秒级时间戳，另有 `rateLimitType`（`seven_day`）、`status`（`allowed_warning`）、`unifiedWindows` |
+| f interrupt | `control_request{subtype:"interrupt"}` 立刻生效：`control_response` success，流里一条 user 文本 `[Request interrupted by user]`，`result` 为 `subtype=error_during_execution`、`is_error=true`、`terminal_reason=aborted_streaming`；同一进程能接下一轮。对正在跑的前台命令没测到；**后台命令不会被它停掉** |
+| g `set_model` | 生效；流里多一条 `user` 事件，`message.content` 是字符串（`<local-command-stdout>…`），不是内容块数组 |
+| h | `--session-id` 指定的 id 生效；等审批时杀掉整个进程组后 `--resume` 接得上，id 不变 |
+| i | 续接后让模型原样重发，`tool_input` 逐字段相同 2/3 |
+| j | 换配置续接两个方向都跟着这一次启动的设置走，新 hook 生效 |
+| e 进程组 | **hook 进程每次都自成进程组**（1310 次调用，`pgid` 都等于自己的 pid）。**后台 Bash 任务自成进程组**。前台命令没测到。结束 CLI 的进程组清不到这两种 |
+| 前台 sleep | 第一段是裸 `sleep N` 的前台命令被 CLI 拦下（`Blocked: sleep N followed by: …`），不过 hook |
+| 子代理 | 默认在后台跑：主回合先出一个 `result`，子代理结束后 CLI 自己再起一轮（同一进程第二个 init 与 result）。只在没有 hook 的格子里观察到，待重测 |
+
+**G8 工具开关**
+
+| 项 | 结论 |
+| --- | --- |
+| a | `--tools ""`：`init.tools` 为空 |
+| b | `--tools "Read,Grep,Glob"`：只剩这三个 |
+| c | `--disallowedTools` 生效；写了不存在的名字不报错；禁掉 Bash 后清单里多出 Glob、Grep |
+| d | 同用时禁用优先 |
+| MCP（e、f 与阳性对照） | **三行都没测成**：默认工具集下 MCP 工具是延迟加载的，模型先调 `ToolSearch`，探针没登记它，阳性对照没成立。那几次运行里看到的现象，只作线索、不算结论，待 R2：`--tools Read` 白名单下 MCP 工具还在 `init.tools` 里、也调成了；`--disallowedTools <MCP 工具名>` 后它从 `init.tools` 消失 |
+
+**G9 环境变量**：CLI 把自己的环境变量传给 hook；`sandbox.credentials.envVars` 的 `deny` 让沙箱内的命令看不到这个变量（对照变量看得到）；hook 的父进程是 CLI，进程组是它自己。
+
+**G5、G9d**：未跑（要一次性环境）。
+
+**运行前后核对**：家目录下原有 1 项，没变。登记之外的调用 86 次，都被探针拒了。
+
 ### 2.3 不采用的接法：claude-agent-acp
 
 `@agentclientprotocol/claude-agent-acp` 0.101.0 实测：新会话**沿用用户的 auto 模式**，此时不发任何权限请求，客户端选“拒绝”无效；强制 `session/set_mode` 为 `default`（Manual）后，写文件与联网会请求且拒绝生效，但 echo 等被它视为只读的命令不请求；它不使用客户端终端与客户端文件读写，iWork 无法把命令包进沙箱。保留为可选接法，不用于 M1。
