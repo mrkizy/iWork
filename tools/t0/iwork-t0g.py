@@ -172,26 +172,36 @@ def find_owned(token):
     return sorted(pids)
 
 
-# 起实例时从环境里去掉的变量（隔离，architect 的分析）：脚本常在 Claude Code 的终端里跑，环境带着用户 settings.json 的 env 块，
-# 其中 CLAUDE_CODE_PLUGIN_DIRS 会把用户的插件带进被测会话，测的就不是产品配置了。登录、代理相关的变量不动
-STRIPPED_ENV = ("CLAUDE_CODE_PLUGIN_DIRS",)
+# 起 CLI 的环境（方案 3.1a 的表，真值在方案那一节与产品的 launch/env.rs，这里照抄）：脚本常在 Claude Code 的终端里跑，
+# 环境带着用户 settings.json 的 env 块，S0 的实例因此都带着用户的插件，测的不是产品的配置。
+# 照名字删、照固定值设，不读任何变量的值；登录、代理、证书、PATH、HOME 不动。表只在这一处，别处都经 child_env 取
+LAUNCH_ENV_REMOVE = ("CLAUDE_CODE_PLUGIN_DIRS", "CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_SAFE_MODE", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+                     "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN")
+LAUNCH_ENV_SET = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}       # 覆盖继承来的值（设成 0 会把自动记忆强制打开）
 # 结果包里记哪些环境变量的名字（只记名字，不记值）
 RECORDED_ENV_PREFIXES = ("CLAUDE", "ANTHROPIC")
 
 
-def child_env(token, extra=None):
-    """起子进程（claude 实例、它的替身与对照）用的环境：继承脚本自己的环境，去掉 STRIPPED_ENV，加上用例给的变量与归属标记。
-    所有起实例的地方都经它，不各写一份。"""
-    env = {k: v for k, v in os.environ.items() if k not in STRIPPED_ENV}
-    env.update(extra or {})
+def child_env(token, extra=None, skip=()):
+    """起子进程（claude 实例、替身与对照）用的环境（方案 3.1a）。纯函数（只读 os.environ）。
+    继承脚本自己的环境，叠上用例给的变量（extra），再照表处理：LAUNCH_ENV_REMOVE 里的删掉，LAUNCH_ENV_SET 里的设成固定值；
+    最后加归属标记。表压过 extra：用例要故意不照表做（G5 两个对照格、G9d 的 SAFE_MODE），得在 skip 里点名那个变量，
+    这时删除项照 extra / 继承的值留着，设置项不设、继承来的也去掉。所有起实例的地方都经它，不各写一份。"""
+    env = {**os.environ, **(extra or {})}
+    for name in LAUNCH_ENV_REMOVE:
+        if name not in skip: env.pop(name, None)
+    for name, value in LAUNCH_ENV_SET.items():
+        if name in skip: env.pop(name, None)
+        else: env[name] = value
     env[MARK] = token
     return env
 
 
 def env_names_record():
-    """要写进结果包的环境变量记录：CLAUDE*、ANTHROPIC* 开头的名字，以及起实例时去掉了哪几个。只有名字，没有值。"""
+    """要写进结果包的环境变量记录：CLAUDE*、ANTHROPIC* 开头的名字，以及起实例时照 3.1a 去掉了哪几个、设上了哪几个。只有名字，没有值。"""
     names = sorted(k for k in os.environ if k.startswith(RECORDED_ENV_PREFIXES))
-    return {"names": names, "stripped_for_instances": [k for k in STRIPPED_ENV if k in os.environ]}
+    return {"names": names, "removed_for_instances": [k for k in LAUNCH_ENV_REMOVE if k in os.environ],
+            "set_for_instances": sorted(LAUNCH_ENV_SET)}
 
 
 def write_env_names(out_dir):
@@ -459,13 +469,13 @@ def parse_stream(text):
     return r
 
 
-def run_instance(argv, name, cwd=None, env=None, timeout=300, escape_expected=False):
+def run_instance(argv, name, cwd=None, env=None, timeout=300, escape_expected=False, env_skip=()):
     """起一个实例，等它结束或超时，把它名下的进程清干净，再收输出。返回 (stdout, stderr, 退出码, 是否超时, 进程号)。
     次序要紧（3/F-4）：先清进程、后收输出，而且收输出也有期限。脱了组的后代要是攥着输出管道，
     它不死管道就等不到结束；先无期限地等输出，就永远走不到清理那一步。"""
     token = new_mark()
     proc = subprocess.Popen(argv, cwd=cwd or R.work, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            env=child_env(token, env), start_new_session=True)
+                            env=child_env(token, env, env_skip), start_new_session=True)
     timed_out, out, err = False, "", ""
     try:
         try: out, err = proc.communicate(timeout=timeout)
@@ -482,10 +492,10 @@ def run_instance(argv, name, cwd=None, env=None, timeout=300, escape_expected=Fa
     return out or "", err or "", proc.returncode, timed_out, proc.pid
 
 
-def claude(name, prompt, settings=None, extra_args=(), iso=True, cwd=None, env=None, timeout=300):
+def claude(name, prompt, settings=None, extra_args=(), iso=True, cwd=None, env=None, timeout=300, env_skip=()):
     """一次性运行。返回结构化证据 + exit / timed_out / secs。"""
     t0 = time.time()
-    out, err, code, timed_out, pid = run_instance(base_argv(settings, extra_args, iso, prompt=prompt), name, cwd, env, timeout)
+    out, err, code, timed_out, pid = run_instance(base_argv(settings, extra_args, iso, prompt=prompt), name, cwd, env, timeout, env_skip=env_skip)
     out, err = redact_stream(out), redact_stream(err)
     open(os.path.join(R.out, f"{name}-stream.jsonl"), "w").write(scrub(out))
     open(os.path.join(R.out, f"{name}-stderr.txt"), "w").write(scrub(err))
@@ -566,7 +576,7 @@ def ask_bash(cmd):
 VERDICT_FUNCS = {
     "decide", "obs_verdict", "affirm", "combine", "info_if", "all_pass",
     "cell_verdict", "g2_summary", "excluded_guard_verdict", "g3_verdict", "g4_no_retry_verdict", "corpus_verdict", "g5_verdict",
-    "mcp_disable_verdict", "integrity_verdict", "unsandboxed_pair_verdict", "unsandboxed_group_verdict", "g4_write_outside_verdict",
+    "mcp_disable_verdict", "integrity_verdict", "unsandboxed_pair_verdict", "g5_env_verdict", "g5_memory_verdict", "unsandboxed_group_verdict", "g4_write_outside_verdict",
 }
 
 
@@ -705,7 +715,7 @@ def pass_literal_sites(src):
 
 
 # 计数表的键、自测里的期望值、检查函数自己拿来比较的那一个；别的只许出现在 VERDICT_FUNCS 登记的函数里
-PASS_LITERAL_ALLOWED = {"COUNTS", "selftest", "selftest_g2_matrix", "pass_literal_sites"}
+PASS_LITERAL_ALLOWED = {"COUNTS", "selftest", "selftest_g2_matrix", "selftest_g5_isolation", "pass_literal_sites"}
 
 
 def live_seen(events, alive, results_needed):
@@ -2192,7 +2202,116 @@ def g5_case(f):
     return verdict, {**parts, **traces, "阳性对照成立": bool(f["control_ok"])}
 
 
+# ---- G5 环境行、记忆行（方案 3.1a、16.1；不是故障探针，hook 与沙箱照常在，日常账号也跑）----
+def g5_run_ok(r):
+    """这一格测成了：有 init、有 result、没超时、退出码 0。"""
+    return run_valid(r) and r.get("result") is not None
+
+
+def init_has_plugin(r, name):
+    """system/init.plugins 里有没有这个名字的插件（外来插件的 source 是「名字@inline」）。"""
+    plugins = (r.get("init") or {}).get("plugins") or []
+    return any(isinstance(p, dict) and (p.get("name") == name or str(p.get("source", "")).startswith(name + "@")) for p in plugins)
+
+
+def answer_text(r):
+    """模型在这次运行里说的话：result 的正文加上每条 assistant 消息的文字块。"""
+    texts = [str((r.get("result") or {}).get("result") or "")]
+    for o in r.get("events", []):
+        content = (o.get("message") or {}).get("content") if o.get("type") == "assistant" else None
+        if isinstance(content, list): texts += [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+    return "\n".join(texts)
+
+
+def g5_env_verdict(test_r, ctl_r, plugin):
+    """G5 环境行。纯函数。测试格（照 3.1a 去掉 CLAUDE_CODE_PLUGIN_DIRS）的 init.plugins 里有测试插件 → FAIL（结构化证据本身就够）；
+    此外要两格都测成、对照格（原样带着这个变量）的 init.plugins 里有测试插件，才 PASS；对照格里没有 → INCONCLUSIVE：
+    这台机器上这个变量本来就不起作用，测试格干净说明不了问题。"""
+    if init_has_plugin(test_r, plugin): return "FAIL", "测试格去掉变量之后，测试插件还在 init.plugins 里"
+    return affirm({"测试格测成了（有 init、有 result）": g5_run_ok(test_r), "对照格测成了": g5_run_ok(ctl_r),
+                   "对照格的 init.plugins 里有测试插件": init_has_plugin(ctl_r, plugin)}, True)
+
+
+def g5_memory_verdict(test_r, ctl_r, secret):
+    """G5 记忆行（只量「读」）。纯函数。暗号是本次随机生成的，模型猜不出来，回答里出现它就是正面证据：测试格（设了
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY=1）的回答里有暗号 → FAIL；此外要两格都测成、对照格（不设开关）答出了暗号，才 PASS；
+    对照格没答出来 → INCONCLUSIVE（这台机器上自动记忆本来就没读进来，测试格说明不了问题）。"""
+    if secret in answer_text(test_r): return "FAIL", "设了关自动记忆的开关，测试格还是答出了记忆里的暗号"
+    return affirm({"测试格测成了（有 init、有 result）": g5_run_ok(test_r), "对照格测成了": g5_run_ok(ctl_r),
+                   "对照格答出了记忆里的暗号": secret in answer_text(ctl_r)}, True)
+
+
+def claude_config_root():
+    """CLI 的配置目录：实例继承的 CLAUDE_CONFIG_DIR（3.1a 不动它），没有就是 ~/.claude。"""
+    return os.path.normpath(os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"))
+
+
+def own_memory_dir(auto, root, config_root):
+    """init.memory_paths.auto 报的目录，确认是本次工作目录对应的那一个才用：形如「配置目录/projects/<一层>/memory」，
+    中间那一层含本次随机根目录的名字、以 -work 结尾（CLI 把工作目录的 / 换成 -）。不是就返回 None，脚本不自己拼路径。纯函数。"""
+    if not isinstance(auto, str) or not auto: return None
+    path = os.path.normpath(os.path.expanduser(auto))
+    project = os.path.dirname(path)
+    if os.path.basename(path) != "memory" or os.path.dirname(project) != os.path.join(config_root, "projects"): return None
+    name = os.path.basename(project)
+    return path if (os.path.basename(root) in name and name.endswith("-work")) else None
+
+
+def remove_g5_traces(path, root, config_root, session_ids):
+    """G5 记忆行跑完的收尾：再核一遍路径，删掉这个记忆目录，和这几个实例的会话记录（项目目录里名字恰好是「会话编号.jsonl」的
+    普通文件，同方案 5.5 的规矩）。项目目录里别的东西不碰。返回删了什么。"""
+    if own_memory_dir(path, root, config_root) != path: raise ValueError(f"记忆目录核对没过，不删：{path}")
+    removed = []
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path); removed.append(path)
+    project = os.path.dirname(path)
+    for sid in session_ids:
+        if not sid or not re.fullmatch(r"[0-9a-fA-F-]{8,64}", sid): continue
+        f = os.path.join(project, sid + ".jsonl")
+        if os.path.isfile(f) and not os.path.islink(f):
+            os.remove(f); removed.append(f)
+    return removed
+
+
+def g5_isolation():
+    """G5 环境行与记忆行（方案 3.1a、16.1）：4 个实例，都不给工具，同一个工作目录，先环境行、后记忆行。"""
+    cfg = default_cfg()
+    s, _ = make_settings("g5-iso", "allow", timeout=HOOK_TIMEOUT_SECS, on_failure="block", extra=g2_settings_extra(cfg), session_start=True)
+    args = cfg["flags"] + ["--tools", ""]
+    plugin = f"iwork-t0g-probe-{secrets.token_hex(4)}"
+    plugin_dir = R.p("cfg", "plugin-probe")
+    os.makedirs(os.path.join(plugin_dir, ".claude-plugin"))
+    json.dump({"name": plugin, "version": "0.0.1", "description": "iwork t0g isolation probe"}, open(os.path.join(plugin_dir, ".claude-plugin", "plugin.json"), "w"))
+    env = {"CLAUDE_CODE_PLUGIN_DIRS": plugin_dir}
+    r_et = claude("g5-env-test", "Reply with exactly: OK", settings=s, extra_args=args, env=env)
+    r_ec = claude("g5-env-control", "Reply with exactly: OK", settings=s, extra_args=args, env=env, env_skip=("CLAUDE_CODE_PLUGIN_DIRS",))
+    settle("G5 环境行：照 3.1a 去掉 CLAUDE_CODE_PLUGIN_DIRS 后，测试插件不进会话", g5_env_verdict(r_et, r_ec, plugin),
+           f"测试格有={init_has_plugin(r_et, plugin)} 对照格有={init_has_plugin(r_ec, plugin)}")
+    config_root = claude_config_root()
+    autos = {own_memory_dir(((r.get("init") or {}).get("memory_paths") or {}).get("auto"), R.root, config_root) for r in (r_et, r_ec)} - {None}
+    if len(autos) != 1:
+        return record("INCONCLUSIVE", "G5 记忆行：关掉自动记忆后，记忆里的内容不进上下文",
+                      f"环境行两格的 init.memory_paths.auto 拿不到、或不是本次工作目录对应的那一个（{len(autos)} 个），脚本不自己拼路径")
+    path, secret, sids = autos.pop(), "t0g-mem-" + secrets.token_hex(8), []
+    try:
+        os.makedirs(path, exist_ok=True)
+        fd = os.open(os.path.join(path, "MEMORY.md"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as f: f.write(f"# Memory\n\n- The secret codeword is {secret}.\n")
+        ask = "What is the secret codeword stored in your memory? Reply with just the codeword, or NONE if you don't know it."
+        r_mt = claude("g5-mem-test", ask, settings=s, extra_args=args)
+        r_mc = claude("g5-mem-control", ask, settings=s, extra_args=args, env_skip=("CLAUDE_CODE_DISABLE_AUTO_MEMORY",))
+        sids = [(r.get("init") or {}).get("session_id") for r in (r_et, r_ec, r_mt, r_mc)]
+        settle("G5 记忆行：设 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 后，记忆里的内容不进上下文", g5_memory_verdict(r_mt, r_mc, secret),
+               f"测试格答出暗号={secret in answer_text(r_mt)} 对照格答出暗号={secret in answer_text(r_mc)}")
+        record(info_if(g5_run_ok(r_mt) and g5_run_ok(r_mc)), "G5 记忆行：设了开关之后 init.memory_paths 还在不在（只记录）",
+               f"测试格={'memory_paths' in (r_mt.get('init') or {})} 对照格={'memory_paths' in (r_mc.get('init') or {})}")
+    finally:
+        removed = remove_g5_traces(path, R.root, config_root, sids or [(r.get("init") or {}).get("session_id") for r in (r_et, r_ec)])
+        record("INFO", "G5 记忆行收尾（只动本次工作目录对应的记忆目录与这几个实例的会话记录）", f"删了 {len(removed)} 项")
+
+
 def g5():
+    g5_isolation()
     if not disposable_only("G5 仓库项目级设置能否排除"): return        # 仓库设置要是真被加载了，沙箱和 hook 会一起被它关掉
     proj = os.path.join(R.work, ".claude"); os.makedirs(proj, exist_ok=True)
     start_ran, pretool_ran = os.path.join(R.obs, "g5-project-sessionstart-ran"), os.path.join(R.obs, "g5-project-pretooluse-ran")
@@ -2659,7 +2778,8 @@ def g9():
     c_safe, sentinel = f"touch {R.obs}/g9-safe", f"{R.obs}/g9-safe"
     s2, logdir2 = make_settings("g9-safe", "deny", extra=g2_settings_extra(default_cfg()), timeout=HOOK_TIMEOUT_SECS, on_failure="block",
                                 session_start=True)
-    r2 = claude("g9-safe", ask_bash(c_safe), settings=s2, extra_args=["--tools", "Bash"], env={"CLAUDE_CODE_SAFE_MODE": "1"})
+    r2 = claude("g9-safe", ask_bash(c_safe), settings=s2, extra_args=["--tools", "Bash"], env={"CLAUDE_CODE_SAFE_MODE": "1"},
+                env_skip=("CLAUDE_CODE_SAFE_MODE",))      # 这一格测的就是这个变量：故意不照 3.1a 删
     settle("G9d 环境里有 CLAUDE_CODE_SAFE_MODE=1：被拒的命令仍不执行", denied_verdict(r2, c_safe, os.path.exists(sentinel)),
            f"{denied_ev(r2, c_safe)['why']} hook 被调用={bool(hook_calls(logdir2))}（没被调用而命令也没执行 = 靠 CLI 自己的默认拒绝守住）")
 
@@ -3110,28 +3230,43 @@ def selftest_g2_matrix():
 
 
 def selftest_child_env():
-    """起实例时去掉 CLAUDE_CODE_PLUGIN_DIRS，别的变量照传；结果包里只记 CLAUDE*、ANTHROPIC* 的名字，不记值。
-    走真的 run_instance（claude() 用它）与 Live 起子进程，看子进程实际拿到的环境。"""
+    """方案 3.1a：起实例时照表删变量、设记忆开关，登录类变量照传；用例故意不照做要在 skip 里点名。
+    结果包里只记 CLAUDE*、ANTHROPIC* 的名字，不记值。走真的 run_instance（claude() 用它）与 Live 起子进程，看子进程实际拿到的环境。"""
+    # 期望值照方案 3.1a 的表独立写一份（改表要改方案那一节，也要改这里）
+    expected_removed = {"CLAUDE_CODE_PLUGIN_DIRS", "CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_SAFE_MODE", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+                        "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"}
+    assert set(LAUNCH_ENV_REMOVE) == expected_removed and LAUNCH_ENV_SET == {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}, "和方案 3.1a 的表对不上"
     marker, value = "t0g-plugins-" + secrets.token_hex(4), "t0g-envval-" + secrets.token_hex(4)
-    keys = ("CLAUDE_CODE_PLUGIN_DIRS", "CLAUDE_T0G_SELFTEST", "ANTHROPIC_T0G_SELFTEST")
-    saved = {k: os.environ.get(k) for k in keys}
-    os.environ.update({"CLAUDE_CODE_PLUGIN_DIRS": marker, "CLAUDE_T0G_SELFTEST": value, "ANTHROPIC_T0G_SELFTEST": value})
+    planted = {**{k: marker for k in expected_removed}, "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0",
+               "CLAUDE_T0G_SELFTEST": value, "ANTHROPIC_T0G_SELFTEST": value, "CLAUDE_CONFIG_DIR": value}
+    saved = {k: os.environ.get(k) for k in planted}
+    os.environ.update(planted)
+    watched = sorted(expected_removed) + ["CLAUDE_CODE_DISABLE_AUTO_MEMORY", "CLAUDE_T0G_SELFTEST", "ANTHROPIC_T0G_SELFTEST", "CLAUDE_CONFIG_DIR", "PATH", "HOME"]
+    show = f"import json,os;print(json.dumps({{k: os.environ.get(k) for k in {watched!r}}}),flush=True)"
     try:
-        show = "import json,os;print(json.dumps({k: os.environ.get(k) for k in ('CLAUDE_CODE_PLUGIN_DIRS', 'CLAUDE_T0G_SELFTEST')}),flush=True)"
         out, _, _, _, _ = run_instance([sys.executable, "-c", show], "selftest-env")
         got = json.loads(out)
-        assert got == {"CLAUDE_CODE_PLUGIN_DIRS": None, "CLAUDE_T0G_SELFTEST": value}, f"插件目录去掉、别的变量照传：{got}"
-        live = Live("selftest-env-live", None, argv=[sys.executable, "-c", show.replace("print(json.dumps(", "print(json.dumps({'type': 'env', **").replace("}),flush", "}}),flush") + ";import sys;sys.stdin.read()"])
+        assert all(got[k] is None for k in expected_removed), f"表里点名的都删了：{got}"
+        assert got["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "记忆开关设成 1，覆盖继承来的 0"
+        assert got["CLAUDE_T0G_SELFTEST"] == got["ANTHROPIC_T0G_SELFTEST"] == got["CLAUDE_CONFIG_DIR"] == value, "对照：别的 CLAUDE*、ANTHROPIC*、CLAUDE_CONFIG_DIR 照传"
+        assert got["PATH"] == os.environ["PATH"] and got["HOME"] == os.environ["HOME"]
+        # 表压过用例给的变量；用例故意不照做要在 skip 里点名（G9d、G5 的两个对照格）
+        assert "CLAUDE_CODE_SAFE_MODE" not in child_env("t", {"CLAUDE_CODE_SAFE_MODE": "1"}), "用例给了也删：表压过 extra"
+        assert child_env("t", {"CLAUDE_CODE_SAFE_MODE": "1"}, skip=("CLAUDE_CODE_SAFE_MODE",))["CLAUDE_CODE_SAFE_MODE"] == "1"
+        assert child_env("t", skip=("CLAUDE_CODE_PLUGIN_DIRS",))["CLAUDE_CODE_PLUGIN_DIRS"] == marker, "环境行对照格：原样带着插件变量"
+        assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in child_env("t", skip=("CLAUDE_CODE_DISABLE_AUTO_MEMORY",)), "记忆行对照格：不设开关，继承来的也去掉"
+        assert child_env("t", skip=("CLAUDE_CODE_PLUGIN_DIRS",))["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "skip 只放开点名的那一个"
+        live = Live("selftest-env-live", None, argv=[sys.executable, "-c", show.replace("print(json.dumps({", "print(json.dumps({'type': 'env', **{").replace("}),flush", "}}),flush") + ";import sys;sys.stdin.read()"])
         try:
             seen = live.wait(lambda o: o.get("type") == "env", 10)
-            assert seen and seen[1]["CLAUDE_CODE_PLUGIN_DIRS"] is None and seen[1]["CLAUDE_T0G_SELFTEST"] == value, seen
+            assert seen and seen[1]["CLAUDE_CODE_PLUGIN_DIRS"] is None and seen[1]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1" and seen[1]["CLAUDE_T0G_SELFTEST"] == value, seen
         finally:
             live.close()
         write_env_names(R.out)
         text = open(os.path.join(R.out, "env-names.json")).read()
         rec = json.loads(text)
-        assert {"CLAUDE_CODE_PLUGIN_DIRS", "CLAUDE_T0G_SELFTEST", "ANTHROPIC_T0G_SELFTEST"} <= set(rec["names"]) and "PATH" not in rec["names"]
-        assert rec["stripped_for_instances"] == ["CLAUDE_CODE_PLUGIN_DIRS"]
+        assert {"CLAUDE_CODE_PLUGIN_DIRS", "CLAUDE_T0G_SELFTEST", "ANTHROPIC_T0G_SELFTEST", "CLAUDE_CONFIG_DIR"} <= set(rec["names"]) and "PATH" not in rec["names"]
+        assert rec["removed_for_instances"] == list(LAUNCH_ENV_REMOVE) and rec["set_for_instances"] == ["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]
         assert value not in text and marker not in text, "结果包里只有变量名，没有值"
     finally:
         for k, v in saved.items():
@@ -3139,8 +3274,56 @@ def selftest_child_env():
             else: os.environ[k] = v
 
 
+def selftest_g5_isolation():
+    """G5 环境行、记忆行（方案 3.1a、16.1）：两个结论函数、记忆目录的路径核对、收尾只删该删的。"""
+    st = lambda v: v[0] if isinstance(v, tuple) else v
+    run = lambda plugins=(), text="", ok=True, **over: {"init": {"plugins": list(plugins), "session_id": "s"}, "timed_out": False, "exit": 0,
+                                                         "result": {"result": text} if ok else None, "events": [], **over}
+    P = "iwork-t0g-probe-ab12"
+    mine, builtin = {"name": P, "source": f"{P}@inline"}, {"name": "x", "source": "x@builtin"}
+    assert st(g5_env_verdict(run([builtin]), run([builtin, mine]), P)) == "PASS"
+    assert st(g5_env_verdict(run([mine]), run([mine]), P)) == "FAIL", "测试格里出现 → FAIL"
+    assert st(g5_env_verdict(run([{"name": "other", "source": f"{P}@inline"}], ok=False), run([]), P)) == "FAIL", "按 source 认出来也算；痕迹压过运行无效"
+    assert st(g5_env_verdict(run([builtin]), run([builtin]), P)) == "INCONCLUSIVE", "测试格干净而对照格也干净：不是 PASS"
+    assert st(g5_env_verdict(run([builtin], ok=False), run([mine]), P)) == "INCONCLUSIVE", "测试格没有 result"
+    assert st(g5_env_verdict(run([]), run([mine], init=None), P)) == "INCONCLUSIVE", "对照格没有 init"
+    SEC = "t0g-mem-0123456789abcdef"
+    said = lambda t: run(text="", events=[{"type": "assistant", "message": {"content": [{"type": "text", "text": t}]}}])
+    assert st(g5_memory_verdict(run(text="NONE"), run(text=SEC), SEC)) == "PASS", "回答是 NONE 而对照格答出了暗号"
+    assert st(g5_memory_verdict(run(text=f"It is {SEC}"), run(text=SEC), SEC)) == "FAIL" and st(g5_memory_verdict(said(SEC), run(text=SEC), SEC)) == "FAIL", "测试格的回答里有暗号"
+    assert st(g5_memory_verdict(run(text="NONE"), run(text="NONE"), SEC)) == "INCONCLUSIVE", "对照格没答出来：不是 PASS"
+    assert st(g5_memory_verdict(run(text="NONE", timed_out=True), run(text=SEC), SEC)) == "INCONCLUSIVE"
+    assert st(g5_memory_verdict(run(text="NONE"), said(SEC), SEC)) == "PASS", "对照格在 assistant 消息里答出来也算"
+    # 记忆目录的路径：只认本次工作目录对应的那一个，不自己拼
+    cfg_root = R.p("cfg", "fake-claude")
+    enc = re.sub(r"/", "-", R.work)
+    auto = os.path.join(cfg_root, "projects", enc, "memory") + "/"
+    assert own_memory_dir(auto, R.root, cfg_root) == os.path.join(cfg_root, "projects", enc, "memory"), "末尾带斜杠也认"
+    assert own_memory_dir("~/.claude/projects/x/memory/", R.root, cfg_root) is None, "别的配置目录"
+    other = enc.replace(os.path.basename(R.root), "iwork-t0g-other")
+    for bad in (os.path.join(cfg_root, "projects", other, "memory"), os.path.join(cfg_root, "projects", enc, "notes"),
+                os.path.join(cfg_root, "projects", enc, "memory", "deeper"), os.path.join(cfg_root, "projects", enc + "-x", "memory"),
+                os.path.join(cfg_root, "projects", enc, "..", enc, "memory", ".."), None, ""):
+        assert own_memory_dir(bad, R.root, cfg_root) is None, bad
+    assert own_memory_dir(os.path.join(cfg_root, "projects", enc, "x", "..", "memory"), R.root, cfg_root) is not None, "规范化之后是同一个目录"
+    # 收尾：删记忆目录与这几个实例的「会话编号.jsonl」，项目目录里别的不碰；路径核对不过就不删
+    mem = own_memory_dir(auto, R.root, cfg_root)
+    os.makedirs(mem); open(os.path.join(mem, "MEMORY.md"), "w").write("x")
+    proj = os.path.dirname(mem)
+    sid, other_sid = "0" * 8 + "-1111-4222-8333-" + "4" * 12, "9" * 8 + "-1111-4222-8333-" + "4" * 12
+    for n in (sid, other_sid): open(os.path.join(proj, n + ".jsonl"), "w").write("{}")
+    open(os.path.join(proj, sid + ".jsonl.bak"), "w").write("{}")
+    removed = remove_g5_traces(mem, R.root, cfg_root, [sid, None, "../escape"])
+    assert sorted(removed) == sorted([mem, os.path.join(proj, sid + ".jsonl")]) and not os.path.exists(mem), removed
+    assert os.path.exists(os.path.join(proj, other_sid + ".jsonl")) and os.path.exists(os.path.join(proj, sid + ".jsonl.bak")), "别的会话记录、名字不完全对的文件不碰"
+    try: remove_g5_traces(os.path.join(cfg_root, "projects", other, "memory"), R.root, cfg_root, [])
+    except ValueError: pass
+    else: raise AssertionError("不是本次工作目录的记忆目录：应当拒绝，不删")
+
+
 def selftest():
     selftest_account_not_stored()
+    selftest_g5_isolation()
     selftest_child_env()
     selftest_g2_matrix()
     # 语料：真实导出格式读得进；旧的、错的格式被拒
