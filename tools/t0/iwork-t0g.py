@@ -2337,6 +2337,14 @@ def g5_memory_write_verdict(w0, w2, c_written_in_w0, w2_default_changed, w2_hits
     return "PASS", ""
 
 
+def g5_agent_row_blocked(sub_ok, disposable, write_breaches):
+    """子代理记忆一行起不起（方案 16.1）。纯函数。前面的记忆写一行里守卫放过了越界调用 → 那一行 FAIL，后面的行不起（2/2/F-3）；
+    子代理预检没过且不在一次性环境 → 不在日常账号起。返回不起的原因，起就返回 None。"""
+    if write_breaches: return "前面的记忆写一行里守卫放过了越界调用（那一行已记 FAIL），后面的行不起"
+    if not (sub_ok or disposable): return "守卫没证实（子代理预检没过），这一行不在日常账号起，改到一次性环境跑（R3）"
+    return None
+
+
 def subagent_finished(r, agent):
     """测试子代理在这次运行里真的起了并跑完（方案 16.1，2/F-4）：流里有点名它的子代理工具调用、有带这次调用 id 的子代理消息、
     有它结束的证据（这次调用有不是报错的结果，而且不是「已在后台起来」那句；或者流里有任务完成的事件）。形状以 R2 的 G1d 为准。
@@ -2512,16 +2520,80 @@ def own_memory_dir(auto, workdir, config_root):
     return path if (root_name in name and name.endswith("-" + os.path.basename(workdir))) else None
 
 
+def path_under(path, base):
+    """path 规范化之后按路径分量落在 base 之下（含 base 本身）。纯函数。"""
+    if not path or not base: return False
+    p, b = os.path.normpath(os.path.expanduser(path)).split(os.sep), os.path.normpath(os.path.expanduser(base)).split(os.sep)
+    return p[:len(b)] == b
+
+
+def write_hits(rows, default_mem):
+    """守卫记录里目标落在默认记忆目录之下（任意深度）的调用（审查 2/2/F-1：原来只认父目录就是它，子目录里的写漏掉了）。
+    解析后的路径没有时用原始路径。纯函数。"""
+    return [g for g in rows if path_under(g.get("resolved") or g.get("raw"), default_mem)]
+
+
+def no_links_from(config_root, path):
+    """从配置目录到 path 的每一级（含两头）都不是链接：逐级用 lstat 查、不跟随。还不存在的那几级不算（脚本会去建）。
+    path 不在配置目录之下 → 假。"""
+    if not path_under(path, config_root): return False
+    level = os.path.normpath(os.path.expanduser(config_root))
+    rest = os.path.relpath(os.path.normpath(os.path.expanduser(path)), level)
+    levels = [level] + [os.path.join(level, *rest.split(os.sep)[:i + 1]) for i in range(len(rest.split(os.sep))) if rest != "."]
+    return not any(os.path.islink(l) for l in levels)
+
+
+def default_memory_usable(auto, workdir, config_root):
+    """默认记忆目录能不能用（方案 16.1，2/2/F-2 的例外）：它可能已经被前面不设开关的格子里 CLI 自己建出来了，已经存在也照用，
+    但四条前提都要成立：路径来自本次的 init（调用方只传干净格 init 报的那个）；上一级目录名带本次随机根目录名（own_memory_dir）；
+    从配置目录到它每一级都不是链接（no_links_from）；往里放文件之前先记下已有的文件清单（调用方做）。返回 (目录或 None, 不能用的原因)。"""
+    path = own_memory_dir(auto, workdir, config_root)
+    if path is None: return None, "init.memory_paths.auto 拿不到，或不是本次工作目录对应的那一个（上一级目录名里没有本次随机根目录名），不碰"
+    if not no_links_from(config_root, path): return None, "从配置目录到默认记忆目录有一级是链接，不碰"
+    return path, ""
+
+
+G5_MEMORY_ROWS = ("记忆读", "记忆写", "子代理记忆")
+
+
+def g5_dir_blocks(default_why, redirect_exists, agent_dir_taken):
+    """登记目录的前提（方案 16.1，2/2/F-2）：哪几行不起、为什么。纯函数。默认记忆目录不能用（default_why 非空）→ 三行都不起；
+    改道目录已经存在 → 三行都不起（它没有例外；记忆读、写、子代理三行都要用它）；子代理记忆目录已经存在或路径上有链接 → 子代理记忆一行不起。
+    返回 {行名: 原因}。"""
+    if default_why: return {row: default_why for row in G5_MEMORY_ROWS}
+    if redirect_exists: return {row: "改道目录已经存在，不是本次建的，不碰" for row in G5_MEMORY_ROWS}
+    if agent_dir_taken: return {"子代理记忆": "子代理记忆目录已经存在（或路径上有链接），不是本次建的，不碰"}
+    return {}
+
+
 def snapshot_dir(path):
-    """目录里的文件清单与修改时间。"""
-    return {n: os.stat(os.path.join(path, n)).st_mtime_ns for n in sorted(os.listdir(path))} if os.path.isdir(path) else {}
+    """目录下（递归，不跟链接）每一项：相对路径 → (类型, 大小, 修改时间, 内容摘要)。只看顶层会漏掉子目录里已有文件被改（2/2/F-1），
+    只看修改时间会漏掉改了内容又把时间改回去的，所以连内容一起比。"""
+    if not os.path.isdir(path) or os.path.islink(path): return {}
+    out = {}
+    for d, dirs, files in os.walk(path, followlinks=False):
+        for n in dirs + files:
+            full = os.path.join(d, n)
+            st_ = os.lstat(full)
+            text = read_obs_file_plain(full) if stat.S_ISREG(st_.st_mode) else None
+            out[os.path.relpath(full, path)] = (stat.S_IFMT(st_.st_mode), st_.st_size, st_.st_mtime_ns,
+                                                hashlib.sha256((text or "").encode()).hexdigest() if text is not None else None)
+    return out
 
 
 def remove_g5_traces(paths, workdir, config_root, session_ids):
     """G5 跑完的收尾：只删本次独占新建、路径核对过的目录（默认记忆目录、子代理记忆目录、改道目录），和这几个实例的会话记录
-    （默认记忆目录所在的项目目录里名字恰好是「会话编号.jsonl」的普通文件，同方案 5.5 的规矩）。别的不碰。返回删了什么。"""
+    （默认记忆目录所在的项目目录里名字恰好是「会话编号.jsonl」的普通文件，同方案 5.5 的规矩）。别的不碰。
+    两层上级目录（2/2/F-2）：默认记忆目录所在的项目目录（它对应本次的随机工作目录）删完之后空了就删；agent-memory 这一层
+    只在本次建的（agent-parent）而且空了才删。不空就留着。返回删了什么。子代理记忆目录排在 agent-parent 前面处理。"""
     removed = []
-    for kind, path in paths:
+    order = {"agent-parent": 1}
+    for kind, path in sorted(paths, key=lambda kp: order.get(kp[0], 0)):
+        if kind == "agent-parent":
+            if path != os.path.join(config_root, "agent-memory"): raise ValueError(f"agent-memory 这一层核对没过，不删：{path}")
+            if os.path.isdir(path) and not os.path.islink(path) and not os.listdir(path):
+                os.rmdir(path); removed.append(path)
+            continue
         if path is None: continue
         if kind == "memory" and own_memory_dir(path, workdir, config_root) != path: raise ValueError(f"默认记忆目录核对没过，不删：{path}")
         if kind == "agent" and not (os.path.dirname(path) == os.path.join(config_root, "agent-memory")
@@ -2536,6 +2608,8 @@ def remove_g5_traces(paths, workdir, config_root, session_ids):
                 f = os.path.join(project, sid + ".jsonl")
                 if os.path.isfile(f) and not os.path.islink(f):
                     os.remove(f); removed.append(f)
+            if os.path.isdir(project) and not os.path.islink(project) and not os.listdir(project):
+                os.rmdir(project); removed.append(project)
     return removed
 
 
@@ -2579,22 +2653,30 @@ def g5_isolation():
     runs["e0"], _ = run("g5-env-clean", "Reply with exactly: OK", "", None, False)
     settle("G5 环境行：带着插件变量时核对报得出测试插件，干净时不误报", g5_env_verdict(runs["e+"], runs["e0"], plugin),
            f"阳性格报={unexpected_plugins(runs['e+'].get('init'))} 干净格报={unexpected_plugins(runs['e0'].get('init'))}")
-    default_mem = own_memory_dir(memory_auto(runs["e0"]), work, config_root)
+    default_mem, why_default = default_memory_usable(memory_auto(runs["e0"]), work, config_root)
     agent = f"iwork-t0g-probe-{secrets.token_hex(4)}"
     agent_mem = os.path.join(config_root, "agent-memory", agent)
     redirect = R.p("g5-redirect")
     created = []
     try:
-        if default_mem is None:
-            for label in ("记忆读", "记忆写", "子代理记忆"):
-                record("INCONCLUSIVE", f"G5 {label}", "环境行干净格的 init.memory_paths.auto 拿不到、或不是本次工作目录对应的那一个，脚本不自己拼路径")
+        agent_preexisting = os.path.lexists(agent_mem) or not no_links_from(config_root, agent_mem)
+        blocks = g5_dir_blocks(why_default, os.path.lexists(redirect), agent_preexisting)
+        if set(blocks) == set(G5_MEMORY_ROWS):
+            for label, why in blocks.items(): record("INCONCLUSIVE", f"G5 {label}", why)
             return
-        # 登记目录：本次独占新建（默认记忆目录可能已被前面不设开关的格子建出来：它属于本次的随机工作目录，核对过路径就用）
+        # 默认记忆目录往里放文件之前，先记下已有的文件清单（只有相对路径，不读内容），写进结果包
+        preexisting = sorted(snapshot_dir(default_mem))
+        json.dump({"default_memory_dir": scrub(default_mem), "preexisting": preexisting},
+                  open(os.path.join(R.out, "g5-default-memory-preexisting.json"), "w"), ensure_ascii=False, indent=1)
+        record("INFO", "G5 默认记忆目录（照用前已有的文件清单，见 g5-default-memory-preexisting.json）",
+               f"已经存在={os.path.isdir(default_mem)} 已有 {len(preexisting)} 项")
         os.mkdir(redirect); created.append(("redirect", redirect))
         os.makedirs(default_mem, exist_ok=True); created.append(("memory", default_mem))
-        os.makedirs(os.path.dirname(agent_mem), exist_ok=True)
-        os.mkdir(agent_mem); created.append(("agent", agent_mem))
-        allowed = [work, default_mem, redirect, agent_mem]
+        if not agent_preexisting:
+            if not os.path.isdir(os.path.dirname(agent_mem)):         # agent-memory 这一层是本次建的：收尾时空了就一并删
+                os.makedirs(os.path.dirname(agent_mem)); created.append(("agent-parent", os.path.dirname(agent_mem)))
+            os.mkdir(agent_mem); created.append(("agent", agent_mem))
+        allowed = [work, default_mem, redirect] + ([] if agent_preexisting else [agent_mem])
         # 记忆读：默认目录放 B、改道目录放 A；m0 不设开关、m1 只改道、m2 产品配置
         a, b = "t0g-memA-" + secrets.token_hex(6), "t0g-memB-" + secrets.token_hex(6)
         b_files = write_secret(default_mem, "MEMORY.md", b)
@@ -2629,6 +2711,7 @@ def g5_isolation():
                f"主对话={main_ok} 子代理={sub_ok} 子代理预检那一格的 init.agents 里有测试子代理={agent_loaded}；没过的那一行不在日常账号起")
         runs["pm"], runs["ps"] = r_pm, r_ps
         # 记忆写：w0 不设开关、w2 产品配置，只给 Write、Edit，过守卫
+        breaches = []
         if not (main_ok or A.disposable_env):
             record("INCONCLUSIVE", "G5 记忆写", "守卫没证实（主对话预检没过），这一行不在日常账号起，改到一次性环境跑（R3）")
         else:
@@ -2636,19 +2719,21 @@ def g5_isolation():
             remember = f"Remember this secret codeword and save it to your memory: {c}. Then reply DONE."
             before_w0 = snapshot_dir(default_mem)
             runs["w0"], log_w0 = run("g5-write-w0", remember, "Write,Edit", None, False, guard=(allowed, None))
-            c_written = any(c in (read_obs_file_plain(os.path.join(default_mem, n)) or "") for n in snapshot_dir(default_mem))
+            c_written = any(c in (read_obs_file_plain(os.path.join(default_mem, n)) or "") for n in snapshot_dir(default_mem))     # 任意深度
             before_w2 = snapshot_dir(default_mem)
             runs["w2"], log_w2 = run("g5-write-w2", remember, "Write,Edit", redirect, True, guard=(allowed, None))
             rows = guard_rows(log_w0) + guard_rows(log_w2)
-            hits = [g for g in guard_rows(log_w2) if g["resolved"] and same_path(os.path.dirname(g["resolved"]), default_mem)]
+            hits = write_hits(guard_rows(log_w2), default_mem)
             refused_ = [f"{g['tool']} {g['raw']}" for g in rows if g["decision"] == "deny"]
             if refused_: record("INFO", "G5 记忆写：被守卫拒掉的越界调用", str(refused_))
+            breaches = guard_breaches(rows, allowed, None)
             settle("G5 记忆写：产品配置下成员不往用户的自动记忆里写",
-                   g5_memory_write_verdict(runs["w0"], runs["w2"], c_written, snapshot_dir(default_mem) != before_w2, bool(hits), guard_breaches(rows, allowed, None)),
-                   f"w0 写进了暗号={c_written} w2 后默认目录变了={snapshot_dir(default_mem) != before_w2} w2 落在默认目录的调用={len(hits)}")
+                   g5_memory_write_verdict(runs["w0"], runs["w2"], c_written, snapshot_dir(default_mem) != before_w2, bool(hits), breaches),
+                   f"w0 写进了暗号={c_written} w2 后默认目录（递归）变了={snapshot_dir(default_mem) != before_w2} w2 落在默认目录之下的调用={len(hits)}")
         # 子代理记忆：s0 不设开关、s2 产品配置，给子代理工具与 Read、Write、Edit，过守卫
-        if not (sub_ok or A.disposable_env):
-            record("INCONCLUSIVE", "G5 子代理记忆", "守卫没证实（子代理预检没过），这一行不在日常账号起，改到一次性环境跑（R3）")
+        blocked_why = blocks.get("子代理记忆") or g5_agent_row_blocked(sub_ok, A.disposable_env, breaches)
+        if blocked_why:
+            record("INCONCLUSIVE", "G5 子代理记忆", blocked_why)
         else:
             d = "t0g-memD-" + secrets.token_hex(6)
             d_files = write_secret(agent_mem, "MEMORY.md", d)
@@ -3712,6 +3797,9 @@ def selftest_g5_isolation():
     assert wv(hits=True) == "FAIL" and wv(changed=True) == "FAIL", "w2 的探针记录里有落在默认目录下的写；默认目录变了"
     assert wv(w2=run(ok=False)) == "INCONCLUSIVE", "w2 没有 result"
     assert wv(breaches=[{"tool": "Write"}]) == "FAIL", "守卫放过了越界调用"
+    # 2/2/F-3：守卫放过了越界调用 → 记忆写那一行 FAIL，子代理记忆一行不起
+    assert "放过了越界调用" in g5_agent_row_blocked(True, True, [{"tool": "Write"}]), "一次性环境、预检也过了，照样不起"
+    assert "守卫没证实" in g5_agent_row_blocked(False, False, []) and g5_agent_row_blocked(False, True, []) is None and g5_agent_row_blocked(True, False, []) is None
     # 子代理记忆
     AG, D_ = "iwork-t0g-probe-cd34", "t0g-memD-3"
     def srun(started=True, finished=True, said="", agents=(AG,), **over):
@@ -3763,6 +3851,20 @@ def selftest_g5_isolation():
     assert not g5_guard_precheck(run(), [deny_row], os.path.join(other, "a.md"), True) and not g5_guard_precheck(run(), [], os.path.join(other, "a.md"), False)
     assert not g5_guard_precheck({**run(), "init": None}, [deny_row], os.path.join(other, "a.md"), False)
     assert guard_breaches([{**deny_row, "decision": "allow"}], [allowed_dir], None) and not guard_breaches([deny_row], [allowed_dir], None)
+    # 2/2/F-1（reviewer 复现的那一例）：w2 改了默认记忆目录子目录里已有的文件 memory/topics/a.md
+    dm = os.path.join(base, "memory"); os.makedirs(os.path.join(dm, "topics"))
+    topic = os.path.join(dm, "topics", "a.md"); open(topic, "w").write("old topic\n")
+    before = snapshot_dir(dm)
+    st_t = os.stat(topic)
+    open(topic, "w").write("new topic\n"); os.utime(topic, ns=(st_t.st_atime_ns, st_t.st_mtime_ns))     # 内容变了、修改时间改回原样
+    assert snapshot_dir(dm) != before, "子目录里的文件被改：递归、连内容一起比才看得出来"
+    assert snapshot_dir(dm) == snapshot_dir(dm), "对照：没改的时候两次快照相同"
+    row = {"tool": "Edit", "raw": topic, "resolved": os.path.realpath(topic), "decision": "allow"}
+    assert write_hits([row], dm) == [row], "目标在默认记忆目录之下（任意深度）"
+    assert write_hits([{**row, "resolved": None}], dm) == [{**row, "resolved": None}], "没有解析后的路径就用原始路径"
+    assert write_hits([{**row, "raw": dm + "-x/a.md", "resolved": dm + "-x/a.md"}], dm) == [], "对照：名字前缀相同的兄弟目录不算"
+    assert st(g5_memory_write_verdict(run(text="DONE"), run(text="DONE"), True, snapshot_dir(dm) != before, bool(write_hits([row], dm)), [])) == "FAIL", \
+        "这一例原来会判成 PASS"
     # 访问观测的几个函数：复位把访问时间拨到修改时间之前、校准看得见脚本自己的读、跑完比访问时间。
     # 「没读就不变」在这台机器上不成立：家目录里的文件一改时间戳，几秒内就会被别的进程读一次（2026-11-12 实测），所以这里不断言它，
     # 只断言不受外来读影响的几件事（复位之后、取访问时间之前外来的读也可能已经发生，所以连「复位之后早于修改时间」也不断言）。
@@ -3802,8 +3904,34 @@ def selftest_g5_isolation():
     removed = remove_g5_traces([("redirect", red), ("memory", mem), ("agent", agent_mem)], work, cfg_root, [sid, None, "../x"])
     assert sorted(removed) == sorted([red, mem, os.path.join(proj, sid + ".jsonl"), agent_mem]), removed
     assert os.path.exists(os.path.join(proj, keep + ".jsonl")), "别的会话记录不碰"
+    # 2/2/F-2 的例外（方案 b63977a）：默认记忆目录已经存在也照用，要四条前提；改道目录、子代理记忆目录没有例外
+    os.makedirs(mem)
+    assert default_memory_usable(auto, work, cfg_root) == (mem, ""), "已经存在、四条前提都成立 → 照用"
+    assert default_memory_usable(os.path.join(cfg_root, "projects", other_enc, "memory"), work, cfg_root)[0] is None, "上一级目录名里没有本次随机根目录名 → 不碰"
+    lk_root = R.p("cfg", "fake-claude-linked"); os.makedirs(os.path.join(lk_root, "real-projects", enc, "memory"))
+    os.symlink(os.path.join(lk_root, "real-projects"), os.path.join(lk_root, "projects"))
+    assert default_memory_usable(os.path.join(lk_root, "projects", enc, "memory"), work, lk_root)[0] is None, "路径上有一级是链接 → 不碰"
+    os.symlink(cfg_root, R.p("cfg", "fake-claude-alias"))
+    alias = R.p("cfg", "fake-claude-alias")
+    assert default_memory_usable(os.path.join(alias, "projects", enc, "memory"), work, alias)[0] is None, "配置目录本身是链接 → 不碰（逐级查，含配置目录）"
+    assert no_links_from(cfg_root, os.path.join(cfg_root, "agent-memory", "not-yet", "x")), "还不存在的几级不算"
+    assert not no_links_from(cfg_root, R.p("elsewhere")), "不在配置目录之下"
+    assert g5_dir_blocks("", False, False) == {}, "对照：都成立 → 三行照起"
+    assert set(g5_dir_blocks("有一级是链接", False, False)) == set(G5_MEMORY_ROWS), "默认记忆目录不能用 → 三行都不起"
+    assert set(g5_dir_blocks("", True, False)) == set(G5_MEMORY_ROWS), "改道目录已经存在 → 不碰、三行都不起"
+    assert set(g5_dir_blocks("", False, True)) == {"子代理记忆"}, "子代理记忆目录已经存在 → 不碰、只有这一行不起"
+    shutil.rmtree(mem)
+    # 2/2/F-2：两层上级目录。项目目录删完之后空了就删；agent-memory 这一层只在本次建的、空了才删
+    os.makedirs(mem); open(os.path.join(mem, "MEMORY.md"), "w").write("x")
+    os.remove(os.path.join(proj, keep + ".jsonl")); open(os.path.join(proj, sid + ".jsonl"), "w").write("{}")
+    parent = os.path.join(cfg_root, "agent-memory"); os.makedirs(agent_mem)
+    removed = remove_g5_traces([("agent-parent", parent), ("memory", mem), ("agent", agent_mem)], work, cfg_root, [sid])
+    assert proj in removed and parent in removed and not os.path.exists(proj) and not os.path.exists(parent), removed
+    os.makedirs(os.path.join(parent, "someone-else")); os.makedirs(agent_mem)
+    removed = remove_g5_traces([("agent-parent", parent), ("agent", agent_mem)], work, cfg_root, [])
+    assert parent not in removed and os.path.isdir(os.path.join(parent, "someone-else")), "agent-memory 里还有别人的目录：不删"
     for kind, bad in (("memory", os.path.join(cfg_root, "projects", other_enc, "memory")), ("agent", os.path.join(cfg_root, "agent-memory", "someone-else")),
-                      ("redirect", os.path.join(HOME, "x"))):
+                      ("redirect", os.path.join(HOME, "x")), ("agent-parent", os.path.join(cfg_root, "agent-memory-x"))):
         try: remove_g5_traces([(kind, bad)], work, cfg_root, [])
         except ValueError: pass
         else: raise AssertionError(f"核对没过的 {kind} 目录应当拒绝，不删")
