@@ -41,9 +41,10 @@ pub trait Connect: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(Client, Incoming), ConnectError>> + Send + 'static;
 }
 
-/// 起后台进程（真实现是 [`DetachedSpawn`]；测试换成记数的假实现）。
-pub trait Spawn: Send + 'static {
-    fn spawn(&mut self, exe: &Path, args: &[&str]) -> std::io::Result<()>;
+/// 起后台进程（真实现是 [`DetachedSpawn`]；测试换成记数的假实现）。同步调用（fork/exec 可能被慢盘、杀毒扫描拖住），
+/// `Launcher` 把它放到阻塞线程池上跑，等它不超过截止时间。
+pub trait Spawn: Send + Sync + 'static {
+    fn spawn(&self, exe: &Path, args: &[&str]) -> std::io::Result<()>;
 }
 
 /// 连本机的后台：`LocalConnector` + 双向身份校验 + 握手。
@@ -78,7 +79,7 @@ pub struct DetachedSpawn;
 
 impl Spawn for DetachedSpawn {
     #[cfg(unix)]
-    fn spawn(&mut self, exe: &Path, args: &[&str]) -> std::io::Result<()> {
+    fn spawn(&self, exe: &Path, args: &[&str]) -> std::io::Result<()> {
         use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
         let mut cmd = Command::new(exe);
@@ -106,7 +107,7 @@ impl Spawn for DetachedSpawn {
     }
 
     #[cfg(not(unix))]
-    fn spawn(&mut self, _exe: &Path, _args: &[&str]) -> std::io::Result<()> {
+    fn spawn(&self, _exe: &Path, _args: &[&str]) -> std::io::Result<()> {
         // M1 不支持 Windows：身份那一步就返回 Environment，走不到这里（方案 2.15）
         Err(std::io::Error::other("M1 暂不支持 Windows"))
     }
@@ -140,7 +141,7 @@ pub enum LaunchError {
 /// 现在能看到的全部诊断数据。纯读取，不拉起、不加锁、不结束进程。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Diagnostics {
-    /// 停在哪一步（「连接中」「拉起失败」「等后台就绪」「同一个程序已经说过起不来」）。
+    /// 停在哪一步（「连接中」「拉起中」「拉起失败」「等后台就绪」「同一个程序已经说过起不来」）。
     pub stage: &'static str,
     pub endpoint: Result<PathBuf, String>,
     pub lock: Option<LockInfo>,
@@ -290,14 +291,17 @@ pub fn should_launch(status: Option<&StartupStatus>, disk_exe: Option<ExeStamp>)
 }
 
 type Attempt = JoinHandle<Result<(Client, Incoming), ConnectError>>;
+type SpawnJob = JoinHandle<std::io::Result<()>>;
 
 /// 连接或拉起。
 pub struct Launcher<C: Connect, S: Spawn> {
     connect: Arc<C>,
-    spawner: S,
+    spawner: Arc<S>,
     cfg: LaunchConfig,
     /// 还没出结果的那次连接尝试。
     pending: Option<Attempt>,
+    /// 还没返回的那次拉起（到点不取消，下一次调用接着等，不叠新的）。
+    pending_spawn: Option<SpawnJob>,
     last_launch: Option<Instant>,
 }
 
@@ -310,9 +314,10 @@ impl<C: Connect, S: Spawn> Launcher<C, S> {
     pub fn new(connect: C, spawner: S, cfg: LaunchConfig) -> Self {
         Self {
             connect: Arc::new(connect),
-            spawner,
+            spawner: Arc::new(spawner),
             cfg,
             pending: None,
+            pending_spawn: None,
             last_launch: None,
         }
     }
@@ -381,14 +386,36 @@ impl<C: Connect, S: Spawn> Launcher<C, S> {
         if !force && !should_launch(status.as_ref(), disk) {
             return Err(self.diag("同一个程序已经说过起不来", Some(last), None));
         }
-        // 第 4 步：拉起（同一个 Launcher 两次至少隔 2s）
+        // 第 4 步：拉起（同一个 Launcher 两次至少隔 2s；上一次还没返回就接着等它，不叠新的）
         let now = Instant::now();
-        if self
-            .last_launch
-            .is_none_or(|t| now.duration_since(t) >= LAUNCH_GAP)
-        {
-            self.last_launch = Some(now);
-            if let Err(e) = self.spawner.spawn(&self.cfg.daemon_exe, &self.cfg.args) {
+        let job = match self.pending_spawn.take() {
+            Some(job) => Some(job),
+            None if self
+                .last_launch
+                .is_none_or(|t| now.duration_since(t) >= LAUNCH_GAP) =>
+            {
+                self.last_launch = Some(now);
+                let (spawner, exe, args) = (
+                    self.spawner.clone(),
+                    self.cfg.daemon_exe.clone(),
+                    self.cfg.args.clone(),
+                );
+                Some(tokio::task::spawn_blocking(move || {
+                    spawner.spawn(&exe, &args)
+                }))
+            }
+            None => None,
+        };
+        if let Some(mut job) = job {
+            let spawned = match tokio::time::timeout_at(deadline, &mut job).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(join)) => Err(std::io::Error::other(format!("拉起线程异常结束：{join}"))),
+                Err(_) => {
+                    self.pending_spawn = Some(job);
+                    return Err(self.diag("拉起中", Some(last), None));
+                }
+            };
+            if let Err(e) = spawned {
                 return Err(self.diag(
                     "拉起失败",
                     Some(last),

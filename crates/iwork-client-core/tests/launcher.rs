@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -40,6 +40,8 @@ struct Ctl {
     attempts: AtomicUsize,
     spawns: AtomicUsize,
     spawn_fails: AtomicBool,
+    /// 拉起要卡多久（毫秒）
+    spawn_delay_ms: AtomicU64,
     /// 拉起后后台是否真的起来
     spawn_brings_up: AtomicBool,
     /// 事先和假后台握好手的那一条连接；每个用例最多连上一次
@@ -90,8 +92,12 @@ impl Connect for FakeConnect {
 struct FakeSpawn(Arc<Ctl>);
 
 impl Spawn for FakeSpawn {
-    fn spawn(&mut self, _exe: &Path, _args: &[&str]) -> std::io::Result<()> {
+    fn spawn(&self, _exe: &Path, _args: &[&str]) -> std::io::Result<()> {
         self.0.spawns.fetch_add(1, Ordering::SeqCst);
+        // 慢的 fork/exec（慢盘、杀毒扫描）：同步地卡住
+        std::thread::sleep(Duration::from_millis(
+            self.0.spawn_delay_ms.load(Ordering::SeqCst),
+        ));
         if self.0.spawn_fails.load(Ordering::SeqCst) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -294,6 +300,30 @@ async fn slow_peer_check_returns_at_deadline_and_attempt_is_reused() {
     );
     assert_eq!(w.ctl.attempts.load(Ordering::SeqCst), 1, "没有叠新的尝试");
     assert_eq!(w.spawns(), 0);
+}
+
+/// S19：起进程本身很慢（2.5s，超过 1s 预算，也超过两次拉起的最小间隔 2s）→ 每次调用都在预算内返回「拉起中」；
+/// 后面的调用接着等同一次拉起，过了间隔也不叠新的；拉起返回、后台起来后连上。
+#[tokio::test]
+async fn slow_spawn_returns_at_deadline_and_is_reused() {
+    let w = World::new(true).await;
+    w.ctl.spawn_delay_ms.store(2500, Ordering::SeqCst);
+    let mut l = w.launcher(BUDGET);
+    for _ in 0..2 {
+        let t = std::time::Instant::now();
+        let d = not_ready(l.connect_or_launch().await);
+        assert!(
+            t.elapsed() < BUDGET + Duration::from_millis(300),
+            "{:?}",
+            t.elapsed()
+        );
+        assert_eq!(d.stage, "拉起中");
+    }
+    assert!(
+        l.connect_or_launch().await.is_ok(),
+        "第三次等到那次拉起返回、连上"
+    );
+    assert_eq!(w.spawns(), 1, "没有叠新的拉起");
 }
 
 /// S19：一直连不上、拉起了也不起来 → 起进程、退避睡眠都以同一个截止时间为上界：整个调用恰好用完预算。
