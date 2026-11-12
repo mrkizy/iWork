@@ -238,4 +238,36 @@ fn requires_owner_only_for_build_and_approve() {
     assert!(!requires_owner(&card_event(UserActionState::Voided {
         reason: VoidReason::AssistantDeleted
     })));
+    // 排新回合要查（T10a A3）；回合别的事件不查
+    let turn = iwork_domain::turn::Turn {
+        id: iwork_domain::id::TurnId::from_raw(iwork_domain::id::RawUlid::from_u128(1)),
+        conversation_id: iwork_domain::id::ConversationId::from_raw(
+            iwork_domain::id::RawUlid::from_u128(2),
+        ),
+        assistant_id: iwork_domain::id::AssistantId::from_raw(
+            iwork_domain::id::RawUlid::from_u128(3),
+        ),
+        assistant_version: 1,
+        runtime_id: iwork_domain::id::RuntimeId::from_raw(iwork_domain::id::RawUlid::from_u128(4)),
+        model: iwork_domain::common::ModelSelection {
+            model_id: iwork_domain::common::ModelId("m".into()),
+            effort: None,
+        },
+        runtime_session_id: None,
+        kind: iwork_domain::turn::TurnKind::Assistant,
+        state: iwork_domain::turn::TurnState::Queued,
+        started_at: iwork_domain::common::Timestamp(0),
+        ended_at: None,
+    };
+    let id = turn.id;
+    assert!(requires_owner(
+        &iwork_domain::event::TurnQueued { turn }.into()
+    ));
+    assert!(!requires_owner(
+        &iwork_domain::event::TurnIntentRecorded {
+            turn_id: id,
+            intent: iwork_domain::turn::TurnIntentKind::Cancel,
+        }
+        .into()
+    ));
 }

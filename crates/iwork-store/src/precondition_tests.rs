@@ -329,29 +329,13 @@ fn rebuild_rejects_illegal_history() {
     assert_eq!(state(&env), before, "旧投影不变");
 }
 
-/// 别的实体的状态事件照旧不校验：回合、对话的「现在 → 新值」随便给都写入。
+/// 对话的状态事件照旧不校验：进删除中两次也照写（回合的状态前提见 `turn_preconditions_on_writer`）。
 #[test]
-fn precondition_only_for_approvals_and_cards() {
+fn conversation_state_is_not_checked() {
     let env = Env::new();
     let store = env.open();
     let feed = Feed::new(&store);
     owned_base(&feed);
-    // 回合从 Queued 直接到 Completed，再回 Running：领域状态机不允许，投影器照写
-    for (from, to) in [
-        (TurnState::Queued, TurnState::Completed),
-        (TurnState::Completed, TurnState::Running),
-    ] {
-        feed.ok(vec![
-            TurnStateChanged {
-                turn_id: tid(20),
-                from,
-                to,
-                reason: None,
-            }
-            .into(),
-        ]);
-    }
-    // 对话进删除中两次也照写
     for _ in 0..2 {
         feed.ok(vec![
             ConversationDeleting {
@@ -447,6 +431,23 @@ fn owner_facts_sqlite_matches_reference() {
         vec![
             ConversationDeleting {
                 conversation_id: cid(11),
+            }
+            .into(),
+        ],
+        // 级联删除要求名下回合先到终态（T10a X5）
+        vec![
+            TurnStateChanged {
+                turn_id: tid(22),
+                from: TurnState::Queued,
+                to: TurnState::Cancelled,
+                reason: None,
+            }
+            .into(),
+            TurnStateChanged {
+                turn_id: tid(21),
+                from: TurnState::Queued,
+                to: TurnState::Cancelled,
+                reason: None,
             }
             .into(),
         ],
@@ -640,7 +641,16 @@ fn owner_alive_precondition() {
         .into(),
     ]);
 
-    // 对话整条没了：回合行随之级联，再建就是回合没有记录
+    // 对话整条没了：回合行随之级联，再建就是回合没有记录（级联前回合先到终态，T10a X5）
+    feed.ok(vec![
+        TurnStateChanged {
+            turn_id: tid(21),
+            from: TurnState::Queued,
+            to: TurnState::Cancelled,
+            reason: None,
+        }
+        .into(),
+    ]);
     feed.ok(vec![
         ConversationDeleted {
             conversation_id: cid(11),

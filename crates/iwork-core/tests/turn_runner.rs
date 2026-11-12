@@ -413,6 +413,12 @@ impl StoragePort for Store {
             replayed: false,
         })
     }
+    async fn command_receipt(
+        &self,
+        _id: iwork_domain::id::CommandId,
+    ) -> Result<Option<iwork_ports::store::CommitReceipt>, iwork_ports::store::StorageError> {
+        unimplemented!("这个假存储的使用者不查回执")
+    }
     async fn head_seq(&self) -> Result<Seq, StorageError> {
         unimplemented!()
     }

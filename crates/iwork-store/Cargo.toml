@@ -14,6 +14,11 @@ sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+[features]
+# 测试用的观测与控制点（压住写线程、查回执入队的通知）。只给测试打开（后台的 dev-dependency），
+# 发布构建里没有：见 src/test_hooks.rs
+test-hooks = []
+
 [dev-dependencies]
 # 测试与基准要真实 codec：快照借事件编码，玩具 codec 得把 11 种实体都编得出来（方案 3.2）
 iwork-app.workspace = true

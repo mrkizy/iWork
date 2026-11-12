@@ -158,7 +158,7 @@ fn newer_schema_is_refused_without_writing() {
 fn new_database_records_versions() {
     let env = Env::new();
     drop(env.open());
-    assert_eq!(schema_version(&env.db()), "1");
+    assert_eq!(schema_version(&env.db()), "2", "新库跑完全部迁移");
     let conn = rusqlite::Connection::open(env.db()).unwrap();
     let major: String = conn
         .query_row(
@@ -196,7 +196,7 @@ fn failed_initial_migration_can_be_retried() {
     // 换正常程序重开：按新库初始化
     let names = project_names_after_seed(&env);
     assert_eq!(names, vec!["p1"]);
-    assert_eq!(schema_version(&env.db()), "1");
+    assert_eq!(schema_version(&env.db()), "2");
 }
 
 fn project_names_after_seed(env: &Env) -> Vec<String> {
@@ -289,4 +289,164 @@ fn killed_during_initial_migration_can_be_retried() {
         "换正常程序重开成功"
     );
     assert!(!has_table(&env.db(), "slow"), "没提交的迁移一点不剩");
+}
+
+/// 迁移 0002 的回填（T10a 方案 2.2）：同一串事件，在线投影写出的 `created_seq`、`ended_seq`、
+/// `tool_calls.conversation_id` 与「库退回 v1 的样子、重开时由迁移从 events 回填」的值逐行相等；
+/// 一趟的起点与两种意图的 seq 迁移时留空（那时没有在跑的编排、旧库没有意图事件）。
+#[test]
+fn migration_0002_backfills_from_events() {
+    use iwork_domain::event::*;
+    use iwork_domain::turn::{InterruptReason, TurnState};
+    let env = Env::new();
+    let store = env.open();
+    let commit = |n: u128, events: Vec<DomainEvent>| {
+        block(store.commit(cmd(n, events))).expect("提交");
+    };
+    let change = |turn: u128, from: TurnState, to: TurnState| -> DomainEvent {
+        TurnStateChanged {
+            turn_id: tid(turn),
+            from,
+            to,
+            reason: None,
+        }
+        .into()
+    };
+    commit(
+        1,
+        vec![
+            ProjectAdded {
+                project: project(1),
+            }
+            .into(),
+            AssistantCreated {
+                assistant: assistant(1, false),
+            }
+            .into(),
+            ConversationCreated {
+                conversation: project_conversation(10, 1),
+            }
+            .into(),
+            ConversationCreated {
+                conversation: project_conversation(11, 1),
+            }
+            .into(),
+        ],
+    );
+    // 回合 20：跑完，带一次工具调用；回合 21：还排着；回合 22（另一个对话）：中断
+    commit(2, vec![TurnQueued { turn: turn(20, 10) }.into()]);
+    commit(3, vec![TurnQueued { turn: turn(21, 10) }.into()]);
+    commit(4, vec![TurnQueued { turn: turn(22, 11) }.into()]);
+    commit(5, vec![change(20, TurnState::Queued, TurnState::Running)]);
+    commit(
+        6,
+        vec![
+            ToolCallStarted {
+                turn_id: tid(20),
+                tool_call_id: ToolCallId("tc".into()),
+                tool_name: "Bash".into(),
+                action: approval(1, 1, 1).action,
+            }
+            .into(),
+        ],
+    );
+    commit(
+        7,
+        vec![
+            change(20, TurnState::Running, TurnState::Completed),
+            TurnFinished {
+                turn_id: tid(20),
+                state: TurnState::Completed,
+                usage: Default::default(),
+                celebrate: false,
+                change_summary: None,
+            }
+            .into(),
+        ],
+    );
+    commit(8, vec![change(22, TurnState::Queued, TurnState::Running)]);
+    commit(
+        9,
+        vec![change(
+            22,
+            TurnState::Running,
+            TurnState::Interrupted {
+                reason: InterruptReason::Crash,
+            },
+        )],
+    );
+    store.close().unwrap();
+
+    const BACKFILLED: &str = "SELECT id, created_seq, ended_seq FROM turns";
+    const TOOL_CALLS: &str = "SELECT turn_id, tool_call_id, conversation_id FROM tool_calls";
+    let online = (dump(&env.db(), BACKFILLED), dump(&env.db(), TOOL_CALLS));
+    // 对照：在线投影的值确实各不相同、不是默认值
+    assert_eq!(
+        online.0,
+        vec![
+            format!("{} 5 11", tid(20)),
+            format!("{} 6 0", tid(21)),
+            format!("{} 7 0", tid(22)),
+        ]
+    );
+    assert_eq!(online.1, vec![format!("{} tc {}", tid(20), cid(10))]);
+
+    // 退回 v1 的样子：去掉 0002 加的索引与列，schema 版本记回 1
+    let conn = rusqlite::Connection::open(env.db()).unwrap();
+    conn.execute_batch(
+        "DROP INDEX turns_by_conversation_created;
+         DROP INDEX turns_by_conversation_ended;
+         DROP INDEX tool_calls_by_conversation;
+         DROP INDEX approvals_by_conversation_seq;
+         DROP INDEX user_actions_by_conversation_seq;
+         DROP INDEX messages_by_conversation_seq;
+         ALTER TABLE turns DROP COLUMN created_seq;
+         ALTER TABLE turns DROP COLUMN ended_seq;
+         ALTER TABLE turns DROP COLUMN run_started_seq;
+         ALTER TABLE turns DROP COLUMN cancel_intent_seq;
+         ALTER TABLE turns DROP COLUMN resume_intent_seq;
+         ALTER TABLE tool_calls DROP COLUMN conversation_id;
+         UPDATE meta SET value = '1' WHERE key = 'schema_version';",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = env.open();
+    assert_eq!(schema_version(&env.db()), "2");
+    assert_eq!(dump(&env.db(), BACKFILLED), online.0, "回填与在线投影相等");
+    assert_eq!(dump(&env.db(), TOOL_CALLS), online.1);
+    assert_eq!(
+        scalar(
+            &env.db(),
+            "SELECT COUNT(*) FROM turns WHERE run_started_seq IS NOT NULL \
+             OR cancel_intent_seq IS NOT NULL OR resume_intent_seq IS NOT NULL"
+        ),
+        0,
+        "迁移时这三列留空"
+    );
+    store.close().unwrap();
+}
+
+/// 一条查询的每一行，各列用空格连起来。
+fn dump(db: &Path, sql: &str) -> Vec<String> {
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut stmt = conn.prepare(&format!("{sql} ORDER BY 1, 2")).unwrap();
+    let n = stmt.column_count();
+    stmt.query_map([], |r| {
+        let vals: Vec<String> = (0..n)
+            .map(|i| {
+                r.get::<_, rusqlite::types::Value>(i).map(|v| match v {
+                    rusqlite::types::Value::Integer(i) => i.to_string(),
+                    rusqlite::types::Value::Text(t) => t,
+                    other => format!("{other:?}"),
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(vals.join(" "))
+    })
+    .unwrap()
+    .collect::<Result<_, _>>()
+    .unwrap()
 }

@@ -1,6 +1,6 @@
-//! 审批与卡片的参照投影（T02 方案 2.6「状态前提」「归属存续」；T07 方案 6.10.7、6.10.13）。
+//! 提交时校验的参照投影（T02 方案 2.6「状态前提」「归属存续」；T07 方案 6.10.7、6.10.13；T10a 方案 2.2）。
 //!
-//! 只维护提交时校验要用的那几样：回合（→ 对话、助手）、对话（在 / 删除中）、私聊属于哪个助手、
+//! 只维护提交时校验要用的那几样：回合（→ 对话、助手、状态）、对话（在 / 删除中）、私聊属于哪个助手、
 //! 助手、审批（主状态、审查子状态、回合）、卡片（状态、回合）。判断全部调 `iwork-domain` 的同一组函数，
 //! 和 `SqliteProjector` 不各写一份规则。别的 crate 的测试经 `#[path]` 引入同一份：存储的对拍测试
 //! 拿它当参照，引擎测试的假存储拿它做提交时校验。
@@ -15,15 +15,18 @@ use iwork_domain::approval::{
     ApprovalState, ConversationPresence, OwnerFacts, Presence, ReviewState, check_committed,
     owner_alive, requires_owner,
 };
-use iwork_domain::conversation::{ConversationKind, ConversationState};
+use iwork_domain::conversation::{ConversationKind, ConversationState, check_cascade};
 use iwork_domain::event::DomainEvent;
 use iwork_domain::id::{ApprovalId, AssistantId, ConversationId, TurnId, UserActionId};
+use iwork_domain::turn::{TurnState, check_intent_committed, check_turn_committed};
 use iwork_domain::user_action::{self, UserActionState};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReferenceProjection {
     /// 回合 → (对话, 助手)。`TurnFinished` 不删；随对话、助手私聊的级联删
     pub turns: BTreeMap<TurnId, (ConversationId, AssistantId)>,
+    /// 回合 → 现在的状态（回合状态变化与回合意图的状态前提，T10a A4）
+    pub turn_states: BTreeMap<TurnId, TurnState>,
     /// 对话 → 是否删除中
     pub conversations: BTreeMap<ConversationId, bool>,
     /// 私聊 → 它的助手
@@ -43,19 +46,42 @@ impl ReferenceProjection {
                 assistant: Presence::Gone,
             };
         };
+        self.facts_of_owners(*conversation, *assistant)
+    }
+
+    /// 回合有记录（或排新回合时由事件带来）时，它的对话与助手在不在。
+    fn facts_of_owners(&self, conversation: ConversationId, assistant: AssistantId) -> OwnerFacts {
         OwnerFacts {
             turn: Presence::Present,
-            conversation: match self.conversations.get(conversation) {
+            conversation: match self.conversations.get(&conversation) {
                 None => ConversationPresence::Gone,
                 Some(true) => ConversationPresence::Deleting,
                 Some(false) => ConversationPresence::Present,
             },
-            assistant: if self.assistants.contains(assistant) {
+            assistant: if self.assistants.contains(&assistant) {
                 Presence::Present
             } else {
                 Presence::Gone
             },
         }
+    }
+
+    fn turn_state(&self, turn: TurnId) -> Result<TurnState, String> {
+        self.turn_states
+            .get(&turn)
+            .copied()
+            .ok_or_else(|| format!("没有回合 {turn}"))
+    }
+
+    /// 级联删掉对话 `c` 之前名下回合都到终态（T10a X5）。
+    fn require_cascade(&self, c: ConversationId) -> Result<(), String> {
+        let turns: Vec<_> = self
+            .turns
+            .iter()
+            .filter(|(_, (conv, _))| *conv == c)
+            .map(|(t, _)| (*t, self.turn_states[t]))
+            .collect();
+        check_cascade(c, &turns).map_err(|e| e.message)
     }
 
     fn require_owner(&self, event: &DomainEvent, turn: TurnId) -> Result<(), String> {
@@ -70,6 +96,8 @@ impl ReferenceProjection {
         self.conversations.remove(&c);
         self.dm_assistant.remove(&c);
         self.turns.retain(|_, (conv, _)| *conv != c);
+        let turns = &self.turns;
+        self.turn_states.retain(|t, _| turns.contains_key(t));
         self.approvals.retain(|_, (_, _, _, conv)| *conv != c);
         self.cards.retain(|_, (_, _, conv)| *conv != c);
     }
@@ -82,13 +110,16 @@ impl ReferenceProjection {
                 self.assistants.insert(e.assistant.id);
             }
             E::AssistantDeleted(e) => {
-                self.assistants.remove(&e.assistant_id);
                 let dms: Vec<ConversationId> = self
                     .dm_assistant
                     .iter()
                     .filter(|(_, a)| **a == e.assistant_id)
                     .map(|(c, _)| *c)
                     .collect();
+                for c in &dms {
+                    self.require_cascade(*c)?;
+                }
+                self.assistants.remove(&e.assistant_id);
                 for c in dms {
                     self.drop_conversation(c);
                 }
@@ -108,10 +139,24 @@ impl ReferenceProjection {
                     .ok_or_else(|| format!("没有对话 {}", e.conversation_id))?;
                 *row = true;
             }
-            E::ConversationDeleted(e) => self.drop_conversation(e.conversation_id),
+            E::ConversationDeleted(e) => {
+                self.require_cascade(e.conversation_id)?;
+                self.drop_conversation(e.conversation_id)
+            }
             E::TurnQueued(e) => {
-                self.turns
-                    .insert(e.turn.id, (e.turn.conversation_id, e.turn.assistant_id));
+                let t = &e.turn;
+                owner_alive(&self.facts_of_owners(t.conversation_id, t.assistant_id))
+                    .map_err(|g| format!("{} 的归属不在了：{g}", event.kind()))?;
+                self.turns.insert(t.id, (t.conversation_id, t.assistant_id));
+                self.turn_states.insert(t.id, t.state);
+            }
+            E::TurnStateChanged(e) => {
+                check_turn_committed(self.turn_state(e.turn_id)?, e).map_err(|e| e.message)?;
+                self.turn_states.insert(e.turn_id, e.to);
+            }
+            E::TurnIntentRecorded(e) => {
+                check_intent_committed(self.turn_state(e.turn_id)?, e.intent)
+                    .map_err(|e| e.message)?;
             }
             E::ApprovalRequested(e) => {
                 let a = &e.approval;

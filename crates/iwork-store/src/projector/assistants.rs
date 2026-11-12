@@ -100,6 +100,7 @@ pub(super) fn deleted<C: EventCodec + ?Sized>(
         .prepare_cached("SELECT id FROM conversations WHERE assistant_id = ?1")
         .and_then(|mut s| s.query_map([&id], |r| r.get(0))?.collect())
         .map_err(crate::sql::sql_err)?;
+    super::owner::require_cascade(cx, &dms)?;
     for dm in dms {
         conversations::delete_cascade(cx, &dm)?;
     }

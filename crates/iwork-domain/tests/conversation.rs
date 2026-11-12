@@ -189,3 +189,26 @@ fn dm_project_switch_clears_own_mode() {
     );
     assert_eq!(project.approval_mode, Some(ApprovalMode::Auto));
 }
+
+/// 级联删除：名下有没到终态的回合就拒，并点名对话与回合；都到终态（或没有回合）就过。
+#[test]
+fn cascade_needs_every_turn_terminal() {
+    use iwork_domain::conversation::check_cascade;
+    use iwork_domain::id::{ConversationId, RawUlid, TurnId};
+    use iwork_domain::machine::Finite;
+    use iwork_domain::turn::TurnState;
+    let c = ConversationId::from_raw(RawUlid::from_u128(10));
+    let t = |n| TurnId::from_raw(RawUlid::from_u128(n));
+    assert!(check_cascade(c, &[]).is_ok());
+    for state in TurnState::all() {
+        let open = !matches!(
+            state,
+            TurnState::Completed | TurnState::Cancelled | TurnState::Failed
+        );
+        let r = check_cascade(c, &[(t(1), TurnState::Completed), (t(2), state)]);
+        assert_eq!(r.is_err(), open, "{state:?}");
+        if let Err(e) = r {
+            assert!(e.message.contains(&c.to_string()) && e.message.contains(&t(2).to_string()));
+        }
+    }
+}

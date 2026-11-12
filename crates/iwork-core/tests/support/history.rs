@@ -100,4 +100,25 @@ impl ReadModelPort for FakeHistory {
     async fn artifact_is_referenced(&self, _r: &ArtifactRef) -> Result<bool, StorageError> {
         unimplemented!("{UNUSED}")
     }
+    async fn turn_work(&self) -> Result<iwork_ports::read_model::TurnWork, StorageError> {
+        unimplemented!("{UNUSED}")
+    }
+    async fn last_session_binding(
+        &self,
+        _c: ConversationId,
+    ) -> Result<Option<String>, StorageError> {
+        unimplemented!("{UNUSED}")
+    }
+    async fn session_ids_of(&self, _c: ConversationId) -> Result<Vec<String>, StorageError> {
+        unimplemented!("{UNUSED}")
+    }
+    async fn quit_counts(&self) -> Result<iwork_ports::read_model::QuitCounts, StorageError> {
+        unimplemented!("{UNUSED}")
+    }
+    async fn snapshot_inputs(
+        &self,
+        _c: ConversationId,
+    ) -> Result<iwork_ports::read_model::SnapshotInputs, StorageError> {
+        unimplemented!("{UNUSED}")
+    }
 }

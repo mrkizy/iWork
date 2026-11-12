@@ -223,6 +223,13 @@ impl Bench {
                 TurnState::Queued
             }
         };
+        // 只走转换表里的边（存储在提交时校验，T10a A4）：排着的、中断的先进 Running
+        let from = if matches!(from, TurnState::Queued | TurnState::Interrupted { .. }) {
+            events.push(state_changed(t, from, TurnState::Running));
+            TurnState::Running
+        } else {
+            from
+        };
         if from != TurnState::WaitingApproval {
             events.push(state_changed(t, from, TurnState::WaitingApproval));
         }

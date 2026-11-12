@@ -159,6 +159,10 @@ sample_types! {
         b::ev_approval_evaluated_grant,
         b::ev_approval_delivered,
         b::ev_turn_session_bound_replaced,
+        b::ev_turn_intent_recorded_cancel,
+        b::ev_turn_intent_recorded_resume,
+        b::ev_runtime_session_forget_refused,
+        b::ev_runtime_session_forget_failed,
     ],
 }
 

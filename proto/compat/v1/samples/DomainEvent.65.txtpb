@@ -1,0 +1,7 @@
+runtime_session_forget_failed {
+  conversation_id: "01JC0C0000000000000000CNV1"
+  runtime_session_id: "sess-2"
+  failed {
+    message: "\346\235\203\351\231\220\344\270\215\350\266\263"
+  }
+}
