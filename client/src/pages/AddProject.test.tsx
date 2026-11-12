@@ -9,7 +9,7 @@ const dialog = () => screen.getByRole("dialog", { name: "添加项目" });
 const candidate = (name: string) => loadScenario(name).state.addProject!.candidate!;
 const open = (name: string) => renderScenario(name, { page: "addProject" });
 
-describe("添加项目一组意图不带路径（方案 15.2 SD5）", () => {
+describe("add_project_intents_carry_no_path：添加项目一组意图不带路径（方案 15.2 SD5）", () => {
   it("UiIntent 里添加项目一组的消息都没有 path 字段；带路径的旧 add_project（70）已删", () => {
     const group = [
       "pickProjectFolder",
