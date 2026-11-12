@@ -218,6 +218,42 @@ fn unreadable_status_is_none() {
     assert!(read_status(dir.path()).is_some());
 }
 
+/// 临时文件的位置上已经有东西（别人放好的链接、同名文件）→ 新建失败，不顺着链接写，被指向的文件不变。
+#[cfg(unix)]
+#[test]
+fn temp_file_is_created_exclusively() {
+    let dir = tempfile::tempdir().unwrap();
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, "keep me").unwrap();
+    let planted = dir.path().join("planted");
+    std::os::unix::fs::symlink(&victim, &planted).unwrap();
+    assert!(create_new_private(&planted).is_err());
+    assert!(create_new_private(&victim).is_err());
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+    assert!(create_new_private(&dir.path().join("fresh")).is_ok());
+}
+
+/// 状态文件的位置上是指向别处的链接 → 改名替换掉链接本身，被指向的文件不变；不留临时文件。
+#[cfg(unix)]
+#[test]
+fn write_status_does_not_follow_links() {
+    let dir = tempfile::tempdir().unwrap();
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, "keep me").unwrap();
+    std::os::unix::fs::symlink(&victim, dir.path().join(STATUS_FILE)).unwrap();
+    let st = sample_status(Phase::Ready);
+    write_status(dir.path(), &st).unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+    let meta = std::fs::symlink_metadata(dir.path().join(STATUS_FILE)).unwrap();
+    assert!(meta.file_type().is_file());
+    assert_eq!(read_status(dir.path()), Some(st));
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names.len(), 2, "只有状态文件与 victim：{names:?}");
+}
+
 /// 一边反复写两份不同的状态，一边反复读：每次读到的都是两份之一，从不是半份或 `None`。
 #[test]
 fn write_is_atomic() {

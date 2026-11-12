@@ -25,6 +25,10 @@ tracing-subscriber = { workspace = true, features = ["registry"] }
 serde_json.workspace = true
 ulid = { workspace = true, features = ["std"] }
 
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW：锁文件、日志文件不跟随链接打开
+libc.workspace = true
+
 [features]
 # 开发开关 --dev-trust（跳过签名校验，同用户照查）。不是默认 feature；发布构建里不存在：
 # scripts/check-no-dev-trust.sh 查 feature 图、产物字符串与「发布进程收到 --dev-trust 拒绝启动」。

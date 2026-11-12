@@ -227,10 +227,11 @@ fn after_exit_without_reason(code: ExitCode) -> Relaunchable {
 }
 
 /// 写状态文件：先写同目录的临时文件再改名，读的一方永远读到完整的旧内容或新内容。Unix 上权限 0600。
+/// 临时文件名随机、独占新建、不跟随链接（[`create_new_private`]）：不会顺着别人放好的链接写到别处。
 pub fn write_status(run_dir: &Path, status: &StartupStatus) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(status).map_err(io::Error::other)?;
-    let tmp = run_dir.join(format!("{STATUS_FILE}.tmp.{}", std::process::id()));
-    let mut file = create_private(&tmp)?;
+    let tmp = run_dir.join(format!(".{STATUS_FILE}.{}.tmp", ulid::Ulid::generate()));
+    let mut file = create_new_private(&tmp)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
     drop(file);
@@ -260,20 +261,16 @@ pub fn read_lock_info(run_dir: &Path) -> Option<LockInfo> {
     serde_json::from_slice(&bytes).ok()
 }
 
-#[cfg(unix)]
-fn create_private(path: &Path) -> io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-}
-
-#[cfg(not(unix))]
-fn create_private(path: &Path) -> io::Result<File> {
-    File::create(path)
+/// 独占新建（`O_CREAT|O_EXCL`：已存在就失败，最后一级是链接也失败）；Unix 上另加 `O_NOFOLLOW`、权限 0600。
+fn create_new_private(path: &Path) -> io::Result<File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    opts.open(path)
 }
 
 #[cfg(test)]
