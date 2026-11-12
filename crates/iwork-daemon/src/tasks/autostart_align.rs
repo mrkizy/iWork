@@ -20,26 +20,35 @@ pub const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Register,
+    /// 托管实例遇到「定义不符」：运行中只重写定义文件，不卸载、不重新载入（重新载入要先卸下服务，会结束本进程），
+    /// 下次登录生效（方案 2.12，组 3 审查 2/F-2）。
+    RewriteDefinition,
     Unregister,
     Nothing,
     /// 托管实例运行中不注销自己（注销会结束本进程连同在跑的回合）；留到下次启动、`bind` 之前（启动表 9a）。
     KeepUntilNextBoot,
 }
 
-/// 方案 2.12 的对齐表（纯函数）。
+/// 方案 2.12 的对齐表（纯函数）。「定义不符」= 文件里的程序不是现在这个，或服务管理器实际载入的不是文件里这一份
+/// （`Registered` 指向别的程序，或 `Partial`）。
 pub fn decide(intent: bool, state: &AutostartState, managed: bool, program: &Path) -> Action {
-    match (intent, state) {
-        (true, AutostartState::NotRegistered) => Action::Register,
-        // app 挪了位置：注册项指向旧路径 → 重新注册
-        (true, AutostartState::Registered { program: p }) if p != program => Action::Register,
-        (true, AutostartState::Registered { .. }) => Action::Nothing,
-        (false, AutostartState::Registered { .. }) if managed => Action::KeepUntilNextBoot,
-        (false, AutostartState::Registered { .. }) => Action::Unregister,
-        (false, AutostartState::NotRegistered) => Action::Nothing,
-        // 只剩一半（注册或注销到一半）：按意图补齐或清掉；托管实例清它可能结束自己，同样留到下次启动
-        (true, AutostartState::Partial) => Action::Register,
-        (false, AutostartState::Partial) if managed => Action::KeepUntilNextBoot,
-        (false, AutostartState::Partial) => Action::Unregister,
+    let mismatch = match state {
+        AutostartState::NotRegistered => None,
+        AutostartState::Registered { program: p } => Some(p != program),
+        AutostartState::Partial => Some(true),
+    };
+    match (intent, mismatch, managed) {
+        // 开 / 没注册
+        (true, None, _) => Action::Register,
+        // 开 / 文件和实际载入的都是现在这个
+        (true, Some(false), _) => Action::Nothing,
+        // 开 / 定义不符：非托管整套重做；托管运行中只重写文件
+        (true, Some(true), false) => Action::Register,
+        (true, Some(true), true) => Action::RewriteDefinition,
+        // 关 / 有注册项（全部或一半）：非托管注销；托管实例注销会结束自己，留到下次启动、bind 之前（启动表 9a）
+        (false, Some(_), false) => Action::Unregister,
+        (false, Some(_), true) => Action::KeepUntilNextBoot,
+        (false, None, _) => Action::Nothing,
     }
 }
 
@@ -61,6 +70,10 @@ pub async fn align_once<P: AutostartPort, R: ReadModelPort>(
     let action = decide(intent, &state, managed, program);
     match action {
         Action::Register => port.set(true).await?,
+        Action::RewriteDefinition => {
+            port.write_definition().await?;
+            tracing::info!("自启定义已更新，下次登录生效");
+        }
         Action::Unregister => port.set(false).await?,
         Action::KeepUntilNextBoot => {
             tracing::info!("自启已关，注册项留到本进程下次启动时移除");
@@ -115,6 +128,7 @@ mod tests {
     struct FakePort {
         state: Mutex<Option<PathBuf>>,
         sets: Mutex<Vec<bool>>,
+        rewrites: AtomicUsize,
         in_set: AtomicBool,
         reentered: AtomicBool,
         fail_first: AtomicUsize,
@@ -129,6 +143,10 @@ mod tests {
             })
         }
         fn supported(&self) -> Result<(), AutostartError> {
+            Ok(())
+        }
+        async fn write_definition(&self) -> Result<(), AutostartError> {
+            self.rewrites.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         async fn set(&self, enabled: bool) -> Result<(), AutostartError> {
@@ -158,50 +176,115 @@ mod tests {
         })
     }
 
-    /// 方案 2.12 的对齐表逐行。
+    /// 方案 2.12 的对齐表逐行（main 95efaed 的版本：「开 / 定义不符」按托管与否拆两行）。期望值从方案的表抄来。
     #[test]
     fn table() {
+        use Action::*;
         let me = Path::new("/app/iwork-daemon");
         let reg = |p: &str| AutostartState::Registered {
             program: PathBuf::from(p),
         };
         let none = AutostartState::NotRegistered;
-        for managed in [false, true] {
-            assert_eq!(decide(true, &none, managed, me), Action::Register);
-            assert_eq!(
-                decide(true, &reg("/old/iwork-daemon"), managed, me),
-                Action::Register,
-                "路径不对 → 重新注册"
-            );
-            assert_eq!(
-                decide(true, &reg("/app/iwork-daemon"), managed, me),
-                Action::Nothing
-            );
-            assert_eq!(decide(false, &none, managed, me), Action::Nothing);
-        }
-        assert_eq!(
-            decide(false, &reg("/app/iwork-daemon"), false, me),
-            Action::Unregister
-        );
-        assert_eq!(
-            decide(false, &reg("/app/iwork-daemon"), true, me),
-            Action::KeepUntilNextBoot,
-            "托管实例运行中不调 set(false)"
-        );
         let partial = AutostartState::Partial;
-        for managed in [false, true] {
-            assert_eq!(
-                decide(true, &partial, managed, me),
-                Action::Register,
-                "注册到一半 → 补齐"
-            );
+        let rows: Vec<(&str, bool, AutostartState, bool, Action)> = vec![
+            ("开 / 没注册 / 非托管", true, none.clone(), false, Register),
+            ("开 / 没注册 / 托管", true, none.clone(), true, Register),
+            (
+                "开 / 文件里的程序不对 / 非托管",
+                true,
+                reg("/old/iwork-daemon"),
+                false,
+                Register,
+            ),
+            (
+                "开 / 文件里的程序不对 / 托管",
+                true,
+                reg("/old/iwork-daemon"),
+                true,
+                RewriteDefinition,
+            ),
+            (
+                "开 / 实际载入的不是文件里这份（更新到一半）/ 非托管",
+                true,
+                partial.clone(),
+                false,
+                Register,
+            ),
+            (
+                "开 / 实际载入的不是文件里这份 / 托管",
+                true,
+                partial.clone(),
+                true,
+                RewriteDefinition,
+            ),
+            (
+                "开 / 文件和实际载入的都是现在这个 / 非托管",
+                true,
+                reg("/app/iwork-daemon"),
+                false,
+                Nothing,
+            ),
+            (
+                "开 / 文件和实际载入的都是现在这个 / 托管",
+                true,
+                reg("/app/iwork-daemon"),
+                true,
+                Nothing,
+            ),
+            (
+                "关 / 已注册 / 非托管",
+                false,
+                reg("/app/iwork-daemon"),
+                false,
+                Unregister,
+            ),
+            (
+                "关 / 已注册 / 托管",
+                false,
+                reg("/app/iwork-daemon"),
+                true,
+                KeepUntilNextBoot,
+            ),
+            (
+                "关 / 只剩一半 / 非托管",
+                false,
+                partial.clone(),
+                false,
+                Unregister,
+            ),
+            (
+                "关 / 只剩一半 / 托管",
+                false,
+                partial.clone(),
+                true,
+                KeepUntilNextBoot,
+            ),
+            ("关 / 没注册 / 非托管", false, none.clone(), false, Nothing),
+            ("关 / 没注册 / 托管", false, none.clone(), true, Nothing),
+        ];
+        for (what, intent, state, managed, want) in rows {
+            assert_eq!(decide(intent, &state, managed, me), want, "{what}");
         }
-        assert_eq!(
-            decide(false, &partial, false, me),
-            Action::Unregister,
-            "注销到一半 → 清掉"
-        );
-        assert_eq!(decide(false, &partial, true, me), Action::KeepUntilNextBoot);
+    }
+
+    /// 2/F-2：托管实例遇到定义不符 → 只调 write_definition，从不调 set（set(true) 会先 bootout 结束自己）。
+    #[tokio::test]
+    async fn managed_mismatch_rewrites_definition_without_set() {
+        let w = world();
+        let p = port("/app/iwork-daemon");
+        submit(&w, &p, 1, true).await;
+        *p.state.lock().unwrap() = Some(PathBuf::from("/old/iwork-daemon"));
+        let action = align_once(
+            p.as_ref(),
+            w.read.as_ref(),
+            true,
+            Path::new("/app/iwork-daemon"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(action, Action::RewriteDefinition);
+        assert_eq!(p.rewrites.load(Ordering::SeqCst), 1);
+        assert!(p.sets.lock().unwrap().is_empty(), "托管实例运行中不调 set");
     }
 
     struct World {

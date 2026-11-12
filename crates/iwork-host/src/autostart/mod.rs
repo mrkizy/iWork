@@ -20,6 +20,18 @@ pub mod macos;
 /// 服务管理器起后台时带的参数（后台据此知道自己是托管实例，按 2.2 的角色表报退出状态）。
 pub const SERVICE_ARG: &str = "--service";
 
+/// 用哪个命令去改服务管理器。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tool {
+    /// 系统的 `launchctl` / `systemctl`：只有发布构建用。测试构建里调到它直接 panic（组 3 审查 2/F-4：测试只隔离了
+    /// `HOME`，没隔离 launchd，真命令会动到本机用户真实的后台）。
+    System,
+    /// 替身（测试与开发构建）。
+    Substitute(PathBuf),
+    /// 什么都不做：`supported()` 报不支持，`state()` 报没注册，`set` 报错，从不运行任何命令。开发构建没给替身时的默认。
+    Disabled,
+}
+
 /// 一份自启实现的配置。
 #[derive(Debug, Clone)]
 pub struct AutostartConfig {
@@ -27,10 +39,36 @@ pub struct AutostartConfig {
     pub program: PathBuf,
     /// 用户主目录。
     pub home: PathBuf,
-    /// 换掉 `launchctl` / `systemctl`（测试用的替身）。
-    pub tool: Option<PathBuf>,
+    pub tool: Tool,
     /// 不检查 systemd 用户实例在不在（测试用）。
     pub assume_supported: bool,
+}
+
+impl AutostartConfig {
+    /// 要运行的命令路径。`Disabled` 不运行任何东西。
+    fn command(&self, system: &str) -> Result<PathBuf, AutostartError> {
+        match &self.tool {
+            Tool::System => {
+                #[cfg(test)]
+                panic!("测试构建不许运行系统的 {system}：注入替身（Tool::Substitute）");
+                #[cfg(not(test))]
+                Ok(PathBuf::from(system))
+            }
+            Tool::Substitute(p) => Ok(p.clone()),
+            Tool::Disabled => Err(disabled()),
+        }
+    }
+
+    fn disabled(&self) -> bool {
+        self.tool == Tool::Disabled
+    }
+}
+
+fn disabled() -> AutostartError {
+    AutostartError::Unsupported {
+        reason: "开发构建没有给自启命令的替身（IWORK_DEV_AUTOSTART_TOOL），不动系统的服务管理器"
+            .into(),
+    }
 }
 
 /// 按当前平台选实现。
@@ -65,6 +103,9 @@ impl iwork_ports::autostart::AutostartPort for Unsupported {
         })
     }
     async fn set(&self, _enabled: bool) -> Result<(), AutostartError> {
+        Err(self.supported().unwrap_err())
+    }
+    async fn write_definition(&self) -> Result<(), AutostartError> {
         Err(self.supported().unwrap_err())
     }
 }
@@ -119,13 +160,23 @@ fn read_definition(path: &Path) -> Result<Option<String>, AutostartError> {
     }
 }
 
-/// 两半合成一个状态：`definition` 是定义文件里认出的程序路径（文件不在为 `None`；在但认不出为空路径），
-/// `live` 是服务管理器认不认它。
-fn combine(definition: Option<PathBuf>, live: bool) -> iwork_ports::autostart::AutostartState {
+/// 服务管理器那一半：有没有在管这个服务，管着的话实际载入的是哪个程序（取不到为 `None`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Live {
+    Absent,
+    Loaded(Option<PathBuf>),
+}
+
+/// 两半合成一个状态：`definition` 是定义文件里认出的程序路径（文件不在为 `None`；在但认不出为空路径）。
+/// 已注册 = 文件在、服务管理器在管、并且它实际载入的就是文件里这一份（组 3 审查 2/F-1：只看文件会把「写了新文件、
+/// 旧的还载着」当成已对齐）。实际载入的取不到，按「不符」处理，宁可多做一次。
+fn combine(definition: Option<PathBuf>, live: Live) -> iwork_ports::autostart::AutostartState {
     use iwork_ports::autostart::AutostartState;
     match (definition, live) {
-        (Some(program), true) => AutostartState::Registered { program },
-        (None, false) => AutostartState::NotRegistered,
+        (None, Live::Absent) => AutostartState::NotRegistered,
+        (Some(program), Live::Loaded(Some(loaded))) if loaded == program => {
+            AutostartState::Registered { program }
+        }
         _ => AutostartState::Partial,
     }
 }
@@ -142,8 +193,8 @@ fn remove(path: &Path) -> Result<(), AutostartError> {
 
 #[cfg(test)]
 pub(crate) mod test_tool {
-    //! 假命令替身：记下每次改动类调用的参数；`fail_on` 文件里写的词出现在参数里时以 1 退出；用 `live` 文件
-    //! 模拟服务管理器那一半的状态，查询类调用（`print` / `is-enabled`）按它回答。
+    //! 假命令替身：记下每次改动类调用的参数；`fail_on` 文件里写的词出现在参数里时以 1 退出；用几个状态文件模拟
+    //! 服务管理器那一半（实际载入的是哪份定义），查询类调用（`print` / `show`）按它们回答。
 
     use std::path::{Path, PathBuf};
 
@@ -154,24 +205,42 @@ pub(crate) mod test_tool {
     impl FakeTool {
         pub fn new() -> FakeTool {
             let dir = tempfile::tempdir().unwrap();
+            let d = dir.path();
             let script = format!(
                 r#"#!/bin/sh
-# 查询（launchctl print / systemctl is-enabled）按 live 文件回答，不记进日志
+# 查询类调用按状态文件回答、不记日志：
+#   macOS：live = bootstrap 时那份 plist 的副本（服务管理器实际载入的定义）
+#   Linux：enabled = 已启用；loaded = 上次 daemon-reload 时单元文件的副本
 case " $* " in
-  *" print "*) [ -f '{live}' ] && exit 0; echo "Could not find service" >&2; exit 113 ;;
-  *" is-enabled "*) if [ -f '{live}' ]; then echo enabled; exit 0; else echo disabled; exit 1; fi ;;
+  *" print "*)
+    [ -f '{live}' ] || {{ echo "Could not find service" >&2; exit 113; }}
+    echo "	program = $(sed -n 's#.*<key>Program</key><string>\(.*\)</string>.*#\1#p' '{live}')"
+    exit 0 ;;
+  *" show "*)
+    if [ -f '{enabled}' ]; then echo UnitFileState=enabled; else echo UnitFileState=disabled; fi
+    if [ -f '{unit}' ] && ! cmp -s '{unit}' '{loaded}'; then echo NeedDaemonReload=yes; else echo NeedDaemonReload=no; fi
+    if [ -f '{loaded}' ]; then
+      echo "ExecStart={{ path=$(sed -n 's#^ExecStart="\(.*\)" .*#\1#p' '{loaded}') ; argv[]=x ; }}"
+    else echo "ExecStart="; fi
+    exit 0 ;;
 esac
 echo "$@" >> '{log}'
 if [ -f '{fail}' ]; then for a in "$@"; do grep -qx -- "$a" '{fail}' && exit 1; done; fi
 case " $* " in
-  *" bootstrap "*|*" enable "*) : > '{live}' ;;
-  *" bootout "*|*" disable "*) rm -f '{live}' ;;
+  *" bootstrap "*) cp "$3" '{live}' ;;
+  *" bootout "*) rm -f '{live}' ;;
+  *" daemon-reload "*) if [ -f '{unit}' ]; then cp '{unit}' '{loaded}'; else rm -f '{loaded}'; fi ;;
+  *" enable "*) : > '{enabled}' ;;
+  *" disable "*) rm -f '{enabled}' ;;
 esac
 exit 0
 "#,
-                log = dir.path().join("calls.log").display(),
-                fail = dir.path().join("fail_on").display(),
-                live = dir.path().join("live").display(),
+                log = d.join("calls.log").display(),
+                fail = d.join("fail_on").display(),
+                live = d.join("live").display(),
+                enabled = d.join("enabled").display(),
+                loaded = d.join("loaded").display(),
+                unit = d.join("config/systemd/user/iwork-daemon.service").display(),
             );
             // 可执行文件交给子进程（cp）去写：本进程若开着它的写句柄，同一时刻别的测试线程 fork 出的子进程
             // 会继承这个句柄直到它 exec，期间执行这个文件在 Linux 上报 ETXTBSY（CI 实测）。
@@ -210,14 +279,15 @@ exit 0
             std::fs::remove_file(self.dir.path().join("fail_on")).unwrap();
         }
 
-        /// 服务管理器那一半：在不在（bootstrap / enable 之后在，bootout / disable 之后不在）。
+        /// 服务管理器那一半：macOS 已载入（bootstrap 之后在，bootout 之后不在），Linux 已启用。
         pub fn live(&self) -> bool {
-            self.dir.path().join("live").exists()
+            self.dir.path().join("live").exists() || self.dir.path().join("enabled").exists()
         }
 
-        /// 模拟用户或系统在 iWork 之外卸下了服务。
+        /// 模拟用户或系统在 iWork 之外卸下（macOS）或禁用（Linux）了服务。
         pub fn drop_live(&self) {
             let _ = std::fs::remove_file(self.dir.path().join("live"));
+            let _ = std::fs::remove_file(self.dir.path().join("enabled"));
         }
 
         pub fn home(&self) -> &Path {

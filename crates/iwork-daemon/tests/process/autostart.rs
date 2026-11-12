@@ -23,18 +23,32 @@ impl Tool {
     fn new(sb: &Sandbox) -> Tool {
         let dir = sb.home.join("tool");
         std::fs::create_dir_all(&dir).unwrap();
-        // 查询（print / is-enabled）按 live 文件回答、不记日志；bootstrap / enable 之后 live，bootout / disable 之后不；
+        // 和 host 的替身同一套模型。查询类（print / show）按状态文件回答、不记日志：
+        //   macOS：live = bootstrap 时那份 plist 的副本（实际载入的定义）
+        //   Linux：enabled = 已启用；loaded = 上次 daemon-reload 时单元文件的副本
         // 设了 kill-on-unregister 时，结束服务的那一步（macOS bootout、Linux stop）把调用者（后台）用 SIGTERM 结束
         let script = format!(
             r#"#!/bin/sh
 case " $* " in
-  *" print "*) [ -f '{live}' ] && exit 0; echo "Could not find service" >&2; exit 113 ;;
-  *" is-enabled "*) if [ -f '{live}' ]; then echo enabled; exit 0; else echo disabled; exit 1; fi ;;
+  *" print "*)
+    [ -f '{live}' ] || {{ echo "Could not find service" >&2; exit 113; }}
+    echo "	program = $(sed -n 's#.*<key>Program</key><string>\(.*\)</string>.*#\1#p' '{live}')"
+    exit 0 ;;
+  *" show "*)
+    if [ -f '{enabled}' ]; then echo UnitFileState=enabled; else echo UnitFileState=disabled; fi
+    if [ -f '{unit}' ] && ! cmp -s '{unit}' '{loaded}'; then echo NeedDaemonReload=yes; else echo NeedDaemonReload=no; fi
+    if [ -f '{loaded}' ]; then
+      echo "ExecStart={{ path=$(sed -n 's#^ExecStart="\(.*\)" .*#\1#p' '{loaded}') ; argv[]=x ; }}"
+    else echo "ExecStart="; fi
+    exit 0 ;;
 esac
 echo "$@" >> '{log}'
 case " $* " in
-  *" bootstrap "*|*" enable "*) : > '{live}' ;;
-  *" bootout "*|*" disable "*) rm -f '{live}' ;;
+  *" bootstrap "*) cp "$3" '{live}' ;;
+  *" bootout "*) rm -f '{live}' ;;
+  *" daemon-reload "*) if [ -f '{unit}' ]; then cp '{unit}' '{loaded}'; else rm -f '{loaded}'; fi ;;
+  *" enable "*) : > '{enabled}' ;;
+  *" disable "*) rm -f '{enabled}' ;;
 esac
 case " $* " in
   *" bootout "*|*" stop "*) [ -f '{flag}' ] && kill -TERM $PPID ;;
@@ -44,6 +58,9 @@ exit 0
             log = dir.join("calls.log").display(),
             flag = dir.join("kill-on-unregister").display(),
             live = dir.join("live").display(),
+            enabled = dir.join("enabled").display(),
+            loaded = dir.join("loaded").display(),
+            unit = registration(sb).display(),
         );
         crate::support::write_script(&dir.join("tool"), &script);
         Tool { dir }
@@ -68,9 +85,14 @@ exit 0
             .count()
     }
 
-    /// 服务管理器那一半在（登录时已加载 / 已启用）。
-    fn set_live(&self) {
-        std::fs::write(self.dir.join("live"), b"").unwrap();
+    /// 服务管理器那一半在：登录时已载入磁盘上现在那份定义（macOS 载入 plist，Linux 启用并载入单元）。
+    fn set_live(&self, sb: &Sandbox) {
+        if cfg!(target_os = "macos") {
+            std::fs::copy(registration(sb), self.dir.join("live")).unwrap();
+        } else {
+            std::fs::write(self.dir.join("enabled"), b"").unwrap();
+            std::fs::copy(registration(sb), self.dir.join("loaded")).unwrap();
+        }
     }
 
     fn kill_on_unregister(&self) {
@@ -191,7 +213,7 @@ fn managed_boot_with_intent_off_unregisters_before_bind() {
     let tool = Tool::new(&sb);
     tool.kill_on_unregister();
     write_registration(&sb, Path::new(DAEMON));
-    tool.set_live();
+    tool.set_live(&sb);
     let mut d = sb.spawn(&["--service"], &[("IWORK_DEV_AUTOSTART_TOOL", &tool.env())]);
     let status = d.wait_exit(START);
     assert_eq!(
@@ -220,7 +242,7 @@ fn unmanaged_instance_unregisters_while_running() {
     let sb = Sandbox::new();
     let tool = Tool::new(&sb);
     write_registration(&sb, Path::new(DAEMON));
-    tool.set_live();
+    tool.set_live(&sb);
     let d = sb.spawn(&[], &[("IWORK_DEV_AUTOSTART_TOOL", &tool.env())]);
     sb.wait_ready(d.pid(), START);
     // 先删定义文件、后卸服务：等到卸服务那一步也做了
@@ -229,4 +251,46 @@ fn unmanaged_instance_unregisters_while_running() {
     });
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(tool.unregisters(), 1, "{:?}", tool.calls());
+}
+
+/// 2/F-2（方案 2.12「开 / 定义不符 / 托管」）：自启开着，服务管理器载入的是指向旧路径的定义；托管实例起来后
+/// 只把定义文件重写成现在这个程序，不 bootout（会结束自己）、不重新载入，日志写明「下次登录生效」，进程照常在。
+#[test]
+fn managed_instance_rewrites_stale_definition_without_bootout() {
+    let sb = Sandbox::new();
+    let tool = Tool::new(&sb);
+    // 先用非托管实例把自启打开（库里的意图是「开」）
+    let mut a = sb.spawn(&[], &[("IWORK_DEV_AUTOSTART_TOOL", &tool.env())]);
+    sb.wait_ready(a.pid(), START);
+    let r = set_autostart(&sb, true);
+    assert!(
+        matches!(r.body, Some(pb::response::Body::Accepted(_))),
+        "{r:?}"
+    );
+    wait_until("注册", START, || !tool.calls().is_empty());
+    signal(a.pid(), libc::SIGTERM);
+    assert_eq!(code(a.wait_exit(START)), Some(0));
+    // 定义被换成旧路径、服务管理器也载入了它（如 app 挪过位置）
+    let old = Path::new("/old/place/iwork-daemon");
+    write_registration(&sb, old);
+    tool.set_live(&sb);
+    let calls_before = tool.calls();
+
+    let mut b = sb.spawn(&["--service"], &[("IWORK_DEV_AUTOSTART_TOOL", &tool.env())]);
+    sb.wait_ready(b.pid(), START);
+    wait_until("托管实例只重写定义文件", START, || {
+        log_text(&sb).contains("自启定义已更新，下次登录生效")
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        tool.calls(),
+        calls_before,
+        "运行中没有 bootout / bootstrap / reload"
+    );
+    let text = std::fs::read_to_string(registration(&sb)).unwrap();
+    assert!(
+        text.contains(DAEMON) && !text.contains(old.to_str().unwrap()),
+        "{text}"
+    );
+    assert!(b.try_exit().is_none(), "进程还在");
 }

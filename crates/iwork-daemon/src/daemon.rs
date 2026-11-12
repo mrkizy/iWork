@@ -413,22 +413,38 @@ async fn wait_stop_reason(supervisor: &mut Supervisor, stop: &StopSwitch) -> Sto
 
 type Autostart = iwork_host::autostart::Platform;
 
-/// 本机的自启实现：注册项里写本进程的程序路径。开发构建可用 `IWORK_DEV_AUTOSTART_TOOL` 换掉
-/// `launchctl` / `systemctl`（真进程测试的替身；同时不检查 systemd 用户实例）。
+/// 本机的自启实现：注册项里写本进程的程序路径。发布构建用系统的 `launchctl` / `systemctl`；开发构建只用
+/// `IWORK_DEV_AUTOSTART_TOOL` 给的替身，没给就什么都不做（组 3 审查 2/F-4：真进程测试、基准、演练脚本都是开发构建，
+/// 只隔离了 `HOME`，没隔离 launchd，用系统命令会动到本机用户真实的后台）。
 fn autostart_port(id: &Identity) -> Autostart {
-    #[allow(unused_mut)]
-    let mut cfg = iwork_host::autostart::AutostartConfig {
+    let (tool, assume_supported) = autostart_tool(dev_autostart_tool());
+    iwork_host::autostart::for_current_user(iwork_host::autostart::AutostartConfig {
         program: id.exe.clone(),
         home: std::env::home_dir().unwrap_or_default(),
-        tool: None,
-        assume_supported: false,
-    };
-    #[cfg(feature = "dev")]
-    if let Some(tool) = std::env::var_os("IWORK_DEV_AUTOSTART_TOOL") {
-        cfg.tool = Some(PathBuf::from(tool));
-        cfg.assume_supported = true;
+        tool,
+        assume_supported,
+    })
+}
+
+#[cfg(feature = "dev")]
+fn dev_autostart_tool() -> Option<Option<std::ffi::OsString>> {
+    Some(std::env::var_os("IWORK_DEV_AUTOSTART_TOOL"))
+}
+
+#[cfg(not(feature = "dev"))]
+fn dev_autostart_tool() -> Option<Option<std::ffi::OsString>> {
+    None
+}
+
+/// 用哪个命令：发布构建（`None`）用系统的；开发构建（`Some`）有替身用替身（同时不检查 systemd 用户实例），
+/// 没有就禁用。
+fn autostart_tool(dev: Option<Option<std::ffi::OsString>>) -> (iwork_host::autostart::Tool, bool) {
+    use iwork_host::autostart::Tool;
+    match dev {
+        None => (Tool::System, false),
+        Some(Some(path)) => (Tool::Substitute(PathBuf::from(path)), true),
+        Some(None) => (Tool::Disabled, false),
     }
-    iwork_host::autostart::for_current_user(cfg)
 }
 
 /// 启动表第 9a 步。
@@ -732,6 +748,24 @@ fn bind(places: &Places) -> Result<LocalListener, BootError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2/F-4：开发构建没给替身 → 禁用（不跑任何命令）；给了 → 用替身；发布构建 → 系统命令。
+    #[test]
+    fn dev_build_never_uses_system_autostart_tool() {
+        use iwork_host::autostart::Tool;
+        assert_eq!(autostart_tool(Some(None)), (Tool::Disabled, false));
+        assert_eq!(
+            autostart_tool(Some(Some("/t/tool".into()))),
+            (Tool::Substitute(PathBuf::from("/t/tool")), true)
+        );
+        assert_eq!(autostart_tool(None), (Tool::System, false));
+        #[cfg(feature = "dev")]
+        assert_ne!(
+            dev_autostart_tool(),
+            None,
+            "开发构建走开发的那一列，不会落到系统命令"
+        );
+    }
     use crate::status::StatusIdentity;
     use iwork_ipc::rendezvous::ExeStamp;
     use iwork_ports::store::StorageError;

@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use iwork_ports::autostart::{AutostartError, AutostartPort, AutostartState};
 
 use super::{
-    AutostartConfig, SERVICE_ARG, combine, failed, read_definition, remove, run, write_atomically,
+    AutostartConfig, Live, SERVICE_ARG, combine, failed, read_definition, remove, run,
+    write_atomically,
 };
 
 /// launchd 的标签。
@@ -102,11 +103,8 @@ impl LaunchAgent {
             .join(format!("{LABEL}.plist"))
     }
 
-    fn tool(&self) -> PathBuf {
-        self.cfg
-            .tool
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("/bin/launchctl"))
+    fn tool(&self) -> Result<PathBuf, AutostartError> {
+        self.cfg.command("/bin/launchctl")
     }
 
     fn domain(&self) -> String {
@@ -118,20 +116,28 @@ impl LaunchAgent {
         format!("{}/{LABEL}", self.domain())
     }
 
-    /// 服务管理器那一半：`launchctl print` 成功就是已加载。
-    async fn loaded(&self) -> Result<bool, AutostartError> {
+    /// 服务管理器那一半：`launchctl print` 成功就是已载入；实际载入的程序取输出里 `program = …` 那一行
+    /// （取不到为 `None`，按「不符」处理）。
+    async fn live(&self) -> Result<Live, AutostartError> {
         let target = self.target();
-        Ok(run(&self.tool(), &["print", target.as_str()])
-            .await?
-            .status
-            .success())
+        let out = run(&self.tool()?, &["print", target.as_str()]).await?;
+        if !out.status.success() {
+            return Ok(Live::Absent);
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let program = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("program = "))
+            .map(PathBuf::from);
+        Ok(Live::Loaded(program))
     }
 
     /// `bootout`：服务没加载（之前没 bootstrap 过、或已被结束）不算错。
     async fn bootout(&self) -> Result<(), AutostartError> {
+        let tool = self.tool()?;
         let target = self.target();
         let args = ["bootout", target.as_str()];
-        let out = run(&self.tool(), &args).await?;
+        let out = run(&tool, &args).await?;
         if out.status.success() {
             return Ok(());
         }
@@ -144,74 +150,90 @@ impl LaunchAgent {
         if text.contains("No such process") || text.contains("Could not find service") {
             return Ok(());
         }
-        Err(failed(&self.tool(), &args, &out))
+        Err(failed(&tool, &args, &out))
     }
 }
 
 impl AutostartPort for LaunchAgent {
     async fn state(&self) -> Result<AutostartState, AutostartError> {
+        if self.cfg.disabled() {
+            return Ok(AutostartState::NotRegistered);
+        }
         // 读得到但认不出 Program：当作注册着一个不对的东西（空路径），让 set(true) 重写
         let definition = read_definition(&self.plist_path())?
             .map(|text| plist_program(&text).unwrap_or_default());
-        Ok(combine(definition, self.loaded().await?))
+        Ok(combine(definition, self.live().await?))
     }
 
     fn supported(&self) -> Result<(), AutostartError> {
-        Ok(())
+        self.tool().map(|_| ())
     }
 
     async fn set(&self, enabled: bool) -> Result<(), AutostartError> {
+        let tool = self.tool()?;
         let path = self.plist_path();
         let current = read_definition(&path)?;
-        let loaded = self.loaded().await?;
+        let live = self.live().await?;
         if enabled {
             let want = plist_text(&self.cfg.program);
             let same = current.as_deref() == Some(want.as_str());
-            if same && loaded {
+            // 已对齐 = 文件是这一份，并且实际载入的也是这个程序（组 3 审查 2/F-1）
+            if same && live == Live::Loaded(Some(self.cfg.program.clone())) {
                 return Ok(());
             }
             if !same {
                 write_atomically(&path, &want)?;
             }
-            if loaded && !same {
-                // 加载着的是旧定义（如 app 挪了位置）：先卸下再加载新的。新 plist 已经写好，
-                // 从托管实例自己调用时在这里被结束，下次登录加载的就是新的
+            if live != Live::Absent {
+                // 载着的不是这一份（app 挪了位置、上次更新到一半）：先卸下。失败就返回错误，state 仍报 Partial，
+                // 下一轮重做。托管实例不走这里（对齐表「开 / 定义不符 / 托管」只调 write_definition）
                 self.bootout().await?;
             }
             let domain = self.domain();
             let plist = path.display().to_string();
             let args = ["bootstrap", domain.as_str(), plist.as_str()];
-            let out = run(&self.tool(), &args).await?;
+            let out = run(&tool, &args).await?;
             if !out.status.success() {
-                // plist 留着、没加载：state 报 Partial，下次对齐再 bootstrap
-                return Err(failed(&self.tool(), &args, &out));
+                // plist 留着、没载入：state 报 Partial，下次对齐再 bootstrap
+                return Err(failed(&tool, &args, &out));
             }
             Ok(())
         } else {
-            if current.is_none() && !loaded {
+            if current.is_none() && live == Live::Absent {
                 return Ok(());
             }
             // 先删 plist 再 bootout：从托管实例自己调用时 bootout 会结束本进程、不返回，
             // 那时 plist 已经不在，下次登录不会再起
             remove(&path)?;
-            if loaded {
+            if live != Live::Absent {
                 self.bootout().await?;
             }
             Ok(())
         }
+    }
+
+    async fn write_definition(&self) -> Result<(), AutostartError> {
+        self.tool()?;
+        let path = self.plist_path();
+        let want = plist_text(&self.cfg.program);
+        if read_definition(&path)?.as_deref() != Some(want.as_str()) {
+            write_atomically(&path, &want)?;
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::autostart::Tool;
     use crate::autostart::test_tool::FakeTool;
 
     fn agent(tool: &FakeTool, program: &str) -> LaunchAgent {
         LaunchAgent::new(AutostartConfig {
             program: PathBuf::from(program),
             home: tool.home().join("home"),
-            tool: Some(tool.path()),
+            tool: Tool::Substitute(tool.path()),
             assume_supported: false,
         })
     }
@@ -341,6 +363,89 @@ mod tests {
         a.set(false).await.unwrap();
         assert!(!t.live());
         assert_eq!(a.state().await.unwrap(), AutostartState::NotRegistered);
+    }
+
+    /// 2/F-1：更新已注册的定义时 bootout 失败 → 新 plist 写下了、实际载入的还是旧程序：不算对齐（Partial），
+    /// 下一轮 set(true) 不早退，补上 bootout 与 bootstrap。
+    #[tokio::test]
+    async fn macos_failed_bootout_on_update_is_not_aligned() {
+        let t = FakeTool::new();
+        agent(&t, "/old/iwork-daemon").set(true).await.unwrap();
+        let moved = agent(&t, "/new/iwork-daemon");
+        t.fail_on("bootout");
+        moved.set(true).await.unwrap_err();
+        assert_eq!(
+            plist_program(&std::fs::read_to_string(moved.plist_path()).unwrap()),
+            Some(PathBuf::from("/new/iwork-daemon")),
+            "前提：新 plist 已写下"
+        );
+        assert_eq!(moved.state().await.unwrap(), AutostartState::Partial);
+        t.stop_failing();
+        moved.set(true).await.unwrap();
+        assert_eq!(
+            moved.state().await.unwrap(),
+            AutostartState::Registered {
+                program: PathBuf::from("/new/iwork-daemon")
+            }
+        );
+        let calls = t.calls();
+        assert!(calls.last().unwrap().starts_with("bootstrap"), "{calls:?}");
+    }
+
+    /// 2/F-2：只写定义文件：plist 换成现在这个程序，不 bootout、不 bootstrap；实际载入的仍是旧的（Partial）。
+    #[tokio::test]
+    async fn macos_write_definition_does_not_touch_launchd() {
+        let t = FakeTool::new();
+        agent(&t, "/old/iwork-daemon").set(true).await.unwrap();
+        let moved = agent(&t, "/new/iwork-daemon");
+        moved.write_definition().await.unwrap();
+        moved.write_definition().await.unwrap();
+        assert_eq!(
+            t.calls().len(),
+            1,
+            "只有最初那次 bootstrap：{:?}",
+            t.calls()
+        );
+        assert_eq!(
+            plist_program(&std::fs::read_to_string(moved.plist_path()).unwrap()),
+            Some(PathBuf::from("/new/iwork-daemon"))
+        );
+        assert_eq!(moved.state().await.unwrap(), AutostartState::Partial);
+    }
+
+    /// 2/F-4：替身禁用（开发构建没给替身）→ 不支持、报没注册、set 与 write_definition 都报错，不写文件。
+    #[tokio::test]
+    async fn macos_disabled_tool_does_nothing() {
+        let t = FakeTool::new();
+        let a = LaunchAgent::new(AutostartConfig {
+            program: PathBuf::from("/x/iwork-daemon"),
+            home: t.home().join("home"),
+            tool: Tool::Disabled,
+            assume_supported: false,
+        });
+        assert!(matches!(
+            a.supported(),
+            Err(AutostartError::Unsupported { .. })
+        ));
+        assert_eq!(a.state().await.unwrap(), AutostartState::NotRegistered);
+        assert!(a.set(true).await.is_err());
+        assert!(a.set(false).await.is_err());
+        assert!(a.write_definition().await.is_err());
+        assert!(!a.plist_path().exists());
+    }
+
+    /// 2/F-4：测试构建里用到系统的 launchctl 直接 panic（测试只隔离了 HOME，没隔离 launchd）。
+    #[tokio::test]
+    #[should_panic(expected = "测试构建不许运行系统的")]
+    async fn macos_system_tool_is_refused_in_tests() {
+        let t = FakeTool::new();
+        let a = LaunchAgent::new(AutostartConfig {
+            program: PathBuf::from("/x/iwork-daemon"),
+            home: t.home().join("home"),
+            tool: Tool::System,
+            assume_supported: false,
+        });
+        let _ = a.state().await;
     }
 
     /// 定义文件的位置上是一个指向别处的符号链接 → 拒绝写，链接指向的文件不变。

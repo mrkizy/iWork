@@ -4,7 +4,8 @@
 //!   `RestartSec=10`、`StartLimitIntervalSec=300`、`StartLimitBurst=10`、`WantedBy=default.target`。
 //! - **不加 `RestartForceExitStatus=SIGTERM`**：被要求停下（SIGTERM 等）不自动再拉，systemd 的默认正合这个意思。
 //!   和 launchd 只在后台装上信号处理之前那一小段不一样（方案 2.12 如实写了）。
-//! - 状态两半：单元文件在不在 + `systemctl --user is-enabled` 是不是 `enabled`。
+//! - 状态两半：单元文件在不在 + `systemctl --user show` 的 `UnitFileState`（启用没有）、`NeedDaemonReload`（文件改了还没
+//!   重新载入）、`ExecStart`（实际载入的程序）。
 //! - 开：写单元、`daemon-reload`、`enable --now`（已在跑时不重启）。
 //! - 关：`disable`（只撤启用、不停）、删文件、`daemon-reload`，最后 `stop`。`stop` 会结束服务名下的实例——可能就是
 //!   调用者自己，那时定义文件和启用都已经撤掉，下次登录不会再起。
@@ -15,7 +16,8 @@ use std::path::{Path, PathBuf};
 use iwork_ports::autostart::{AutostartError, AutostartPort, AutostartState};
 
 use super::{
-    AutostartConfig, SERVICE_ARG, combine, failed, read_definition, remove, run, write_atomically,
+    AutostartConfig, Live, SERVICE_ARG, combine, failed, read_definition, remove, run,
+    write_atomically,
 };
 
 pub const UNIT: &str = "iwork-daemon.service";
@@ -104,51 +106,86 @@ impl UserUnit {
         self.config_home.join("systemd/user").join(UNIT)
     }
 
-    fn tool(&self) -> PathBuf {
-        self.cfg
-            .tool
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("systemctl"))
+    fn tool(&self) -> Result<PathBuf, AutostartError> {
+        self.cfg.command("systemctl")
     }
 
-    /// 服务管理器那一半：`is-enabled` 报 `enabled`（禁用、不认识这个单元时报别的，并以非零退出）。
-    async fn enabled(&self) -> Result<bool, AutostartError> {
-        let out = run(&self.tool(), &["--user", "is-enabled", UNIT]).await?;
-        Ok(String::from_utf8_lossy(&out.stdout).trim() == "enabled")
+    /// 服务管理器那一半：启用了没有，启用了的话实际载入的是哪个程序。单元文件改过而还没 `daemon-reload`
+    /// （`NeedDaemonReload=yes`），或 `ExecStart` 取不到，都算「实际载入的不知道是哪份」（`None`，按不符处理）。
+    async fn live(&self) -> Result<Live, AutostartError> {
+        let out = run(
+            &self.tool()?,
+            &[
+                "--user",
+                "show",
+                "-p",
+                "UnitFileState,NeedDaemonReload,ExecStart",
+                UNIT,
+            ],
+        )
+        .await?;
+        Ok(parse_show(&String::from_utf8_lossy(&out.stdout)))
     }
 
     /// `stop`：单元已经不认识（没在跑、文件也删了）不算错。
     async fn stop(&self) -> Result<(), AutostartError> {
+        let tool = self.tool()?;
         let args = ["--user", "stop", UNIT];
-        let out = run(&self.tool(), &args).await?;
+        let out = run(&tool, &args).await?;
         if out.status.success() || String::from_utf8_lossy(&out.stderr).contains("not loaded") {
             Ok(())
         } else {
-            Err(failed(&self.tool(), &args, &out))
+            Err(failed(&tool, &args, &out))
         }
     }
 
     async fn systemctl(&self, args: &[&str]) -> Result<(), AutostartError> {
+        let tool = self.tool()?;
         let mut all = vec!["--user"];
         all.extend_from_slice(args);
-        let out = run(&self.tool(), &all).await?;
+        let out = run(&tool, &all).await?;
         if out.status.success() {
             Ok(())
         } else {
-            Err(failed(&self.tool(), &all, &out))
+            Err(failed(&tool, &all, &out))
         }
     }
 }
 
+/// `systemctl show -p UnitFileState,NeedDaemonReload,ExecStart` 的输出 → 服务管理器那一半。
+fn parse_show(text: &str) -> Live {
+    let value = |key: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+            .unwrap_or("")
+    };
+    if value("UnitFileState") != "enabled" {
+        return Live::Absent;
+    }
+    if value("NeedDaemonReload") != "no" {
+        return Live::Loaded(None);
+    }
+    // ExecStart={ path=/opt/iwork/iwork-daemon ; argv[]=… ; … }
+    let program = value("ExecStart")
+        .split_once("path=")
+        .and_then(|(_, rest)| rest.split_once(" ;"))
+        .map(|(p, _)| PathBuf::from(p));
+    Live::Loaded(program)
+}
+
 impl AutostartPort for UserUnit {
     async fn state(&self) -> Result<AutostartState, AutostartError> {
+        if self.cfg.disabled() {
+            return Ok(AutostartState::NotRegistered);
+        }
         let definition = read_definition(&self.unit_path())?
             .map(|text| exec_start(&text).map(|(p, _)| p).unwrap_or_default());
-        Ok(combine(definition, self.enabled().await?))
+        Ok(combine(definition, self.live().await?))
     }
 
     /// 有没有 systemd 用户实例：`$XDG_RUNTIME_DIR/systemd/private` 是用户实例的控制 socket。
     fn supported(&self) -> Result<(), AutostartError> {
+        self.tool()?;
         if self.cfg.assume_supported {
             return Ok(());
         }
@@ -169,24 +206,26 @@ impl AutostartPort for UserUnit {
         self.supported()?;
         let path = self.unit_path();
         let current = read_definition(&path)?;
-        let live = self.enabled().await?;
+        let live = self.live().await?;
         if enabled {
             let want = unit_text(&self.cfg.program);
             let same = current.as_deref() == Some(want.as_str());
-            if same && live {
+            // 已对齐 = 文件是这一份，启用了，并且实际载入的也是这个程序（组 3 审查 2/F-1）
+            if same && live == Live::Loaded(Some(self.cfg.program.clone())) {
                 return Ok(());
             }
             if !same {
                 write_atomically(&path, &want)?;
             }
-            // 失败时单元文件留着、没启用：state 报 Partial，下次对齐从这里再来
+            // 任何一步失败都返回错误：state 仍报 Partial（没启用，或 NeedDaemonReload=yes），下次对齐从这里再来。
+            // `enable --now` 对已在跑的实例不重启，不会结束调用者
             self.systemctl(&["daemon-reload"]).await?;
             self.systemctl(&["enable", "--now", UNIT]).await
         } else {
-            if current.is_none() && !live {
+            if current.is_none() && live == Live::Absent {
                 return Ok(());
             }
-            if live {
+            if live != Live::Absent {
                 self.systemctl(&["disable", UNIT]).await?;
             }
             remove(&path)?;
@@ -195,11 +234,22 @@ impl AutostartPort for UserUnit {
             self.stop().await
         }
     }
+
+    async fn write_definition(&self) -> Result<(), AutostartError> {
+        self.supported()?;
+        let path = self.unit_path();
+        let want = unit_text(&self.cfg.program);
+        if read_definition(&path)?.as_deref() != Some(want.as_str()) {
+            write_atomically(&path, &want)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::autostart::Tool;
     use crate::autostart::test_tool::FakeTool;
 
     fn unit(tool: &FakeTool, program: &str, runtime: Option<PathBuf>, assume: bool) -> UserUnit {
@@ -207,7 +257,7 @@ mod tests {
             AutostartConfig {
                 program: PathBuf::from(program),
                 home: tool.home().join("home"),
-                tool: Some(tool.path()),
+                tool: Tool::Substitute(tool.path()),
                 assume_supported: assume,
             },
             tool.home().join("config"),
@@ -347,6 +397,119 @@ mod tests {
                 program: PathBuf::from("/new place/iwork-daemon")
             }
         );
+    }
+
+    /// 2/F-1：更新已注册的定义时 daemon-reload 失败 → 新单元写下了、旧的还启用着（NeedDaemonReload=yes）：
+    /// 不算对齐（Partial），下一轮 set(true) 不早退，补上 reload 与 enable。
+    #[tokio::test]
+    async fn linux_failed_reload_on_update_is_not_aligned() {
+        let t = FakeTool::new();
+        unit(&t, "/old/iwork-daemon", None, true)
+            .set(true)
+            .await
+            .unwrap();
+        let moved = unit(&t, "/new/iwork-daemon", None, true);
+        t.fail_on("daemon-reload");
+        moved.set(true).await.unwrap_err();
+        assert!(
+            std::fs::read_to_string(moved.unit_path())
+                .unwrap()
+                .contains("/new/iwork-daemon"),
+            "前提：新单元已写下"
+        );
+        assert_eq!(moved.state().await.unwrap(), AutostartState::Partial);
+        t.stop_failing();
+        moved.set(true).await.unwrap();
+        assert_eq!(
+            moved.state().await.unwrap(),
+            AutostartState::Registered {
+                program: PathBuf::from("/new/iwork-daemon")
+            }
+        );
+        assert_eq!(
+            &t.calls()[t.calls().len() - 2..],
+            [
+                "--user daemon-reload",
+                "--user enable --now iwork-daemon.service"
+            ]
+        );
+    }
+
+    /// 2/F-2：只写定义文件：单元换成现在这个程序，不 reload、不 enable、不 stop。
+    #[tokio::test]
+    async fn linux_write_definition_does_not_touch_systemd() {
+        let t = FakeTool::new();
+        unit(&t, "/old/iwork-daemon", None, true)
+            .set(true)
+            .await
+            .unwrap();
+        let moved = unit(&t, "/new/iwork-daemon", None, true);
+        moved.write_definition().await.unwrap();
+        assert_eq!(
+            t.calls().len(),
+            2,
+            "只有最初的 reload 与 enable：{:?}",
+            t.calls()
+        );
+        assert!(
+            std::fs::read_to_string(moved.unit_path())
+                .unwrap()
+                .contains("/new/iwork-daemon")
+        );
+        assert_eq!(moved.state().await.unwrap(), AutostartState::Partial);
+    }
+
+    /// `systemctl show` 的解析：没启用 → 不在；文件改了没重新载入 → 载入的不知道是哪份；否则取 ExecStart 的 path。
+    #[test]
+    fn parse_show_table() {
+        assert_eq!(
+            parse_show("UnitFileState=disabled\nNeedDaemonReload=no\n"),
+            Live::Absent
+        );
+        assert_eq!(parse_show(""), Live::Absent);
+        assert_eq!(
+            parse_show(
+                "UnitFileState=enabled\nNeedDaemonReload=yes\nExecStart={ path=/a ; argv[]=/a ; }\n"
+            ),
+            Live::Loaded(None)
+        );
+        assert_eq!(
+            parse_show(
+                "UnitFileState=enabled\nNeedDaemonReload=no\nExecStart={ path=/new place/iwork-daemon ; argv[]=/new place/iwork-daemon --service ; ignore_errors=no ; }\n"
+            ),
+            Live::Loaded(Some(PathBuf::from("/new place/iwork-daemon")))
+        );
+        assert_eq!(
+            parse_show("UnitFileState=enabled\nNeedDaemonReload=no\nExecStart=\n"),
+            Live::Loaded(None)
+        );
+    }
+
+    /// 2/F-4：替身禁用 → 不支持、报没注册，什么命令都不跑、不写文件。
+    #[tokio::test]
+    async fn linux_disabled_tool_does_nothing() {
+        let t = FakeTool::new();
+        let mut u = unit(&t, "/x", None, true);
+        u.cfg.tool = Tool::Disabled;
+        assert!(matches!(
+            u.supported(),
+            Err(AutostartError::Unsupported { .. })
+        ));
+        assert_eq!(u.state().await.unwrap(), AutostartState::NotRegistered);
+        assert!(u.set(true).await.is_err());
+        assert!(u.write_definition().await.is_err());
+        assert!(!u.unit_path().exists());
+        assert!(t.calls().is_empty());
+    }
+
+    /// 2/F-4：测试构建里用到系统的 systemctl 直接 panic。
+    #[tokio::test]
+    #[should_panic(expected = "测试构建不许运行系统的")]
+    async fn linux_system_tool_is_refused_in_tests() {
+        let t = FakeTool::new();
+        let mut u = unit(&t, "/x", None, true);
+        u.cfg.tool = Tool::System;
+        let _ = u.state().await;
     }
 
     /// 没有 systemd 用户实例 → Unsupported，什么都不写、不调。对照：有控制 socket 时支持。

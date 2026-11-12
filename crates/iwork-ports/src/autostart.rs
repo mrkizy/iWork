@@ -11,11 +11,12 @@ use std::path::PathBuf;
 /// 两半都以实际查到的为准，不看上次 `set` 返回了什么。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutostartState {
-    /// 两半都在：定义文件在、服务管理器认它。`program` 是定义文件里写的后台程序路径。
+    /// 两半都在，并且服务管理器实际载入的就是定义文件里这一份。`program` 是定义文件里写的后台程序路径。
     Registered { program: PathBuf },
     /// 两半都不在。
     NotRegistered,
-    /// 只剩一半：注册到一半失败（文件写了、加载或启用没成），或注销到一半被打断（文件删了、服务还在）。
+    /// 两半对不上：注册到一半失败（文件写了、加载或启用没成），更新到一半失败（写了新文件、实际载入的还是旧的），
+    /// 或注销到一半被打断（文件删了、服务还在）。
     /// 对齐任务按意图把它补齐或清掉。
     Partial,
 }
@@ -45,4 +46,7 @@ pub trait AutostartPort: Send + Sync {
     /// 实现必须先删定义文件、最后才结束服务：调用者在任何一步被结束，留下的都只是服务管理器里的状态
     /// （下次登录不会再起），下次对齐查到 `Partial` 再清。
     fn set(&self, enabled: bool) -> impl Future<Output = Result<(), AutostartError>> + Send;
+    /// 只把定义文件写成现在这个程序，不卸载、不重新载入（服务管理器下次登录时读到）。托管实例运行中用：重新载入要先
+    /// 卸下服务，会结束本进程（T04 方案 2.12「开 / 定义不符 / 托管」）。幂等。
+    fn write_definition(&self) -> impl Future<Output = Result<(), AutostartError>> + Send;
 }
