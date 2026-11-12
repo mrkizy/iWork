@@ -190,6 +190,8 @@ impl<I: RequestHandler, W: RunningWork> RequestHandler for DaemonHandler<I, W> {
             ),
             _ => tracing::Span::none(),
         };
+        // 只记 span 里的种类与 command_id，不记载荷（载荷可能是消息正文）
+        span.in_scope(|| tracing::debug!(request_id, "收到请求"));
         let Some(_ticket) = self.gate.enter() else {
             return error_response(request_id, pb::ErrorCode::Unavailable, STOPPING, true);
         };

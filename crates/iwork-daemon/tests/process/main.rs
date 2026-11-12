@@ -15,6 +15,7 @@ mod autostart;
 mod boot;
 mod install;
 mod instance;
+mod logs;
 mod outbox;
 mod recovery;
 mod stop;

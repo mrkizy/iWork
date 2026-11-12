@@ -37,6 +37,10 @@ pub type Store = SqliteStore<ProtoEventCodec>;
 /// 开发构建的暂停点：状态已写定、锁还没放（见 [`dev`]）。
 pub const PAUSE_BEFORE_EXIT: &str = "before-exit";
 
+/// M1 在 Windows 上启动即拒绝时的说明（方案 2.15）。
+pub const WINDOWS_UNSUPPORTED: &str =
+    "M1 暂不支持 Windows：对端映像校验未通过实测（t0-findings 6.4）";
+
 /// 本程序的版本（写进锁文件与状态文件）。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -205,7 +209,14 @@ pub struct Identity {
 }
 
 fn identify(started: Instant) -> Result<Identity, BootError> {
-    let unsupported = |m: String| BootError::Identity(m);
+    // M1 不支持 Windows：对端映像校验没通过实测（方案 2.15）。错误原文前面点明这一句，stderr 与诊断都看得到
+    let unsupported = |m: String| {
+        if cfg!(windows) {
+            BootError::Identity(format!("{WINDOWS_UNSUPPORTED}（{m}）"))
+        } else {
+            BootError::Identity(m)
+        }
+    };
     if dev::fail_at(Step::Identity.name()) {
         return Err(unsupported("开发注入：取运行映像身份失败".into()));
     }
