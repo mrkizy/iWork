@@ -194,11 +194,14 @@ async fn yields(n: u8) {
     }
 }
 
+/// 新回合用 `W::plan`，续接用 `W::resume_plan`。
+type PlanOf = fn(&W<Reference>, Turn) -> TurnPlan;
+
 async fn run_scenario(scenario: Scenario, order: Order, spin: u8) -> Result<(), String> {
     let turn = queued_turn(1);
     let t = turn.id;
     let w = W::<Reference>::new(&turn).await;
-    let (turn, plan_of): (Turn, fn(&W<Reference>, Turn) -> TurnPlan) = match scenario {
+    let (turn, plan_of): (Turn, PlanOf) = match scenario {
         Scenario::WithdrawVsDispatch | Scenario::SettleVsLateCommit => (turn, W::<Reference>::plan),
         Scenario::AbandonVsResume | Scenario::TwoResumes => {
             (interrupted_turn(&w, turn), W::<Reference>::resume_plan)

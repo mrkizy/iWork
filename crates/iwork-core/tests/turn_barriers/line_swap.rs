@@ -17,11 +17,9 @@ fn last_binding(store: &MemStore) -> Option<String> {
     })
 }
 
-/// 扮宿主换线（D8a）：补完绑定回退、确认进程树清空，两样都成了才按最后一条绑定建新线；有一样没成，旧线还回去。
-async fn swap_line(
-    w: &Arc<W<Reference>>,
-    mut line: Line<Reference>,
-) -> Result<Line<Reference>, Line<Reference>> {
+/// 扮宿主换线（D8a）：补完绑定回退、确认进程树清空，两样都成了才按最后一条绑定建新线；有一样没成返回 `None`，
+/// 旧线留在原处。
+async fn swap_line(w: &Arc<W<Reference>>, line: &mut Line<Reference>) -> Option<Line<Reference>> {
     let ports = TurnPorts {
         store: &w.store,
         clock: &w.clock,
@@ -31,9 +29,9 @@ async fn swap_line(
         history: &w.history,
     };
     if line.settle(ports).await.is_err() || line.retire().await.is_err() || !line.is_settled() {
-        return Err(line);
+        return None;
     }
-    Ok(SessionLine::new(w.decider.clone(), last_binding(&w.store)))
+    Some(SessionLine::new(w.decider.clone(), last_binding(&w.store)))
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -77,10 +75,10 @@ async fn pending_rebind_blocks_line_swap() {
     let opens = w.ctl.opens.load(Ordering::SeqCst);
     let mut line = line;
     for _ in 0..3 {
-        line = match swap_line(&w, line).await {
-            Ok(_) => panic!("补记没落盘时不该换出新线"),
-            Err(kept) => kept,
-        };
+        assert!(
+            swap_line(&w, &mut line).await.is_none(),
+            "补记没落盘时不该换出新线"
+        );
         assert!(!line.is_settled(), "旧线还欠着补记");
         assert_eq!(line.resume_id(), Some(OLD_ID), "旧线还在");
         assert_eq!(
@@ -93,7 +91,7 @@ async fn pending_rebind_blocks_line_swap() {
 
     // 放开存储：补记先落盘，新线带旧编号
     w.store.fail_all.store(false, Ordering::SeqCst);
-    let fresh = swap_line(&w, line).await.ok().expect("补记落盘后可以换线");
+    let fresh = swap_line(&w, &mut line).await.expect("补记落盘后可以换线");
     assert_eq!(
         last_binding(&w.store).as_deref(),
         Some(OLD_ID),
