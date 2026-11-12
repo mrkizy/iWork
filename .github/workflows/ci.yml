@@ -12,6 +12,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # macOS 的 codesign 只在用户搜索列表里的钥匙串找身份：测试与形态 B 打包建的临时钥匙串要加进去
+  # （scripts/test-signing-identity.sh；探针 CI run 43302065465）
+  IWORK_TEST_SIGNING_SEARCH_LIST: "1"
 
 jobs:
   # 与平台无关的检查只在 Linux 跑一次

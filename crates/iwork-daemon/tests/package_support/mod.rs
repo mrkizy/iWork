@@ -28,7 +28,7 @@ pub fn run(cmd: &mut Command) -> String {
 }
 
 /// 放一个「程序」：本测试程序的拷贝。`variant` 不同时身份不同（macOS 用另一个签名标识做 ad-hoc 重签，cdhash 随之
-/// 变；Linux 在末尾追加字节，全文哈希随之变）。和链接器给的 ad-hoc 签名一样，这是形态 A 里程序的样子。
+/// 变；Linux 在末尾追加程序名与 `variant`，全文哈希随之变）。和链接器给的 ad-hoc 签名一样，这是形态 A 里程序的样子。
 ///
 /// 在包外签好再拷进去：对包的主程序（Info.plist 里的 `CFBundleExecutable`）跑 `codesign`，会连带给整个包做资源封印，
 /// 而 Tauri 打出来的无证书包没有封印（N5 第 0 项）。
@@ -53,7 +53,10 @@ pub fn place_program(dir: &Path, name: &str, variant: &str) -> PathBuf {
             .append(true)
             .open(&staged)
             .unwrap();
-        f.write_all(variant.as_bytes()).unwrap();
+        // 和 macOS 的签名标识一样带上程序名：同一版的后台与客户端内容不同，清单里的身份不会碰巧通用
+        // （CI run 43295353857：两者内容相同时，只登记后台的清单也认得客户端）
+        f.write_all(format!("dev.iwork.test.{name}.{variant}").as_bytes())
+            .unwrap();
     }
     let path = dir.join(name);
     std::fs::copy(&staged, &path).unwrap();
@@ -111,7 +114,7 @@ pub struct Signer {
     pub keychain: String,
     pub identity: String,
     pub leaf: [u8; 32],
-    /// 叶证书的 SHA-1：codesign 按它指定身份（按名字时不受信任的自签证书找不到）
+    /// 叶证书的 SHA-1：codesign 按它指定身份，签的恰好是这一张
     pub sha1: String,
 }
 
