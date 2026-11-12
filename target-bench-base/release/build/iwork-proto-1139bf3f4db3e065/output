@@ -1,0 +1,9 @@
+cargo:rerun-if-changed=/private/tmp/claude-501/-Users-lilithgames-LiWork-iWork--cao-worktrees-c87fefd6/7e316a85-49e6-4559-8efd-b8bfa61ae5f1/scratchpad/base/crates/iwork-proto/../../proto/iwork
+cargo:rerun-if-changed=/private/tmp/claude-501/-Users-lilithgames-LiWork-iWork--cao-worktrees-c87fefd6/7e316a85-49e6-4559-8efd-b8bfa61ae5f1/scratchpad/base/crates/iwork-proto/../../proto/iwork/v1/agent.proto
+cargo:rerun-if-changed=/private/tmp/claude-501/-Users-lilithgames-LiWork-iWork--cao-worktrees-c87fefd6/7e316a85-49e6-4559-8efd-b8bfa61ae5f1/scratchpad/base/crates/iwork-proto/../../proto/iwork/v1/commands.proto
+cargo:rerun-if-changed=/private/tmp/claude-501/-Users-lilithgames-LiWork-iWork--cao-worktrees-c87fefd6/7e316a85-49e6-4559-8efd-b8bfa61ae5f1/scratchpad/base/crates/iwork-proto/../../proto/iwork/v1/common.proto
+cargo:rerun-if-changed=/private/tmp/claude-501/-Users-lilithgames-LiWork-iWork--cao-worktrees-c87fefd6/7e316a85-49e6-4559-8efd-b8bfa61ae5f1/scratchpad/base/crates/iwork-proto/../../proto/iwork/v1/events.proto
+cargo:rerun-if-changed=/private/tmp/claude-501/-Users-lilithgames-LiWork-iWork--cao-worktrees-c87fefd6/7e316a85-49e6-4559-8efd-b8bfa61ae5f1/scratchpad/base/crates/iwork-proto/../../proto/iwork/v1/frame.proto
+cargo:rerun-if-changed=/private/tmp/claude-501/-Users-lilithgames-LiWork-iWork--cao-worktrees-c87fefd6/7e316a85-49e6-4559-8efd-b8bfa61ae5f1/scratchpad/base/crates/iwork-proto/../../proto/iwork/v1/model.proto
+cargo:rerun-if-changed=/private/tmp/claude-501/-Users-lilithgames-LiWork-iWork--cao-worktrees-c87fefd6/7e316a85-49e6-4559-8efd-b8bfa61ae5f1/scratchpad/base/crates/iwork-proto/../../proto/iwork/v1/queries.proto
+cargo:rerun-if-changed=/private/tmp/claude-501/-Users-lilithgames-LiWork-iWork--cao-worktrees-c87fefd6/7e316a85-49e6-4559-8efd-b8bfa61ae5f1/scratchpad/base/crates/iwork-proto/../../proto/iwork/v1/view.proto

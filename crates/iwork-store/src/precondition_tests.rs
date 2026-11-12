@@ -1,8 +1,9 @@
 //! 提交时校验（方案 2.6「状态前提」「归属存续」，第 11 节第 4a 步的六条）。放在 crate 内部：
 //! 对拍要用写线程那一份读法（`projector::owner::owner_facts_on`）在只读连接上取归属事实。
 
+/// 参照投影，本 crate 的对拍用例共用这一份（`turn_precondition_tests` 也从这里取）。
 #[path = "../../iwork-ports/tests/reference_projection/mod.rs"]
-mod reference_projection;
+pub(crate) mod reference_projection;
 
 use std::cell::Cell;
 

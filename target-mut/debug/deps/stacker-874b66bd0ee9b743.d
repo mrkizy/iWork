@@ -1,0 +1,10 @@
+/Users/lilithgames/LiWork/iWork/.cao/worktrees/c87fefd6/target-mut/debug/deps/stacker-874b66bd0ee9b743.d: /Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/lib.rs /Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/backends/mod.rs /Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/backends/macos.rs /Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/mmap_stack_restore_guard.rs
+
+/Users/lilithgames/LiWork/iWork/.cao/worktrees/c87fefd6/target-mut/debug/deps/libstacker-874b66bd0ee9b743.rlib: /Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/lib.rs /Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/backends/mod.rs /Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/backends/macos.rs /Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/mmap_stack_restore_guard.rs
+
+/Users/lilithgames/LiWork/iWork/.cao/worktrees/c87fefd6/target-mut/debug/deps/libstacker-874b66bd0ee9b743.rmeta: /Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/lib.rs /Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/backends/mod.rs /Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/backends/macos.rs /Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/mmap_stack_restore_guard.rs
+
+/Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/lib.rs:
+/Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/backends/mod.rs:
+/Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/backends/macos.rs:
+/Users/lilithgames/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/stacker-0.1.25/src/mmap_stack_restore_guard.rs:

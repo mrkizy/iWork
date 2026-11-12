@@ -1,0 +1,1 @@
+{"rustc":13976775244188850736,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[4501031860619579840,"build_script_build",false,7965850092096743525]],"local":[{"RerunIfChanged":{"output":"release/build/prettyplease-c449dd22ad4fd363/output","paths":["build.rs"]}}],"rustflags":[],"config":0,"compile_kind":0}

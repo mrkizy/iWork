@@ -1,12 +1,10 @@
 //! 回合的三处提交时校验（T10a 方案 2.2、0a.3 的 A3、A4、X5）在写线程上的样子，以及真存储与参照投影
 //! （`iwork-ports/tests/reference_projection`，iwork-core 的假存储用它做提交时校验）的对拍。
 
-#[path = "../../iwork-ports/tests/reference_projection/mod.rs"]
-mod reference_projection;
-
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
+use crate::precondition_tests::reference_projection::{ReferenceProjection, apply_all};
 use iwork_domain::event::*;
 use iwork_domain::id::{Seq, TurnId};
 use iwork_domain::machine::Finite;
@@ -14,7 +12,6 @@ use iwork_domain::turn::{InterruptReason, Turn, TurnIntentKind, TurnState};
 use iwork_ports::store::{StorageError, StoragePort};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
-use reference_projection::{ReferenceProjection, apply_all};
 use rusqlite::Connection;
 
 use crate::fixtures::*;
@@ -199,7 +196,8 @@ fn turn_preconditions_on_writer() {
 #[test]
 fn cascade_rejected_while_turn_open() {
     // 每种没到终态的状态，和把它带到终态的一串事件
-    let open_states: [(&str, Vec<TurnState>, Vec<(TurnState, TurnState)>); 3] = [
+    type Case = (&'static str, Vec<TurnState>, Vec<(TurnState, TurnState)>);
+    let open_states: [Case; 3] = [
         (
             "Queued",
             vec![],
