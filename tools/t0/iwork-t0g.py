@@ -248,11 +248,12 @@ RECORDED_ENV_PREFIXES = ("CLAUDE", "ANTHROPIC")
 def child_env(token, extra=None, skip=()):
     """起子进程（claude 实例、替身与对照）用的环境。纯函数（只读 os.environ）。继承脚本自己的环境（P14：不筛选），
     叠上用例给的变量（extra），再把 LAUNCH_ENV_SET 里的设成固定值（压过 extra 与继承来的值），最后加归属标记。
-    用例要故意不设（G5 记忆行的对照格）就在 skip 里点名，这时继承来的值也去掉。所有起实例的地方都经它，不各写一份。"""
+    用例要故意不设（G5 记忆行的对照格；cfgdir 那一格的 CLAUDE_CONFIG_DIR）就在 skip 里点名，这时继承来的值也去掉。
+    所有起实例的地方都经它，不各写一份。"""
     env = {**os.environ, **(extra or {})}
+    for name in skip: env.pop(name, None)
     for name, value in LAUNCH_ENV_SET.items():
-        if name in skip: env.pop(name, None)
-        else: env[name] = value
+        if name not in skip: env[name] = value
     env[MARK] = token
     return env
 
@@ -739,7 +740,7 @@ VERDICT_FUNCS = {
     "cell_verdict", "g2_summary", "excluded_guard_verdict", "g3_verdict", "g4_no_retry_verdict", "corpus_verdict", "g5_verdict",
     "mcp_disable_verdict", "integrity_verdict", "unsandboxed_pair_verdict", "g5_env_verdict", "g5_memory_read_verdict", "g5_memory_write_verdict",
     "g5_agent_memory_verdict", "g5_guard_precheck", "target_guard_decision", "unsandboxed_group_verdict", "g4_write_outside_verdict",
-    "p4_verdict",
+    "p4_verdict", "cfgdir_verdict",
 }
 
 
@@ -1036,11 +1037,14 @@ G1_COMMAND_PROBES = ("Bash", "Agent", "BashBg")
 G1_EXPECTED_TOOLS = 24
 
 
-def g1_agent_shape_verdict(r):
-    """G1d′：关后台任务时，子代理那一格的事件流是一个 init、一个 result，没有报 is_backgrounded 为真。纯函数。"""
+def g1_agent_shape_verdict(r, sub_ev, sentinel_exists):
+    """G1d′：关后台任务时，子代理那一格的事件流是一个 init、一个 result，没有报 is_backgrounded 为真。纯函数。
+    先要子代理真跑了（审查 1/F-2）：子代理里有那条目标 Bash 调用（sub_ev，归属对得上一次子代理工具调用）、它的结果不是报错、
+    它的哨兵出现了。模型直接回 DONE、子代理被拒、没跑完 → INCONCLUSIVE，不看形状。"""
     shape = stream_shape(r.get("events", []))
     ok = shape["init 个数"] == 1 and shape["result 个数"] == 1 and "True" not in shape["is_backgrounded"]
-    return affirm({"运行有效": run_valid(r)}, ok)
+    ran = sub_ev["ok"] and not sub_ev["result"]["is_error"]
+    return affirm({"运行有效": run_valid(r), "子代理里的目标调用有正面证据、结果不是报错": ran, "哨兵出现了（子代理把命令跑完了）": sentinel_exists}, ok)
 
 
 def g1_bashbg_record(r, cmd, rows):
@@ -1099,7 +1103,8 @@ def g1():
     settle("G1d 子代理里的工具调用也进 hook（验收 2a）", g1_sub_verdict(sub_ev, hooked), sub_ev["why"])
     settle("G1e 导出各工具 tool_input 字段名", g1_export_verdict(valid, len(shapes)), json.dumps({k: sorted(v) for k, v in shapes.items()}, ensure_ascii=False))
     settle("G1f 每个工具结果都先过了 hook（含报错的结果）", g1_hooked_verdict(list(runs.values()), hooked), f"运行有效的探针 {valid}/{len(runs)} 个")
-    settle("G1d′ 关后台任务时子代理不进后台：一个 init、一个 result、is_backgrounded 不为真", g1_agent_shape_verdict(runs["Agent"]),
+    settle("G1d′ 关后台任务时子代理不进后台：一个 init、一个 result、is_backgrounded 不为真",
+           g1_agent_shape_verdict(runs["Agent"], sub_ev, os.path.exists(os.path.join(R.obs, "g1-sub"))),
            json.dumps(stream_shape(runs["Agent"]["events"]), ensure_ascii=False))
     record(*g1_bashbg_record(runs["BashBg"], c_bg, by_probe["BashBg"]))
     tools_now = (runs["Bash"]["init"] or {}).get("tools") or []
@@ -3547,17 +3552,41 @@ def product_settings(name, behaviour, exp=None, extra=None, **kw):
                          extra=sandbox_settings(local_binding=True) if extra is None else extra, **kw)
 
 
-SANDBOX_PRESENT = "沙箱在场（命令开头往工作区外写被挡下，退出码非 0、文件没出现）"
+SANDBOX_PRESENT = "沙箱在场（同一个探针写工作区成功，写工作区外被沙箱挡下：退出码非 0、文件没出现、错误原文是沙箱的）"
 
 
-def sandbox_probe_prefix(target, rc_file):
-    """命令开头的一段：往工作区外写一笔，把退出码写进工作区里的观测文件。错误输出丢掉。"""
-    return f"touch {target} 2>/dev/null; echo $? > {rc_file}; "
+# 沙箱挡下写入时的错误原文：macOS 的 Seatbelt 是「Operation not permitted」，Linux 的 bwrap 只读挂载是「Read-only file system」。
+# 别的报错（命令不存在、目录不存在、权限不够）都不算沙箱在场的证据（审查 1/F-3）
+SANDBOX_DENIED_TEXT = ("Operation not permitted", "Read-only file system")
+SANDBOX_PROBE_TOUCH = "/usr/bin/touch"         # 固定绝对路径：不经 PATH 找，找不到（127）不会冒充被挡
 
 
-def sandbox_was_present(rc_text, target_exists):
-    """沙箱在场的直接证据：那一笔的退出码写下来了、不是 0，文件也没出现。没写下退出码（命令没跑到）是 False。纯函数。"""
-    return rc_text is not None and rc_text.strip() not in ("", "0") and not target_exists
+def sandbox_probe_prefix(probe):
+    """命令开头的一段：同一个探针程序先往工作区里写一笔（对照），再往工作区外写一笔；两笔各自的退出码与错误原文写进工作区里的观测文件。
+    probe 是 sandbox_probe_files 的返回值。"""
+    return (f"{SANDBOX_PROBE_TOUCH} {probe['ctl']} 2> {probe['ctl']}.err; echo $? > {probe['ctl']}.rc; "
+            f"{SANDBOX_PROBE_TOUCH} {probe['target']} 2> {probe['err']}; echo $? > {probe['rc']}; ")
+
+
+def sandbox_probe_files(tag):
+    """一格的沙箱探针：工作区外的目标、它的退出码与错误原文文件、工作区里的对照目标（都在本次根目录里）。"""
+    return {"target": os.path.join(R.outside, f"{tag}-sandbox-probe"), "rc": os.path.join(R.obs, f"{tag}-sandbox-probe.rc"),
+            "err": os.path.join(R.obs, f"{tag}-sandbox-probe.err"), "ctl": os.path.join(R.obs, f"{tag}-sandbox-ctl")}
+
+
+def sandbox_was_present(obs):
+    """沙箱在场的直接证据。纯函数。obs：{ctl_rc, ctl_exists, rc, err, target_exists}，文件不在的值是 None。
+    要三样都成立：对照（同一个探针往工作区里写）退出码 0、文件在；往工作区外那一笔退出码非 0、文件没出现；
+    它的错误原文是沙箱挡下写入的那几句之一。命令没跑到、对照失败、找不到程序、普通 I/O 错误都是 False。"""
+    control = (obs.get("ctl_rc") or "").strip() == "0" and obs.get("ctl_exists")
+    refused = (obs.get("rc") or "").strip() not in ("", "0") and not obs.get("target_exists")
+    return bool(control and refused and any(t in (obs.get("err") or "") for t in SANDBOX_DENIED_TEXT))
+
+
+def read_sandbox_probe(probe):
+    """把探针留下的观测读出来（交给 sandbox_was_present）；错误原文也进说明。"""
+    return {"ctl_rc": read_obs_path(probe["ctl"] + ".rc"), "ctl_exists": os.path.exists(probe["ctl"]), "rc": read_obs_path(probe["rc"]),
+            "err": read_obs_path(probe["err"]), "target_exists": os.path.exists(probe["target"])}
 
 
 def r2x_kill_case(kind):
@@ -3565,8 +3594,8 @@ def r2x_kill_case(kind):
     k4 在同一格里顺带记：那个 shell 的父进程号、进程组号、会话号（D2 的 b′ 按后代找找不找得到）。只记录。"""
     late = os.path.join(R.obs, f"r2x-{kind}-late")
     # 命令开头先往工作区外写一笔（该被沙箱挡下），退出码写进观测文件：沙箱在场的直接证据，不多花实例（architect 47737e78）
-    blocked, blocked_rc = os.path.join(R.outside, f"r2x-{kind}-sandbox-probe"), os.path.join(R.obs, f"r2x-{kind}-sandbox-probe.rc")
-    cmd = sandbox_probe_prefix(blocked, blocked_rc) + f"/bin/sleep {LONG_SLEEP}; touch {late}"
+    probe = sandbox_probe_files(f"r2x-{kind}")
+    cmd = sandbox_probe_prefix(probe) + f"/bin/sleep {LONG_SLEEP}; touch {late}"
     s, _ = r2x_live_settings(f"r2x-{kind}", expect(bash=[cmd]))
     live = Live(f"r2x-{kind}", s)
     facts = {}
@@ -3597,8 +3626,10 @@ def r2x_kill_case(kind):
                 while time.time() - t0 < 70: time.sleep(1)
                 facts["70 秒后哨兵出现了（命令接着跑完）"] = os.path.exists(late)
         label = {"k1": "k1 前台命令跑着时 SIGKILL CLI 的进程组", "k2": "k2 前台命令跑着时只关输入", "k3": "k3 前台命令跑着时给 CLI 发 SIGTERM"}[kind]
-        in_sandbox = sandbox_was_present(read_obs_path(blocked_rc), os.path.exists(blocked))
+        probe_obs = read_sandbox_probe(probe)
+        in_sandbox = sandbox_was_present(probe_obs)
         facts["沙箱在场（命令开头往工作区外写被挡下）"] = in_sandbox
+        facts["沙箱探针的观测"] = {k: (v.strip()[:200] if isinstance(v, str) else v) for k, v in probe_obs.items()}
         status, why = r2x_live_record(evs, alive_now, 0, {SLEEP_SEEN: target is not None, FOREGROUND_SEEN: fg, "发信号时 CLI 还在": cli_running,
                                                            UNSANDBOXED_ABSENT: no_unsandboxed_calls(evs), SANDBOX_PRESENT: in_sandbox})
         record(status, f"R2X {label}（只记录；k4 的进程号也在这一行）", "；".join(x for x in (why, json.dumps(facts, ensure_ascii=False)) if x))
@@ -4012,23 +4043,39 @@ def nested_sandbox_preflight():
     return outer == 0 and nested != 0, f"外层一层的退出码={outer} 套两层的退出码={nested}"
 
 
-def p4_facts(r, written, cmd):
-    """一格的事实：文件写没写进去、CLI 有没有拒绝开会话（没有 init、退出码非 0）、目标调用有没有被拒的证据。"""
+# 沙箱起不来、而设置要求沙箱时 CLI 给的原文（2.1.322 程序字样）。启动时：诊断码与「Set sandbox.failIfUnavailable=false …」那句；
+# 会话中途：「Sandbox is required (sandbox.failIfUnavailable) …」那句。只认这几句：认证失败、CLI 崩溃、外层包装起不来都不算
+SANDBOX_REQUIRED_STARTUP = ("sandbox_required_unavailable", "Set sandbox.failIfUnavailable=false to allow unsandboxed execution")
+SANDBOX_REQUIRED_RUNTIME = ("Sandbox is required (sandbox.failIfUnavailable)",)
+
+
+def p4_facts(r, written, cmd, rows, stderr):
+    """一格的事实（审查 1/F-1）。纯函数。
+    refused：CLI 没开会话（没有 init、没超时、退出码非 0），并且输出（stderr 或流里的文字）里有沙箱不可用的那句原文；
+    blocked：会话开了，与登记逐字相同的目标调用每一次都有：按 tool_use_id 对上的探针「允许」记录（拒的不是 iWork），
+    结果标了错误、文字是沙箱不可用的那句。别的错误（认证失败、崩溃、普通报错）两样都不算。rows 是 hook_rows 的原始记录。"""
+    texts = [stderr or "", json.dumps(r.get("events", []), ensure_ascii=False)]
+    startup = any(sign in t for t in texts for sign in SANDBOX_REQUIRED_STARTUP + SANDBOX_REQUIRED_RUNTIME)
+    refused = r.get("init") is None and not r.get("timed_out") and r.get("exit") not in (0, None) and startup
     ev = bash_ev(r, cmd, many=True)
-    return {"written": written, "refused": r.get("init") is None and not r.get("timed_out") and r.get("exit") not in (0, None),
-            "blocked": blocked(ev, written), "exit": r.get("exit")}
+    allowed = {(row.get("input") or {}).get("tool_use_id") for row in rows if row.get("answered") == "allow"}
+    blocked_ = (ev["ok"] and not written and all(u["id"] in allowed for u in ev["uses"])
+                and all(res["is_error"] and any(sign in res["text"] for sign in SANDBOX_REQUIRED_RUNTIME + SANDBOX_REQUIRED_STARTUP) for res in ev["results"]))
+    return {"written": written, "refused": refused, "blocked": blocked_, "exit": r.get("exit"),
+            "看到了沙箱不可用的原文": startup, "目标调用的结果（前 200 字）": [res["text"][:200] for res in ev.get("results", [])]}
 
 
 def p4_verdict(preflight_ok, f1, f2):
     """F1、F2 的结论（方案第 8 节）。纯函数。返回 (F1 的状态, F2 的状态, 说明)。
     预检没过 → 两格都没测成；F2 里文件没写进去 → 沙箱其实起来了、造法无效，两格都没测成；
-    F1 写进去了 → F1 FAIL（这个键拦不住）；F1 没写进去，还要有正面证据：CLI 拒绝开会话，或者目标调用每一次都被拒 → F1 PASS；
-    都没有（模型没发调用、超时）→ F1 没测成。F2 是对照：文件写进去了就是 PASS。"""
+    F1 写进去了 → F1 FAIL（这个键拦不住）；F1 没写进去，还要有正面证据（p4_facts：CLI 带着沙箱不可用的原文拒绝开会话，
+    或者目标调用每一次都被探针允许、又被 CLI 以沙箱不可用拒掉）→ F1 PASS；都没有（模型没发调用、超时、别的错误）→ F1 没测成。
+    F2 是对照：文件写进去了就是 PASS。"""
     if not preflight_ok: return "INCONCLUSIVE", "INCONCLUSIVE", "预检没过：套两层 sandbox-exec 没有失败，造法不成立（候选：PATH 里换一个一运行就失败的 sandbox-exec 替身）"
     if not f2["written"]: return "INCONCLUSIVE", "INCONCLUSIVE", "F2 里工作区外的文件没写进去：沙箱其实起来了，造法无效"
     if f1["written"]: return "FAIL", "PASS", "F1 里文件写进去了：failIfUnavailable 拦不住，enforced 不能照「能开起来」推"
     if f1["refused"] or f1["blocked"]: return "PASS", "PASS", ("CLI 没开会话" if f1["refused"] else "目标命令被拒、没执行")
-    return "INCONCLUSIVE", "PASS", "F1 里文件没写进去，但既没看到 CLI 拒绝开会话，也没有目标调用被拒的证据"
+    return "INCONCLUSIVE", "PASS", "F1 里文件没写进去，但没有沙箱不可用的正面证据（没看到那句原文，或者是别的错误、模型没发调用）"
 
 
 def r2x_p4():
@@ -4045,10 +4092,11 @@ def r2x_p4():
         st = sandbox_settings(local_binding=True)
         if fail_if: st["sandbox"]["failIfUnavailable"] = True
         else: st["sandbox"].pop("failIfUnavailable", None)
-        s, _ = product_settings(f"p4-{key}", "allow-sandboxed", expect(bash=[cmd]), extra=st)
+        s, logdir = product_settings(f"p4-{key}", "allow-sandboxed", expect(bash=[cmd]), extra=st)
         r = claude(f"p4-{key}", ask_bash(cmd), settings=s, launch_prefix=OUTER_SANDBOX)
-        facts[key] = p4_facts(r, os.path.exists(target), cmd)
-        stderr = open(os.path.join(R.out, f"p4-{key}-stderr.txt")).read().lower()
+        stderr_raw = open(os.path.join(R.out, f"p4-{key}-stderr.txt")).read()
+        facts[key] = p4_facts(r, os.path.exists(target), cmd, hook_rows(logdir), stderr_raw)
+        stderr = stderr_raw.lower()
         init = r.get("init") or {}
         caps = init.get("capabilities")
         facts[key].update({"stderr 提到 sandbox": "sandbox" in stderr, "init 的顶层键": sorted(init),
@@ -4059,6 +4107,61 @@ def r2x_p4():
     settle("R2X P4 F2 对照：去掉 failIfUnavailable，工作区外的文件写得进（证明沙箱确实没起）", f2, detail)
 
 
+# --part cfgdir（T10f A 审查 1/F-2 的实测，supervisor 2026-11-13）：CLI 找用户配置（.claude.json）是按「CLAUDE_CONFIG_DIR 设没设」
+# 分支，还是按「值是不是默认目录」分支。隔离的 HOME（本次根目录里的临时目录），里面放三份合成配置，各带一个名字不同的 MCP 条目
+# （命令是 /usr/bin/true，不联网、没有副作用）；四种情况各跑一次 `claude mcp list`（不起模型、不花额度），只记命中哪几个名字、几个、退出码。
+# 不碰用户真实的 ~/.claude 与 ~/.claude.json：HOME 换成了临时目录
+CFGDIR_CASES = {
+    # 情况: (CLAUDE_CONFIG_DIR 取什么，None 是不设；该读到哪一份)
+    "没设": (None, "home"),
+    # JS 里 "" 是假值，CLI 可能和没设走同一支；iWork 的 ConfigPaths::resolve 把空串当没设。对不上要回报 supervisor
+    "设成空串": ("empty", "home"),
+    "显式设成默认目录": ("default", "cfgdir"),
+    "自定义目录": ("custom", "custom"),
+}
+
+
+def cfgdir_layout(home, token):
+    """隔离 HOME 里的三份合成配置：家目录下的 .claude.json、默认配置目录里的 .claude.json、自定义目录里的 .claude.json。
+    返回 {份: (路径, 条目名)}。"""
+    spots = {"home": os.path.join(home, ".claude.json"), "cfgdir": os.path.join(home, ".claude", ".claude.json"),
+             "custom": os.path.join(home, "custom-config", ".claude.json")}
+    out = {}
+    for key, path in spots.items():
+        name = f"t0g-{key}-{token}"
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        json.dump({"mcpServers": {name: {"command": "/usr/bin/true"}}}, open(path, "w"))
+        out[key] = (path, name)
+    return out
+
+
+def cfgdir_verdict(code, timed_out, output, names, want):
+    """一种情况的结论。纯函数。names：{份: 条目名}；want：该读到的那一份。
+    命令报错、超时、输出里一个合成条目名都认不出 → INCONCLUSIVE；列出的恰好是该读的那一份 → PASS；
+    列出了别的份（不管该读的那份在不在）→ FAIL。返回 (状态, 说明)。"""
+    if timed_out or code != 0: return "INCONCLUSIVE", f"命令没正常结束（退出码={code} 超时={timed_out}）"
+    seen = sorted(k for k, n in names.items() if n in output)
+    if not seen: return "INCONCLUSIVE", "输出里认不出任何一份合成配置的条目"
+    facts = f"命中 {seen}（{len(seen)} 份），退出码 {code}"
+    if seen == [want]: return "PASS", f"读的是 {want} 那一份；{facts}"
+    return "FAIL", f"该读的是 {want}；{facts}"
+
+
+def r2x_cfgdir():
+    home = R.p("cfgdir-home"); os.mkdir(home)
+    layout = cfgdir_layout(home, secrets.token_hex(3))
+    names = {k: n for k, (_, n) in layout.items()}
+    for label, (setting, want) in CFGDIR_CASES.items():
+        extra = {"HOME": home}
+        if setting == "empty": extra["CLAUDE_CONFIG_DIR"] = ""
+        elif setting == "default": extra["CLAUDE_CONFIG_DIR"] = os.path.join(home, ".claude")
+        elif setting == "custom": extra["CLAUDE_CONFIG_DIR"] = os.path.dirname(layout["custom"][0])
+        skip = ("CLAUDE_CONFIG_DIR",) if setting is None else ()
+        out, err, code, timed_out, _ = run_instance(["claude", "mcp", "list"], f"cfgdir-{setting or 'unset'}", env=extra, env_skip=skip, timeout=120)
+        status, why = cfgdir_verdict(code, timed_out, out + err, names, want)
+        settle(f"R2X cfgdir {label}：CLI 读哪一份 .claude.json（不起模型）", status, why)
+
+
 # R2X 的格子表（审查 1/F-5）：部分 → {格名: 处理器}。--part 的可选值、每部分跑哪几格、按格名分派都只从这里来
 R2X_CELLS = {
     "d": {"k1": lambda: r2x_kill_case("k1"), "k2": lambda: r2x_kill_case("k2"), "k3": lambda: r2x_kill_case("k3"),
@@ -4066,7 +4169,8 @@ R2X_CELLS = {
     "rest": {"c1": g4_c1, "n1": lambda: r2x_background("n1", NO_BACKGROUND_SWITCH), "tools": r2x_tool_lists},
     "net": {"p1": lambda: r2x_net("p1"), "p2": lambda: r2x_net("p2"), "p4": lambda: r2x_net("p4")},
     "recheck": {"g1": g1, "g8": g8, "g7": g7_product_cells},             # G1 10、G8 8、G7 9 个实例，带产品设置重跑
-    "p4": {"f": r2x_p4},                                                  # f 是 F1、F2 两格（F2 是 F1 的对照，一起跑），2 个实例
+    "p4": {"f": r2x_p4},
+    "cfgdir": {"cfg": r2x_cfgdir},                                      # 四种情况各跑一次 claude mcp list，0 个模型实例                                                  # f 是 F1、F2 两格（F2 是 F1 的对照，一起跑），2 个实例
     "skill": {"l": r2x_repo_load, "k3b": lambda: r2x_inline("k3b"), "k3c": lambda: r2x_inline("k3c"),     # l 是 L1、L2 两格（L2 是 L1 的对照，一起跑）
               "k2c": r2x_allowed_tools, "h1": r2x_hook_vs_hook},
 }
@@ -5140,10 +5244,22 @@ def selftest_recheck_and_p4():
     """script6 第一批：G1d′ 与 BashBg 记录格、沙箱在场的证据、P4 的判定、产品设置、列进程不经 ps -ax。每样配反例。"""
     init_, res_ = {"type": "system", "subtype": "init", "plugins": []}, {"type": "result"}
     run = lambda events, ok=True: {"init": init_ if ok else None, "timed_out": False, "exit": 0, "events": events, "tool_uses": [], "tool_results": {}}
-    assert g1_agent_shape_verdict(run([init_, res_]))[0] == "PASS"
-    assert g1_agent_shape_verdict(run([init_, {"type": "system", "subtype": "task_started", "is_backgrounded": True}, res_]))[0] == "FAIL", "子代理进了后台"
-    assert g1_agent_shape_verdict(run([init_, res_, init_, res_]))[0] == "FAIL", "两个 init、两个 result：后台跑完又起了一轮"
-    assert g1_agent_shape_verdict(run([init_, res_], ok=False))[0] == "INCONCLUSIVE"
+    # G1d′（审查 1/F-2）：先要子代理真跑了（子代理里的目标调用、结果不是报错、哨兵在），再看形状
+    c_sub = "touch /w/g1-sub"
+    ag = {"id": "a1", "name": "Agent", "input": {}, "parent": None}
+    sub = {"id": "b1", "name": "Bash", "input": {"command": c_sub}, "parent": "a1"}
+    def agent_run(events, sub_result=False, ok=True):
+        r = {**run(events, ok), "tool_uses": [ag, sub], "tool_results": {"a1": {"is_error": False, "text": "done"}, "b1": {"is_error": sub_result, "text": "x"}}}
+        return r, evidence(r, bash_match(c_sub), "sub")
+    shape = lambda events, **kw: (lambda r, ev: g1_agent_shape_verdict(r, ev, kw.get("sentinel", True))[0])(*agent_run(events, kw.get("err", False), kw.get("ok", True)))
+    assert shape([init_, res_]) == "PASS"
+    assert shape([init_, {"type": "system", "subtype": "task_started", "is_backgrounded": True}, res_]) == "FAIL", "子代理进了后台"
+    assert shape([init_, res_, init_, res_]) == "FAIL", "两个 init、两个 result：后台跑完又起了一轮"
+    assert shape([init_, res_], ok=False) == "INCONCLUSIVE"
+    assert shape([init_, res_], err=True) == "INCONCLUSIVE", "子代理里的命令被拒（结果是报错）：形状再对也不算"
+    assert shape([init_, res_], sentinel=False) == "INCONCLUSIVE", "命令没跑完（哨兵不在）"
+    direct = {**run([init_, res_]), "tool_uses": [], "tool_results": {}}
+    assert g1_agent_shape_verdict(direct, evidence(direct, bash_match(c_sub), "sub"), False)[0] == "INCONCLUSIVE", "模型直接回 DONE，没起子代理"
     cmd = "sleep 20; touch /w/g1-bg"
     use = {"id": "u1", "name": "Bash", "input": {"command": cmd, "run_in_background": True}, "parent": None}
     rbg = {**run([init_, res_]), "tool_uses": [use], "tool_results": {"u1": {"is_error": True, "text": "run_in_background is disabled"}}}
@@ -5152,10 +5268,57 @@ def selftest_recheck_and_p4():
     assert g1_bashbg_record({**rbg, "tool_uses": []}, cmd, [])[0] == "INCONCLUSIVE", "没有目标调用：没测成"
     assert '"每次都进了 hook": false' in g1_bashbg_record(rbg, cmd, [])[2]
     assert G1_COMMAND_PROBES == ("Bash", "Agent", "BashBg") and G1_EXPECTED_TOOLS == 24
-    # 沙箱在场：退出码写下来了、不是 0、文件没出现
-    assert sandbox_was_present("1\n", False) and not sandbox_was_present("0\n", False) and not sandbox_was_present("1", True)
-    assert not sandbox_was_present(None, False), "命令没跑到那一步：不算证据"
-    assert sandbox_probe_prefix("/o/x", "/w/x.rc") == "touch /o/x 2>/dev/null; echo $? > /w/x.rc; "
+    # 沙箱在场（审查 1/F-3）：对照写进去了、工作区外那一笔被沙箱的原文挡下
+    good = {"ctl_rc": "0\n", "ctl_exists": True, "rc": "1\n", "err": "touch: /o/x: Operation not permitted\n", "target_exists": False}
+    assert sandbox_was_present(good) and sandbox_was_present({**good, "err": "touch: cannot touch '/o/x': Read-only file system"})
+    for bad, why in (({"rc": "127\n", "err": "sh: /usr/bin/touch: No such file or directory"}, "找不到程序"),
+                     ({"err": "touch: /o/x: No such file or directory"}, "普通 I/O 错误（目录不存在）"),
+                     ({"err": "touch: /o/x: Permission denied"}, "权限不够不是沙箱的原文"),
+                     ({"ctl_rc": "1\n", "ctl_exists": False}, "对照失败：探针自己就写不了"),
+                     ({"rc": "0\n", "target_exists": True, "err": ""}, "写进去了"),
+                     ({"rc": None, "err": None}, "命令没跑到那一步")):
+        assert not sandbox_was_present({**good, **bad}), why
+    probe = {"target": "/o/x", "rc": "/w/x.rc", "err": "/w/x.err", "ctl": "/w/c"}
+    assert sandbox_probe_prefix(probe) == ("/usr/bin/touch /w/c 2> /w/c.err; echo $? > /w/c.rc; /usr/bin/touch /o/x 2> /w/x.err; echo $? > /w/x.rc; ")
+    # 真跑一遍这段前缀（不经沙箱）：对照与目标都写进去，错误原文为空 → 不算沙箱在场
+    pr = sandbox_probe_files("st-sbx")
+    subprocess.run(["sh", "-c", sandbox_probe_prefix(pr) + "true"], check=True)
+    real = read_sandbox_probe(pr)
+    assert real["ctl_exists"] and real["target_exists"] and real["rc"].strip() == "0" and not sandbox_was_present(real), real
+    # P4 的取证（审查 1/F-1）：从 p4_facts 开始
+    pcmd = "touch /o/p4-f1"
+    p_use = {"id": "t1", "name": "Bash", "input": {"command": pcmd}, "parent": None}
+    allow_row = {"input": {"hook_event_name": "PreToolUse", "tool_use_id": "t1"}, "answered": "allow"}
+    sbx_err = "Sandbox is required (sandbox.failIfUnavailable) and stopped being available in this session: x"
+    p_run = lambda text, err=True: {**run([init_, res_]), "tool_uses": [p_use], "tool_results": {"t1": {"is_error": err, "text": text}}}
+    no_init = lambda code: {"init": None, "timed_out": False, "exit": code, "events": [], "tool_uses": [], "tool_results": {}}
+    startup_err = "Error: sandbox unavailable detail: x. Set sandbox.failIfUnavailable=false to allow unsandboxed execution."
+    assert p4_facts(no_init(1), False, pcmd, [], startup_err)["refused"], "带沙箱不可用原文的启动失败"
+    assert not p4_facts(no_init(1), False, pcmd, [], "Invalid API key · Please run /login")["refused"], "认证失败不冒充"
+    assert not p4_facts(no_init(1), False, pcmd, [], "sandbox-exec: execvp() of 'claude' failed")["refused"], "外层包装起不来不冒充"
+    assert not p4_facts(no_init(134), False, pcmd, [], "panic: something")["refused"], "CLI 崩溃不冒充"
+    assert p4_facts(p_run(sbx_err), False, pcmd, [allow_row], "")["blocked"], "探针允许了、CLI 以沙箱不可用拒掉"
+    assert not p4_facts(p_run("Exit code 1"), False, pcmd, [allow_row], "")["blocked"], "别的报错不算"
+    assert not p4_facts(p_run(sbx_err), False, pcmd, [{**allow_row, "answered": "deny"}], "")["blocked"], "是 iWork 拒的，不是沙箱"
+    assert not p4_facts(p_run(sbx_err), False, pcmd, [], "")["blocked"], "探针没有这次调用的允许记录"
+    assert not p4_facts(p_run(sbx_err), True, pcmd, [allow_row], "")["blocked"], "写进去了就不是被挡下"
+    f1 = p4_facts(no_init(1), False, pcmd, [], "Invalid API key")
+    f2 = p4_facts(p_run("", err=False), True, "touch /o/p4-f2", [], "")
+    assert p4_verdict(True, f1, {**f2, "written": True})[0] == "INCONCLUSIVE", "认证失败那一次：F1 没测成，不是 PASS"
+    # cfgdir（T10f A 1/F-2 的实测格）
+    nm = {"home": "t0g-home-a", "cfgdir": "t0g-cfgdir-a", "custom": "t0g-custom-a"}
+    assert cfgdir_verdict(0, False, "t0g-home-a: /usr/bin/true - ✓ Connected", nm, "home")[0] == "PASS"
+    assert cfgdir_verdict(0, False, "t0g-cfgdir-a: /usr/bin/true", nm, "home")[0] == "FAIL", "读了别的那一份"
+    assert cfgdir_verdict(0, False, "t0g-home-a t0g-cfgdir-a", nm, "cfgdir")[0] == "FAIL", "两份都列出来了"
+    assert cfgdir_verdict(1, False, "t0g-home-a", nm, "home")[0] == "INCONCLUSIVE" and cfgdir_verdict(0, True, "", nm, "home")[0] == "INCONCLUSIVE"
+    assert cfgdir_verdict(0, False, "No MCP servers configured.", nm, "home")[0] == "INCONCLUSIVE", "输出认不出"
+    assert "命中 ['custom']（1 份），退出码 0" in cfgdir_verdict(0, False, "t0g-custom-a", nm, "custom")[1]
+    assert list(CFGDIR_CASES) == ["没设", "设成空串", "显式设成默认目录", "自定义目录"] and CFGDIR_CASES["设成空串"][1] == "home"
+    lay_home = R.p("st-cfgdir-home"); os.mkdir(lay_home)
+    lay = cfgdir_layout(lay_home, "st")
+    assert {k: os.path.relpath(p_, lay_home) for k, (p_, _) in lay.items()} == {"home": ".claude.json", "cfgdir": ".claude/.claude.json", "custom": "custom-config/.claude.json"}
+    assert all(json.load(open(p_))["mcpServers"][n] == {"command": "/usr/bin/true"} for p_, n in lay.values())
+    assert "CLAUDE_CONFIG_DIR" not in child_env("t", {"CLAUDE_CONFIG_DIR": "/x"}, skip=("CLAUDE_CONFIG_DIR",)), "env_skip 能去掉任何点名的变量"
     # P4 判定表
     f = lambda written=False, refused=False, blocked=False: {"written": written, "refused": refused, "blocked": blocked, "exit": 0}
     assert p4_verdict(False, f(), f(written=True))[:2] == ("INCONCLUSIVE", "INCONCLUSIVE"), "预检没过"
@@ -5824,7 +5987,8 @@ def main():
                     help="只给 --only R2X：d = k1–k3、b1、b2（5 个实例，先跑，定 D2、D5）；rest = c1、n1 与工具清单（8 个）；"
                          "net = 沙箱联网 p1、p2、p4 两格（4 个）；skill = 仓库技能加不加载 L1、L2，内联命令 K3b、K3c，"
                          "allowed-tools 的故障探针 K2c，插件 hook 对 iWork hook H1（6 个，日常账号下 K2c 另加 1 个预检）；"
-                         "recheck = G1、G8、G7 非 cfg 格带产品设置重跑（27 个）；p4 = macOS 上沙箱起不来时 F1、F2（2 个）；不给就都跑")
+                         "recheck = G1、G8、G7 非 cfg 格带产品设置重跑（27 个）；p4 = macOS 上沙箱起不来时 F1、F2（2 个）；"
+                         "cfgdir = CLI 读哪一份 .claude.json（四次 claude mcp list，0 个模型实例）；不给就都跑")
     ap.add_argument("--cell", default=None,
                     help="只给 --only R2X：逗号分隔的格名，只跑这几格（优先于 --part），如 --cell k3（带产品设置重记 k3、k4，1 个实例）")
     ap.add_argument("--quick", action="store_true", help="G2 只跑普通 Bash 一行（结论只能是 INCONCLUSIVE，不能进已验证表）")
