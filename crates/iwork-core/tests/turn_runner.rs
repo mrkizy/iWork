@@ -1470,3 +1470,7 @@ async fn second_prompt_failure_after_reopen_fails_running_turn() {
     assert!(line.session().is_none());
     assert_eq!(line.resume_id(), Some("fake"));
 }
+
+/// 改动摘要与「搞定」章，编排那一半（T10a 方案 D10）。
+#[path = "turn_runner/change_probe.rs"]
+mod change_probe;

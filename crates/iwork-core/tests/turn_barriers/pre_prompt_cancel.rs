@@ -37,6 +37,22 @@ fn prompt_calls(w: &W<Reference>) -> Vec<usize> {
     w.ctl.prompt_calls.lock().unwrap().clone()
 }
 
+/// 等这一趟结束；期间运行时一收下 prompt 就判红（不然没人答这个 prompt，回合会一直等下去，坏实现表现成超时）。
+async fn join_without_prompt(
+    w: &W<Reference>,
+    mut task: Task<Reference>,
+    what: &str,
+) -> (Result<TurnState, TurnRunError>, Line<Reference>) {
+    let before = received(w).len();
+    tokio::select! {
+        joined = &mut task => joined.unwrap(),
+        () = wait_until("运行时收下 prompt", || received(w).len() > before) => {
+            task.abort();
+            panic!("{what}：取消之后运行时还是收下了 prompt");
+        }
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn pre_prompt_cancel_at_each_wait() {
     for wait in [
@@ -117,7 +133,7 @@ async fn cancel_at(wait: Wait) {
         gate.notify_one();
         task
     };
-    let (result, line) = task.await.unwrap();
+    let (result, line) = join_without_prompt(&w, task, &format!("{wait:?}")).await;
 
     assert_eq!(result.unwrap(), TurnState::Cancelled, "{wait:?}");
     assert_eq!(
@@ -172,7 +188,8 @@ async fn cancelled_resume_before_start_commits_nothing() {
     let before = w.store.all().len();
     let line = w.line();
     line.canceller().cancel(t);
-    let (result, _) = w.spawn(line, w.resume_plan(turn)).await.unwrap();
+    let task = w.spawn(line, w.resume_plan(turn));
+    let (result, _) = join_without_prompt(&w, task, "续接").await;
     assert_eq!(
         result.unwrap(),
         TurnState::Interrupted {
@@ -215,7 +232,7 @@ async fn cancel_just_before_and_after_pass_prompt() {
     .await;
     canceller.cancel(t);
     gate.notify_one();
-    let (result, _) = task.await.unwrap();
+    let (result, _) = join_without_prompt(&w, task, "取消在裁决之前").await;
     assert_eq!(result.unwrap(), TurnState::Cancelled);
     assert!(prompt_calls(&w).is_empty(), "取消先到：没有 prompt");
     assert_eq!(trail(&w.store, t), strings(&CANCELLED_AFTER_START));

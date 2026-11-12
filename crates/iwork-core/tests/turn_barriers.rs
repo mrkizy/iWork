@@ -2280,3 +2280,11 @@ fn message_endings(store: &MemStore) -> Vec<MessageStatus> {
 /// 交出 prompt 之前认取消（T10a 方案 D1a、7.2 第 ① 条）。
 #[path = "turn_barriers/pre_prompt_cancel.rs"]
 mod pre_prompt_cancel;
+
+/// 丢掉会话线之前先了结（T10a 方案 D8a、7.2 第 ② 条）。
+#[path = "turn_barriers/line_swap.rs"]
+mod line_swap;
+
+/// 回合状态两类写者撞车（T10a 方案 A4、G1；7.2a 的 K3）。
+#[path = "turn_barriers/a4_interleavings.rs"]
+mod a4_interleavings;
