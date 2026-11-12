@@ -171,6 +171,7 @@ mod tests {
     /// 子进程在 exec 之前复制着锁文件的句柄（锁文件都带 `O_CLOEXEC`，exec 时才关），这段时间里锁还被那份副本拿着
     /// （`forked_copy_keeps_lock_until_it_closes` 确定性地复现了这一点）。所以「放掉之后马上就拿得到」在多线程的
     /// 测试进程里不成立，只能断言「很快拿得到」。
+    #[cfg(unix)]
     fn acquire_eventually(a: &Path, b: &Path, pid: u32) -> InstanceLock {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
