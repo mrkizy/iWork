@@ -1,6 +1,28 @@
 use proptest::prelude::*;
 
 use super::*;
+use crate::process::signal::{Ident, Os, verify_then_kill};
+
+/// 发信号的替身：出生时间照模型世界答，信号落到此刻占着这个号的进程上，记下来。
+struct WorldOs<'a> {
+    world: &'a World,
+    landed: std::cell::RefCell<Vec<Pid>>,
+}
+
+impl Os for WorldOs<'_> {
+    fn birth_of(&self, pid: Pid) -> Option<Birth> {
+        self.world
+            .procs
+            .get(&pid)
+            .filter(|p| !p.unreadable)
+            .map(|p| Birth(p.birth))
+    }
+    fn kill(&self, pid: Pid, _sig: libc::c_int) {
+        if self.world.procs.contains_key(&pid) {
+            self.landed.borrow_mut().push(pid);
+        }
+    }
+}
 
 // ---------- 模拟的进程世界（交错属性测试用） ----------
 
@@ -245,8 +267,8 @@ fn step() -> impl Strategy<Value = Step> {
 /// 被测的实现跑一遍交错，返回第一条违反的规则。
 fn run(steps: &[Step]) -> Result<(), String> {
     let mut w = World::new();
-    let mut scope = Scope::new(BRIDGE, DAEMON);
     let bridge_birth = w.procs[&BRIDGE].birth;
+    let mut scope = Scope::new(BRIDGE, Some(Birth(bridge_birth)), DAEMON);
     // 上一遍认下的（进程号，出生时间）
     let mut last: BTreeSet<(Pid, u64)> = BTreeSet::new();
     for (n, s) in steps.iter().enumerate() {
@@ -260,6 +282,25 @@ fn run(steps: &[Step]) -> Result<(), String> {
                 }
                 let recheck = w.recheck(&scope.witness_pids());
                 let members = scope.observe(&table, &recheck);
+                // 清理照这次求出的范围发信号，发的时候是读表之后、中间那些事都发生过了的世界（5.4a「发信号按身份」）。
+                // 每个信号按它发出那一刻的世界断言：落在我们的进程上，或者根本没发
+                for m in &members.0 {
+                    let Some(birth) = m.birth else { continue };
+                    let os = WorldOs {
+                        world: &w,
+                        landed: std::cell::RefCell::default(),
+                    };
+                    let who = Ident { pid: m.pid, birth };
+                    verify_then_kill(&os, who, libc::SIGKILL);
+                    for pid in os.landed.into_inner() {
+                        if !w.procs[&pid].ours {
+                            return Err(format!(
+                                "第 {n} 步把信号发到了外人 {pid}：{:?}",
+                                w.procs[&pid]
+                            ));
+                        }
+                    }
+                }
                 let got = members.pids();
                 for pid in &got {
                     // 安全：认下的都是读表那一刻桥接的后代
@@ -323,6 +364,58 @@ proptest! {
     }
 }
 
+/// reviewer 的反例（审查 S6-5 1/F-1）：桥接起一个孩子；记一次；下一次读表之后、发信号之前孩子退出、号码被后台的
+/// 另一个孩子（外人）拿到。按身份发：一次都不落在外人身上。
+#[test]
+fn reused_pid_between_scan_and_signal_gets_no_signal() {
+    let steps = vec![
+        Step::World(Op::Fork(2, false)),
+        Step::Observe(vec![]),
+        Step::Observe(vec![Op::Exit(1), Op::Fork(1, false)]),
+    ];
+    // 对照：这个序列里号码确实被外人重用了
+    let mut w = World::new();
+    let mut scope = Scope::new(BRIDGE, None, DAEMON);
+    w.apply(&Op::Fork(2, false), &mut scope);
+    let child = *w.procs.keys().max().unwrap();
+    assert!(w.procs[&child].ours);
+    w.apply(&Op::Exit(1), &mut scope);
+    w.apply(&Op::Fork(1, false), &mut scope);
+    assert!(!w.procs[&child].ours, "号码 {child} 换成了外人");
+    assert_eq!(run(&steps), Ok(()));
+}
+
+/// 剩下的窗口（待产品负责人确认的已知限制）：复核出生时间与 `kill` 之间号码换了人，信号落到外人身上。只在没有
+/// 句柄可用的做法里有这个插入点（macOS；`pidfd_open` 用不了的 Linux）。以后有了更好的办法，要有意识地改这条。
+#[test]
+fn reuse_between_verify_and_kill_is_the_known_window() {
+    let mut w = World::new();
+    let mut scope = Scope::new(BRIDGE, None, DAEMON);
+    w.apply(&Op::Fork(2, false), &mut scope);
+    let child = *w.procs.keys().max().unwrap();
+    let birth = Birth(w.procs[&child].birth);
+    // 复核：对得上
+    let verified = {
+        let os = WorldOs {
+            world: &w,
+            landed: std::cell::RefCell::default(),
+        };
+        os.birth_of(child) == Some(birth)
+    };
+    assert!(verified);
+    // 复核与 kill 之间：孩子退出、号码被外人拿到
+    w.apply(&Op::Exit(1), &mut scope);
+    w.apply(&Op::Fork(1, false), &mut scope);
+    let os = WorldOs {
+        world: &w,
+        landed: std::cell::RefCell::default(),
+    };
+    os.kill(child, libc::SIGKILL);
+    let landed = os.landed.into_inner();
+    assert_eq!(landed, vec![child]);
+    assert!(!w.procs[&child].ours, "落到了外人身上：这就是那个窗口");
+}
+
 // ---------- 方案 5.4a 点名的快照测试 ----------
 
 fn proc(pid: Pid, ppid: Pid, pgid: Pid, sid: Pid, birth: u64) -> Proc {
@@ -368,7 +461,7 @@ fn observe(scope: &mut Scope, procs: Vec<Proc>) -> BTreeSet<Pid> {
 /// 表驱动：每一种进范围的方式各一行，外加不该进的几行。
 #[test]
 fn scope_membership() {
-    let mut s = Scope::new(10, 2);
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
     // 第一遍：根组 10、11，顺父链 20、21；后台、init 不在
     assert_eq!(
         observe(&mut s, base_table()),
@@ -388,7 +481,7 @@ fn scope_membership() {
 /// 3/F-2：同一个进程号、同一秒、原生出生时间不同 → 不是记到过的那个进程，也不能当见证。
 #[test]
 fn same_pid_same_second_different_birth_is_another_process() {
-    let mut s = Scope::new(10, 2);
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
     observe(&mut s, base_table());
     // 20 和 21 都没了，号码 21 被外人拿到（出生时间不同），自成会话 21
     let mut t = base_table();
@@ -402,7 +495,7 @@ fn same_pid_same_second_different_birth_is_another_process() {
 /// 出生时间读不到的进程不算任何记到过的进程，也不被记下。
 #[test]
 fn unreadable_birth_is_never_matched() {
-    let mut s = Scope::new(10, 2);
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
     observe(&mut s, base_table());
     let mut t = base_table();
     t.retain(|p| p.pid != 11);
@@ -421,7 +514,7 @@ fn unreadable_birth_is_never_matched() {
 /// 3/F-1：根组已标成回收，快照里有进程的组号等于旧根组号 → 一个都不认领。
 #[test]
 fn root_group_reused_after_reap_is_not_claimed() {
-    let mut s = Scope::new(10, 2);
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
     observe(
         &mut s,
         vec![
@@ -448,7 +541,7 @@ fn root_group_reused_after_reap_is_not_claimed() {
 /// S 从此作废，以后再出现会话号 S 的进程也不认。
 #[test]
 fn reused_session_number_is_not_claimed() {
-    let mut s = Scope::new(10, 2);
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
     observe(&mut s, base_table());
     let foreign = |pid, ppid, birth| proc(pid, ppid, 20, 20, birth);
     let mut t: Vec<Proc> = base_table().into_iter().filter(|p| p.pid < 20).collect();
@@ -467,7 +560,7 @@ fn reused_session_number_is_not_claimed() {
 /// 只要它们还在受管会话里、见证在，就照会话认领；离开了会话（另立会话）就靠记到过的身份。
 #[test]
 fn regrouped_members_are_not_a_witness() {
-    let mut s = Scope::new(10, 2);
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
     observe(&mut s, base_table());
     // 外人 40 在根会话里，换进组 20 的号（同号重建出来的组）：不认
     let mut t = base_table();
@@ -486,7 +579,7 @@ fn regrouped_members_are_not_a_witness() {
 #[test]
 fn witness_must_hold_after_the_table_read() {
     let setup = || {
-        let mut s = Scope::new(10, 2);
+        let mut s = Scope::new(10, Some(Birth(10)), 2);
         observe(&mut s, base_table());
         // CLI 死了、shell 20 与 21 被收养；表里新出现同会话的 22，父链断了，只能靠见证
         let mut t: Vec<Proc> = base_table().into_iter().filter(|p| p.pid != 11).collect();
@@ -525,7 +618,7 @@ fn witness_must_hold_after_the_table_read() {
 /// 最后一个见证没了，下一次求范围就不认这个会话，不等周期删除。
 #[test]
 fn session_is_dropped_the_moment_its_last_witness_is_gone() {
-    let mut s = Scope::new(10, 2);
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
     observe(&mut s, base_table());
     assert_eq!(s.witness_pids(), vec![20, 21]);
     let mut t: Vec<Proc> = base_table().into_iter().filter(|p| p.pid < 20).collect();
@@ -539,7 +632,7 @@ fn session_is_dropped_the_moment_its_last_witness_is_gone() {
 /// 见证选停住了的、记到过的、离根最近的那个；没停住的不当见证。
 #[test]
 fn witness_is_the_stopped_member_closest_to_the_root() {
-    let mut s = Scope::new(10, 2);
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
     let mut t = base_table();
     for p in &mut t {
         p.run = Run::Stopped;

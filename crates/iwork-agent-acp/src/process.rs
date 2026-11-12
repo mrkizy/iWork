@@ -11,6 +11,8 @@ mod scan;
 #[cfg(unix)]
 mod scope;
 #[cfg(unix)]
+mod signal;
+#[cfg(unix)]
 mod tree;
 #[cfg(all(test, unix))]
 mod tree_tests;
@@ -121,7 +123,11 @@ impl SupervisedProcess {
             #[cfg(unix)]
             sample_loop(move || sampled.0.sample(&mut system), sample_tx).await;
             #[cfg(windows)]
-            sample_loop(move || sample_tree(&mut system, pid), sample_tx).await;
+            sample_loop(
+                move || sample_tree(&mut system, pid).map_or(Tick::Done, Tick::Sample),
+                sample_tx,
+            )
+            .await;
         });
         Ok((
             Self {
@@ -243,11 +249,22 @@ fn reap(mut child: Child) {
     });
 }
 
+/// 一次采样的结果。
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Tick {
+    Sample(ResourceSample),
+    /// 这一次没采成（扫描失败），下次再来
+    #[cfg_attr(windows, allow(dead_code))]
+    Skip,
+    /// 树里已没有进程，采样结束
+    Done,
+}
+
 /// 采样循环。全机进程扫描是同步的重活，放到阻塞线程池里做，不占异步工作线程；
-/// 一次做完才开始计下一次，不会重叠。`scan` 返回 `None`（树里已没有进程）时结束。
+/// 一次做完才开始计下一次，不会重叠。`scan` 返回 [`Tick::Done`]（树里已没有进程）时结束。
 async fn sample_loop<F>(scan: F, out: watch::Sender<Option<ResourceSample>>)
 where
-    F: FnMut() -> Option<ResourceSample> + Send + 'static,
+    F: FnMut() -> Tick + Send + 'static,
 {
     let mut scan = scan;
     let mut ticker = tokio::time::interval(SAMPLE_INTERVAL);
@@ -264,7 +281,8 @@ where
         };
         scan = back;
         match sample {
-            Some(sample) if out.send(Some(sample)).is_ok() => {}
+            Tick::Sample(sample) if out.send(Some(sample)).is_ok() => {}
+            Tick::Skip => {}
             _ => return,
         }
     }
@@ -321,10 +339,9 @@ fn adopt(child: Child, exit: watch::Sender<Option<ExitInfo>>) -> io::Result<Proc
 
 #[cfg(unix)]
 impl ProcessTree {
-    /// 请桥接退出：只发给桥接自己，它的后代由之后的清理收拾。
+    /// 请桥接退出：只发给桥接自己，它的后代由之后的清理收拾。它的进程号已经不归我们（回收了、根作废了）就不发。
     fn terminate(&self) {
-        // SAFETY: kill 只读两个整数参数
-        unsafe { libc::kill(self.0.root(), libc::SIGTERM) };
+        self.0.signal_root(libc::SIGTERM);
     }
 
     fn kill(&self) {
@@ -559,7 +576,7 @@ mod tests {
                 move || {
                     counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     std::thread::sleep(Duration::from_millis(300));
-                    Some(ResourceSample {
+                    Tick::Sample(ResourceSample {
                         rss_bytes: 1,
                         cpu_percent: 0.0,
                         processes: 1,

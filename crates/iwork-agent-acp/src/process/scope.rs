@@ -68,6 +68,8 @@ struct Recorded {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
     pub pid: Pid,
+    /// 这一遍扫描读到的出生时间：发信号时按它认人（5.4a「发信号按身份」）。读不到的成员不发信号
+    pub birth: Option<Birth>,
     pub ppid: Pid,
     pub sid: Option<Pid>,
     pub run: Run,
@@ -106,12 +108,25 @@ pub struct Scope {
 }
 
 impl Scope {
-    /// `root`：桥接的进程号（也是根组号）；`root_sid`：桥接所在的会话。
-    pub fn new(root: Pid, root_sid: Pid) -> Self {
+    /// `root`：桥接的进程号（也是根组号）；`root_birth`：它的出生时间（起它之后立刻读，读到了就记成记到过的进程：
+    /// 一遍扫描都没做成时范围里也有它，审查 S6-5 1/F-3）；`root_sid`：桥接所在的会话。
+    pub fn new(root: Pid, root_birth: Option<Birth>, root_sid: Pid) -> Self {
+        let recorded = root_birth
+            .map(|birth| {
+                (
+                    root,
+                    Recorded {
+                        birth,
+                        sid: root_sid,
+                    },
+                )
+            })
+            .into_iter()
+            .collect();
         Self {
             root: Some(root),
             root_sid,
-            recorded: BTreeMap::new(),
+            recorded,
             sessions: BTreeSet::new(),
             dropped: BTreeSet::new(),
         }
@@ -122,7 +137,6 @@ impl Scope {
         self.root = None;
     }
 
-    #[cfg(test)]
     pub fn root_valid(&self) -> bool {
         self.root.is_some()
     }
@@ -223,6 +237,7 @@ impl Scope {
                 let p = &table.0[pid];
                 Member {
                     pid: p.pid,
+                    birth: p.birth,
                     ppid: p.ppid,
                     sid: p.sid,
                     run: p.run,

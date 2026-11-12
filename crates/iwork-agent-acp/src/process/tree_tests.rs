@@ -102,7 +102,7 @@ async fn wait_for(path: &Path) -> String {
 
 /// 活着、不是僵尸。
 fn alive(pid: Pid) -> bool {
-    scan::read_table().0.contains_key(&pid)
+    scan::read_table().unwrap().0.contains_key(&pid)
 }
 
 async fn wait_gone(pid: Pid) {
@@ -386,8 +386,122 @@ fn reaped_elsewhere_disables_root_group() {
     let mut child = std::process::Command::new("true").spawn().unwrap();
     let pid = child.id() as Pid;
     child.wait().unwrap();
-    let scope = std::sync::Mutex::new(super::scope::Scope::new(pid, 1));
-    let said = super::tree::wait_exit_no_reap(pid, &scope);
+    let scope = std::sync::Mutex::new(super::scope::Scope::new(pid, None, 1));
+    let said = super::tree::wait_exit_no_reap(pid, None, &scope);
     assert_eq!(said, "进程已被别处回收");
     assert!(!scope.lock().unwrap().root_valid());
+}
+
+// ---------- 审查 S6-5 第 1 轮：F-2、F-3、F-4 ----------
+
+/// 1/F-4：扫描没做成不是空表。`clear()` 返回 `false`、范围没变、句柄没交出去；`is_empty()` 答「不空」。恢复之后
+/// 再清的是同一个范围，清得掉。
+#[tokio::test]
+async fn scan_failure_is_not_empty() {
+    let f = Fixture::start("sleep 30 & echo $! > $D/m.pid; wait");
+    let member = f.pid("m.pid").await;
+    let _cleanup = Leftover(vec![member]);
+    f.process.record().await;
+    let tree = f.process.unix_tree().clone();
+    let before = tree.scope_copy();
+    tree.fail_scans(true);
+    assert!(!f.process.kill_tree_and_wait().await, "扫描没做成不报清空");
+    assert_eq!(tree.scope_copy(), before, "范围没变");
+    assert!(tree.holds_child(), "没回收");
+    assert!(!f.process.tree_is_empty().unwrap(), "答「不空」");
+    assert!(alive(f.root()) && alive(member), "一个信号都没发");
+    tree.fail_scans(false);
+    assert!(f.process.kill_tree_and_wait().await);
+    assert!(!alive(member));
+}
+
+/// 同上，桥接已经退出（僵尸，没回收）、它留下的后台进程还活着：这时「桥接退了没有」「回收拿不拿得到退出状态」都
+/// 放行，只剩「扫描没做成不当空表」这一道在挡。
+#[tokio::test]
+async fn scan_failure_after_root_exit_is_not_empty() {
+    let f = Fixture::start("sleep 30 & echo $! > $D/m.pid; exit 0");
+    let member = f.pid("m.pid").await;
+    let _cleanup = Leftover(vec![member]);
+    f.process.exited().await;
+    f.process.record().await;
+    let tree = f.process.unix_tree().clone();
+    tree.fail_scans(true);
+    assert!(!f.process.kill_tree_and_wait().await, "扫描没做成不报清空");
+    assert!(alive(member) && tree.holds_child());
+    tree.fail_scans(false);
+    assert!(f.process.kill_tree_and_wait().await);
+    assert!(!alive(member));
+}
+
+/// 1/F-3（reviewer 的探针）：第一遍读表超过期限，`clear()` 返回 `false`；桥接替身还活着、没被回收、根组仍有效。等迟到
+/// 的那一遍读完，范围也没被它弄空。第二次 `clear()` 只许两种结果：`true` 并且原来的根不在了，或者 `false`。
+#[tokio::test]
+async fn first_scan_timeout_keeps_root_and_retry_is_truthful() {
+    let f = Fixture::start("sleep 30");
+    let tree = f.process.unix_tree().clone();
+    tree.delay_next_scan(TREE_CLEAR_LIMIT + Duration::from_millis(300));
+    assert!(!f.process.kill_tree_and_wait().await);
+    assert!(alive(f.root()), "根还活着");
+    assert!(tree.holds_child(), "clear 是 false：不回收");
+    assert!(tree.scope_copy().root_valid(), "根组仍有效");
+    // 等迟到的那一遍读完
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(tree.scope_copy().root_valid(), "迟到的扫描碰不到根组");
+    let cleared = f.process.kill_tree_and_wait().await;
+    assert!(!(cleared && alive(f.root())), "不许返回 true 而根还活着");
+    assert!(cleared, "这一次没有注入，清得掉");
+}
+
+/// 1/F-3：判定清空之后、回收之前，根组还有效；回收拿到退出状态之后才作废。
+#[tokio::test]
+async fn root_group_valid_until_wait_returns() {
+    let f = Fixture::start("sleep 30");
+    let tree = f.process.unix_tree().clone();
+    let t = tree.clone();
+    let cleared = f
+        .clear_with(GateStep::BeforeReap, || async move {
+            assert!(t.scope_copy().root_valid() && t.holds_child());
+        })
+        .await;
+    assert!(cleared);
+    assert!(!tree.scope_copy().root_valid() && !tree.holds_child());
+}
+
+/// 等的时候得到 `ECHILD`，但这个进程按身份还在（这里拿测试进程自己：它不是自己的子进程）：根组不作废。
+#[test]
+fn echild_with_live_root_keeps_scope() {
+    let me = std::process::id() as Pid;
+    let birth = scan::birth_of(me);
+    assert!(birth.is_some());
+    let scope = std::sync::Mutex::new(super::scope::Scope::new(me, birth, 1));
+    let said = super::tree::wait_exit_no_reap(me, birth, &scope);
+    assert_eq!(said, "等待进程退出失败（ECHILD，进程还在）");
+    assert!(scope.lock().unwrap().root_valid());
+}
+
+/// 1/F-2：`clear()` 成功（桥接已回收）之后不再给旧进程号发信号；`shutdown()` 照常走完。
+#[tokio::test]
+async fn no_signal_to_root_after_reap() {
+    let f = Fixture::start("sleep 30");
+    let tree = f.process.unix_tree().clone();
+    assert!(f.process.kill_tree_and_wait().await);
+    assert!(!tree.signal_root(libc::SIGTERM), "回收之后不发");
+    f.process.shutdown().await;
+}
+
+/// 1/F-2：桥接被别处回收（`ECHILD`）之后 `shutdown()`：号码已经不归我们，按身份发不出去；之后的清理按身份确认它
+/// 不在，照「已回收」处理。
+#[tokio::test]
+async fn shutdown_after_reaped_elsewhere_sends_nothing() {
+    let f = Fixture::start("exit 0");
+    f.process.exited().await;
+    let root = f.root();
+    // 别处把它回收了
+    // SAFETY: 回收本测试起的子进程
+    let rc = unsafe { libc::waitpid(root, std::ptr::null_mut(), 0) };
+    assert_eq!(rc, root);
+    let tree = f.process.unix_tree().clone();
+    assert!(!tree.signal_root(libc::SIGTERM), "号码不归我们了，不发");
+    assert!(f.process.kill_tree_and_wait().await);
+    assert!(!tree.scope_copy().root_valid());
 }
