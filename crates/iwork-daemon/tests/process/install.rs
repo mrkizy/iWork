@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 
 use iwork_ipc::peer::{self, ImageId, MANIFEST_FILE, Want};
 
-use crate::support::{DAEMON, Daemon, Sandbox, append_exe, code, copy_exe, log_text};
+use crate::support::{
+    DAEMON, Daemon, Sandbox, append_exe, code, copy_exe, log_text, readies, wait_readies,
+    wait_ready_logged,
+};
 
 const FAST: (&str, &str) = ("IWORK_DEV_INSTALL_FAST", "10");
 /// 每条用例要复制、重签几个 20 MB 的程序并反复算哈希；本机负载高（其他构建、杀毒软件扫新程序）时这些都慢，
@@ -163,37 +166,11 @@ pub fn image_of(path: &Path) -> String {
     pick.to_string()
 }
 
-/// 日志里每次「后台服务就绪」的运行映像身份，按先后。
-pub fn readies(sb: &Sandbox) -> Vec<String> {
-    log_text(sb)
-        .lines()
-        .filter(|l| l.contains("后台服务就绪"))
-        .filter_map(|l| {
-            let v: serde_json::Value = serde_json::from_str(l).ok()?;
-            v["fields"]["image"].as_str().map(str::to_owned)
-        })
-        .collect()
-}
-
-pub fn wait_readies(sb: &Sandbox, n: usize, limit: Duration) -> Vec<String> {
-    let deadline = Instant::now() + limit;
-    loop {
-        let r = readies(sb);
-        if r.len() >= n {
-            return r;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{limit:?} 内没等到第 {n} 次就绪：{r:?}"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 /// 起安装目录里的后台（加快安装检查的计时），等它就绪。
 pub fn start(sb: &Sandbox, inst: &Install, args: &[&str]) -> Daemon {
+    let before = readies(sb).len();
     let d = sb.spawn_exe(&inst.daemon(), args, &[FAST]);
-    sb.wait_ready(d.pid(), START);
+    wait_ready_logged(sb, d.pid(), before, START);
     d
 }
 
@@ -343,8 +320,9 @@ fn old_daemon_restarted_mid_install_still_upgrades_via_standby() {
     standby.wait_stderr("等锁接班", START);
     inst.put("iwork-daemon", "B");
     // 磁盘上已是 B 的后台、清单还是 A：A 崩了，等锁的实例 exec 磁盘上的程序（B）接班
+    let before = readies(&sb).len();
     a.kill9();
-    sb.wait_ready(standby.pid(), START);
+    wait_ready_logged(&sb, standby.pid(), before, START);
     let r = readies(&sb);
     assert_eq!(r.last().unwrap(), &inst.image("B"), "接班的是磁盘上的 B");
     let before = r.len();
@@ -452,7 +430,7 @@ fn identity_failure_mid_install_is_relaunched() {
         err.contains("逻辑退出码 14") && err.contains("包没装齐"),
         "{err}"
     );
-    assert!(sb.untouched(), "不拿锁、不写状态");
+    sb.assert_untouched(); // 不拿锁、不写状态
 
     // 另一格：包是齐的，第 1 步期间程序文件被改写（测试的子进程改它的修改时间）
     inst.put_manifest(&[("iwork-daemon", "A"), ("iwork-client", "A")]);
@@ -482,7 +460,7 @@ fn identity_failure_mid_install_is_relaunched() {
         "{}",
         d.stderr()
     );
-    assert!(sb.untouched());
+    sb.assert_untouched();
 
     // 装齐、去掉注入：下一次拉起到就绪
     start(&sb, &inst, &["--service"]);
@@ -503,7 +481,7 @@ fn identity_failure_on_settled_install_exits_zero() {
     );
     let (status, err) = run_installed(&sb, &inst, &[], &[FAIL_IDENTITY]);
     assert_eq!(status, Some(10), "{err}");
-    assert!(sb.untouched());
+    sb.assert_untouched();
 }
 
 /// S7g（1/F-8）：升级 `exec` 的那一瞬间接手的新进程，冷却从它自己的启动算起。三个入口共用的后半段：

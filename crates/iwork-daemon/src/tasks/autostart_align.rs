@@ -338,7 +338,11 @@ mod tests {
             p.program.clone(),
             wake,
         ));
-        for _ in 0..200 {
+        // 时钟是暂停的：运行时一空闲就把虚拟时间往前拨，而读设置要在别的线程上真的读库。按虚拟时间数次数
+        // （原来是 200 次 × 1s）会在库还没读完时就把次数用光（CI run 43236780312 上只走到第一次 set）。
+        // 所以按真实时间设上限：重试本身仍由虚拟时钟驱动，退避 5s、10s 一下就过去
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_secs(1)).await;
             if p.state.lock().unwrap().is_some() {
                 break;

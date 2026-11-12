@@ -85,7 +85,7 @@ fn service_mode_usage_exits_zero() {
     let (status, err) = sb.run_to_exit(&["--service", "--bogus"], &[]);
     assert_eq!(code(status), Some(0), "{err}");
     assert!(err.contains("未知参数"), "{err}");
-    assert!(sb.untouched());
+    sb.assert_untouched();
 }
 
 #[test]
@@ -94,7 +94,7 @@ fn usage_exits_2_when_not_managed() {
     let (status, err) = sb.run_to_exit(&["--bogus"], &[]);
     assert_eq!(code(status), Some(2), "{err}");
     assert!(err.contains("未知参数"), "{err}");
-    assert!(sb.untouched());
+    sb.assert_untouched();
 }
 
 /// 第 1 步失败、程序在开发目录（两种包的形态都对不上，方案 2.2 L7）→ 「包没装齐」→ 14（托管也报 14），
@@ -109,7 +109,7 @@ fn identity_failure_in_dev_dir_exits_14() {
         err.contains("开发注入") && err.contains("包没装齐"),
         "{err}"
     );
-    assert!(sb.untouched());
+    sb.assert_untouched();
     let (status, _) = sb.run_to_exit(&["--service"], &env);
     assert_eq!(code(status), Some(14));
 }
@@ -212,4 +212,24 @@ fn every_step_failure_lands_in_table() {
             );
         }
     }
+}
+
+/// `assert_untouched` 不成立时，panic 里带着证据：出现的目录、家目录下的条目、会合点里锁文件的内容。
+#[test]
+fn assert_untouched_reports_evidence() {
+    let sb = Sandbox::new();
+    sb.assert_untouched();
+    let run = sb.run_dir();
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(
+        run.join(iwork_ipc::rendezvous::LOCK_FILE),
+        r#"{"pid":4242}"#,
+    )
+    .unwrap();
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sb.assert_untouched()))
+        .expect_err("目录在时应 panic");
+    let msg = err.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(msg.contains("家目录里出现了 iWork 的东西"), "{msg}");
+    assert!(msg.contains(iwork_ipc::rendezvous::LOCK_FILE), "{msg}");
+    assert!(msg.contains(r#""pid":4242"#), "{msg}");
 }
