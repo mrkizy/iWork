@@ -61,7 +61,8 @@
       --part skill = 仓库的 CLAUDE.md、技能、子代理、命令加不加载（L1，L2 对照）、技能内联命令（K3b、K3c）、allowed-tools 故障探针（K2c）、
       插件 hook 答允许对 iWork 的拒绝（H1）；
       --part recheck = G1、G8、G7（非 cfg 格）带产品设置重跑；--part p4 = macOS 上沙箱起不来时 CLI 停不停（F1、F2）；
-      --part cfgdir = CLI 读哪一份 .claude.json；--part repo = 仓库内容由 iWork 送进会话的实测格 RC1–RC8
+      --part cfgdir = CLI 读哪一份 .claude.json；--part repo = 仓库内容由 iWork 送进会话的实测格 RC1–RC8；
+      --part vdir = 每家一个 iWork 专用配置目录的实测格（方案 3.1d）
 --selftest：不调用 claude，只自测脚本自己的机制。
 """
 import argparse, ast, base64, collections, ctypes, fcntl, hashlib, inspect, json, os, re, secrets, shlex, shutil, signal, socket, stat, subprocess, sys, tarfile, tempfile, threading, time
@@ -7493,7 +7494,8 @@ def main():
                          "net = 沙箱联网 p1、p2、p4 两格（4 个）；skill = 仓库技能加不加载 L1、L2，内联命令 K3b、K3c，"
                          "allowed-tools 的故障探针 K2c，插件 hook 对 iWork hook H1（6 个，日常账号下 K2c 另加 1 个预检）；"
                          "recheck = G1、G8、G7 非 cfg 格带产品设置重跑（27 个）；p4 = macOS 上沙箱起不来时 F1、F2（2 个）；"
-                         "cfgdir = CLI 读哪一份 .claude.json（四次 claude mcp list，0 个模型实例）；repo = 方案 3.1c 的 RC1–RC8（15 个）；不给就都跑")
+                         "cfgdir = CLI 读哪一份 .claude.json（四次 claude mcp list，0 个模型实例）；repo = 方案 3.1c 的 RC1–RC8（15 个）；"
+                         "vdir = 方案 3.1d 的日常账号格（这一批 9 个，V10、V12 下一批）；不给就都跑")
     ap.add_argument("--cell", default=None,
                     help="只给 --only R2X：逗号分隔的格名，只跑这几格（优先于 --part），如 --cell k3（带产品设置重记 k3、k4，1 个实例）")
     ap.add_argument("--quick", action="store_true", help="G2 只跑普通 Bash 一行（结论只能是 INCONCLUSIVE，不能进已验证表）")
