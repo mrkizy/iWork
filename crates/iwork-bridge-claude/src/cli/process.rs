@@ -5,6 +5,9 @@
 //!   再继承任何东西，CLI 看到的就是计划里那一份。
 //! - stdout：按行读，一行最长 [`MAX_LINE_BYTES`]（events.rs 的同一个上限）。超了就停在上限附近报错，不把整行
 //!   读进内存；之后这条输出流不再可信，调用方按致命处理。
+//! - stdin：开会话的握手阶段直接写（[`CliProcess::write_line`]，一问一答，行很短）；会话开起来之后交给
+//!   [`InputQueue`]：一个单独的任务往 stdin 写，会话循环只往队列里放。CLI 正在往 stdout 写一大行、不读 stdin 时，
+//!   会话循环照样读它的 stdout、收 hook 事件，双方不会互等（审查 S6-3 1/F-1）。
 //! - stderr：不进日志（里面可能有用户的内容），只留最后 [`STDERR_TAIL_BYTES`] 字节，回合结局判不出来时给诊断用。
 //! - 结束进程树的做法归 S6-5（方案 5.4a）；这里只提供「杀掉 CLI 自己并等它退出」，开会话失败时用（那时还没有
 //!   任何工具调用，没有它起的命令要清）。
@@ -16,6 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::{mpsc, watch};
 
 use crate::cli::events::{LineError, MAX_LINE_BYTES};
 use crate::launch::LaunchPlan;
@@ -34,7 +38,8 @@ pub const STDERR_TAIL_BYTES: usize = 8 * 1024;
 /// 一个跑着的 CLI。
 pub struct CliProcess {
     child: Child,
-    stdin: ChildStdin,
+    /// 交给 [`InputQueue`] 之后为 `None`
+    stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     /// 还没读到换行的半行（放在这里而不是局部变量：`next_line` 被取消时不丢已读的字节）
     partial: Vec<u8>,
@@ -72,7 +77,7 @@ impl CliProcess {
         });
         Ok(Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             stdout,
             partial: Vec::new(),
             stderr_tail,
@@ -84,11 +89,33 @@ impl CliProcess {
         self.child.id()
     }
 
-    /// 写一行（自动加换行符）并刷出。
+    /// 写一行（自动加换行符）并刷出。只在开会话的握手阶段用；之后用 [`Self::input_queue`]。
     pub async fn write_line(&mut self, line: &str) -> io::Result<()> {
-        self.stdin.write_all(line.as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or_else(|| io::Error::other("stdin 已经交给输入队列"))?;
+        stdin.write_all(line.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await
+    }
+
+    /// 把 stdin 交给一个单独的写任务，返回往里放行的队列。只能调一次。
+    pub fn input_queue(&mut self) -> InputQueue {
+        let mut stdin = self.stdin.take().expect("输入队列只建一次");
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(INPUT_QUEUE_LINES);
+        let (failed_tx, failed) = watch::channel(false);
+        tokio::spawn(async move {
+            while let Some(mut bytes) = rx.recv().await {
+                bytes.push(b'\n');
+                if stdin.write_all(&bytes).await.is_err() || stdin.flush().await.is_err() {
+                    let _ = failed_tx.send(true);
+                    return;
+                }
+            }
+            // 队列关了（会话结束）：丢掉 stdin，CLI 读到输入结束
+        });
+        InputQueue { tx, failed }
     }
 
     /// 读下一行（不含换行符）；CLI 关了 stdout 返回 `None`（最后没换行的半行照样当一行返回）。
@@ -136,6 +163,54 @@ impl CliProcess {
     }
 }
 
+/// 输入队列里最多排几行。正常时只有一条用户消息加一条控制请求；排满说明 CLI 一直不读 stdin。
+pub const INPUT_QUEUE_LINES: usize = 8;
+
+/// 一行输入的上限（字节，不含换行符）：和读 CLI 输出用同一个数。
+pub const MAX_INPUT_LINE_BYTES: usize = MAX_LINE_BYTES;
+
+/// 往 CLI 的 stdin 放一行没放成。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputError {
+    /// 这一行超过 [`MAX_INPUT_LINE_BYTES`]：不写，调用方回 `setup_invalid`
+    TooLarge { bytes: usize },
+    /// 队列排满了：CLI 一直不读 stdin
+    Backlogged,
+    /// 写任务已经停了（写出错，CLI 多半没了）
+    Closed,
+}
+
+/// 给 CLI 的输入队列（见模块说明）。丢掉它就关掉 CLI 的 stdin。
+pub struct InputQueue {
+    tx: mpsc::Sender<Vec<u8>>,
+    failed: watch::Receiver<bool>,
+}
+
+impl InputQueue {
+    /// 放一行（不含换行符），不等它写完。
+    pub fn send(&self, line: &str) -> Result<(), InputError> {
+        if line.len() > MAX_INPUT_LINE_BYTES {
+            return Err(InputError::TooLarge { bytes: line.len() });
+        }
+        if *self.failed.borrow() {
+            return Err(InputError::Closed);
+        }
+        self.tx
+            .try_send(line.as_bytes().to_vec())
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => InputError::Backlogged,
+                mpsc::error::TrySendError::Closed(_) => InputError::Closed,
+            })
+    }
+
+    /// 写任务写出错时返回（之后 CLI 收不到输入了）；一直没出错就一直等。取消安全。
+    pub async fn failed(&mut self) {
+        if self.failed.wait_for(|f| *f).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 /// 一行的字节 → 文字：去掉行尾的 `\r`，不是 UTF-8 的按坏行处理。
 fn finish(mut line: Vec<u8>) -> Result<String, ReadError> {
     if line.last() == Some(&b'\r') {
@@ -154,6 +229,33 @@ fn keep_tail(tail: &mut VecDeque<u8>, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 超长的一行不放（调用方回 `setup_invalid`）；队列排满了报 `Backlogged`，不在这里等。
+    #[test]
+    fn input_queue_limits() {
+        let (tx, _rx) = mpsc::channel(1);
+        let (_failed_tx, failed) = watch::channel(false);
+        let q = InputQueue { tx, failed };
+        let big = "x".repeat(MAX_INPUT_LINE_BYTES + 1);
+        assert_eq!(
+            q.send(&big),
+            Err(InputError::TooLarge {
+                bytes: MAX_INPUT_LINE_BYTES + 1
+            })
+        );
+        assert_eq!(q.send("first"), Ok(()));
+        assert_eq!(q.send("second"), Err(InputError::Backlogged));
+    }
+
+    /// 写任务出过错：之后放不进去。
+    #[test]
+    fn input_queue_after_failure_is_closed() {
+        let (tx, _rx) = mpsc::channel(8);
+        let (failed_tx, failed) = watch::channel(false);
+        let q = InputQueue { tx, failed };
+        failed_tx.send(true).unwrap();
+        assert_eq!(q.send("x"), Err(InputError::Closed));
+    }
 
     #[test]
     fn line_bytes_to_text() {

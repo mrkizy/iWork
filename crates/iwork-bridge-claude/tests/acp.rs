@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use iwork_domain::common::{ModelId, Usage};
 use iwork_ports::agent::{
-    AgentError, AgentSession, AgentUpdate, PermissionDecision, RawToolInput, SandboxStatus,
-    TurnOutcome,
+    AgentError, AgentSession, AgentUpdate, IsolationKind, PermissionDecision, RawToolInput,
+    SandboxStatus, TurnOutcome,
 };
 use serde_json::{Value, json};
 use support::acp::*;
@@ -228,7 +228,7 @@ async fn isolation_case(spec_dirs: Vec<std::path::PathBuf>, init_line: Value) ->
 fn isolation_failed(updates: &[AgentUpdate]) -> bool {
     matches!(
         ends(updates)[..],
-        [AgentUpdate::Failed(AgentError::Protocol { message })] if message.contains("用户配置进入了会话")
+        [AgentUpdate::Failed(AgentError::IsolationBroken { .. })]
     )
 }
 
@@ -239,7 +239,15 @@ async fn init_with_unexpected_plugin_breaks_isolation() {
         init_with(json!([{ "name": "mine", "path": "/home/u/.claude/plugins/mine", "source": "mine@inline" }]), None),
     )
     .await;
-    assert!(isolation_failed(&updates), "{updates:?}");
+    // 种类与插件名一路带到后台（审查 1/F-6）：只名字，不带路径
+    assert_eq!(
+        ends(&updates),
+        [&AgentUpdate::Failed(AgentError::IsolationBroken {
+            kind: IsolationKind::Plugin,
+            plugin: Some("mine".into())
+        })],
+        "{updates:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -422,4 +430,141 @@ async fn tool_call_outside_turn_is_denied() {
     assert_eq!(tool["decision"], "deny");
     assert!(!marker.exists());
     assert!(answers.seen.lock().unwrap().is_empty(), "没交给后台");
+}
+
+/// 审查 1/F-1：CLI 往 stdout 写一大行、暂时不读 stdin，同时后台发来一条大 prompt：桥接不能在写 stdin 上停住，
+/// 要照样读 stdout，双方都往下走。假 CLI 先停半秒（让桥接开始写 2 MiB 的用户消息、写满管道），再写 2 MiB 的
+/// 一行，然后才去读 stdin。修之前桥接卡在写上、假 CLI 卡在写上，这一轮永远不结束。
+#[tokio::test(flavor = "multi_thread")]
+async fn big_output_and_big_prompt_do_not_deadlock() {
+    let rig = Rig::new(script(vec![
+        json!({ "step": "sleep_ms", "ms": 500 }),
+        json!({ "step": "emit_big", "bytes": 2 * 1024 * 1024 }),
+        read_user(),
+        init(),
+        text("m1", "收到"),
+        result_ok(),
+    ]));
+    let s = rig.open(rig.spec(), allow_all()).await.unwrap();
+    let big = "大".repeat(700 * 1024);
+    let updates = tokio::time::timeout(std::time::Duration::from_secs(20), turn(&s, &big))
+        .await
+        .expect("20 秒内这一轮结束，没有互等")
+        .unwrap();
+    assert_eq!(
+        ends(&updates),
+        [&AgentUpdate::Finished(TurnOutcome::Completed)]
+    );
+}
+
+/// 审查 1/F-2：后台选了允许、改写后的输入却不合法：交给 hook 的是拒绝，对账也按拒绝记。CLI 之后照样回了
+/// 这个编号的成功结果（没经允许就执行了）→ `hook_inactive`。修之前对账按后台的「允许」记，这一轮当成完成。
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_rewrite_is_denied_and_reconciled_as_denied() {
+    let input = json!({ "command": "ls" });
+    let rig = Rig::new(script(vec![
+        read_user(),
+        init(),
+        json!({ "step": "tool", "id": "toolu_1", "name": "Bash", "input": input }),
+        tool_result("toolu_1", true, "ran anyway"),
+        result_ok(),
+    ]));
+    let answers = Arc::new(Answers::default());
+    *answers.decision.lock().unwrap() = Some(PermissionDecision::AllowRewritten {
+        new_input: RawToolInput("not json".into()),
+    });
+    let s = rig.open(rig.spec(), Handler(answers)).await.unwrap();
+    let updates = turn(&s, "跑一下").await.unwrap();
+    assert!(
+        matches!(ends(&updates)[..], [AgentUpdate::Failed(AgentError::Protocol { message })] if message.contains("审批 hook 没有生效")),
+        "{updates:?}"
+    );
+    let tool = rig.log().into_iter().find(|v| v["kind"] == "tool").unwrap();
+    assert_eq!(tool["decision"], "deny", "交给 hook 的是拒绝");
+}
+
+/// 审查 1/F-3、F-5：回合之外 CLI 回了一个没经允许的成功结果：会话当场作废（`hook_inactive`），下一次 prompt
+/// 拿到的是这个原因，不是泛泛的「CLI 退出了」。修之前回合外的结果不对账，下一轮照常完成。
+#[tokio::test(flavor = "multi_thread")]
+async fn unapproved_result_outside_turn_ends_session_with_its_reason() {
+    let rig = Rig::new(script(vec![
+        read_user(),
+        init(),
+        result_ok(),
+        tool_use("toolu_9", "Bash", json!({ "command": "rm x" })),
+        tool_result("toolu_9", true, "done"),
+        read_user(),
+        init(),
+        result_ok(),
+    ]));
+    let s = rig.open(rig.spec(), allow_all()).await.unwrap();
+    let first = turn(&s, "一").await.unwrap();
+    assert_eq!(
+        ends(&first),
+        [&AgentUpdate::Finished(TurnOutcome::Completed)]
+    );
+    // 等回合外那两行到桥接
+    for _ in 0..100 {
+        if rig.log().iter().filter(|v| v["kind"] == "emitted").count() >= 5 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let err = match s
+        .prompt(vec![iwork_ports::agent::ContentBlock::Text("二".into())])
+        .await
+    {
+        Err(e) => e,
+        Ok(mut u) => {
+            use iwork_ports::agent::UpdateStream;
+            let mut last = None;
+            while let Some(x) = u.next().await {
+                last = Some(x);
+            }
+            match last {
+                Some(AgentUpdate::Failed(e)) => e,
+                other => panic!("第二轮应当失败：{other:?}"),
+            }
+        }
+    };
+    assert!(
+        matches!(&err, AgentError::Protocol { message } if message.contains("审批 hook 没有生效")),
+        "{err:?}"
+    );
+}
+
+/// 审查 1/F-5：开会话期间就到了的 `init` 带着外来的插件：开会话直接失败，原因是隔离失效（带插件名），
+/// 不留到第一轮。
+#[tokio::test(flavor = "multi_thread")]
+async fn isolation_failure_while_opening_fails_the_open() {
+    let rig = Rig::new(Value::Array(vec![
+        json!({ "step": "session_start" }),
+        init_with(
+            json!([{ "name": "mine", "path": "/home/u/.claude/plugins/mine", "source": "mine@inline" }]),
+            None,
+        ),
+        json!({ "step": "read_line" }),
+        json!({ "step": "answer_initialize", "mode": "dontAsk" }),
+        wait_eof(),
+    ]));
+    let err = rig
+        .open(rig.spec(), allow_all())
+        .await
+        .err()
+        .expect("开会话失败");
+    assert_eq!(
+        err,
+        AgentError::IsolationBroken {
+            kind: IsolationKind::Plugin,
+            plugin: Some("mine".into())
+        }
+    );
+    assert_eq!(
+        std::fs::read_dir(rig.data.path().join("run").join("h"))
+            .map(|d| d.count())
+            .unwrap_or(0),
+        0,
+        "会话目录删了"
+    );
 }

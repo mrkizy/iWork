@@ -10,7 +10,7 @@
 //! 5. 这两步都过了才返回；第一条用户消息由调用方之后再发。
 //!
 //! 哪一步失败都杀掉 CLI、停掉 hook 通道、删掉会话目录，不留东西；开会话的 future 被丢掉（调用方超时、请求被
-//! 取消）也一样：会话目录由作用域守卫管，成功时才交出去，CLI 带 `kill_on_drop`，hook 通道丢掉即停。
+//! 取消）也一样：会话目录自己负责删（`SessionDir` 的 Drop），CLI 带 `kill_on_drop`，hook 通道丢掉即停。
 //!
 //! 开会话期间 CLI 的每一行都先解析：不合协议（不是 JSON 对象、超过 8 MiB）就失败，和映射里一样不信任这条输出
 //! （`cli_exited`）。合协议的别的行（`system` 事件等）原样留在 [`OpenSession::early_lines`]，由调用方交给映射；
@@ -133,32 +133,9 @@ pub async fn open(req: OpenRequest<'_>) -> Result<OpenSession, OpenError> {
     }
     check_hook_program(&req.bridge.hook_program)?;
     let dir = SessionDir::create(req.data_dir).map_err(|e| OpenError::ChannelFailed(e.0))?;
-    let mut guard = DirGuard(Some(dir));
-    let parts = open_in(guard.dir(), &req).await?;
-    Ok(parts.into_session(guard.hand_over()))
-}
-
-/// 会话目录的作用域守卫：没交出去之前离开作用域（出错返回、future 被丢掉）就删掉。
-struct DirGuard(Option<SessionDir>);
-
-impl DirGuard {
-    fn dir(&self) -> &SessionDir {
-        self.0.as_ref().expect("交出去之前一直在")
-    }
-
-    fn hand_over(&mut self) -> SessionDir {
-        self.0.take().expect("只交一次")
-    }
-}
-
-impl Drop for DirGuard {
-    fn drop(&mut self) {
-        if let Some(dir) = self.0.take()
-            && let Err(e) = dir.remove()
-        {
-            tracing::warn!(error = %e, "开会话没成，删会话目录也失败了");
-        }
-    }
+    // 会话目录自己负责删（`SessionDir` 的 Drop）：出错返回、这个 future 被丢掉，都在这里删掉；成功时交给会话
+    let parts = open_in(&dir, &req).await?;
+    Ok(parts.into_session(dir))
 }
 
 /// hook 程序在、是普通文件、可执行（3.2）。不在的话报到永远不会来，提前说清楚。

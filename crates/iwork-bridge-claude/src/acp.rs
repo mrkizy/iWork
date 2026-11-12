@@ -38,7 +38,7 @@ use crate::cli::errors::TurnEnd;
 use crate::cli::facts::{IsolationBroken, SessionExpect};
 use crate::cli::input::{InputBlock, user_line};
 use crate::cli::map::{Fatal, Out, Report, StreamMapper};
-use crate::cli::process::ReadError;
+use crate::cli::process::{InputError, InputQueue, ReadError};
 use crate::deadlines::deadlines;
 use crate::hook_server::HookEvent;
 use crate::hook_server::input::{self as hook_input, HookInput};
@@ -117,9 +117,21 @@ type Conn = ConnectionTo<Client>;
 
 /// 带点名错误码的 JSON-RPC 错误：`data` 为 `{"iwork": {"code", "reason"?}}`（方案 2.6 第 7 条）。
 fn named_error(code: &str, reason: Option<&str>) -> agent_client_protocol::Error {
+    named_error_with(code, reason, None)
+}
+
+/// 同上，`isolation_broken` 的插件种类另带插件名（只名字，不带路径：`error.data.iwork.plugin`，F-6）。
+fn named_error_with(
+    code: &str,
+    reason: Option<&str>,
+    plugin: Option<&str>,
+) -> agent_client_protocol::Error {
     let mut inner = json!({ "code": code });
     if let Some(reason) = reason {
         inner["reason"] = json!(reason);
+    }
+    if let Some(plugin) = plugin {
+        inner["plugin"] = json!(plugin);
     }
     agent_client_protocol::Error::internal_error().data(json!({ META_KEY: inner }))
 }
@@ -142,12 +154,24 @@ enum Command {
     },
 }
 
-/// 桥接进程里那一条会话。
+/// 桥接进程里那一条会话。会话任务是它的唯一写入方（开会话时放进发送端，结束时记下原因、拿走发送端）。
 #[derive(Default)]
 struct Slot {
-    /// 开过会话之后有值；会话任务结束（致命错误）后发送端关闭，之后的 prompt 回 `cli_exited`
+    /// 会话任务在跑时有值
     commands: Option<mpsc::UnboundedSender<Command>>,
     opened: bool,
+    /// 会话为什么结束了：之后来的 prompt 拿到的就是它，不是泛泛的 `cli_exited`（审查 S6-3 1/F-5）
+    ended: Option<SessionFatal>,
+}
+
+impl Slot {
+    /// 会话已经结束时给 prompt 的错误。
+    fn ended_error(&self) -> agent_client_protocol::Error {
+        match &self.ended {
+            Some(f) => f.to_error(),
+            None => named_error("cli_exited", None),
+        }
+    }
 }
 
 /// 在给定的传输上说 ACP，直到对端断开。
@@ -310,7 +334,7 @@ fn new_session_id() -> String {
 /// 开会话，成功后起会话任务。一个桥接进程只开一次。
 async fn open(
     config: &BridgeConfig,
-    slot: &Mutex<Slot>,
+    slot: &Arc<Mutex<Slot>>,
     cx: &Conn,
     meta: Option<&Meta>,
     cwd: PathBuf,
@@ -332,7 +356,7 @@ async fn open(
         system_prompt,
         start,
     };
-    let session = startup::open(OpenRequest {
+    let mut session = startup::open(OpenRequest {
         data_dir: &config.data_dir,
         setup: &setup,
         opening: &opening,
@@ -350,9 +374,7 @@ async fn open(
         memory_dir: session.dir.files().memory,
     };
     let mapper = StreamMapper::new(setup.model.effort, expect);
-    let (tx, rx) = mpsc::unbounded_channel();
-    slot.lock().expect("锁没有中毒").commands = Some(tx);
-    let worker = Worker {
+    let mut worker = Worker {
         cx: cx.clone(),
         session_id: SessionId::new(match &opening.start {
             Start::New { session_id } | Start::Resume { session_id } => session_id.clone(),
@@ -363,8 +385,23 @@ async fn open(
         reconciler: Reconciler::default(),
         turn: None,
     };
+    // 开会话期间收下的行（`init` 可能已经在里面）先过映射与对账：这时确认的致命错误（隔离失效、没经允许的工具
+    // 结果）让开会话失败，不留到之后（审查 1/F-5）。失败时 `session` 在这里丢掉：CLI 被杀、通道停、目录删
+    for line in std::mem::take(&mut session.early_lines) {
+        if let Err(f) = worker.on_text(&line) {
+            tracing::warn!(code = f.code, reason = ?f.reason, "开会话期间的输出不过核对");
+            return Err(f.to_error());
+        }
+    }
+    let (tx, rx) = mpsc::unbounded_channel();
+    slot.lock().expect("锁没有中毒").commands = Some(tx);
+    let owner = Arc::clone(slot);
+    // 起不来的话闭包连同 `session` 一起丢掉，目录照样删（`SessionDir` 自己负责）
     cx.spawn(async move {
-        run_session(worker, session, rx).await;
+        let ended = run_session(worker, session, rx).await;
+        let mut slot = owner.lock().expect("锁没有中毒");
+        slot.commands = None;
+        slot.ended = ended;
         Ok(())
     })?;
     Ok(())
@@ -379,19 +416,23 @@ async fn prompt(
         .iter()
         .map(input_block)
         .collect::<Result<Vec<_>, _>>()?;
-    let commands = slot
-        .lock()
-        .expect("锁没有中毒")
-        .commands
-        .clone()
-        .ok_or_else(|| named_error("setup_invalid", Some("session")))?;
+    let commands = {
+        let slot = slot.lock().expect("锁没有中毒");
+        match (&slot.commands, slot.opened) {
+            (Some(c), _) => c.clone(),
+            (None, true) => return Err(slot.ended_error()),
+            (None, false) => return Err(named_error("setup_invalid", Some("session"))),
+        }
+    };
     let (done, result) = oneshot::channel();
-    commands
-        .send(Command::Prompt { blocks, done })
-        .map_err(|_| named_error("cli_exited", None))?;
-    result
-        .await
-        .unwrap_or_else(|_| Err(named_error("cli_exited", None)))
+    if commands.send(Command::Prompt { blocks, done }).is_err() {
+        return Err(slot.lock().expect("锁没有中毒").ended_error());
+    }
+    match result.await {
+        Ok(r) => r,
+        // 会话任务没回就结束了：拿它记下的原因
+        Err(_) => Err(slot.lock().expect("锁没有中毒").ended_error()),
+    }
 }
 
 /// ACP 内容块 → 桥接收的几种（5.2 最后一条）。
@@ -427,24 +468,53 @@ struct Answered {
 }
 
 /// 致命：这条会话不能再用了。
+#[derive(Debug, Clone)]
 struct SessionFatal {
     code: &'static str,
     reason: Option<&'static str>,
+    /// `isolation_broken` 是多出来的插件时，它的名字（只名字）
+    plugin: Option<String>,
+}
+
+impl SessionFatal {
+    const fn code(code: &'static str) -> Self {
+        Self {
+            code,
+            reason: None,
+            plugin: None,
+        }
+    }
+
+    fn to_error(&self) -> agent_client_protocol::Error {
+        named_error_with(self.code, self.reason, self.plugin.as_deref())
+    }
 }
 
 impl From<Fatal> for SessionFatal {
     fn from(f: Fatal) -> Self {
         match f {
-            Fatal::BadLine(_) => Self {
-                code: "cli_exited",
-                reason: None,
-            },
+            Fatal::BadLine(_) => Self::code("cli_exited"),
             Fatal::Isolation(i) => Self {
                 code: "isolation_broken",
                 reason: Some(isolation_kind(&i)),
+                // 名字的形状不合规定就不带（方案 2.6 第 7 条表下；bridge_error 那头还会再查一遍）
+                plugin: match i {
+                    IsolationBroken::UnexpectedPlugin { name } if plugin_shaped(&name) => {
+                        Some(name)
+                    }
+                    _ => None,
+                },
             },
         }
     }
+}
+
+/// 插件名能不能放进错误里：只有字母、数字和 `.`、`_`、`-`、`@`，1–80 个字符（方案 2.6 第 7 条表下）。
+fn plugin_shaped(name: &str) -> bool {
+    (1..=80).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'@'))
 }
 
 /// `isolation_broken` 的种类（只是枚举，不带路径或名字：`reason` 进后台的错误信息）。
@@ -457,61 +527,48 @@ fn isolation_kind(i: &IsolationBroken) -> &'static str {
     }
 }
 
-const BACKSTOP: SessionFatal = SessionFatal {
-    code: "approval_backstop",
-    reason: None,
-};
+const BACKSTOP: SessionFatal = SessionFatal::code("approval_backstop");
+const CLI_EXITED: SessionFatal = SessionFatal::code("cli_exited");
 
-/// 会话任务：独占 CLI、hook 通道与映射，直到致命错误。
+/// 会话任务：独占 CLI、hook 通道与映射，直到致命错误或连接断开。返回致命原因（连接断开为 `None`）。
+/// `s` 归它所有：它结束（或者这个 future 被丢掉）时 CLI 被杀、hook 通道停、会话目录删（`SessionDir` 自己负责）。
 async fn run_session(
     mut w: Worker,
     mut s: OpenSession,
     mut commands: mpsc::UnboundedReceiver<Command>,
-) {
+) -> Option<SessionFatal> {
     let (answered_tx, mut answered) = mpsc::unbounded_channel::<Answered>();
-    // 开会话期间收下的行（`init` 可能已经在里面）先过映射：更新事实，回合之外的正文只记诊断
-    let early = std::mem::take(&mut s.early_lines);
-    let mut fatal = None;
-    for line in early {
-        match w.mapper.on_line(&line) {
-            Ok(outs) => w.emit(outs),
-            Err(f) => {
-                fatal = Some(SessionFatal::from(f));
-                break;
-            }
-        }
-    }
-    while fatal.is_none() {
+    // stdin 交给单独的写任务：写卡住时这里照样读 stdout、收 hook 事件（审查 1/F-1）
+    let mut input = s.cli.input_queue();
+    let fatal = loop {
         let result = tokio::select! {
             cmd = commands.recv() => match cmd {
-                Some(Command::Prompt { blocks, done }) => w.begin(&mut s, blocks, done).await,
+                Some(Command::Prompt { blocks, done }) => w.begin(&input, blocks, done),
                 // 连接没了：没有人再发 prompt，会话到此为止
-                None => break,
+                None => break None,
             },
             line = s.cli.next_line() => w.on_line(line),
             ev = s.hook_events.recv() => match ev {
                 Some(ev) => w.on_hook(&s, ev, &answered_tx),
-                None => Err(SessionFatal { code: "channel_failed", reason: None }),
+                None => Err(SessionFatal::code("channel_failed")),
             },
             Some(a) = answered.recv() => w.on_answered(&s, a),
+            () = input.failed() => Err(CLI_EXITED),
         };
         if let Err(f) = result {
-            fatal = Some(f);
+            break Some(f);
         }
-    }
-    if let Some(f) = fatal {
+    };
+    if let Some(f) = &fatal {
         tracing::warn!(code = f.code, reason = ?f.reason, "会话出现致命错误，结束 CLI");
         if let Some(done) = w.turn.take() {
-            let _ = done.send(Err(named_error(f.code, f.reason)));
+            let _ = done.send(Err(f.to_error()));
         }
     }
     // 停在这里的还在等的 hook 一律拒绝；怎么停才不留下命令（5.4a）归 S6-5
     s.pending.deny_all(REASON_NO_TURN);
     let _ = s.cli.kill().await;
-    drop(s.serving);
-    if let Err(e) = s.dir.remove() {
-        tracing::warn!(error = %e, "删会话目录失败");
-    }
+    fatal
 }
 
 impl Worker {
@@ -610,14 +667,16 @@ impl Worker {
                     }
                 }
                 Out::Diagnostic(d) => tracing::debug!(diagnostic = ?d, "映射诊断"),
+                // 只给对账用（[`Self::on_text`]）
+                Out::ToolResultSeen { .. } => {}
             }
         }
     }
 
-    /// prompt 到了：先报缓存的模型与额度，再把用户消息写给 CLI。
-    async fn begin(
+    /// prompt 到了：先报缓存的模型与额度，再把用户消息放进输入队列（不等它写完）。
+    fn begin(
         &mut self,
-        s: &mut OpenSession,
+        input: &InputQueue,
         blocks: Vec<InputBlock>,
         done: oneshot::Sender<Result<StopReason, agent_client_protocol::Error>>,
     ) -> Result<(), SessionFatal> {
@@ -632,39 +691,46 @@ impl Worker {
                 return Ok(());
             }
         };
+        match input.send(&line) {
+            Ok(()) => {}
+            Err(InputError::TooLarge { bytes }) => {
+                tracing::warn!(bytes, "用户消息超过一行输入的上限");
+                let _ = done.send(Err(named_error("setup_invalid", Some("prompt"))));
+                return Ok(());
+            }
+            Err(InputError::Backlogged | InputError::Closed) => {
+                let _ = done.send(Err(CLI_EXITED.to_error()));
+                return Err(CLI_EXITED);
+            }
+        }
         self.turn = Some(done);
         let outs = self.mapper.begin_turn();
         self.emit(outs);
-        s.cli.write_line(&line).await.map_err(|_| SessionFatal {
-            code: "cli_exited",
-            reason: None,
-        })
+        Ok(())
     }
 
     fn on_line(&mut self, line: Result<Option<String>, ReadError>) -> Result<(), SessionFatal> {
-        let line = match line {
-            Ok(Some(l)) => l,
+        match line {
+            Ok(Some(l)) => self.on_text(&l),
             Ok(None) | Err(ReadError::Io(_)) => {
                 let outs = self.mapper.on_exit();
                 self.emit(outs);
-                return Err(SessionFatal {
-                    code: "cli_exited",
-                    reason: None,
-                });
+                Err(CLI_EXITED)
             }
-            Err(ReadError::Line(e)) => return Err(Fatal::BadLine(e).into()),
-        };
-        let outs = self.mapper.on_line(&line).map_err(SessionFatal::from)?;
-        // 对账（4.7）：没标错误的结果，它的调用一定得到过允许
+            Err(ReadError::Line(e)) => Err(Fatal::BadLine(e).into()),
+        }
+    }
+
+    /// CLI 的一行：映射，对账，发出去。开会话期间收下的行也走这里。
+    fn on_text(&mut self, line: &str) -> Result<(), SessionFatal> {
+        let outs = self.mapper.on_line(line).map_err(SessionFatal::from)?;
+        // 对账（4.7）：没标错误的结果，它的调用一定得到过允许。回合之外的结果映射时会丢掉，对账不丢（1/F-3）
         for out in &outs {
-            if let Out::ToolCallUpdate { id, failed, .. } = out
+            if let Out::ToolResultSeen { id, failed } = out
                 && self.reconciler.on_result(id, *failed).is_err()
             {
                 tracing::warn!(tool_use_id = %id, "工具结果没对上一次允许：hook 没生效");
-                return Err(SessionFatal {
-                    code: "hook_inactive",
-                    reason: None,
-                });
+                return Err(SessionFatal::code("hook_inactive"));
             }
         }
         self.emit(outs);
@@ -754,10 +820,10 @@ impl Worker {
     }
 
     fn on_answered(&mut self, s: &OpenSession, a: Answered) -> Result<(), SessionFatal> {
-        let allow = matches!(a.answer, BackendAnswer::Allow { .. });
+        // 对账只认翻译之后实际交给 hook 的决定（审查 1/F-2）：后台选了允许、改写后的输入不合法时交出去的是拒绝
         match s.pending.answer(a.call, a.answer) {
-            Delivery::Delivered => {
-                if allow {
+            Delivery::Delivered { allowed } => {
+                if allowed {
                     self.reconciler.on_allowed(&a.tool_use_id);
                 }
                 Ok(())
@@ -822,6 +888,22 @@ mod tests {
     use agent_client_protocol::v1::schema::SelectedPermissionOutcome;
 
     use super::*;
+
+    /// 名字形状不合规定的插件：错误里不带名字，只带种类。
+    #[test]
+    fn plugin_name_shape_on_the_bridge_side() {
+        let fatal = |name: &str| {
+            SessionFatal::from(Fatal::Isolation(IsolationBroken::UnexpectedPlugin {
+                name: name.into(),
+            }))
+        };
+        assert_eq!(fatal("mine@inline").plugin.as_deref(), Some("mine@inline"));
+        assert_eq!(fatal("mine").reason, Some("plugin"));
+        let too_long = "p".repeat(81);
+        for bad in ["/home/u/x", "two words", "", too_long.as_str()] {
+            assert_eq!(fatal(bad).plugin, None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn session_ids_are_uuid_v4() {

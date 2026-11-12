@@ -431,7 +431,7 @@ mod tests {
                     updated_input: None
                 }
             ),
-            pending::Delivery::Delivered
+            pending::Delivery::Delivered { allowed: true }
         );
         assert!(matches!(
             hook_gone(&p, id, rx).await,

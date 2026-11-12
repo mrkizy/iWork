@@ -7,7 +7,7 @@
 //! 加一种错误码 = [`map`] 里加一行，桥接那边照同一份字符串写。
 
 use iwork_domain::session::SessionLostReason;
-use iwork_ports::agent::{AgentError, ModelUnavailableReason};
+use iwork_ports::agent::{AgentError, IsolationKind, ModelUnavailableReason};
 use serde_json::Value;
 
 use crate::convert::META_KEY;
@@ -50,6 +50,33 @@ fn model_reason(reason: &str) -> ModelUnavailableReason {
     }
 }
 
+fn isolation_kind(reason: &str) -> IsolationKind {
+    match reason {
+        "permission_mode" => IsolationKind::PermissionMode,
+        "plugin" => IsolationKind::Plugin,
+        "plugins_unreadable" => IsolationKind::PluginsUnreadable,
+        "memory_path" => IsolationKind::MemoryPath,
+        _ => IsolationKind::Unknown,
+    }
+}
+
+/// 插件名（`data.iwork.plugin`，T06 方案 2.6 第 7 条表下）：只在 `reason` 是 `plugin` 时取。它来自运行时，不信
+/// 桥接，这里自己再查一遍形状：只有字母、数字和 `.`、`_`、`-`、`@`，1–80 个字符（装不下路径和句子）。不合就当没有。
+fn plugin_name(data: Option<&Value>, reason: &str) -> Option<String> {
+    if reason != "plugin" {
+        return None;
+    }
+    let name = data?.get(META_KEY)?.get("plugin")?.as_str()?;
+    plugin_shaped(name).then(|| name.to_owned())
+}
+
+fn plugin_shaped(name: &str) -> bool {
+    (1..=80).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'@'))
+}
+
 fn lost(reason: SessionLostReason) -> AgentError {
     AgentError::SessionLost { reason }
 }
@@ -76,7 +103,10 @@ pub fn map(data: Option<&Value>, cx: &ErrorContext) -> Option<AgentError> {
             message: format!("会话配置不完整或不认识：{reason}"),
         },
         "hook_inactive" => protocol("审批 hook 没有生效，会话已停止"),
-        "isolation_broken" => protocol("用户配置进入了会话，会话已停止"),
+        "isolation_broken" => AgentError::IsolationBroken {
+            kind: isolation_kind(reason),
+            plugin: plugin_name(data, reason),
+        },
         "approval_backstop" => protocol("审批等待兜底触发，会话已停止"),
         // 续接时记录用不了，三类分开报：编排据此用摘要新开会话线（T06 方案 5.2a）
         "session_not_found" => lost(SessionLostReason::NotFound),
@@ -172,8 +202,24 @@ mod tests {
         );
         assert_eq!(
             mapped("isolation_broken", None),
-            proto("用户配置进入了会话，会话已停止")
+            Some(AgentError::IsolationBroken {
+                kind: IsolationKind::Unknown,
+                plugin: None
+            })
         );
+        for (reason, kind) in [
+            ("permission_mode", IsolationKind::PermissionMode),
+            ("plugin", IsolationKind::Plugin),
+            ("plugins_unreadable", IsolationKind::PluginsUnreadable),
+            ("memory_path", IsolationKind::MemoryPath),
+            ("something_new", IsolationKind::Unknown),
+        ] {
+            assert_eq!(
+                mapped("isolation_broken", Some(reason)),
+                Some(AgentError::IsolationBroken { kind, plugin: None }),
+                "{reason}"
+            );
+        }
         assert_eq!(
             mapped("approval_backstop", None),
             proto("审批等待兜底触发，会话已停止")
@@ -251,5 +297,51 @@ mod tests {
     #[test]
     fn session_lost_is_not_retryable() {
         assert!(!mapped("session_not_found", None).unwrap().retryable());
+    }
+
+    /// 插件名只在 `reason` 是 `plugin` 时取，形状卡死：带 `/`、`\`、空格、换行、超过 80 字符的都得到 `None`；
+    /// 显示文字固定，不带名字（方案 2.6 第 7 条表下）。
+    #[test]
+    fn isolation_plugin_name_is_checked() {
+        let err = |reason: &str, plugin: &str| {
+            map(
+                Some(&json!({ "iwork": { "code": "isolation_broken", "reason": reason, "plugin": plugin } })),
+                &cx(),
+            )
+            .unwrap()
+        };
+        let plugin = |p: Option<&str>| AgentError::IsolationBroken {
+            kind: IsolationKind::Plugin,
+            plugin: p.map(str::to_owned),
+        };
+        assert_eq!(err("plugin", "mine"), plugin(Some("mine")));
+        let long_ok = "p".repeat(80);
+        for good in ["code-review@builtin.v2_1", long_ok.as_str()] {
+            assert_eq!(err("plugin", good), plugin(Some(good)), "{good:?}");
+        }
+        let too_long = "p".repeat(81);
+        for bad in [
+            "",
+            "/home/u/.claude/plugins/mine",
+            "a\\b",
+            "two words",
+            "x\ny",
+            too_long.as_str(),
+        ] {
+            assert_eq!(err("plugin", bad), plugin(None), "{bad:?}");
+        }
+        // reason 不是 plugin：带了 plugin 键也不取
+        assert_eq!(
+            err("memory_path", "mine"),
+            AgentError::IsolationBroken {
+                kind: IsolationKind::MemoryPath,
+                plugin: None
+            }
+        );
+        assert_eq!(
+            err("plugin", "mine").to_string(),
+            "用户配置进入了会话，会话已停止",
+            "显示文字固定，不带名字"
+        );
     }
 }

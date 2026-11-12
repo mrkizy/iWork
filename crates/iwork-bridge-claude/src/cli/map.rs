@@ -45,6 +45,12 @@ pub enum Out {
         content: String,
     },
     Report(Report),
+    /// CLI 输出了一个工具结果（回合内外都报，排在这一行别的输出之前）：只给对账用（4.7），不发给后台。回合之外
+    /// 的工具结果映射时会丢掉，对账不能跟着丢（审查 S6-3 1/F-3）
+    ToolResultSeen {
+        id: String,
+        failed: bool,
+    },
     /// 桥接自己发的控制请求的响应（由进程薄壳按 `request_id` 配对）
     Control(ControlResponse),
     /// 这一轮结束
@@ -219,6 +225,16 @@ impl StreamMapper {
             CliEvent::ControlResponse(r) => out.push(Out::Control(r)),
             CliEvent::Unknown => out.push(Out::Diagnostic(Diagnostic::UnknownEvent)),
             CliEvent::OtherSystem | CliEvent::OtherStream => {}
+            CliEvent::User { ref tool_results } if !tool_results.is_empty() => {
+                out.extend(tool_results.iter().map(|r| Out::ToolResultSeen {
+                    id: r.tool_use_id.clone(),
+                    failed: r.is_error,
+                }));
+                match self.turn.as_mut() {
+                    None => out.push(Out::Diagnostic(Diagnostic::OutsideTurn)),
+                    Some(turn) => in_turn(turn, event, &mut out),
+                }
+            }
             CliEvent::TextDelta { .. }
             | CliEvent::ThinkingDelta { .. }
             | CliEvent::Assistant(_)

@@ -51,7 +51,10 @@ async fn allow_round_trip_carries_hook_input() {
     let hook = spawn_hook("pre-tool-use", &b.env(), INPUT);
     let (id, input) = b.next_call().await;
     assert_eq!(input, INPUT.as_bytes(), "stdin 原文交给会话一侧");
-    assert_eq!(b.pending.answer(id, allow()), Delivery::Delivered);
+    assert_eq!(
+        b.pending.answer(id, allow()),
+        Delivery::Delivered { allowed: true }
+    );
     let ran = hook.await.unwrap();
     assert_eq!(ran.code, Some(0));
     assert_eq!(ran.decision().0, "allow");
@@ -301,7 +304,7 @@ async fn stalled_write_still_hits_the_backstop() {
                 updated_input: Some(big)
             }
         ),
-        Delivery::Delivered
+        Delivery::Delivered { allowed: true }
     );
     assert!(matches!(b.next_event().await, HookEvent::AllowUndelivered { id: got } if got == id));
 }

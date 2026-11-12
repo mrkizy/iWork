@@ -230,6 +230,17 @@ pub enum ModelUnavailableReason {
     Unknown,
 }
 
+/// 隔离失效是哪一种（T06 方案 3.5 的核对与 3.1b）：权限模式不是选定配置、多出来一个插件、插件清单读不了、
+/// 自动记忆目录不是给出去的那个。运行时没说、或说了不认识的为 `Unknown`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationKind {
+    PermissionMode,
+    Plugin,
+    PluginsUnreadable,
+    MemoryPath,
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AgentError {
     #[error("找不到运行时程序")]
@@ -250,6 +261,14 @@ pub enum AgentError {
     /// 编排据此用摘要新开一条会话线（T06 方案 5.2a），不靠原样重试解决
     #[error("运行时的会话记录用不了，无法续接：{reason:?}")]
     SessionLost { reason: SessionLostReason },
+    /// 用户的配置进入了成员会话（隔离失效，T06 方案 3.5、2.6 第 7 条表下）：会话已停止。`plugin` 是多出来的那个
+    /// 插件的名字，只有 `kind` 是 `Plugin` 时才可能有，形状卡死（字母、数字与 `. _ - @`，≤ 80 字符），不带路径。
+    /// 显示文字固定，不带名字
+    #[error("用户配置进入了会话，会话已停止")]
+    IsolationBroken {
+        kind: IsolationKind,
+        plugin: Option<String>,
+    },
     #[error("与运行时通信出错：{message}")]
     Protocol { message: String },
     #[error("运行时进程意外退出：{message}")]
