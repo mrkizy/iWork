@@ -312,6 +312,10 @@ struct Store {
     reject_voids: AtomicUsize,
     /// 为真时带 `ApprovalVoided` 的提交永不返回
     hang_voids: AtomicBool,
+    /// 设了的话：带 `ApprovalVoided` 的提交把事件追加进去（状态已经看得见）之后，先停在这里等放行再返回。
+    /// 用来把「状态已是 Cancelling、提交还没返回给编排」这一刻固定下来
+    after_append_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    at_after_append_gate: AtomicBool,
 }
 
 impl Store {
@@ -393,9 +397,16 @@ impl StoragePort for Store {
                 message: "审批已不在待审批".into(),
             });
         }
-        let mut events = self.events.lock().unwrap();
-        events.extend(req.events);
-        let seq = Seq(events.len() as u64);
+        let seq = {
+            let mut events = self.events.lock().unwrap();
+            events.extend(req.events);
+            Seq(events.len() as u64)
+        };
+        let gate = self.after_append_gate.lock().unwrap().clone();
+        if voids && let Some(gate) = gate {
+            self.at_after_append_gate.store(true, Ordering::SeqCst);
+            gate.notified().await;
+        }
         Ok(CommitReceipt {
             first_seq: seq,
             last_seq: seq,
@@ -937,9 +948,38 @@ async fn runner_replans_void_on_projection_error() {
     let (t, task, canceller) = running(&b).await;
     canceller.cancel(t);
     b.wait_state(t, TurnState::Cancelling).await;
+    // 状态看得见时提交可能还没返回给编排（见 cancel_reaches_session_only_after_the_commit_returns）：
+    // 等到 `cancel()` 真的被调过，第三个句柄这时一定已经丢了
+    wait_until(|| b.ctl.cancels.load(Ordering::SeqCst) == 1).await;
     assert_eq!(b.decider.voided.lock().unwrap().len(), 3, "要了 3 次计划");
     assert_eq!(b.decider.holds_dropped.load(Ordering::SeqCst), 3);
     assert_eq!(b.ctl.cancels.load(Ordering::SeqCst), 1);
+    b.ctl.send(AgentUpdate::Finished(TurnOutcome::Cancelled));
+    assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Cancelled);
+}
+
+/// 取消的次序（`on_cancel`）：提交带作废的那一笔 → 丢作废句柄 → 停止受理 → `session.cancel()`。提交里事件一追加，
+/// 回合状态就已经是 Cancelling，而这时提交还没返回给编排：句柄还攥着，`cancel()` 也还没调。
+/// `runner_replans_void_on_projection_error` 曾在 CI 的 ubuntu 上偶发失败（期望取消 1 次、实际 0 次）：它看到
+/// Cancelling 就立刻断言调过 `cancel()`，正撞在这个窗口里。这里用存储的闸门把那一刻固定下来，不靠调度。
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_reaches_session_only_after_the_commit_returns() {
+    let b = Bench::new();
+    *b.decider.void_mode.lock().unwrap() = VoidMode::Plan(vec![void_event()]);
+    b.store.reject_voids.store(2, Ordering::SeqCst);
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *b.store.after_append_gate.lock().unwrap() = Some(gate.clone());
+    let (t, task, canceller) = running(&b).await;
+    canceller.cancel(t);
+    wait_until(|| b.store.at_after_append_gate.load(Ordering::SeqCst)).await;
+    // 窗口里：状态已经是 Cancelling，第三个句柄没丢，会话还没被取消
+    assert_eq!(b.store.state_of(t), Some(TurnState::Cancelling));
+    assert_eq!(b.decider.voided.lock().unwrap().len(), 3);
+    assert_eq!(b.decider.holds_dropped.load(Ordering::SeqCst), 2);
+    assert_eq!(b.ctl.cancels.load(Ordering::SeqCst), 0);
+    gate.notify_one();
+    wait_until(|| b.ctl.cancels.load(Ordering::SeqCst) == 1).await;
+    assert_eq!(b.decider.holds_dropped.load(Ordering::SeqCst), 3);
     b.ctl.send(AgentUpdate::Finished(TurnOutcome::Cancelled));
     assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Cancelled);
 }
@@ -1091,7 +1131,8 @@ async fn cancel_all_is_not_blocked_by_one_stuck_conversation() {
     c1.cancel(t1);
     c2.cancel(t2);
     fine.wait_state(t2, TurnState::Cancelling).await;
-    assert_eq!(fine.ctl.cancels.load(Ordering::SeqCst), 1);
+    // 同上：状态先看得见，`cancel()` 在提交返回之后才调
+    wait_until(|| fine.ctl.cancels.load(Ordering::SeqCst) == 1).await;
     fine.ctl.send(AgentUpdate::Finished(TurnOutcome::Cancelled));
     assert_eq!(task2.await.unwrap().0.unwrap(), TurnState::Cancelled);
     let (result, _) = task1.await.unwrap();
