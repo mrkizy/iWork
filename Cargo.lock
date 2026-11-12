@@ -2895,6 +2895,7 @@ dependencies = [
  "iwork-fake-daemon",
  "iwork-ipc",
  "iwork-proto",
+ "libc",
  "proptest",
  "prost",
  "prost-types",

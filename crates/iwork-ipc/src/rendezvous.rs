@@ -111,6 +111,20 @@ pub enum Refusal {
     StoreOpenFailed { message: String },
 }
 
+/// 「这个库被更新的版本写过」的标记字样：存储（schema 比程序新，T02）与后台第 5a 步（库里有不认识的事件种类）
+/// 给出的拒绝原文里都带它。诊断页据此提示「装回更新的那一版」。
+pub const WRITTEN_BY_NEWER: &str = "被更新的";
+
+impl Refusal {
+    /// 拒绝是不是因为库被更新的版本写过（装回更新的那一版就能用）。
+    pub fn written_by_newer(&self) -> bool {
+        match self {
+            Refusal::StoreOpenFailed { message } => message.contains(WRITTEN_BY_NEWER),
+            Refusal::ProtocolMajorMismatch { .. } => false,
+        }
+    }
+}
+
 /// 逻辑退出码。写进状态文件的是名字不是数字：新版本加了码而旧程序不认识时，整份状态解析不了、按「读不到」处理。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ExitCode {

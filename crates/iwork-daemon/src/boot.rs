@@ -180,7 +180,8 @@ pub fn read_error(step: Step, e: StorageError) -> BootError {
         StorageError::Codec(CodecError::UnknownKind { kind }) => {
             BootError::Refused(Refusal::StoreOpenFailed {
                 message: format!(
-                    "库里有本版本不认识的事件种类 {kind}：这个库被更新的版本写过，装回更新的那一版可继续使用"
+                    "库里有本版本不认识的事件种类 {kind}：这个库{}版本写过，装回更新的那一版可继续使用",
+                    iwork_ipc::rendezvous::WRITTEN_BY_NEWER
                 ),
             })
         }
@@ -633,6 +634,28 @@ mod tests {
         );
     }
 
+    /// 对拍：存储（T02）真的因为「schema 比程序新」拒绝打开时，拒绝原文带着「被更新的」标记，诊断页能据此提示
+    /// 装回更新的那一版（`Refusal::written_by_newer`）。
+    #[test]
+    fn newer_schema_refusal_is_marked_written_by_newer() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = DataDir::from_root(t.path().join("data"));
+        let clock = Arc::new(SystemClock::new());
+        drop(open_store(&dir, clock.clone()).unwrap());
+        rusqlite::Connection::open(dir.db_path())
+            .unwrap()
+            .execute(
+                "UPDATE meta SET value = '999' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        match open_store(&dir, clock) {
+            Err(BootError::Refused(r)) => assert!(r.written_by_newer(), "{r:?}"),
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("应拒绝打开"),
+        }
+    }
+
     #[test]
     fn step_names_are_unique() {
         let mut names: Vec<_> = Step::ALL.iter().map(|s| s.name()).collect();
@@ -656,6 +679,13 @@ mod tests {
                 Some(Phase::Refused(Refusal::StoreOpenFailed { message })) => {
                     assert!(message.contains("zz_future_kind"), "{message}");
                     assert!(message.contains("更新的版本"), "{message}");
+                    assert!(
+                        Refusal::StoreOpenFailed {
+                            message: message.clone()
+                        }
+                        .written_by_newer(),
+                        "{message}"
+                    );
                 }
                 other => panic!("{other:?}"),
             }
