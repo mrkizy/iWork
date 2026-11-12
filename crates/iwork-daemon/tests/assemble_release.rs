@@ -15,16 +15,30 @@ use package_support::*;
 const JOURNAL: &str = ".iwork-journal";
 const LOCK: &str = ".iwork-assemble.lock";
 
-/// 照装配脚本的写法往记录里追加一条：<名字>（相对成品目录）是装配的，身份是 <路径> 现在的设备号:inode。
+/// 照装配脚本的写法往记录里追加一条：<名字>（相对成品目录）是装配的，身份是 <路径> 现在的身份。身份用脚本自己的
+/// `_ident` 算（同一个真值，不在测试里另抄一份格式）。
 fn journal_add(dist: &Path, name: &str, identity_of: &Path) {
     use std::io::Write;
-    use std::os::unix::fs::MetadataExt;
-    let m = std::fs::symlink_metadata(identity_of).unwrap();
+    let lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/lib/owned-paths.sh");
+    let out = Command::new(BASH)
+        .arg("-c")
+        .arg(r#"source "$1"; _ident "$2""#)
+        .arg("sh")
+        .arg(&lib)
+        .arg(identity_of)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ident = String::from_utf8(out.stdout).unwrap();
     let mut f = std::fs::OpenOptions::new()
         .append(true)
         .open(dist.join(JOURNAL))
         .unwrap();
-    writeln!(f, "add\t{name}\t{}:{}", m.dev(), m.ino()).unwrap();
+    writeln!(f, "add\t{name}\t{}", ident.trim()).unwrap();
 }
 
 /// 跑脚本用的 bash：macOS 上是系统自带的 3.2（打包命令实际用的就是它），别的平台用 PATH 里的。
