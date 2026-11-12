@@ -6,7 +6,10 @@ use iwork_ipc::rendezvous::{ExitCode, Phase, StopReason};
 use iwork_proto::pb;
 
 use crate::seed;
-use crate::support::{Sandbox, alive, code, group_alive, log_text, shutdown_daemon, signal};
+use crate::support::{
+    Sandbox, alive, code, group_alive, log_text, readies, shutdown_daemon, signal,
+    wait_ready_logged,
+};
 
 const START: Duration = Duration::from_secs(20);
 
@@ -97,6 +100,7 @@ fn uncleared_tree_is_recorded_and_stop_proceeds() {
 
     let trigger = sb.home.join("upgrade-now");
     let spec = format!("{}:upgrade", trigger.display());
+    let launched = readies(&sb).len();
     let d = sb.spawn(
         &[],
         &[
@@ -104,12 +108,13 @@ fn uncleared_tree_is_recorded_and_stop_proceeds() {
             ("IWORK_DEV_STOP_ON", &spec),
         ],
     );
-    sb.wait_ready(d.pid(), START);
-    let readies = |sb: &Sandbox| log_text(sb).matches("后台服务就绪").count();
-    let before = readies(&sb);
+    // 先等这一次启动自己的就绪日志落盘，再记升级前的基线：只等状态文件就记，迟到的这一行会被当成 exec 之后的
+    // 就绪，没 exec 也能过（第 1 轮审查 1/F-2）
+    wait_ready_logged(&sb, d.pid(), launched, START);
+    let before = readies(&sb).len();
     std::fs::write(&trigger, b"").unwrap();
     let deadline = Instant::now() + START;
-    while readies(&sb) < before + 1 {
+    while readies(&sb).len() < before + 1 {
         assert!(
             Instant::now() < deadline,
             "exec 后没再次就绪：{}",

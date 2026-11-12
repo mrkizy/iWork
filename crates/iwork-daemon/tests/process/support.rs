@@ -268,6 +268,40 @@ fn list_tree(root: &Path, dir: &Path, out: &mut String, depth: usize) {
     }
 }
 
+/// 日志里每次「后台服务就绪」的运行映像身份，按先后。
+pub fn readies(sb: &Sandbox) -> Vec<String> {
+    log_text(sb)
+        .lines()
+        .filter(|l| l.contains("后台服务就绪"))
+        .filter_map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).ok()?;
+            v["fields"]["image"].as_str().map(str::to_owned)
+        })
+        .collect()
+}
+
+pub fn wait_readies(sb: &Sandbox, n: usize, limit: Duration) -> Vec<String> {
+    let deadline = Instant::now() + limit;
+    loop {
+        let r = readies(sb);
+        if r.len() >= n {
+            return r;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{limit:?} 内没等到第 {n} 次就绪：{r:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// 等 `pid` 就绪，并等它的「后台服务就绪」那行日志写下来。后台先把状态文件写成 Ready、再记这行日志，日志还经异步
+/// 写线程落盘：只等状态文件就去读日志里最后一次就绪，读到的可能还是前任的（CI run 43236780312）。
+pub fn wait_ready_logged(sb: &Sandbox, pid: u32, readies_before: usize, limit: Duration) {
+    sb.wait_ready(pid, limit);
+    wait_readies(sb, readies_before + 1, limit);
+}
+
 pub fn kill9(pid: u32) {
     // SAFETY：只对本测试起的进程发信号
     unsafe {
