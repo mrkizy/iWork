@@ -74,9 +74,10 @@ export function withConfigLayers(
 // scripts/assemble-release.sh 放后台、写清单或签名、核对、发布到 <输出根>/release/dist/。下面是算命令行的纯函数，
 // scripts/tauri.ts 只负责依次起进程。
 
-/** 只问帮助或版本：原样交给 tauri CLI，不编、不装配。 */
+/** 只问 tauri 自己的帮助或版本：原样交给 tauri CLI，不编、不装配。`--` 之后的是转给构建程序的参数，不算。 */
 export function isHelpOrVersion(args: readonly string[]): boolean {
-  return args.some((a) => ["-h", "--help", "-V", "--version"].includes(a));
+  const own = args.includes("--") ? args.slice(0, args.indexOf("--")) : args;
+  return own.some((a) => ["-h", "--help", "-V", "--version"].includes(a));
 }
 
 // build 多拒的参数：长名、短名（单字母；短参数可连写、可贴值，凡以单个 - 开头且含这个字母的都算）、为什么拒。
