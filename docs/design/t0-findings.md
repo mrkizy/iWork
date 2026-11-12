@@ -480,7 +480,7 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 | G1 | 10 | 9 种工具探针各 1，cd 之后的 cwd 1 |
 | G2 | 日常账号约 105 | 候选配置 = `--modes` 里的每个模式（默认 `dontAsk`，方案 3.4a 写死）× 2：选定配置（带 `onFailure: "block"`）与去掉 onFailure 的对照。选定配置：预检 5、普通 Bash 一行 11，全 `PASS` 才往下跑；日常账号下能跑的是 bash 另 5 行、write、read、mcp 共 66 格，加「工作目录外的读」的允许格 1、只读命令的记录格 1、四个拒绝格、只读命令的失败格 1。对照：预检 5、read 行 11（结果只记 INFO，不计入总结论）。只在一次性环境跑的格子在日常账号下不起实例 |
 | G3 | 11 | 预检 5 + 六个 timeout 取值，每个 hook 睡 90 秒 |
-| G4 | 29 + 语料行数 | 基础 17（含 ①e′、②c′ 两格对照）、最小构建 3（`--skip-builds` 就没有）、⑥ 重试 5、⑨ 全开档 3、⑩ 写工作目录外 1；联网的四条另有沙箱外对照，不起实例 |
+| G4 | 31 + 语料行数 | 基础 19（含 ①c′、①d′、①e′、②c′ 四格对照）、最小构建 3（`--skip-builds` 就没有）、⑥ 重试 5、⑨ 全开档 3、⑩ 写工作目录外 1；联网的四条另有沙箱外对照，不起实例 |
 | G5 | 11 + 7 | 环境行与记忆各行 11 个日常账号也跑（守卫预检没过的行不起）；仓库设置的三种写法与对照 7 个只在 `--disposable-env` 下跑 |
 | G6 | 10 | 思考强度 6、不存在的模型 1、换模型续接 2、换系统提示 1 |
 | G7 | 10 + 2 × `--repeat` | 常驻会话 4（含后台命令一格）、只发 initialize 2（G7c′）、换配置续接 4、杀进程续接每次 2（默认 `--repeat 3`） |
@@ -507,7 +507,7 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 | --- | --- | --- | --- |
 | 1 | `python3 tools/t0/iwork-t0g.py --selftest` | 0 | 最后一行 `selftest ok` |
 | 2 | `python3 tools/t0/iwork-t0g.py --only G2 --g2-subset r2` | 5 | **先跑这一条**（S4 定型之前要结果）：`G2 [...] read-工作目录外 hook=allow` 一行 `PASS`（hook 允许之后读得到工作目录外；`FAIL` 就回 architect 重看方案 3.4a 第 2 条）；四个「补充 拒绝格」（Grep、Glob、只读命令、子代理工具）都是 `PASS`。两行总结论这时一定是 `INCONCLUSIVE`，正常 |
-| 3 | `python3 tools/t0/iwork-t0g.py --only G4 --skip-builds --corpus corpus.json` | 26 + 44 = 70 | `⑩` 一行 `PASS`（选定配置下 Write 写得进工作目录外；`FAIL` 同样回 architect）；`①e′`、`②c′`、四条「沙箱外对照」、`⑥` 的计数、`④` 全部行重新实测；结果包 `obs/corpus-*.calls` 的祖先链：CLI 自己调的 `git` 是不是 CLI 的直接子进程、沙箱里的调起祖先链记不记得全（每一项是「pid:程序名」，记不全的在末尾是 `?`）。这两点交 architect：前者不成立，出沙箱格的归属判据不够用；后者记不全，R3 加 `--ancestry parent-only` |
+| 3 | `python3 tools/t0/iwork-t0g.py --only G4 --skip-builds --corpus corpus.json` | 28 + 44 = 72（R2 时是 70，之后加了 ①c′、①d′） | `⑩` 一行 `PASS`（选定配置下 Write 写得进工作目录外；`FAIL` 同样回 architect）；`①e′`、`②c′`、四条「沙箱外对照」、`⑥` 的计数、`④` 全部行重新实测；结果包 `obs/corpus-*.calls` 的祖先链：CLI 自己调的 `git` 是不是 CLI 的直接子进程、沙箱里的调起祖先链记不记得全（每一项是「pid:程序名」，记不全的在末尾是 `?`）。这两点交 architect：前者不成立，出沙箱格的归属判据不够用；后者记不全，R3 加 `--ancestry parent-only` |
 | 4 | `python3 tools/t0/iwork-t0g.py --only G7` | 16 | `G7c'` 两行（只发 initialize 时 `current_permission_mode` 是 `dontAsk`；设置校验不过时的取值）；`G7e`、`G7f` 对前台命令的结论；后台命令一行 |
 | 5 | `python3 tools/t0/iwork-t0g.py --only G1` | 10 | `G1d`；`g1-Agent-stream.jsonl` 里子代理是不是后台跑、有没有第二个 `result`；`G1c`、`G1f` |
 | 6 | `python3 tools/t0/iwork-t0g.py --only G8` | 8 | `G8g`（白名单里写了不存在的工具名时 `init.tools` 只剩存在的）；`G8 MCP 阳性对照`、`G8f`、`G8e` |
@@ -515,11 +515,22 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 
 R2 合计约 120 个实例，加 6 个探查（每条命令 1 个）。
 
+**R2 补测**（2026-11-12，方案 19 节 S0 行「R2 补测」；日常账号、普通终端，都是好的探针。脚本已照 R2 分析第 10 节改过：根目录名只用小写字母和数字、④ 按「这次 Bash 调用发起的」认调起、「进程组」一行分出 hook 探针、G7e 改成记录格、⑦b 多记几类特征）
+
+| 序 | 命令 | 约几个实例 | 看什么 |
+| --- | --- | --- | --- |
+| 1 | `python3 tools/t0/iwork-t0g.py --selftest` | 0 | 最后一行 `selftest ok` |
+| 2 | `python3 tools/t0/iwork-t0g.py --only R2X --part d` | 5 | **先跑这一条，D2、D5 靠它定**，约 5 分钟（k1 要等 70 秒）。几行都只记录（`INFO`），看说明里的事实：<br>· `R2X k1`：SIGKILL CLI 的进程组之后，「停 CLI 5 秒后 sleep 还在」「70 秒后哨兵出现了（命令接着跑完）」<br>· `R2X k2`：只关输入之后，「CLI 30 秒内退出了」「CLI 退出之后 sleep 还在」<br>· `R2X k3`：发 SIGTERM 之后，同上两样<br>· k1–k3 每行的 `k4`：`sleep`、它的 shell、CLI 各自的父进程号、进程组号、会话号（shell 的父进程是不是 CLI，决定 D2 的 b′ 按后代找不找得到）<br>· `R2X b1`（设 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`，调子代理）：`is_backgrounded`、`init` 与 `result` 的次序和个数、目标调用在不在子代理里、进没进 hook<br>· `R2X b2`（同一变量，后台跑 Bash）：输入里还带不带 `run_in_background`、目标调用的结果、哨兵出没出现<br>任何一行 `INCONCLUSIVE` 是那一格没走到（模型没照做、没看到 `sleep`），单独重跑这条命令 |
+| 3 | `python3 tools/t0/iwork-t0g.py --only R2X --part rest` | 8 | · `G4 ①c′`、`G4 ①d′`：去掉 `credentials.files` 之后，假凭据目录里只读区之外的文件仍然读不到、写不了，两行都要 `PASS`（有一行 `FAIL` 回 architect，第 8 节翻译表那条改动要重想）<br>· `R2X n1`（不设变量，常驻流式输入下调子代理）：两个 `init`、两个 `result` 的先后<br>· `R2X 工具清单` 五行：`--tools Read,Task` 与 `--tools Read,Agent` 各自的 `init.tools` 里有没有子代理工具（P11 的白名单写的是 `Task`）；`--disallowedTools Task` 与 `--disallowedTools Agent` 之后子代理工具还在不在；只禁 Bash 时的 `init.tools`（Monitor 还在不在） |
+| 4 | `python3 tools/t0/iwork-t0g.py --only G5` | 11 | G5 重跑（根目录名改了之后），看什么同上面 R2 第 7 条 |
+
+R2 补测合计约 24 个实例，加 3 个探查。第 2 条先跑，第 3、4 条可以晚一点。
+
 **R3：一次性环境**（16.2 第 5 项，搭法见下一小节）
 
 | 命令 | 约几个实例 | 看什么 |
 | --- | --- | --- |
-| `python3 tools/t0/iwork-t0g.py --only G2,G5,G9 --disposable-env --modes dontAsk --corpus corpus.json --disabled-tools disabled-tools.json` | G2 约 228：主矩阵 9 × 11 = 99、补充格 33、出沙箱格对 2 × 36 = 72、「不问工具」记录行 12 加它开头的探查 1（2.1.322 的工具清单去掉永久禁用的 11 个之后）、对照配置的 read 行 11；一次性环境不预检。G5 18（环境行与记忆各行 11，仓库设置三种写法与对照 7），G9 2。合计约 248，加 1 个探查 | `G2 硬格子 [dontAsk+block]` 一行 `PASS`（硬格子 114 个加出沙箱的 M 个全过）；`G2 范围记录 [dontAsk+block]` 一行；`G2 [...] 出沙箱这一组` 一行的 M、「这条写法没测到组合的条目」与「做过扣除的条目」（各自那一行写了 CLI 自己的调起对照里几笔、出沙箱格里几笔，请看一眼；M = 0 时整组 `INCONCLUSIVE`，要先换「条目 → 只读写法」表里的写法再跑）；`不问工具：带着永久禁用名单启动后的工具清单` 一行；read 行三个记录格写的「有执行的痕迹」；对照配置 read 行失败格的痕迹（有痕迹说明 `block` 在起作用）；`G5 环境行`、`G5 记忆读`、`G5 记忆写` 三行 `PASS`，`G5 子代理记忆` `PASS` 或 `INFO`「这条路不存在」，`G5 A --setting-sources 空值` `PASS`；`G9d` 一行 `PASS` |
+| `python3 tools/t0/iwork-t0g.py --only G2,G5,G9 --disposable-env --modes dontAsk --corpus corpus.json --disabled-tools disabled-tools.json --ancestry parent-only` | G2 约 228：主矩阵 9 × 11 = 99、补充格 33、出沙箱格对 2 × 36 = 72、「不问工具」记录行 12 加它开头的探查 1（2.1.322 的工具清单去掉永久禁用的 11 个之后）、对照配置的 read 行 11；一次性环境不预检。G5 18（环境行与记忆各行 11，仓库设置三种写法与对照 7），G9 2。合计约 248，加 1 个探查 | `G2 硬格子 [dontAsk+block]` 一行 `PASS`（硬格子 114 个加出沙箱的 M 个全过）；`G2 范围记录 [dontAsk+block]` 一行；`G2 [...] 出沙箱这一组` 一行的 M、「这条写法没测到组合的条目」与「做过扣除的条目」（各自那一行写了 CLI 自己的调起对照里几笔、出沙箱格里几笔，请看一眼；M = 0 时整组 `INCONCLUSIVE`，要先换「条目 → 只读写法」表里的写法再跑）；`不问工具：带着永久禁用名单启动后的工具清单` 一行；read 行三个记录格写的「有执行的痕迹」；对照配置 read 行失败格的痕迹（有痕迹说明 `block` 在起作用）；`G5 环境行`、`G5 记忆读`、`G5 记忆写` 三行 `PASS`，`G5 子代理记忆` `PASS` 或 `INFO`「这条路不存在」，`G5 A --setting-sources 空值` `PASS`；`G9d` 一行 `PASS` |
 
 **不带 `--disabled-tools`**：「不问工具」记录行整组记 `INCONCLUSIVE`（不知道会话里有哪些工具），不拿默认工具集顶替，`G2 范围记录` 一行到不了 `PASS`。
 
