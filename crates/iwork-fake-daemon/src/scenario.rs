@@ -11,7 +11,7 @@ use iwork_proto::pb::TurnState as T;
 use iwork_proto::pb::UserActionState as U;
 
 use crate::fixtures::{self as f, IWORK};
-use crate::tables::Tables;
+use crate::tables::{FakeDir, Tables};
 
 /// 场景的一步。
 pub enum Step {
@@ -66,6 +66,8 @@ pub enum ClientAct {
     ShowAssistant(&'static str),
     /// 打开这个项目的「全部对话」列表页（ConversationListView，不筛选）。
     ShowAllConversations(&'static str),
+    /// 打开添加项目弹窗，在选择框里选了这个文件夹（候选与检查结果进 AddProjectView）。
+    PickProjectFolder(&'static str),
 }
 
 impl Scenario {
@@ -268,6 +270,50 @@ pub const REGISTRY: &[Scenario] = &[
         focus: Some("c-rules"),
         characters: &[],
         client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "add-project-ready",
+        about: "添加项目：选了一个受版本控制、没有 AGENTS.md 的文件夹（能加，默认勾着生成草稿）",
+        build: || add_project_disk(ADD_READY, FakeDir::repo(ADD_READY)),
+        focus: None,
+        characters: &[],
+        client: &[ClientAct::PickProjectFolder(ADD_READY)],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "add-project-unversioned",
+        about: "添加项目：选的文件夹还没有版本控制（提示 + 初始化按钮，主按钮不可点）",
+        build: || {
+            add_project_disk(
+                ADD_RAW,
+                FakeDir {
+                    versioned: false,
+                    ..FakeDir::repo(ADD_RAW)
+                },
+            )
+        },
+        focus: None,
+        characters: &[],
+        client: &[ClientAct::PickProjectFolder(ADD_RAW)],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "add-project-known",
+        about: "添加项目：选的文件夹已经是项目（主按钮「打开已有项目」）",
+        build: || add_project_disk(KNOWN_ROOT, FakeDir::repo(KNOWN_ROOT)),
+        focus: None,
+        characters: &[],
+        client: &[ClientAct::PickProjectFolder(KNOWN_ROOT)],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "add-project-subdir",
+        about: "添加项目：选的是仓库的子目录（一行「将添加整个仓库」，路径显示仓库根）",
+        build: || add_project_disk(ADD_SUBDIR, FakeDir::repo(ADD_READY)),
+        focus: None,
+        characters: &[],
+        client: &[ClientAct::PickProjectFolder(ADD_SUBDIR)],
         timeline_cap: None,
     },
     Scenario {
@@ -1124,6 +1170,26 @@ fn settings_rules() -> Vec<Step> {
     )));
     s.push(a(f::project_conversation("c-rules", PROJECT)));
     s.extend(exchange("c-rules", "rules", "跑一下测试", "测试都过了。"));
+    s
+}
+
+// 添加项目场景的目录（假「盘」上的，不碰真盘）
+const ADD_READY: &str = "/Users/demo/code/settlement-svc";
+const ADD_SUBDIR: &str = "/Users/demo/code/settlement-svc/src/refund";
+const ADD_RAW: &str = "/Users/demo/code/scratch";
+/// 基础世界里 demo 项目的根（与 world() 里 f::project 的一致）。
+const KNOWN_ROOT: &str = "~/work/demo";
+
+/// 基础世界 + 假「盘」上登记一个目录；之后加一轮对话事件，录像打开之后有增量。
+fn add_project_disk(path: &'static str, dir: FakeDir) -> Vec<Step> {
+    let mut s = base();
+    s.push(Step::Mutate(Box::new(move |t: &mut Tables| {
+        t.disk.insert(path.to_owned(), dir);
+    })));
+    // 先登记好目录，再做「选文件夹」（客户端动作在切点上）
+    s.push(Step::OpenHere);
+    s.push(a(f::project_conversation("c-add", PROJECT)));
+    s.extend(exchange("c-add", "add", "看看这个仓库", "好的。"));
     s
 }
 

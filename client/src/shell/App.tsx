@@ -5,6 +5,7 @@ import { HOME_DRAFT, setDraft } from "../composer/drafts";
 import { ConnectionState } from "../gen/iwork/v1/view_pb";
 import { HostProvider, type Host } from "../host";
 import { ConversationPage } from "../pages/Conversation";
+import { AddProjectDialog } from "../pages/AddProject";
 import { AllConversationsPage } from "../pages/AllConversations";
 import { AssistantPage } from "../pages/Assistant";
 import { HomePage } from "../pages/Home";
@@ -52,6 +53,8 @@ export function App(props: { host: Host; toasts: Component; initialRoute?: Route
     if (n.startedProjectId !== undefined) setDraft(HOME_DRAFT + n.startedProjectId, "");
     // 被系统通知叫到前台、那一项没有对话归属：打开「待你处理」页（方案 2.8）
     if (n.pendingList) router.go({ page: "pending" });
+    else if (n.addProject) router.go({ page: "addProject" });
+    else if (n.projectId !== undefined) router.go({ page: "home", projectId: n.projectId });
     else router.go({ page: "conversation", id: n.conversationId, rowKey: n.rowKey || undefined });
   });
 
@@ -123,6 +126,11 @@ export function App(props: { host: Host; toasts: Component; initialRoute?: Route
               </Match>
               <Match when={allConversations(p.router.route())}>
                 {(r) => <AllConversationsPage route={r()} go={p.router.go} />}
+              </Match>
+              <Match when={p.router.route().page === "addProject"}>
+                {/* 添加项目是弹窗：底下照常是首页 */}
+                <HomePage openRuntimeDetails={() => p.router.go({ page: "settings", section: "runtimes" })} />
+                <AddProjectDialog onClose={() => p.router.go({ page: "home" })} />
               </Match>
               <Match when={p.router.route().page === "pending"}>
                 <PendingPage open={p.router.go} />

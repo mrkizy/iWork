@@ -189,6 +189,9 @@ message ResetAssistant {
 
 message AddProject {
   string path = 1;
+  // 缺 AGENTS.md 时让 iWork 读代码生成草稿（需求 FR19；设计 9.3 第 4 条）。没设或为假：不生成。
+  // 仓库里已经有 AGENTS.md 时这个选项不起作用（T09 方案 15.2）。
+  optional bool propose_agents_md_draft = 2;
 }
 
 message CreateProject {

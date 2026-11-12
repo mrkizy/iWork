@@ -52,6 +52,10 @@ message NavigatePatch {
   optional string started_project_id = 4;
   // 打开「待你处理」页（被系统通知叫到前台、那一项没有对话归属时；T09 方案 2.8）。此时 conversation_id 为空。
   bool pending_list = 5;
+  // 打开这个项目的首页（添加、新建项目之后；T09 方案 15.2）。此时 conversation_id 为空。
+  optional string project_id = 6;
+  // 请网页打开添加项目弹窗（拖入一个文件夹时）。
+  bool add_project = 7;
 }
 
 // ---------- 通用小件 ----------
@@ -714,6 +718,38 @@ message AddProjectPatch {
 message AddProjectView {
   optional CloneProgressView clone = 1;
   repeated DraftCardView drafts = 2;
+  // 选中的文件夹与检查结果；没选时不设（T09 方案 15.2）。
+  optional CandidateView candidate = 3;
+  // 新建、克隆要放到的父目录（家目录写成 ~）。
+  string parent_label = 4;
+  // 上一次操作被拒的原因（目录非空、没配提交身份等，文字用后台给的）。
+  optional string error = 5;
+  // 「Claude Code（全局默认）」那一行。
+  string runtime_label = 6;
+  // 正在加或正在新建：主按钮转圈、不可点。
+  bool busy = 7;
+}
+
+message CandidateView {
+  // 给人看的路径（家目录写成 ~）。会被加进来的那个目录：选了子目录时这里是仓库根。
+  string path_label = 1;
+  // 检查还没回来。
+  bool checking = 2;
+  // 提示框：没有版本控制、选的是子目录、检查失败。没有就都为空。
+  string notice_title = 3;
+  string notice_body = 4;
+  Tone notice_tone = 5;
+  // 「初始化为 git 仓库并首次提交」那个按钮：显不显示、文字、是不是正在初始化。
+  optional string init_label = 6;
+  bool initializing = 7;
+  // 「AGENTS.md　未找到 / 已有」；检查中为空。
+  string agents_md_label = 8;
+  // 显不显示「让 iWork 生成草稿」的勾选框，以及勾着没。
+  bool can_propose_draft = 9;
+  bool propose_draft = 10;
+  // 主按钮：可不可点、文字（「添加并开始对话」「打开已有项目」）。
+  bool can_confirm = 11;
+  string confirm_label = 12;
 }
 
 message CloneProgressView {
@@ -883,7 +919,25 @@ message UiIntent {
     ProjectIntent remove_project = 72;
     // 「重新定位」：Rust 弹文件夹选择框，选好后发 RelocateProject，由后台校验 project.toml。
     ProjectIntent pick_project_location = 74;
-    // 75–79、92–95 留给添加项目一组（T09 方案 15.2，步 7d-0）。
+    // 添加项目一组（T09 方案 15.2）：都不带路径，路径只在 Rust 的添加项目草稿里（RD1）。
+    // 弹选文件夹的框，选好的设成候选、发检查。
+    PickProjectFolder pick_project_folder = 75;
+    // 候选没有版本控制时：初始化它。
+    InitCandidateRepository init_candidate_repository = 76;
+    // 「让 iWork 生成 AGENTS.md 草稿」。
+    ToggleIntent set_propose_agents_md_draft = 77;
+    // 「添加并开始对话」/「打开已有项目」。
+    ConfirmAddProject confirm_add_project = 78;
+    // 弹窗关了：清掉草稿。
+    ClearAddProject clear_add_project = 79;
+    // 新建项目：name 只当一个目录名，由后台判（方案 15.2「从网页来的字符串」）。
+    CreateProjectIntent create_project = 92;
+    // 克隆：url 只收远程地址、name 只当一个目录名，都由后台判。
+    StartCloneIntent start_clone = 93;
+    // 用上一次的参数重新克隆（参数记在 Rust，网页不重传）。
+    RetryClone retry_clone = 94;
+    // 弹选文件夹的框，选好的作为这一次新建、克隆的父目录。
+    PickProjectsParent pick_projects_parent = 95;
     // 设置 › 项目位置的「更换」：Rust 弹文件夹选择框，选好后发 SetProjectsRoot（方案 15.2）。
     PickProjectsRoot pick_projects_root = 96;
 
@@ -1073,6 +1127,27 @@ message AttachPasted {
 }
 
 message PickProjectsRoot {}
+
+message PickProjectFolder {}
+
+message InitCandidateRepository {}
+
+message ConfirmAddProject {}
+
+message ClearAddProject {}
+
+message RetryClone {}
+
+message PickProjectsParent {}
+
+message CreateProjectIntent {
+  string name = 1;
+}
+
+message StartCloneIntent {
+  string url = 1;
+  optional string name = 2;
+}
 
 message PinProjectIntent {
   string project_id = 1;

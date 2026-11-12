@@ -26,6 +26,8 @@ pub enum Action {
     Reject(pb::IntentError),
     /// 首页：新建对话并发出首条消息（会话层 session::start 一步步推进）。
     Start { project_id: String, text: String },
+    /// 添加项目一组（方案 15.2）：都不带路径，作用在 Rust 的添加项目草稿上（session::add_project）。
+    AddProject(AddProjectAct),
     /// 助手配置页改了一项：进自动保存闸（store::assistant_edits），由会话层按闸的决定发命令。
     AssistantField {
         assistant_id: String,
@@ -80,13 +82,32 @@ pub enum Pick {
     ProjectLocation { project_id: String },
     /// 设置 › 项目位置：选中的文件夹设成新建项目的默认父目录。
     ProjectsRoot,
+    /// 添加项目：选中的文件夹设成候选、发检查（方案 15.2）。
+    ProjectFolder,
+    /// 添加项目：选中的文件夹作为这一次新建、克隆的父目录。
+    ProjectsParent,
+}
+
+/// 添加项目草稿上的操作（方案 15.2 的意图表）。网页给的字符串只有新建、克隆的名字与克隆地址，由后台判。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddProjectAct {
+    InitCandidate,
+    SetProposeDraft(bool),
+    Confirm,
+    Clear,
+    Create { name: String },
+    StartClone { url: String, name: Option<String> },
+    RetryClone,
 }
 
 impl Pick {
     pub fn kind(&self) -> PickKind {
         match self {
             Pick::Attachments { .. } => PickKind::Files,
-            Pick::ProjectLocation { .. } | Pick::ProjectsRoot => PickKind::Folder,
+            Pick::ProjectLocation { .. }
+            | Pick::ProjectsRoot
+            | Pick::ProjectFolder
+            | Pick::ProjectsParent => PickKind::Folder,
         }
     }
 }
@@ -290,6 +311,18 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
         }),
 
         I::PickProjectsRoot(_) => Action::Pick(Pick::ProjectsRoot),
+        I::PickProjectFolder(_) => Action::Pick(Pick::ProjectFolder),
+        I::PickProjectsParent(_) => Action::Pick(Pick::ProjectsParent),
+        I::InitCandidateRepository(_) => Action::AddProject(AddProjectAct::InitCandidate),
+        I::SetProposeAgentsMdDraft(x) => Action::AddProject(AddProjectAct::SetProposeDraft(x.on)),
+        I::ConfirmAddProject(_) => Action::AddProject(AddProjectAct::Confirm),
+        I::ClearAddProject(_) => Action::AddProject(AddProjectAct::Clear),
+        I::CreateProject(x) => Action::AddProject(AddProjectAct::Create { name: x.name }),
+        I::StartClone(x) => Action::AddProject(AddProjectAct::StartClone {
+            url: x.url,
+            name: x.name,
+        }),
+        I::RetryClone(_) => Action::AddProject(AddProjectAct::RetryClone),
         I::PinProject(x) => Action::Command(Cmd::PinProject(pb::PinProject {
             project_id: x.project_id,
             pinned: x.pinned,

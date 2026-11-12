@@ -201,6 +201,35 @@ async fn client_act(
                 return Err(format!("SetVisible 被拒：{}", e.message));
             }
         }
+        ClientAct::PickProjectFolder(path) => {
+            let mut v = visible(None, true);
+            if let Some(pb::ui_intent::Kind::SetVisible(s)) = v.kind.as_mut() {
+                s.add_project = true;
+            }
+            if let Some(e) = app.intent(v).await.error {
+                return Err(format!("SetVisible 被拒：{}", e.message));
+            }
+            // 网页点「选择」，壳弹框（录像里没有壳），用户选了 path
+            let picking = {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    app.intent(pb::UiIntent {
+                        kind: Some(pb::ui_intent::Kind::PickProjectFolder(
+                            pb::PickProjectFolder {},
+                        )),
+                    })
+                    .await
+                })
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            app.shell(ShellEvent::Picked(vec![path.into()]));
+            let ack = picking
+                .await
+                .map_err(|e| format!("选文件夹的操作没回来：{e}"))?;
+            if let Some(e) = ack.error {
+                return Err(format!("选文件夹被拒：{}", e.message));
+            }
+        }
         ClientAct::ShowAssistant(id) => {
             let mut v = visible(Some(focus), false);
             if let Some(pb::ui_intent::Kind::SetVisible(s)) = v.kind.as_mut() {
@@ -365,9 +394,11 @@ pub async fn record(s: &Scenario, mut opts: Options) -> Result<Recording, String
     // 先连上
     pump.run(&daemon, Vec::new(), |_| true).await?;
     let (before, after) = s.split_at_focus();
-    // 建出 focus 对话，打开它，等它的快照到
-    if let Some(focus) = s.focus {
+    // 打开之前的那一段（没有 focus 的场景用 OpenHere 标出切点时也有）；有 focus 就打开它，等它的快照到
+    if !before.is_empty() {
         pump.run(&daemon, before, |_| true).await?;
+    }
+    if let Some(focus) = s.focus {
         declare(&app, Some(focus), false).await?;
         pump.run(&daemon, Vec::new(), |seen| seen.conversation_opened)
             .await?;

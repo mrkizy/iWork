@@ -28,7 +28,12 @@ fn every_focus_scenario_splits_with_events_after_opening() {
                     s.name
                 );
             }
-            None => assert!(before.is_empty(), "{}：没有 focus 时整段在后面", s.name),
+            // 没有 focus 时整段在后面；场景用 OpenHere 标了切点的除外（先布置、再做客户端动作，如添加项目）
+            None => assert!(
+                before.is_empty() || s.steps().iter().any(|x| matches!(x, Step::OpenHere)),
+                "{}：没有 focus、也没有 OpenHere 时整段在后面",
+                s.name
+            ),
         }
     }
 }

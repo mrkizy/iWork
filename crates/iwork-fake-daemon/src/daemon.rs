@@ -36,6 +36,9 @@ struct Shared {
     pace: std::sync::atomic::AtomicU32,
     /// 只给测试用：命中的查询一律回错误（模拟查询受理出错）。
     failing_queries: Mutex<Option<QueryFilter>>,
+    /// 只给测试用：命中的查询先不回，等放行（hold_queries(None)）；期间断线，客户端拿到「连接已关」。
+    held_queries: Mutex<Option<QueryFilter>>,
+    released: tokio::sync::Notify,
     /// 只给测试用：命中的命令一律拒绝（模拟后台不受理）。
     failing_commands: Mutex<Option<CommandFilter>>,
     /// 收到的 ReportPresence（按到达顺序）。不产生事件、不进幂等记录，只给测试读。
@@ -213,6 +216,23 @@ struct Handler(Arc<Shared>);
 impl RequestHandler for Handler {
     async fn handle(&self, _: &ConnectionContext, req: pb::Request) -> pb::Response {
         use pb::request::Body;
+        if let Some(Body::Query(q)) = &req.body {
+            loop {
+                // 先登记等待再看条件：放行的通知不会落在两步之间丢掉
+                let released = self.0.released.notified();
+                let held = self
+                    .0
+                    .held_queries
+                    .lock()
+                    .expect("查询扣留表锁中毒")
+                    .as_ref()
+                    .is_some_and(|f| f(q));
+                if !held {
+                    break;
+                }
+                released.await;
+            }
+        }
         use pb::response::Body as Out;
         let body = match req.body {
             Some(Body::Command(c))
@@ -294,7 +314,13 @@ impl EventSource for Source {
     }
 
     fn scope_streams(&self, scope: &pb::SubscriptionScope) -> Vec<StreamKey> {
-        iwork_app::subscription::scope_streams(scope)
+        let mut streams = iwork_app::subscription::scope_streams(scope);
+        // 设置范围先在假后台带上 rule 流（记住、撤销、连带删除的规则；客户端收到就重查 ListRules）。
+        // 真后台在 T10a 步 7 给设置范围加上 all(rule)，到时候这里删掉
+        if matches!(scope.kind, Some(pb::subscription_scope::Kind::Settings(_))) {
+            streams.push(StreamKey::all(crate::routes::RULE));
+        }
+        streams
     }
 
     async fn replay(
@@ -369,6 +395,8 @@ impl FakeDaemon {
             auto_reply: AtomicBool::new(false),
             pace: std::sync::atomic::AtomicU32::new(1),
             failing_queries: Mutex::new(None),
+            held_queries: Mutex::new(None),
+            released: tokio::sync::Notify::new(),
             failing_commands: Mutex::new(None),
             presence: Mutex::new(Vec::new()),
             replay_limit: std::sync::atomic::AtomicU64::new(
@@ -426,6 +454,15 @@ impl FakeDaemon {
             .failing_queries
             .lock()
             .expect("查询故障表锁中毒") = f;
+    }
+
+    /// 只给测试用：之后命中 `f` 的查询先扣着不回；`None` 放行全部扣着的。
+    pub fn hold_queries(&self, f: Option<QueryFilter>) {
+        let release = f.is_none();
+        *self.shared.held_queries.lock().expect("查询扣留表锁中毒") = f;
+        if release {
+            self.shared.released.notify_waiters();
+        }
     }
 
     /// 只给测试用：之后命中 `f` 的命令一律拒绝（不追加事件）；`None` 恢复正常。

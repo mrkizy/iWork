@@ -210,7 +210,7 @@ impl FrameEngine {
                     .and_then(|id| derive::assistant::assistant(store, id))
                     .map(|view| C::Assistant(pb::AssistantProfilePatch { view: Some(view) })),
                 ViewKey::AddProject if v.add_project => Some(C::AddProject(pb::AddProjectPatch {
-                    view: Some(derive::settings::add_project(store)),
+                    view: Some(derive::add_project::add_project(store)),
                 })),
                 ViewKey::Connection => Some(C::Connection(pb::ConnectionPatch {
                     view: Some(derive::connection::connection(store)),

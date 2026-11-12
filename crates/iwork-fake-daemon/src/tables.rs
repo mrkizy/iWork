@@ -64,6 +64,34 @@ pub struct Tables {
     pub artifacts: BTreeMap<String, Bytes>,
     /// 用户最近点过的那条系统通知（GetOpenTarget）；测试经 `FakeDaemon::set_open_target` 设。token 0 表示没有。
     pub open_target: pb::GetOpenTargetResult,
+    /// 假的「盘」：InspectProjectPath、AddProject、InitRepository 按它判（假后台不碰真盘；T09 方案 15.2）。
+    /// 键是选择框给的路径；场景经 `Step::Mutate` 登记，克隆完、新建项目时自己登记。
+    pub disk: BTreeMap<String, FakeDir>,
+    /// 克隆时后台拒的地址 → 拒绝的文字（错误码照真后台的地址白名单：INVALID_ARGUMENT）。假后台不另写一份
+    /// 白名单规则（规则只在 iwork-vcs-git 一处），由场景登记哪个地址被拒。
+    pub rejected_clone_urls: BTreeMap<String, String>,
+    /// 初始化会失败的目录 → 原因（错误码照真后台没配提交身份时：VCS_IDENTITY_MISSING）。
+    pub init_failures: BTreeMap<String, String>,
+}
+
+/// 假的「盘」上的一个目录。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FakeDir {
+    /// 会被加进来的目录：选的是仓库的子目录时是仓库根。
+    pub root_path: String,
+    pub versioned: bool,
+    pub has_agents_md: bool,
+}
+
+impl FakeDir {
+    /// 受版本控制的仓库根（克隆完、新建的项目就是这样）。
+    pub fn repo(root: &str) -> Self {
+        FakeDir {
+            root_path: root.to_owned(),
+            versioned: true,
+            has_agents_md: false,
+        }
+    }
 }
 
 pub fn tool_call_key(turn_id: &str, tool_call_id: &str) -> String {
@@ -190,7 +218,16 @@ impl Tables {
                     p.settings = e.settings.clone();
                 }
             }
-            E::RepositoryInitialized(_) | E::CloneFinished(_) => {}
+            E::RepositoryInitialized(e) => {
+                if let Some(d) = self.disk.get_mut(&e.path) {
+                    d.versioned = true;
+                }
+            }
+            E::CloneFinished(e) => {
+                if let Some(path) = e.path.as_ref().filter(|_| e.ok) {
+                    self.disk.insert(path.clone(), FakeDir::repo(path));
+                }
+            }
             E::AgentsMdDraftProposed(e) => {
                 let card = pb::AgentsMdDraftCard {
                     card_id: e.card_id.clone(),
@@ -594,6 +631,7 @@ impl Tables {
                 runtimes: self.runtimes.values().cloned().collect(),
             }),
             Q::GetOpenTarget(_) => R::GetOpenTarget(self.open_target.clone()),
+            Q::InspectProjectPath(i) => R::InspectProjectPath(self.inspect_project_path(&i.path)?),
             Q::ListModels(_) => R::ListModels(pb::ListModelsResult {
                 models: vec![
                     pb::ModelOption {
@@ -1184,6 +1222,52 @@ pub fn auto_title(text: &str, first_attachment: Option<&str>) -> String {
     } else {
         head
     }
+}
+
+impl Tables {
+    /// 检查一个目录（照假的「盘」）：已经是项目 → KNOWN；受版本控制 → ADDABLE；否则 NOT_VERSION_CONTROLLED。
+    /// 不在「盘」上 → PROJECT_PATH_MISSING（真后台路径不存在时的错误码）。
+    pub fn inspect_project_path(
+        &self,
+        path: &str,
+    ) -> Result<pb::InspectProjectPathResult, pb::Error> {
+        // 键是选择框给的路径；AddProject 发的是检查回来的仓库根，也认（按 root_path 找）
+        let d = self
+            .disk
+            .get(path)
+            .or_else(|| self.disk.values().find(|d| d.root_path == path))
+            .ok_or_else(|| pb::Error {
+                code: pb::ErrorCode::ProjectPathMissing.into(),
+                message: format!("找不到这个文件夹：{path}"),
+                retryable: false,
+                ..Default::default()
+            })?;
+        let known = self
+            .projects
+            .values()
+            .find(|p| p.root_path == d.root_path)
+            .map(|p| p.id.clone());
+        let state = match (&known, d.versioned) {
+            (Some(_), _) => pb::ProjectPathState::Known,
+            (None, true) => pb::ProjectPathState::Addable,
+            (None, false) => pb::ProjectPathState::NotVersionControlled,
+        };
+        Ok(pb::InspectProjectPathResult {
+            state: state.into(),
+            name: last_segment(&d.root_path).to_owned(),
+            root_path: d.root_path.clone(),
+            project_id: known,
+            has_agents_md: d.has_agents_md,
+        })
+    }
+}
+
+/// 路径的最后一段（项目名的默认取法）。
+pub fn last_segment(path: &str) -> &str {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
 }
 
 fn invalid(field: &str, message: &str) -> pb::Error {

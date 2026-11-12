@@ -1,4 +1,4 @@
-//! 设置页：通用开关、运行时（验证状态只在这里标，R10）、记住的规则、本机导入；另含「全部对话」与添加项目两页。
+//! 设置页：通用开关、运行时（验证状态只在这里标，R10）、记住的规则、本机导入；另含「全部对话」一页。
 
 use iwork_proto::pb;
 
@@ -164,33 +164,4 @@ pub fn conversation_list(store: &Store, ctx: Ctx) -> Option<pb::ConversationList
         loading: list.loading,
         empty_text,
     })
-}
-
-pub fn add_project(store: &Store) -> pb::AddProjectView {
-    pb::AddProjectView {
-        clone: store.clone_job.as_ref().map(|j| pb::CloneProgressView {
-            job_id: j.progress.job_id.clone(),
-            phase: j.progress.phase.clone(),
-            percent: j.progress.percent,
-            text: j.progress.text.clone(),
-            can_retry: j.error.is_some(),
-            error: j.error.clone(),
-        }),
-        drafts: store
-            .summary
-            .pending
-            .iter()
-            .filter_map(|p| match &p.item {
-                Some(pb::pending_item::Item::AgentsMdDraft(d)) => Some(pb::DraftCardView {
-                    card_id: d.card_id.clone(),
-                    project_id: d.project_id.clone(),
-                    project_name: store
-                        .summary
-                        .project(&d.project_id)
-                        .map_or_else(String::new, |p| p.name.clone()),
-                }),
-                _ => None,
-            })
-            .collect(),
-    }
 }

@@ -118,7 +118,11 @@ fn reopen(app: &tauri::AppHandle) {
 /// 与翻页（至少 2：一组最多两行，方案 2.2 第 4 条）；发布构建不认识这个变量（R8）。
 fn options() -> Options {
     #[allow(unused_mut, reason = "只有 dev 构建改上限")]
-    let mut o = Options::default();
+    let mut o = Options {
+        // 界面上的路径把家目录写成 ~（添加项目的路径、父目录）
+        home_dir: std::env::var("HOME").ok(),
+        ..Options::default()
+    };
     #[cfg(feature = "dev")]
     if let Ok(v) = std::env::var("IWORK_DEV_TIMELINE_CAP") {
         match v.parse::<usize>() {

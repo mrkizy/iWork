@@ -208,23 +208,88 @@ pub fn decide(
                 new_path: x.new_path.clone(),
             })));
         }
-        // 添加项目（步 7d）：真后台要检查目录、写 project.toml（技术设计 8.2）；假后台按路径的最后一段起名。
+        // 添加项目一组（T09 方案 15.2）。真后台的判定（detect、地址白名单、目录名）在 iwork-vcs-git / iwork-host，
+        // 假后台不另写一份：目录照场景登记的假「盘」（Tables::disk）判，被拒的克隆地址由场景登记。
         C::AddProject(x) => {
-            if tables.projects.values().any(|p| p.root_path == x.path) {
+            let check = tables.inspect_project_path(&x.path)?;
+            match pb::ProjectPathState::try_from(check.state).unwrap_or_default() {
+                pb::ProjectPathState::Addable => {}
+                pb::ProjectPathState::NotVersionControlled => {
+                    return Err(error(
+                        pb::ErrorCode::ProjectNotVersionControlled,
+                        "这个文件夹还没有版本控制",
+                        false,
+                    ));
+                }
+                _ => {
+                    return Err(error(
+                        pb::ErrorCode::InvalidArgument,
+                        "这个文件夹已经是项目了",
+                        false,
+                    ));
+                }
+            }
+            let project_id = fresh("project");
+            d.events.push(fixtures::project(
+                &project_id,
+                &check.name,
+                &check.root_path,
+            ));
+            // 勾了「生成草稿」而且没有 AGENTS.md：同一次提交里排上草稿（假后台直接给出草稿卡片）
+            if x.propose_agents_md_draft == Some(true) && !check.has_agents_md {
+                d.events
+                    .push(fixtures::agents_md_draft(&fresh("draft"), &project_id));
+            }
+        }
+        C::InitRepository(x) => {
+            let dir = tables
+                .disk
+                .get(&x.path)
+                .ok_or_else(|| not_found("path", &x.path))?;
+            if dir.versioned {
                 return Err(error(
                     pb::ErrorCode::InvalidArgument,
-                    "这个文件夹已经是项目了",
+                    "这个文件夹已经有版本控制了",
                     false,
                 ));
             }
-            let name = x
-                .path
-                .trim_end_matches('/')
-                .rsplit('/')
-                .next()
-                .unwrap_or_default();
+            if let Some(why) = tables.init_failures.get(&x.path) {
+                return Err(error(pb::ErrorCode::VcsIdentityMissing, why, false));
+            }
             d.events
-                .push(fixtures::project(&fresh("project"), name, &x.path));
+                .push(ev(E::RepositoryInitialized(pb::RepositoryInitialized {
+                    path: x.path.clone(),
+                })));
+        }
+        C::CreateProject(x) => {
+            let parent = x
+                .parent_dir
+                .clone()
+                .unwrap_or_else(|| tables.settings.projects_root.clone());
+            let path = format!("{}/{}", parent.trim_end_matches('/'), x.name);
+            d.events
+                .push(fixtures::project(&fresh("project"), &x.name, &path));
+        }
+        C::CloneRepository(x) => {
+            if let Some(why) = tables.rejected_clone_urls.get(&x.url) {
+                return Err(error(pb::ErrorCode::InvalidArgument, why, false));
+            }
+            let parent = x
+                .parent_dir
+                .clone()
+                .unwrap_or_else(|| tables.settings.projects_root.clone());
+            let name = x.name.clone().unwrap_or_else(|| {
+                crate::tables::last_segment(&x.url)
+                    .trim_end_matches(".git")
+                    .to_owned()
+            });
+            // 假后台不真克隆：直接完成（进度条由场景用瞬时事件演）
+            d.events.push(ev(E::CloneFinished(pb::CloneFinished {
+                job_id: fresh("clone"),
+                ok: true,
+                error: None,
+                path: Some(format!("{}/{name}", parent.trim_end_matches('/'))),
+            })));
         }
         // 设置（步 7d）：只带变了的字段
         C::SetPlayfulUi(x) => {

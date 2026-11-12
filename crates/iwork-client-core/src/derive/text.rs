@@ -357,6 +357,36 @@ pub fn quota_tooltip(window: &str, used: u32, reset: Option<String>) -> String {
 
 pub const RUNTIME_LOCKED_TIP: &str = "要换运行时请开新对话";
 pub const RUNTIME_NOT_IN_M1: &str = "M2 接入";
+/// 添加项目（画布 07 原文；T09 方案 15.2 的表）。「git」这个词只出现在这张文案表里。
+pub const ADD_NOT_VERSIONED_TITLE: &str = "这个文件夹还没有版本控制";
+pub const ADD_NOT_VERSIONED_BODY: &str = "审查、返工和集成都依赖版本快照，需要先初始化。";
+pub const ADD_INIT_LABEL: &str = "初始化为 git 仓库并首次提交";
+pub const ADD_SUBDIR_TITLE: &str = "将添加整个仓库";
+pub const ADD_CHECK_FAILED_TITLE: &str = "这个文件夹不能添加";
+pub const AGENTS_MD_MISSING: &str = "未找到";
+pub const AGENTS_MD_PRESENT: &str = "已有";
+pub const ADD_CONFIRM: &str = "添加并开始对话";
+pub const ADD_OPEN_KNOWN: &str = "打开已有项目";
+pub const RUNTIME_GLOBAL_DEFAULT: &str = "（全局默认）";
+
+/// 给人看的路径：家目录写成 `~`（家目录本身是 `~`，之下是 `~/…`）。名字以家目录为前缀的兄弟目录
+/// （`/Users/al` 与 `/Users/alice`）不缩写。没有家目录就原样。
+pub fn display_path(path: &str, home: Option<&str>) -> String {
+    let Some(home) = home
+        .map(|h| h.trim_end_matches('/'))
+        .filter(|h| !h.is_empty())
+    else {
+        return path.to_owned();
+    };
+    if path == home {
+        return "~".into();
+    }
+    match path.strip_prefix(home) {
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_owned(),
+    }
+}
+
 /// 连接类整页的出口。
 pub const EXIT_RETRY: &str = "重试";
 pub const EXIT_RELAUNCH: &str = "重新打开 iWork";
