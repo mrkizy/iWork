@@ -820,8 +820,10 @@ def obs_verdict(ev, obs, want_ok, expect_out=None, denied=None):
     「该失败」的用例：退出码 0 → FAIL（跑成了）。说「被挡住了」要三样都有（supervisor 2026-11-13，和 k1–k3 的沙箱探针同一条）：
     同一个程序写工作区的对照成功（ctl_rc 是 0）；命令自己写下的非零退出码；输出里有拦截的原文（默认 SANDBOX_DENIED_TEXT，
     格子可以给自己的 denied）。命令不存在、目录不存在、Permission denied、对照失败或没有对照 → INCONCLUSIVE，不当成被挡。
-    「该失败」的格子先看观测（审查 4/F-1 的同类）：命令自己写下了退出码 0，就是跑成了，运行超时、证据不齐也照样 FAIL；
-    观测文件只有登记的那一条命令会写（探针只放行它）。"""
+    「该失败」的格子先看观测（审查 4/F-1 的同类）：命令自己写下了退出码 0，就是跑成了，运行超时、证据不齐也照样 FAIL。
+    这条靠「观测文件只有登记的那一条命令会写（探针只放行它）」，这个前提只在环境干净时成立：init.plugins 里有外来插件时，
+    插件的 hook 能不经 PreToolUse 直接写观测目录，所以先看 unclean，和 decide 的次序一样（审查 5/F-1）。"""
+    if ev.get("unclean"): return "INCONCLUSIVE"
     if not want_ok and obs is not None and obs["rc"] == "0": return "FAIL"
     if not ev["ok"] or obs is None: return "INCONCLUSIVE"
     ok = obs["rc"] == "0" and (expect_out is None or obs["out"].strip() == expect_out)
@@ -5938,6 +5940,9 @@ def selftest():
     ev_bad = bash_ev({**good_ok, "timed_out": True}, T)
     assert obs_verdict(ev_bad, o("0"), False) == "FAIL", "审查 4/F-1 的同类：运行超时，但命令自己写下了退出码 0，照样 FAIL"
     assert obs_verdict(ev_bad, o("1"), False) == "INCONCLUSIVE" and obs_verdict(ev_bad, o("0"), True) == "INCONCLUSIVE", "对照：被挡的证据、该成功的格子仍要运行有效"
+    ev_dirty = bash_ev({**good_ok, "unclean_plugins": ["someone"]}, T)
+    assert ev_dirty.get("unclean") and obs_verdict(ev_dirty, o("0"), False) == "INCONCLUSIVE", "审查 5/F-1：环境不干净时 rc 0 可能是外来插件写的，不下 FAIL"
+    assert obs_verdict(ev_dirty, o("1"), False) == "INCONCLUSIVE" and obs_verdict(ev_dirty, o("0"), True) == "INCONCLUSIVE"
     # observed() 的对照：touch、cat 才有，同一个程序、目标在工作区里；真跑一遍
     c_touch, rd = observed("st-ctl-touch", f"touch {R.outside}/st-ctl-x")
     subprocess.run(["sh", "-c", c_touch], check=True)
