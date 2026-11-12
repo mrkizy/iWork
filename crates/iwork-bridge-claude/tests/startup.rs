@@ -82,9 +82,15 @@ async fn permission_mode_checked_before_first_message() {
         at(&log, "answered_initialize") <= stdin_at[1],
         "用户消息在核对之后"
     );
+    // 按 JSON 值比：假 CLI 单独构建时 serde_json 不一定开 preserve_order，键序会不同
+    let early: Vec<Value> = s
+        .early_lines
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
     assert_eq!(
-        s.early_lines,
-        vec![json!({ "type": "system", "subtype": "hook_started" }).to_string()]
+        early,
+        vec![json!({ "type": "system", "subtype": "hook_started" })]
     );
     assert_eq!(w.session_dirs(), 1);
     s.cli.kill().await.unwrap();
