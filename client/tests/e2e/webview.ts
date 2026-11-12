@@ -109,6 +109,23 @@ const CASES: Record<string, Case> = {
       return f;
     },
   },
+  forged: {
+    scenario: "empty",
+    script: "forged.js",
+    timeoutS: 60,
+    check(r) {
+      const d = done(r) as { forged?: { code?: string | null }; control?: { code?: string | null }; dialogOpen?: boolean };
+      const f: string[] = [];
+      expect(f, d.forged?.code === "invalid_intent", `伪造的 70 号意图没被拒：${JSON.stringify(d.forged)}`);
+      expect(f, d.control?.code === null, `对照：合法的 clear_add_project 应被受理：${JSON.stringify(d.control)}`);
+      expect(f, d.dialogOpen === false, "添加项目弹窗被打开了");
+      const intents = r.counters?.intents ?? {};
+      expect(f, intents["?"] === 1, `Rust 认作「认不出的操作」的次数：${JSON.stringify(intents)}`);
+      expect(f, intents.ClearAddProject === 1, `对照：ClearAddProject 次数：${JSON.stringify(intents)}`);
+      expect(f, r.counters?.fallback === 0, `走了回退路径 ${r.counters?.fallback} 次`);
+      return f;
+    },
+  },
   reload: {
     scenario: "stream-16x100",
     live: { pace: 70 },
