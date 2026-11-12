@@ -426,6 +426,12 @@ mod live {
             .unwrap();
     }
 
+    /// proptest 缩出来的反例（d40dd09 全量测试里偶发）：固定下来单独跑。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconnect_equals_fresh_shrunk() {
+        case(vec![0, 2, 10, 1, 0]).await.unwrap();
+    }
+
     async fn scroll_top(app: &App) {
         app.intent(pb::UiIntent {
             kind: Some(I::SetVisibleRows(pb::SetVisibleRows {
@@ -556,6 +562,9 @@ mod live {
             set_conv(&app, Some("c-basic")).await;
         }
         let (fresh_app, mut fresh) = connect(&d, Some("c-basic")).await;
+        // 先等新客户端的订阅快照到：快照重建会作废之前声明的窗口（6/F-3），快照之前报的整条窗口会被丢掉，
+        // 这边就只剩下面第二次上报才开始往前翻，翻到底以后没人再报，锚点停在最新一段（d40dd09 全量测试里偶发）。
+        settle(&fresh_app, &mut fresh).await;
         // 两边都把窗口声明成整条时间线：窗口顶到最旧会一直往前翻到底，两边都加载全部历史后整份比较。
         // 只比各自的默认窗口会把「加载了多少历史」的差别误判成不一致（两边的窗口落在不同的行上）。
         for a in [&app, &fresh_app] {
