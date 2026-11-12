@@ -104,6 +104,34 @@ pub fn dm(id: &str, assistant_id: &str) -> pb::DomainEvent {
     )
 }
 
+/// 改项目名（只带 `name`，其余字段不动）。
+pub fn project_renamed(id: &str, name: &str) -> pb::DomainEvent {
+    ev(E::ProjectUpdated(pb::ProjectUpdated {
+        project_id: id.into(),
+        name: Some(name.into()),
+        pinned: None,
+        last_active_at: None,
+    }))
+}
+
+/// 助手私聊切换上下文项目；`None` 是切回纯私聊。
+pub fn dm_project_switched(conversation_id: &str, project_id: Option<&str>) -> pb::DomainEvent {
+    ev(E::DmProjectSwitched(pb::DmProjectSwitched {
+        conversation_id: conversation_id.into(),
+        project_id: project_id.map(Into::into),
+    }))
+}
+
+/// 给消息事件标上上下文项目（助手私聊里的消息记着发出时的项目，设计 9.1）。
+pub fn in_project(mut e: pb::DomainEvent, project_id: &str) -> pb::DomainEvent {
+    if let Some(E::MessageAppended(pb::MessageAppended { message: Some(m) })) = &mut e.event {
+        m.context_project_id = Some(project_id.into());
+    } else {
+        panic!("in_project 只用于 MessageAppended：{e:?}");
+    }
+    e
+}
+
 pub fn user_message(id: &str, conversation_id: &str, body: &str) -> pb::DomainEvent {
     ev(E::MessageAppended(pb::MessageAppended {
         message: Some(pb::Message {
@@ -176,6 +204,88 @@ pub fn delta(message_id: &str, offset: u64, t: &str) -> pb::TransientEvent {
             text: t.into(),
         })),
     }
+}
+
+/// 工具输出的一段（临时事件）。
+pub fn tool_output(tool_call_id: &str, offset: u64, t: &str) -> pb::TransientEvent {
+    pb::TransientEvent {
+        event: Some(pb::transient_event::Event::ToolOutputDelta(
+            pb::ToolOutputDelta {
+                tool_call_id: tool_call_id.into(),
+                offset,
+                text: t.into(),
+            },
+        )),
+    }
+}
+
+pub fn project_path_status(project_id: &str, status: pb::PathStatus) -> pb::DomainEvent {
+    ev(E::ProjectPathStatusChanged(pb::ProjectPathStatusChanged {
+        project_id: project_id.into(),
+        path_status: status.into(),
+    }))
+}
+
+pub fn project_pinned(project_id: &str, pinned: bool) -> pb::DomainEvent {
+    ev(E::ProjectUpdated(pb::ProjectUpdated {
+        project_id: project_id.into(),
+        name: None,
+        pinned: Some(pinned),
+        last_active_at: None,
+    }))
+}
+
+pub fn attachment(id: &str, conversation_id: &str, name: &str, size: u64) -> pb::DomainEvent {
+    ev(E::AttachmentStored(pb::AttachmentStored {
+        attachment: Some(pb::Attachment {
+            id: id.into(),
+            conversation_id: conversation_id.into(),
+            sha256: "00".repeat(32),
+            size,
+            mime: "application/octet-stream".into(),
+            name: name.into(),
+            origin: None,
+            needs_confirmation: false,
+            created_at: Some(ts(0)),
+        }),
+    }))
+}
+
+/// 给 TurnQueued 换上别的模型（默认 fake-large · medium）。
+pub fn with_model(mut e: pb::DomainEvent, model_id: &str) -> pb::DomainEvent {
+    if let Some(E::TurnQueued(pb::TurnQueued { turn: Some(t) })) = &mut e.event {
+        t.model = Some(pb::ModelSelection {
+            model_id: model_id.into(),
+            effort: Some("medium".into()),
+        });
+    } else {
+        panic!("with_model 只用于 TurnQueued：{e:?}");
+    }
+    e
+}
+
+/// 本对话改选模型（「已切换为 X」的当次说明）。
+pub fn model_changed(conversation_id: &str, model_id: &str) -> pb::DomainEvent {
+    ev(E::ConversationModelChanged(pb::ConversationModelChanged {
+        conversation_id: conversation_id.into(),
+        model: Some(pb::ModelSelection {
+            model_id: model_id.into(),
+            effort: Some("medium".into()),
+        }),
+    }))
+}
+
+/// 本对话切档位（「审批方式已切换为…」的当次说明）。
+pub fn approval_mode_changed(conversation_id: &str, mode: pb::ApprovalMode) -> pb::DomainEvent {
+    ev(E::ApprovalModeChanged(pb::ApprovalModeChanged {
+        target: Some(pb::ApprovalModeTarget {
+            kind: Some(pb::approval_mode_target::Kind::ConversationId(
+                conversation_id.into(),
+            )),
+        }),
+        mode: Some(mode.into()),
+        cause: pb::ApprovalModeChangeCause::User.into(),
+    }))
 }
 
 pub fn turn_queued(id: &str, conversation_id: &str, assistant_id: &str) -> pb::DomainEvent {

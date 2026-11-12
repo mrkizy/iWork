@@ -32,12 +32,20 @@ struct Shared {
     /// 当前这一代服务端的发布端；重启（断开全部连接）时换新的。
     publisher: Mutex<Option<Publisher>>,
     auto_reply: AtomicBool,
+    /// 场景里等待的倍数（1 = 照原样）：把同样形状的流量摊长（真实 WebView 的 1 分钟用例）。
+    pace: std::sync::atomic::AtomicU32,
     /// 只给测试用：命中的查询一律回错误（模拟查询受理出错）。
     failing_queries: Mutex<Option<QueryFilter>>,
+    /// 只给测试用：命中的命令一律拒绝（模拟后台不受理）。
+    failing_commands: Mutex<Option<CommandFilter>>,
+    /// 重连时最多重放多少个 seq，再多给快照（ipc `ServerConfig::replay_limit`）；下一次重启监听时生效。
+    replay_limit: std::sync::atomic::AtomicU64,
 }
 
 /// 哪些查询要回错误。
 pub type QueryFilter = Box<dyn Fn(&pb::Query) -> bool + Send + Sync>;
+/// 哪些命令要拒绝。
+pub type CommandFilter = Box<dyn Fn(&pb::Command) -> bool + Send + Sync>;
 
 impl Shared {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -205,6 +213,22 @@ impl RequestHandler for Handler {
         use pb::request::Body;
         use pb::response::Body as Out;
         let body = match req.body {
+            Some(Body::Command(c))
+                if self
+                    .0
+                    .failing_commands
+                    .lock()
+                    .expect("命令故障表锁中毒")
+                    .as_ref()
+                    .is_some_and(|f| f(&c)) =>
+            {
+                Out::Error(pb::Error {
+                    code: pb::ErrorCode::InvalidArgument.into(),
+                    message: "假后台：按测试设定拒绝这条命令".into(),
+                    retryable: false,
+                    details: Default::default(),
+                })
+            }
             Some(Body::Command(c)) => match self.0.command(c) {
                 Ok(a) => Out::Accepted(a),
                 Err(e) => Out::Error(e),
@@ -333,7 +357,12 @@ impl FakeDaemon {
             state: Mutex::new(State::default()),
             publisher: Mutex::new(None),
             auto_reply: AtomicBool::new(false),
+            pace: std::sync::atomic::AtomicU32::new(1),
             failing_queries: Mutex::new(None),
+            failing_commands: Mutex::new(None),
+            replay_limit: std::sync::atomic::AtomicU64::new(
+                ServerConfig::new("iwork-fake-daemon").replay_limit,
+            ),
         });
         let running = spawn_server(&shared, &socket_path, own.clone(), NORMAL_TRUST)?;
         Ok(FakeDaemon {
@@ -388,7 +417,31 @@ impl FakeDaemon {
             .expect("查询故障表锁中毒") = f;
     }
 
+    /// 只给测试用：之后命中 `f` 的命令一律拒绝（不追加事件）；`None` 恢复正常。
+    pub fn fail_commands(&self, f: Option<CommandFilter>) {
+        *self
+            .shared
+            .failing_commands
+            .lock()
+            .expect("命令故障表锁中毒") = f;
+    }
+
+    /// 只给测试用：到现在为止的全部持久事件（按 seq）。
+    pub fn persisted_log(&self) -> Vec<pb::PersistedEvent> {
+        self.shared
+            .lock()
+            .log
+            .iter()
+            .map(|e| e.event.clone())
+            .collect()
+    }
+
     /// SendMessage 之后要不要自动回一个脚本化回合（默认关）。
+    /// 场景里的每一次等待乘上这个倍数（至少 1）。
+    pub fn set_pace(&self, factor: u32) {
+        self.shared.pace.store(factor.max(1), Ordering::Relaxed);
+    }
+
     pub fn set_auto_reply(&self, on: bool) {
         self.shared.auto_reply.store(on, Ordering::Relaxed);
     }
@@ -410,6 +463,14 @@ impl FakeDaemon {
         }
     }
 
+    /// 停止监听（客户端连不上）；`disconnect_all` 恢复。
+    pub async fn stop_listening(&self) {
+        if let Some(r) = self.running.lock().await.take() {
+            r.token.cancel();
+            let _ = r.task.await;
+        }
+    }
+
     async fn restart(&self, trust: TrustPolicy, own: SelfIdentity) {
         let mut running = self.running.lock().await;
         if let Some(r) = running.take() {
@@ -423,18 +484,31 @@ impl FakeDaemon {
 
     pub async fn run_scenario(&self, name: &str) -> Result<(), UnknownScenario> {
         let sc = scenario::get(name).ok_or_else(|| UnknownScenario(name.to_owned()))?;
-        for step in sc.steps() {
+        self.run_steps(sc.steps()).await;
+        Ok(())
+    }
+
+    /// 按顺序跑一串步骤（场景的一段，见 `Scenario::split_at_focus`）。
+    pub async fn run_steps(&self, steps: Vec<Step>) {
+        for step in steps {
             match step {
                 Step::Append(e) => {
                     self.append(*e);
                 }
-                Step::Transient(e) => self.transient(e),
-                Step::Sleep(d) => tokio::time::sleep(d).await,
+                Step::Transient(t) => self.transient(t),
+                Step::Sleep(d) => {
+                    tokio::time::sleep(d * self.shared.pace.load(Ordering::Relaxed)).await;
+                }
                 Step::DisconnectAll => self.disconnect_all().await,
+                Step::DisconnectForSnapshot => {
+                    self.shared.replay_limit.store(0, Ordering::Relaxed);
+                    self.disconnect_all().await;
+                }
+                Step::StopListening => self.stop_listening().await,
+                Step::OpenHere => {}
                 Step::Mutate(f) => self.mutate_tables(f),
             }
         }
-        Ok(())
     }
 
     pub async fn shutdown(self) {
@@ -455,6 +529,7 @@ fn spawn_server(
     let listener = LocalListener::bind(path)?;
     let mut cfg = ServerConfig::new("iwork-fake-daemon");
     cfg.trust = trust;
+    cfg.replay_limit = shared.replay_limit.load(Ordering::Relaxed);
     cfg.shutdown_flush = Duration::from_millis(100);
     let (server, publisher) = Server::new(
         cfg,

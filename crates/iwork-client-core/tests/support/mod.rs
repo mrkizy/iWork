@@ -2,6 +2,9 @@
 
 #![allow(dead_code, reason = "各测试文件用其中一部分")]
 
+// 录场景（两段式）；假后台只在 Unix 上监听。
+#[cfg(unix)]
+pub mod record;
 pub mod web;
 
 use iwork_client_core::store::{Item, QueryPurpose, ScopeKind, Store};

@@ -1,0 +1,29 @@
+.iw-avatar {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  overflow: visible;
+}
+.iw-avatar svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+/* 内置 iWork 画应用标志（白底图标，圆角由界面加，design-system README） */
+.iw-avatar--logo {
+  border-radius: 26%;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px var(--line);
+}
+.iw-avatar__logo {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.iw-avatar .iw-n,
+.iw-avatar .iw-h {
+  width: 100%;
+  height: 100%;
+}

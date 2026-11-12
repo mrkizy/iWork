@@ -22,6 +22,8 @@ pub enum Action {
     Attach(pb::ui_intent::Kind),
     /// 本地就能判定不受理（回 `IntentAck.error`）。
     Reject(pb::IntentError),
+    /// 首页：新建对话并发出首条消息（会话层 session::start 一步步推进）。
+    Start { project_id: String, text: String },
     /// 什么都不用做（如标题没变）。
     Nothing,
 }
@@ -43,6 +45,9 @@ pub enum Local {
     Quit {
         confirm: bool,
     },
+    /// 首页选模型 / 档位（记在 Rust，新建对话时带上）。
+    HomeModel(pb::ModelSelection),
+    HomeMode(pb::ApprovalMode),
 }
 
 /// 壳要做的副作用（通知、打开外链）。
@@ -85,6 +90,7 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
                 project_id: l.project_id,
                 filter: l.filter,
             }),
+            home: v.home.map(|h| h.project_id),
         })),
         I::SetVisibleRows(w) => Action::Local(Local::SetWindow {
             conversation_id: w.conversation_id,
@@ -134,6 +140,26 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
                 effort: x.effort,
             }),
         })),
+        I::StartConversation(x) => {
+            if x.text.trim().is_empty() {
+                reject("empty_message", "消息是空的")
+            } else if store.summary.project(&x.project_id).is_none() {
+                reject("project_not_found", "没有这个项目")
+            } else {
+                Action::Start {
+                    project_id: x.project_id,
+                    text: x.text,
+                }
+            }
+        }
+        I::SetHomeModel(x) => Action::Local(Local::HomeModel(pb::ModelSelection {
+            model_id: x.model_id,
+            effort: x.effort,
+        })),
+        I::SetHomeApprovalMode(x) => match pb::ApprovalMode::try_from(x.mode) {
+            Ok(m) if m != pb::ApprovalMode::Unspecified => Action::Local(Local::HomeMode(m)),
+            _ => reject("invalid_mode", "没有这个档位"),
+        },
         I::SwitchDmProject(x) => Action::Command(Cmd::SwitchDmProject(pb::SwitchDmProject {
             conversation_id: x.conversation_id,
             project_id: (!x.project_id.is_empty()).then_some(x.project_id),

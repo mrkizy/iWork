@@ -3,6 +3,9 @@
 //! 连接来的数据只经 [`Store::apply`] 写入，吃的是 `iwork_ipc` `Incoming` 给出的全序；网页声明的视图状态经
 //! `set_*` 写入。两者都只往 [`DirtySet`] 记「哪块脏了」，帧在网页来取时才由 `derive` 从当前状态算（方案 2.4）。
 
+pub mod created;
+pub mod home;
+pub mod models;
 pub mod summary;
 pub mod timeline;
 
@@ -131,11 +134,12 @@ pub enum ViewKey {
     ConversationList,
     Conversation,
     Navigate,
+    Home,
 }
 
 impl ViewKey {
     /// 「全部视图」不含跳转：跳转只在请求时发一次，attach、SetVisible 不重发（审查 1/F-10）。
-    pub const ALL: [ViewKey; 8] = [
+    pub const ALL: [ViewKey; 9] = [
         ViewKey::Sidebar,
         ViewKey::Pending,
         ViewKey::Settings,
@@ -144,6 +148,7 @@ impl ViewKey {
         ViewKey::Connection,
         ViewKey::ConversationList,
         ViewKey::Conversation,
+        ViewKey::Home,
     ];
 }
 
@@ -183,6 +188,8 @@ pub struct Visible {
     pub assistant_id: Option<String>,
     pub add_project: bool,
     pub conversation_list: Option<ListQuery>,
+    /// 首页：路由里带的项目（空串表示由 Rust 挑）。
+    pub home: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -252,13 +259,30 @@ pub struct Store {
     pub quit_requested: bool,
     /// 上一次添加附件被拒的原因（拖入时没有回包可带，放在输入框上方）。
     pub attach_error: Option<String>,
-    /// 最近一次跳转请求（点击系统通知）：(seq, 对话, 行)。
-    pub navigate: Option<(u64, String, String)>,
+    /// 最近一次跳转请求（点击系统通知、新建对话后）。
+    pub navigate: Option<pb::NavigatePatch>,
+    /// 首页：选过的模型与档位、正在进行的「新建并发出」（见 home 模块）。
+    pub home: home::Home,
+    /// 本客户端新建的对话：建好就打开（见 created 模块）。
+    pub created: created::CreatedWatch,
+    /// 各运行时的模型清单（ListModels 附带查询的结果，见 models 模块）。
+    pub models: models::ModelCatalog,
+    /// 「已重新连接，回到最新」提示挂在哪个对话上（Q9）；会话层到时撤掉。
+    pub back_to_latest: Option<String>,
+    /// 这一轮刚挂上提示：会话层取走后开始计时。
+    back_to_latest_started: bool,
     subs: BTreeMap<u32, Sub>,
     /// 这次重连以来由快照换过的摘要表（审查 1/F-8）。
     snapshot_tables: BTreeSet<SummaryTable>,
     /// 时间线行数上限。
     timeline_cap: usize,
+    /// 只给录像与预览：按助手 id 换形象（derive::avatar 读）。正式运行时为空（`Options::characters` 默认空）。
+    ///
+    /// 这不是产品状态，和方案 R8（客户端里没有只为测试存在的分支）不合，是暂时的例外。放在这里，是因为
+    /// 头像在行、侧栏、助手页三处派生里算，三处都只拿得到 `&Store`：挪出去要给三处都加参数。关进 feature 也不划算：
+    /// 现有的 `dev` feature 连着 DevTrust，另开一个又要让测试自依赖。正式运行时它为空，不产生分支差异。
+    /// **删除时机**：助手配置（`pb::Avatar`）有了形象字段时删掉它和 `Options::characters`，形象改从配置读。
+    pub character_overrides: crate::derive::avatar::CharacterOverrides,
     /// 有视图查询失败、在退避中：连接条上显示一行（审查 1/F-5）。
     pub query_failing: bool,
     pub dirty: DirtySet,
@@ -336,6 +360,13 @@ impl Store {
         self.refresh.abandon_round();
         // 列表页的 loading 留着：它就是「还要再发」的记号，重新 Live 后照样发（审查 1/F-2）。
         self.snapshot_tables.clear();
+        self.models.connection_closed();
+    }
+
+    /// 模型清单取到了：输入框的菜单要重算。
+    pub fn set_models(&mut self, runtime_id: &str, result: pb::ListModelsResult) {
+        self.models.loaded(runtime_id, result);
+        self.mark_header();
     }
 
     // ---------- 本地视图状态 ----------
@@ -384,9 +415,9 @@ impl Store {
         if self.connection != c {
             self.connection = c;
             self.dirty.mark(ViewKey::Connection);
-            // 「会发命令的按钮」随连接状态变。
-            self.dirty.mark(ViewKey::Conversation);
-            self.dirty.conversation.header = true;
+            // 「会发命令的按钮」随连接状态变：输入框在标题栏一带，卡片按钮在行里（derive::row 的 live）。
+            self.mark_header();
+            self.mark_rows(|r| matches!(r, Row::Approval(_) | Row::UserAction(_) | Row::Resume(_)));
         }
     }
 
@@ -416,15 +447,90 @@ impl Store {
     pub fn set_attach_error(&mut self, e: Option<String>) {
         if self.attach_error != e {
             self.attach_error = e;
-            self.dirty.mark(ViewKey::Conversation);
-            self.dirty.conversation.header = true;
+            self.mark_header();
         }
     }
 
     pub fn request_navigate(&mut self, conversation_id: String, row_key: String) {
-        let seq = self.navigate.as_ref().map_or(1, |n| n.0 + 1);
-        self.navigate = Some((seq, conversation_id, row_key));
+        self.navigate_to(conversation_id, row_key, None);
+    }
+
+    fn navigate_to(&mut self, conversation_id: String, row_key: String, started: Option<String>) {
+        let seq = self.navigate.as_ref().map_or(1, |n| n.seq + 1);
+        self.navigate = Some(pb::NavigatePatch {
+            seq,
+            conversation_id,
+            row_key,
+            started_project_id: started,
+        });
         self.dirty.mark(ViewKey::Navigate);
+    }
+
+    /// 首页的选择（模型、档位）改了。
+    pub fn set_home_choice(&mut self, f: impl FnOnce(&mut home::Home)) {
+        f(&mut self.home);
+        self.dirty.mark(ViewKey::Home);
+    }
+
+    /// 首页开始「新建并发出」。
+    pub fn start_begin(&mut self, project_id: String, text: String) {
+        self.home.begin(project_id, text);
+        self.dirty.mark(ViewKey::Home);
+    }
+
+    /// 首条消息受理了：跳过去，网页据 started_project_id 清掉首页草稿。
+    pub fn start_finished(&mut self) {
+        if let Some(s) = self.home.finish()
+            && let Some(id) = s.conversation_id
+        {
+            self.navigate_to(id, String::new(), Some(s.project_id));
+        }
+        self.dirty.mark(ViewKey::Home);
+    }
+
+    pub fn start_failed(&mut self, why: home::StartError) {
+        self.home.fail(why);
+        self.dirty.mark(ViewKey::Home);
+    }
+
+    /// 新建的对话配上了受理范围：侧栏「新对话」直接打开；首页的记下对话，等会话层发首条消息。
+    fn created_matched(&mut self, conversation_id: String, purpose: created::Purpose) {
+        match purpose {
+            created::Purpose::Open => self.request_navigate(conversation_id, String::new()),
+            created::Purpose::Start => {
+                if let Some(s) = self.home.start.as_mut() {
+                    s.conversation_id = Some(conversation_id);
+                }
+            }
+        }
+    }
+
+    /// 刚挂上「回到最新」提示：返回真一次，会话层据此开始计时。
+    pub fn take_back_to_latest_started(&mut self) -> bool {
+        std::mem::take(&mut self.back_to_latest_started)
+    }
+
+    pub fn clear_back_to_latest(&mut self) {
+        if self.back_to_latest.take().is_some() {
+            self.mark_header();
+        }
+    }
+
+    /// 本客户端的 CreateConversation 受理了（seq 范围来自 CommandAccepted）。
+    pub fn create_accepted(&mut self, first: u64, last: u64, purpose: created::Purpose) {
+        match self.created.accepted(first, last, purpose, self.cursor) {
+            created::Accepted::Matched(id, purpose) => self.created_matched(id, purpose),
+            created::Accepted::Waiting => {}
+            created::Accepted::Missed(purpose) => self.created_missed(purpose),
+        }
+    }
+
+    /// 新建的对话再也配不上（事件随快照来了）：侧栏「新对话」就不跳（对话在侧栏里）；
+    /// 首页那次停下来报原因，不猜哪个是新对话（猜错会把首条消息发进别的对话）。
+    fn created_missed(&mut self, purpose: created::Purpose) {
+        if purpose == created::Purpose::Start && self.home.start.is_some() {
+            self.start_failed(home::StartError::Lost);
+        }
     }
 
     pub fn take_dirty(&mut self) -> DirtySet {
@@ -495,8 +601,7 @@ impl Store {
                 if let Some(r) = &e.runtime {
                     self.runtimes.insert(r.runtime_id.clone(), r.clone());
                     self.dirty.mark(ViewKey::Settings);
-                    self.dirty.mark(ViewKey::Conversation);
-                    self.dirty.conversation.header = true;
+                    self.mark_header();
                 }
             }
             E::QuotaObserved(e) => {
@@ -522,8 +627,7 @@ impl Store {
                     s.projects_root.clone_from(v);
                 }
                 self.dirty.mark(ViewKey::Settings);
-                self.dirty.mark(ViewKey::Conversation);
-                self.dirty.conversation.rows.extend(self.turn_end_rows());
+                self.mark_rows(|r| matches!(r, Row::TurnEnd(_)));
             }
             E::CloneFinished(e) => {
                 if let Some(job) = self.clone_job.as_mut()
@@ -535,6 +639,15 @@ impl Store {
                             .map_or_else(String::new, |x| x.message.clone())
                     });
                     self.dirty.mark(ViewKey::AddProject);
+                }
+            }
+            E::ConversationCreated(e) => {
+                if let Some(id) = e
+                    .conversation
+                    .as_ref()
+                    .and_then(|c| self.created.created(seq, &c.id))
+                {
+                    self.created_matched(id.0, id.1);
                 }
             }
             E::ConversationDeleted(e)
@@ -572,14 +685,16 @@ impl Store {
         }
     }
 
-    fn turn_end_rows(&self) -> Vec<String> {
-        self.open.as_ref().map_or_else(Vec::new, |t| {
-            t.identities()
-                .into_iter()
-                .filter(|(_, id)| id.starts_with("end:"))
-                .map(|(_, id)| id)
-                .collect()
-        })
+    /// 把打开的时间线里满足条件的行标脏（行外状态变了，见 `Timeline::identities_where`）。
+    fn mark_rows(&mut self, pred: impl Fn(&Row) -> bool) {
+        let Some(t) = self.open.as_ref() else {
+            return;
+        };
+        let rows = t.identities_where(pred);
+        if !rows.is_empty() {
+            self.dirty.mark(ViewKey::Conversation);
+            self.dirty.conversation.rows.extend(rows);
+        }
     }
 
     fn apply_transient(&mut self, t: pb::transient_event::Event, applied: &mut Applied) {
@@ -633,6 +748,10 @@ impl Store {
         if let Some(snapshot) = s.snapshot {
             applied.had_seq = true;
             self.cursor = self.cursor.max(s.snapshot_seq);
+            // 快照盖过的新建：建出它的事件不会再逐条来了（受理后到的那种先后在 create_accepted 里收）。
+            for purpose in self.created.covered_by_snapshot(s.snapshot_seq) {
+                self.created_missed(purpose);
+            }
             self.snapshot_tables.extend(
                 snapshot
                     .results
@@ -691,16 +810,23 @@ impl Store {
                 }
             }
             (_, K::ListProjects(l)) => {
+                // 项目名进了分隔线与「已切到项目」说明的文字（derive::row::project_name）。
+                if self.summary.projects != l.projects {
+                    self.mark_rows(|r| matches!(r, Row::Divider { .. } | Row::Note { .. }));
+                }
                 self.summary.projects = l.projects;
                 self.mark_summary_views();
             }
             (_, K::ListConversations(l)) => {
                 self.summary.conversations = l.conversations;
                 self.mark_summary_views();
-                self.dirty.mark(ViewKey::Conversation);
-                self.dirty.conversation.header = true;
+                self.mark_header();
             }
             (_, K::ListAssistants(l)) => {
+                // 助手头像进了消息行（derive::avatar）。
+                if self.summary.assistants != l.assistants {
+                    self.mark_rows(|r| matches!(r, Row::Message(_)));
+                }
                 self.summary.assistants = l.assistants;
                 self.summary.activities = l.activities;
                 self.mark_summary_views();
@@ -731,8 +857,22 @@ impl Store {
                     && (cid == Some(t.conversation_id.as_str())
                         || matches!(p, Some(QueryPurpose::OlderPage { conversation_id, .. } | QueryPurpose::LatestPage { conversation_id }) if *conversation_id == t.conversation_id))
                 {
+                    // Q9（产品负责人 2026-11-11）：快照重建时用户正在看旧消息 → 回到最新并提示。
+                    // 「在看旧消息」= 网页声明的窗口没顶到最新一行，或时间线已不接着最新。
+                    let reading_old = mode == PageMode::Snapshot
+                        && t.identities().last().is_some_and(|(newest, _)| {
+                            !t.at_tail
+                                || self.window.is_some_and(|(_, last)| last < newest.ordinal())
+                        });
                     let mut c = t.apply_page(&page, mode);
                     c.merge(t.sync_resume_cards(self.summary.resume_cards()));
+                    if reading_old {
+                        // 旧窗口指着重建前的位置；清掉它，下一帧从最新的一页开始。
+                        self.window = None;
+                        self.back_to_latest = Some(t.conversation_id.clone());
+                        self.back_to_latest_started = true;
+                        c.header = true;
+                    }
                     self.dirty.conversation(c);
                 }
             }
@@ -751,8 +891,7 @@ impl Store {
                     .map(|r| (r.runtime_id.clone(), r))
                     .collect();
                 self.dirty.mark(ViewKey::Settings);
-                self.dirty.mark(ViewKey::Conversation);
-                self.dirty.conversation.header = true;
+                self.mark_header();
             }
             (_, K::GetSettings(s)) => {
                 self.settings = s.global;
@@ -777,7 +916,15 @@ impl Store {
         }
     }
 
+    /// 标题栏与输入框一带要重算。首页的输入框用的是同一组输入（运行时、模型清单、连接、项目、助手），一起标。
+    fn mark_header(&mut self) {
+        self.dirty.mark(ViewKey::Conversation);
+        self.dirty.conversation.header = true;
+        self.dirty.mark(ViewKey::Home);
+    }
+
     fn mark_summary_views(&mut self) {
+        self.dirty.mark(ViewKey::Home);
         self.dirty.mark(ViewKey::Sidebar);
         self.dirty.mark(ViewKey::Pending);
         self.dirty.mark(ViewKey::Assistant);

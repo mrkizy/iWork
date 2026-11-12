@@ -1,0 +1,74 @@
+/* 全站基础样式。颜色、字号、圆角只引设计系统令牌（docs/design/design-system/tokens.css），组件不写死颜色。 */
+@import "@design/tokens.css";
+@import "@design/motion.css";
+
+/* 字体随包带（Q13）：fontsource 变体包注册的族名带「Variable」后缀，这里把令牌指过去；
+   系统字体留作后备。令牌文件本身不改。 */
+:root {
+  --font-sans: "Inter Variable", "Noto Sans SC Variable", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-size: var(--fs-md);
+  line-height: var(--lh-ui);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* 正文、代码、输入框可以选中复制 */
+input,
+textarea,
+.iw-selectable {
+  user-select: text;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+code,
+pre,
+kbd {
+  font-family: var(--font-mono);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--bd2);
+  border-radius: var(--r-pill);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+/* 只给读屏器的文字 */
+.iw-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

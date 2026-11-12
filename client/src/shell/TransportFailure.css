@@ -1,0 +1,24 @@
+.iw-transport-failure {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 0 48px;
+  text-align: center;
+  color: var(--tx2);
+}
+.iw-transport-failure h1 {
+  margin: 0 0 12px;
+  color: var(--tx);
+  font-size: var(--fs-title);
+}
+.iw-transport-failure p {
+  margin: 4px 0;
+  max-width: 560px;
+}
+.iw-transport-failure__logs {
+  font-size: var(--fs-sm);
+  color: var(--tx3);
+  user-select: text;
+}

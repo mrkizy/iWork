@@ -120,7 +120,7 @@ async fn idle_loop_is_bounded_after_mark_read() {
     until(&app, &mut web, "徽标归零", |s| {
         s.sidebar
             .as_ref()
-            .is_some_and(|v| v.projects.iter().all(|p| p.unread == 0))
+            .is_some_and(|v| v.projects.iter().all(|p| p.unread_badge.is_none()))
     })
     .await;
     settle(&app, &mut web).await;

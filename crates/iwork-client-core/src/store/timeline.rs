@@ -359,7 +359,7 @@ impl Timeline {
                     return None;
                 }
                 let text = body_text(e.body.as_ref()).map(str::to_owned);
-                let c = self.update(&e.message_id, |r| {
+                let mut c = self.update(&e.message_id, |r| {
                     if let Row::Message(m) = r {
                         m.body.clone_from(&e.body);
                         m.status = e.status;
@@ -367,6 +367,15 @@ impl Timeline {
                 })?;
                 if let Some(t) = text {
                     self.text.insert(e.message_id.clone(), t);
+                }
+                // 回合结束行读同回合消息的 status（derive::row::has_failed_message）：status 变了它也得重发。
+                if let Some(Row::Message(m)) = self.row(&e.message_id)
+                    && let Some(turn) = m.turn_id.as_deref()
+                {
+                    let end = format!("end:{turn}");
+                    if self.by_id.contains_key(&end) {
+                        c.rows.insert(end);
+                    }
                 }
                 c
             }
@@ -444,7 +453,7 @@ impl Timeline {
                 t.state = e.to;
                 t.state_reason.clone_from(&e.reason);
                 t.interrupt_reason = e.interrupt_reason;
-                TimelineChange::default().with_header()
+                self.messages_of_turn(&e.turn_id).with_header()
             }
             E::TurnModelReported(e) => {
                 let t = self.turns.get_mut(&e.turn_id)?;
@@ -466,11 +475,10 @@ impl Timeline {
                     add_usage(self.usage_total.get_or_insert_with(Default::default), u);
                 }
                 let id = format!("end:{}", turn.id);
-                let mut c = if self.admit_new(&id, false) {
-                    self.insert(RowKey::entity(seq), id, Row::TurnEnd(turn))
-                } else {
-                    TimelineChange::default()
-                };
+                let mut c = self.messages_of_turn(&turn.id);
+                if self.admit_new(&id, false) {
+                    c.merge(self.insert(RowKey::entity(seq), id, Row::TurnEnd(turn)));
+                }
                 c.header = true;
                 c
             }
@@ -577,7 +585,11 @@ impl Timeline {
                 if let Some(conv) = self.conversation.as_mut() {
                     conv.state = pb::ConversationState::Deleting as i32;
                 }
-                TimelineChange::default().with_header()
+                // 亲手执行卡片的说明读「对话是否在删除中」（「有一张卡片的执行结果无法核对，请确认后继续删除」）。
+                let mut c = TimelineChange::default().with_header();
+                c.rows
+                    .extend(self.identities_where(|r| matches!(r, Row::UserAction(_))));
+                c
             }
             _ => return None,
         };
@@ -975,6 +987,25 @@ impl Timeline {
     }
 
     /// 行身份 → 键的全部映射，按位置排序（帧引擎算窗口用）。
+    /// 满足条件的行的身份。行的视图模型读了行外的状态（回合状态、连接、摘要表、设置）时，
+    /// 那份状态一变，持有它的一方用这个把受影响的行标脏（`derive::row` 里每一处行外读取都要有对应的标脏）。
+    pub fn identities_where(&self, pred: impl Fn(&Row) -> bool) -> Vec<String> {
+        self.by_id
+            .iter()
+            .filter(|(_, k)| self.rows.get(k).is_some_and(&pred))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// 这个回合的消息行：它们的表情读回合状态（`derive::row::message`）。
+    fn messages_of_turn(&self, turn_id: &str) -> TimelineChange {
+        let mut c = TimelineChange::default();
+        c.rows.extend(self.identities_where(
+            |r| matches!(r, Row::Message(m) if m.turn_id.as_deref() == Some(turn_id)),
+        ));
+        c
+    }
+
     pub fn identities(&self) -> Vec<(RowKey, String)> {
         let mut v: Vec<(RowKey, String)> =
             self.by_id.iter().map(|(id, k)| (*k, id.clone())).collect();

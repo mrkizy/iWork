@@ -1,0 +1,9 @@
+.iw-vrows {
+  position: relative;
+  height: 100%;
+  overflow-y: auto;
+  overflow-anchor: none;
+}
+.iw-vrows__spacer {
+  flex: none;
+}

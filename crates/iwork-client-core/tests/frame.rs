@@ -271,6 +271,7 @@ fn every_patch_kind_survives_chunking() {
             project_id: PID.into(),
             filter: String::new(),
         }),
+        home: Some(String::new()),
     };
     s.set_visible(v.clone());
     // 助手需要在摘要里。
@@ -310,6 +311,7 @@ fn every_patch_kind_survives_chunking() {
         ("connection", st.connection.is_some()),
         ("conversation_list", st.list.is_some()),
         ("navigate", st.navigate.is_some()),
+        ("home", st.home.is_some()),
     ];
     for name in &variants {
         let hit = got

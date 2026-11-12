@@ -260,19 +260,30 @@ pub fn runtime_guidance(state: pb::RuntimeState, name: &str) -> Option<String> {
 }
 
 /// 输入框被挡住时的说明（方案 2.7 首页一行；R10：验证状态在这里只说「为什么发不了」）。
-pub fn composer_block(state: pb::RuntimeState, name: &str) -> Option<String> {
+/// 输入框上方挡住发送的一行（运行时）。验证中、未通过两句照 ui-m1.md 2a 第 8 条，带版本号
+/// （「Claude Code 2.1.3」）；取不到版本时只写名字。未安装、未登录 2a 没写原文，沿用这里的说法。
+pub fn composer_block(
+    state: pb::RuntimeState,
+    name: &str,
+    version: Option<&str>,
+) -> Option<String> {
     use pb::RuntimeState as S;
+    let named = match version.filter(|v| !v.is_empty()) {
+        Some(v) => format!("{name} {v}"),
+        None => name.to_owned(),
+    };
     match state {
         S::Missing => Some(format!("没有找到 {name}，装好后才能发送")),
         S::NotLoggedIn => Some(format!("{name} 还没登录，登录后才能发送")),
-        S::ReadyUnverified => Some(format!("正在验证这个版本的 {name}，验证通过后就能发送")),
-        S::Incompatible => Some(format!("这个版本的 {name} 没通过验证，暂时不能发送")),
+        S::ReadyUnverified => Some(format!("正在检查 {named} 能否安全使用…")),
+        S::Incompatible => Some(format!("{named} 没有通过安全检查，暂不能使用")),
         S::ReadyVerified | S::Unspecified => None,
     }
 }
 
 pub const COMPOSER_OFFLINE: &str = "正在重新连接，连上后就能发送";
-pub const COMPOSER_PATH_MISSING: &str = "找不到项目文件夹，重新定位后才能发送";
+/// ui-m1.md 2a 第 7 条原文。
+pub const COMPOSER_PATH_MISSING: &str = "找不到项目文件夹，重新定位后才能继续";
 pub const COMPOSER_DELETING: &str = "对话正在删除";
 pub const RELOCATE: &str = "重新定位";
 pub const DETAILS: &str = "查看详情";
@@ -333,5 +344,185 @@ pub fn quota_tooltip(window: &str, used: u32, reset: Option<String>) -> String {
     match reset {
         Some(r) => format!("{window}：已用 {used}% · {r}"),
         None => format!("{window}：已用 {used}%"),
+    }
+}
+
+// ---------- 「运行时 · 模型」菜单（ui-m1.md 第 2 节第 14 条） ----------
+
+pub const RUNTIME_LOCKED_TIP: &str = "要换运行时请开新对话";
+pub const RUNTIME_NOT_IN_M1: &str = "M2 接入";
+
+/// 徽标上最多写到的数（ui-m1.md 第 2 节第 4 条，产品负责人 2026-11-11 定）；再多写「99+」。
+pub const BADGE_MAX: u32 = 99;
+
+/// 未读徽标；0 不画。
+pub fn unread_badge(n: u32) -> Option<pb::CountBadge> {
+    count_badge(n, format!("{n} 条未读"))
+}
+
+/// 「待你处理」徽标；0 不画。Dock 角标（步 5a）用同一个文字。
+pub fn pending_badge(n: u32) -> Option<pb::CountBadge> {
+    count_badge(n, format!("{n} 项待你处理"))
+}
+
+fn count_badge(n: u32, label: String) -> Option<pb::CountBadge> {
+    (n > 0).then(|| pb::CountBadge {
+        text: if n > BADGE_MAX {
+            format!("{BADGE_MAX}+")
+        } else {
+            n.to_string()
+        },
+        label,
+    })
+}
+
+/// 输入框的占位文字（ui-m1.md 3.4）：「跟阿森说点什么」；名字以拉丁字母开头或结尾时两边留空格（「跟 iWork 说点什么」）。
+pub fn composer_placeholder(assistant_name: &str) -> String {
+    if assistant_name.is_empty() {
+        return "说点什么".into();
+    }
+    let ascii = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+    let before = if ascii(assistant_name.chars().next()) {
+        " "
+    } else {
+        ""
+    };
+    let after = if ascii(assistant_name.chars().last()) {
+        " "
+    } else {
+        ""
+    };
+    format!("跟{before}{assistant_name}{after}说点什么")
+}
+
+/// 思考强度的显示文字；运行时给的取值不认识就原样显示。
+pub fn effort_label(level: &str) -> String {
+    match level {
+        "low" => "低".into(),
+        "medium" => "中".into(),
+        "high" => "高".into(),
+        "max" | "xhigh" => "最高".into(),
+        other => other.into(),
+    }
+}
+
+// ---------- 这一轮失败（ui-m1.md 2a 第 10 条） ----------
+
+/// 失败说明行：`started` 为假（助手消息为空）是「没能开始」，否则是「中途失败」。
+/// 原因用回合的 state_reason；后台没给就写「运行时没有给出原因」。「详情」是给人核对的技术信息。
+pub fn turn_failure(empty: bool, turn: Option<&pb::Turn>) -> pb::FailureLine {
+    let reason = turn
+        .and_then(|t| t.state_reason.as_deref())
+        .filter(|r| !r.is_empty());
+    let shown = reason.unwrap_or("运行时没有给出原因");
+    let text = if empty {
+        format!("这一轮没能开始：{shown}")
+    } else {
+        format!("这一轮中途失败：{shown}")
+    };
+    let detail = match turn {
+        Some(t) => format!("回合 {}，原因：{}", t.id, reason.unwrap_or("（无）")),
+        None => "这条消息不属于任何回合".to_owned(),
+    };
+    pb::FailureLine { text, detail }
+}
+
+/// 重连走了快照、时间线重建时用户正在看旧消息：回到最新，标题栏下提示（Q9，产品负责人 2026-11-11）。
+pub const BACK_TO_LATEST: &str = "已重新连接，回到最新";
+
+// ---------- 审批档位菜单（ui-m1.md 第 2 节第 9 条，文案已由产品负责人定稿） ----------
+
+pub fn approval_mode_description(mode: pb::ApprovalMode) -> &'static str {
+    match mode {
+        pb::ApprovalMode::Manual | pb::ApprovalMode::Unspecified => "写文件、执行命令前始终询问",
+        pb::ApprovalMode::Auto => "仅对检测到的风险操作请求批准",
+        pb::ApprovalMode::FullAccess => "可不受限地访问和操作一切，只有 git push 仍会询问",
+    }
+}
+
+/// 全开只在当前对话生效、不可设为默认（需求 FR11）。
+pub const FULL_ACCESS_TAG: &str = "仅本对话";
+
+/// 切到全开的确认框（画布 10-ApprovalMode-fullconfirm）。`who` 是受影响的助手名，用顿号连起来。
+pub fn full_access_confirm(who: &str) -> pb::ConfirmView {
+    pb::ConfirmView {
+        title: "本对话切到全开？".into(),
+        body: format!(
+            "{who}将不再询问你，删除也直接执行；只有 git push 仍会询问。凭据和 iWork 数据仍受保护，只有需凭据的命令（如 git pull）会在沙箱外运行。"
+        ),
+        footnote: "只在本对话有效，新对话回到默认".into(),
+        confirm_label: "切到全开".into(),
+        for_value: 0,
+    }
+}
+
+/// 首页「新建对话并发出首条消息」没成（草稿还在输入框里）。
+pub fn start_error(e: &crate::store::home::StartError) -> String {
+    use crate::store::home::StartError as E;
+    match e {
+        E::Create(why) => format!("没能新建对话：{why}"),
+        E::Send(why) => format!("新对话建好了，但消息没发出去：{why}。可以在侧栏打开它再发"),
+        E::Lost => "重新连接后认不出刚建的对话，消息没发出去。可以在侧栏打开它再发".into(),
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::composer_placeholder;
+
+    #[test]
+    fn spaces_only_around_latin_names() {
+        assert_eq!(composer_placeholder("阿森"), "跟阿森说点什么");
+        assert_eq!(composer_placeholder("iWork"), "跟 iWork 说点什么");
+        assert_eq!(composer_placeholder("小 k"), "跟小 k 说点什么");
+        assert_eq!(composer_placeholder(""), "说点什么");
+    }
+}
+
+#[cfg(test)]
+mod badge_tests {
+    use super::{pending_badge, unread_badge};
+
+    #[test]
+    fn over_99_reads_99_plus_and_zero_draws_nothing() {
+        let t = |b: Option<iwork_proto::pb::CountBadge>| b.map(|b| (b.text, b.label));
+        assert_eq!(t(unread_badge(0)), None);
+        assert_eq!(t(unread_badge(7)), Some(("7".into(), "7 条未读".into())));
+        assert_eq!(t(unread_badge(99)), Some(("99".into(), "99 条未读".into())));
+        assert_eq!(
+            t(unread_badge(100)),
+            Some(("99+".into(), "100 条未读".into()))
+        );
+        assert_eq!(
+            t(pending_badge(250)),
+            Some(("99+".into(), "250 项待你处理".into()))
+        );
+    }
+}
+
+#[cfg(test)]
+mod composer_block_tests {
+    use super::composer_block;
+    use iwork_proto::pb::RuntimeState as S;
+
+    /// ui-m1.md 2a 第 8 条的原文，带版本号；取不到版本只写名字。
+    #[test]
+    fn verifying_and_incompatible_follow_the_spec_wording() {
+        assert_eq!(
+            composer_block(S::ReadyUnverified, "Claude Code", Some("2.1.3")).as_deref(),
+            Some("正在检查 Claude Code 2.1.3 能否安全使用…")
+        );
+        assert_eq!(
+            composer_block(S::Incompatible, "Claude Code", Some("2.1.3")).as_deref(),
+            Some("Claude Code 2.1.3 没有通过安全检查，暂不能使用")
+        );
+        assert_eq!(
+            composer_block(S::Incompatible, "Claude Code", None).as_deref(),
+            Some("Claude Code 没有通过安全检查，暂不能使用")
+        );
+        assert_eq!(
+            composer_block(S::ReadyVerified, "Claude Code", Some("2.1.3")),
+            None
+        );
     }
 }

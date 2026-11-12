@@ -305,14 +305,14 @@ async fn mark_read_when_visible_and_focused() {
     let mut h = start(&["conversation-basic"]).await;
     ok(&h.app, visible(Some("c-basic")).kind.unwrap()).await;
     settle(&h.app, &mut h.web).await;
-    let unread = |s: &WebState| {
+    let has_unread = |s: &WebState| {
         s.sidebar
             .as_ref()
-            .map_or(u32::MAX, |v| v.projects.iter().map(|p| p.unread).sum())
+            .is_none_or(|v| v.projects.iter().any(|p| p.unread_badge.is_some()))
     };
-    assert!(unread(&h.web.state) > 0, "对照：没聚焦前有未读");
+    assert!(has_unread(&h.web.state), "对照：没聚焦前有未读");
     ok(&h.app, I::SetFocused(pb::SetFocused { focused: true })).await;
-    until(&h.app, &mut h.web, "徽标归零", |s| unread(s) == 0).await;
+    until(&h.app, &mut h.web, "徽标归零", |s| !has_unread(s)).await;
 }
 
 /// 系统通知：窗口不在前台时新出现的待处理项发一次，之后不重复；启动快照带来的不发。

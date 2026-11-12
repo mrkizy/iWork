@@ -2,7 +2,8 @@
 
 use iwork_proto::pb;
 
-use super::{avatar, text};
+use super::avatar::{AvatarState, avatar};
+use super::text;
 use crate::store::Store;
 
 pub fn assistant(store: &Store, id: &str) -> Option<pb::AssistantProfileView> {
@@ -12,7 +13,7 @@ pub fn assistant(store: &Store, id: &str) -> Option<pb::AssistantProfileView> {
     Some(pb::AssistantProfileView {
         assistant_id: a.id.clone(),
         name: c.name.clone(),
-        avatar: Some(avatar(store, id)),
+        avatar: Some(avatar(store, id, AvatarState::Idle)),
         prompt: c.prompt.clone(),
         runtime_id: c.runtime_id.clone(),
         model_id: model.model_id,
@@ -42,6 +43,7 @@ pub fn assistant(store: &Store, id: &str) -> Option<pb::AssistantProfileView> {
             .map(|(i, r)| pb::OptionView {
                 value: i32::try_from(i).unwrap_or(i32::MAX),
                 label: r.display_name.clone(),
+                ..Default::default()
             })
             .collect(),
         runtime_locked: false,

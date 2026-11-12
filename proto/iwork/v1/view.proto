@@ -37,6 +37,8 @@ message ViewChange {
     ConversationListPatch conversation_list = 17;
     // 请网页跳到某个对话（点击系统通知后）。
     NavigatePatch navigate = 18;
+    // 首页（还没有对话时的输入框）。
+    HomePatch home = 19;
   }
 }
 
@@ -46,24 +48,28 @@ message NavigatePatch {
   string conversation_id = 2;
   // 跳到对话里的这一行；空表示停在最新。
   string row_key = 3;
+  // 这次跳转是首页「新建对话并发出首条消息」的收尾：网页清掉这个项目首页的草稿。
+  optional string started_project_id = 4;
 }
 
 // ---------- 通用小件 ----------
 
-// 头像：首字与颜色来自助手配置；形象 SVG 由网页按 character 名字内联。
+// 助手头像（ui-m1.md 3.3）。画什么全由 Rust 定（client-core derive::avatar）；形象与表情给字符串 id，
+// 对应 design-system/characters/<形象>-<表情>.svg，网页按 id 查构建时生成的素材清单。加素材不改协议。
 message AvatarView {
-  string initial = 1;
+  // 原来的字母头像首字：M1 不再画字母头像（F-10）。
+  reserved 1;
+  reserved "initial";
+  // 形象主色（助手配置里选的），经 --ch4 传给素材；空表示用素材自带的颜色。
   string color = 2;
+  // 形象 id。
   string character = 3;
-}
-
-// 助手表情（ui-m1.md 3.3）。随状态变化，与「轻松元素」开关无关。
-enum Expression {
-  EXPRESSION_UNSPECIFIED = 0;
-  EXPRESSION_IDLE = 1;
-  EXPRESSION_WORKING = 2;
-  EXPRESSION_WAITING = 3;
-  EXPRESSION_ERROR = 4;
+  // 表情 id，随状态变化，与「轻松元素」开关无关。
+  string mood = 4;
+  // 配合的动效：motion.css 里的类名去掉 `iw-` 前缀（如 float）；空表示没有。
+  string motion = 5;
+  // 内置 iWork：画应用标志，不画形象。
+  bool app_logo = 6;
 }
 
 // 侧栏对话圆点（ui-m1.md 2a 第 1 条）：等你处理 > 出错 > 运行中 > 空闲。
@@ -79,6 +85,10 @@ enum DotState {
 message OptionView {
   int32 value = 1;
   string label = 2;
+  // 选项下面的一句说明（如档位菜单里每一档的说明）；没有为空。
+  string description = 3;
+  // 选项旁的小标签（如全开的「仅本对话」）；没有为空。
+  string tag = 4;
 }
 
 // ---------- 侧栏 ----------
@@ -89,17 +99,32 @@ message SidebarPatch {
 }
 
 message SidebarView {
-  // 「待你处理」计数（不含已作废）。
-  uint32 pending_count = 1;
+  // 原来的「待你处理」计数：换成了 pending_badge（文字由 Rust 给，超过 99 写「99+」）。
+  reserved 1;
+  reserved "pending_count";
   repeated ProjectRow projects = 2;
   repeated AssistantRow assistants = 3;
   repeated QuotaCell quota = 4;
+  // 「待你处理」计数（不含已作废）；0 时不设。
+  CountBadge pending_badge = 5;
+  // 对话标题最多几个字符（按码点算）：就地重命名时截到这么长，Rust 提交时再校验一次。
+  uint32 title_max_chars = 6;
+}
+
+// 数字徽标（ui-m1.md 第 2 节第 4 条）：超过 99 写「99+」，侧栏徽标、「待你处理」与 Dock 角标同一个规则。
+// 计数为 0 时整个不设，界面不画。
+message CountBadge {
+  string text = 1;
+  // 读屏读的整句（带真实数目），如「120 条未读」。
+  string label = 2;
 }
 
 message ProjectRow {
   string project_id = 1;
   string name = 2;
-  uint32 unread = 3;
+  // 原来的未读数：换成了 unread_badge。
+  reserved 3;
+  reserved "unread";
   bool pinned = 4;
   // 找不到路径：划线、标签、行内「重新定位」。
   bool path_missing = 5;
@@ -109,6 +134,7 @@ message ProjectRow {
   // 有没有更多对话（显示「全部对话」）。
   bool has_more_conversations = 8;
   string root_path = 9;
+  CountBadge unread_badge = 10;
 }
 
 message ConversationItem {
@@ -119,27 +145,35 @@ message ConversationItem {
   string dot_label = 4;
   bool can_rename = 5;
   bool can_delete = 6;
-  uint32 unread = 7;
+  // 原来的未读数：换成了 unread_badge。
+  reserved 7;
+  reserved "unread";
   // 当前打开的对话。
   bool selected = 8;
   // 「全部对话」页用：最近一条消息首行与最近活动时间（已格式化）。
   string last_message_first_line = 9;
   string last_active_label = 10;
+  CountBadge unread_badge = 11;
 }
 
 message AssistantRow {
   string assistant_id = 1;
   string name = 2;
   AvatarView avatar = 3;
-  Expression expression = 4;
+  // 原来的表情枚举，并进了 AvatarView.mood。
+  reserved 4;
+  reserved "expression";
   // 最近动态一行；从没说过话时不设，界面不显示第二行。
   optional string activity_line = 5;
-  // 只算它那条私聊。
-  uint32 unread = 6;
+  // 原来的未读数：换成了 unread_badge。
+  reserved 6;
+  reserved "unread";
   bool can_delete = 7;
   string dm_conversation_id = 8;
   bool builtin = 9;
   bool selected = 10;
+  // 只算它那条私聊。
+  CountBadge unread_badge = 11;
 }
 
 // 额度一行里的一格：取不到时 value_text 是「—」。
@@ -148,6 +182,8 @@ message QuotaCell {
   string value_text = 2;
   // 悬停：窗口类型与重置时间。
   string tooltip = 3;
+  // 细进度条的用量（0–100）；取不到时不设，界面不画条。
+  optional uint32 used_pct = 4;
 }
 
 // ---------- 对话 ----------
@@ -219,6 +255,32 @@ message ComposerView {
   optional string attach_error = 12;
   // 输入框上方的附件托盘：本对话已上传、还没随消息发出的附件。
   repeated AttachmentChip tray = 13;
+  // 「运行时 · 模型」菜单（ui-m1.md 第 2 节第 14 条）。
+  ModelMenuView model_menu = 14;
+  // 正文框里的占位文字：跟答话的助手说（ui-m1.md 3.4 的例子「跟阿森说点什么」）。
+  string placeholder = 15;
+}
+
+// 「运行时 · 模型」菜单：运行时、模型（仅本对话）、思考强度三节。选中项与可否选都由 Rust 侧给。
+message ModelMenuView {
+  repeated MenuChoice runtimes = 1;
+  // 模型列表还在取（运行时的模型清单是一次附带查询，取到前显示转圈）。
+  bool models_loading = 2;
+  repeated MenuChoice models = 3;
+  // 当前模型不在列表里（手填的模型 ID）时它的文字；在列表里时为空。
+  string custom_model = 4;
+  // 运行时不支持思考强度时为空，界面不显示这一节（设计 9.6 第 5 条）。
+  repeated MenuChoice efforts = 5;
+}
+
+// 菜单里的一项：value 原样回传（模型 ID、思考强度、运行时 ID），label 原样显示。
+message MenuChoice {
+  string value = 1;
+  string label = 2;
+  bool selected = 3;
+  bool enabled = 4;
+  // 不可选时的悬停说明（如「M2 接入」）。
+  string tip = 5;
 }
 
 enum Tone {
@@ -242,14 +304,29 @@ message ApprovalModeView {
   repeated OptionView options = 4;
   int32 current = 5;
   string scope_title = 6;
+  // 切到全开前的确认框（ui-m1.md 第 2 节第 9 条）：每次切到全开都弹；已经是全开时不设。
+  optional ConfirmView full_access_confirm = 7;
+  // 盾牌里带勾（自动、全开时）。
+  bool shield_checked = 8;
+}
+
+// 确认框的全部文字：标题、正文、脚注、确认按钮字样（取消按钮字样固定）。
+message ConfirmView {
+  string title = 1;
+  string body = 2;
+  string footnote = 3;
+  string confirm_label = 4;
+  // 选了哪个选项（OptionView.value）才弹这个确认框。
+  int32 for_value = 5;
 }
 
 message MessageView {
   string message_id = 1;
 }
 
+// 流式追加：消息行接到正文后面，工具行接到输出后面（MessageDelta / ToolOutputDelta）。
 message MessageTextAppend {
-  // 行的 key。
+  // 行的 key（消息行或工具行）。
   string message_id = 1;
   // 追加前这一行正文的长度（UTF-8 字节），网页核对用：对不上就等整行重发。
   uint64 offset = 2;
@@ -299,7 +376,9 @@ message MessageRow {
   Speaker speaker = 2;
   string author_name = 3;
   AvatarView avatar = 4;
-  Expression expression = 5;
+  // 原来的表情枚举，并进了 AvatarView.mood。
+  reserved 5;
+  reserved "expression";
   string text = 6;
   bool streaming = 7;
   // 「已中断」「失败」；正常为空。
@@ -307,6 +386,16 @@ message MessageRow {
   repeated AttachmentChip attachments = 9;
   // 正文是制品引用、还没读到。
   bool body_pending = 10;
+  // 这一轮失败的说明行（ui-m1.md 2a 第 10 条）：「这一轮没能开始：…」或「这一轮中途失败：…」。
+  optional FailureLine failure = 11;
+  // 回合一开始就失败、内容为空：不画空气泡，只画说明行。
+  bool bubble_hidden = 12;
+}
+
+message FailureLine {
+  string text = 1;
+  // 「详情」展开后的技术信息。
+  string detail = 2;
 }
 
 message AttachmentChip {
@@ -393,6 +482,23 @@ message NoteRow {
 }
 
 // ---------- 全部对话 ----------
+
+message HomePatch {
+  optional HomeView view = 1;
+}
+
+// 首页（画布 01）：对着哪个项目、输入框（和对话里的一样有「运行时 · 模型」与审批档位，值记在 Rust，
+// 发出首条消息时随新对话一起设上）。
+message HomeView {
+  // 首页对着的项目：网页声明了就用它，没声明（或已不在）由 Rust 取侧栏里的第一个；没有项目时为空。
+  string project_id = 1;
+  string project_name = 2;
+  ComposerView composer = 3;
+  // 正在新建对话并发出首条消息：发送按钮转圈。
+  bool starting = 4;
+  // 上一次没能发出去的原因（草稿还在输入框里）；下一次发出时清掉。
+  optional string start_error = 5;
+}
 
 message ConversationListPatch {
   optional ConversationListView view = 1;
@@ -657,6 +763,11 @@ message UiIntent {
     SetModelIntent set_model = 27;
     SwitchDmProjectIntent switch_dm_project = 28;
     SetApprovalModeIntent set_approval_mode = 29;
+    // 首页：新建对话并发出首条消息（建好、设上首页选的模型与档位、发出后跳过去）。
+    StartConversationIntent start_conversation = 30;
+    // 首页的「运行时 · 模型」与档位：记在 Rust，新建对话时带上。
+    HomeModelIntent set_home_model = 31;
+    HomeApprovalModeIntent set_home_approval_mode = 32;
 
     // 卡片
     DecideApprovalIntent decide_approval = 40;
@@ -704,6 +815,13 @@ message SetVisible {
   bool add_project = 6;
   // 「全部对话」列表页：项目与筛选文字。
   optional ConversationListQuery conversation_list = 7;
+  // 首页。
+  optional HomeQuery home = 8;
+}
+
+message HomeQuery {
+  // 路由里带的项目；空表示由 Rust 挑（HomeView.project_id）。
+  string project_id = 1;
 }
 
 message ConversationListQuery {
@@ -771,6 +889,21 @@ message SwitchDmProjectIntent {
   string conversation_id = 1;
   // 空表示切回纯私聊。
   string project_id = 2;
+}
+
+message StartConversationIntent {
+  string project_id = 1;
+  string text = 2;
+}
+
+message HomeModelIntent {
+  string model_id = 1;
+  optional string effort = 2;
+}
+
+message HomeApprovalModeIntent {
+  // ApprovalModeView.options 里的 value。
+  int32 mode = 1;
 }
 
 message SetApprovalModeIntent {
