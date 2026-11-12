@@ -518,6 +518,7 @@ Bash 命令用 shell 语法解析器拆成管道、子命令、重定向、变�
 
 - M1 只接 Claude Code；Codex 与 agy 显示“—”（M2 接入后，Codex 额度取自 app-server 的 account/rateLimits/read）。
 - 确定可得的数据：每回合结束时 CLI 上报的用量（token 等），用于“本对话用量”。
+- 费用：CLI 上报的 `costUSD` 是它按官方标价估算的（`costBasis: "list"`），订阅账号并不按它扣费。存储照原样记（`turns.cost_usd`），界面只在“本对话用量”的悬停里标“按官方标价估算”显示，标签本身只显示 token（`ui-m1.md` 2a 第 15 条）。为此本对话用量的视图数据要带上该运行时的登录方式（订阅 / API Key / 未知，取自探测时 `claude auth status` 的 `authMethod`、`subscriptionType`，只取这两个字段），以及“有回合缺少费用”的标记。
 - 额度窗口：取自 CLI 输出的 rate\_limit\_event（窗口类型、使用率、重置时间，见第 12 节 Q3），写入 quota\_snapshots；上报了哪些窗口就显示哪些。只用 CLI 公开输出的数据，不读凭据、不自行调用厂商接口；拿不到就显示“—”。
 
 ### 9.5 配置隔离与本机导入
