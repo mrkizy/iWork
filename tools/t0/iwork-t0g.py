@@ -53,10 +53,11 @@
   G3 hook timeout 上限（O4）；--long 加睡眠时钟的手动步骤           G8 --tools 与 --disallowedTools（含 MCP，带阳性对照）
   G4 沙箱固定配置（O1 ①②④⑤⑥⑦⑧⑨），④ 要 --corpus                G9 hook 环境变量、沙箱内屏蔽、SAFE_MODE
   G5 仓库项目级设置能否排除（O1 ③）；环境行与记忆各行（方案 3.1a）
-  R2X R2 补测（方案 19 节）：--part d = k1–k3、b1、b2（定 D2、D5）；--part rest = ①c′ ①d′、n1、子代理工具名与只禁 Bash 的工具清单
+  R2X R2 补测（方案 19 节）：--part d = k1–k3、b1、b2（定 D2、D5）；--part rest = ①c′ ①d′、n1、子代理工具名与只禁 Bash 的工具清单；
+      --part net = 沙箱联网 p1（代理变量名）、p2（经隧道连 github.com 22）、p4（连沙箱外的本机监听，带 / 不带 allowLocalBinding）
 --selftest：不调用 claude，只自测脚本自己的机制。
 """
-import argparse, ast, collections, hashlib, inspect, json, os, re, secrets, shlex, shutil, signal, stat, subprocess, sys, tarfile, tempfile, threading, time
+import argparse, ast, collections, hashlib, inspect, json, os, re, secrets, shlex, shutil, signal, socket, stat, subprocess, sys, tarfile, tempfile, threading, time
 
 HOME = os.path.expanduser("~")
 A = None            # 命令行参数
@@ -239,14 +240,25 @@ def end_instance(proc, token, case="", limit=6.0, escape_expected=False):
     """结束一个实例名下的全部进程并确认清空：先整组，再全机找属于本次运行的。清不干净抛 Abort。返回脱离了进程组的进程号。
     实例是一个接一个跑的，所以收尾时根目录里还剩的进程都算这个实例的。"""
     pgid = proc.pid          # start_new_session=True：组号就是它的进程号
-    try: os.killpg(pgid, signal.SIGKILL)
-    except ProcessLookupError: pass
+    # 组长还没被回收（活着或是僵尸）时，这个组号一定还归本实例，整组结束是安全的。调用方已经回收了它（wait / communicate /
+    # poll 拿到过退出码）时，组号可能已经被别的进程复用（这台机器上同时跑着很多会话），对旧号码一个信号都不发，
+    # 只按所有权（工作目录在本次根目录里、或带本次的标记）一个个清（脚本审查 script3 1/F-1）
+    reaped = proc.returncode is not None
+    if not reaped:
+        try: os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError: pass
     try: proc.wait(timeout=limit)
     except subprocess.TimeoutExpired: pass
-    escaped, left = set(), []
+    escaped, left, noted = set(), [], False
     for _ in range(4):                                  # 找属于本次运行的进程比较慢（lsof 要几秒），最多找四遍
-        group = [r["pid"] for r in ps_table() if r["pgid"] == pgid]
         owned = find_owned(token)
+        same_group = [r["pid"] for r in ps_table() if r["pgid"] == pgid]
+        # 组长是这一次才回收的：之前的 killpg 已经发到了本实例的组；组里剩下的（还占着这个组号）仍是本实例的。
+        # 组长在调用之前就被回收了：同一个组号下的进程不一定是本实例的，只认有所有权的
+        group = same_group if not reaped else [p for p in same_group if p in owned]
+        if reaped and set(same_group) - set(owned) and not noted:
+            noted = True
+            record("INFO", f"进程清理 {case}", f"旧组号 {pgid} 下有认不出所有权的进程，不碰：{sorted(set(same_group) - set(owned))}")
         for pid in owned:
             if pid not in group: escaped.add(pid)
             try: os.kill(pid, signal.SIGKILL)
@@ -3327,12 +3339,26 @@ def tool_result_texts(events, ids):
     return out
 
 
-R2X_PARTS = {"d": ("k1", "k2", "k3", "b1", "b2"), "rest": ("c1", "n1", "tools")}
+R2X_PARTS = {"d": ("k1", "k2", "k3", "b1", "b2"), "rest": ("c1", "n1", "tools"), "net": ("p1", "p2", "p4")}
 
 
 def subagent_tool_listed(tools):
     """init.tools 里有没有子代理工具，叫什么。"""
     return [t for t in (tools or []) if t in AGENT_TOOLS]
+
+
+def r2x_live_record(events, alive, results_needed, extra_proofs):
+    """R2X 流式格的结论：和别的常驻会话格同一套有效会话的证据（live_seen：活着、看到了 init、每个 init 的插件都过了核对、
+    够数的 result；1/F-2），再加这一格自己要的证据。都齐 → INFO（这几格只记录），缺一样 → INCONCLUSIVE 并点名。纯函数。"""
+    proofs = {**live_seen(events, alive, results_needed), **extra_proofs}
+    missing = [k for k, v in proofs.items() if not v]
+    return info_if(not missing), ("缺正面证据：" + "、".join(missing) if missing else "")
+
+
+def subagent_ran_target(uses, cmd):
+    """子代理格的前提（1/F-3）：流里有子代理工具调用，并且与登记逐字相同的那条 Bash 的父调用就是其中一次。主代理自己代跑不算。"""
+    agent_ids = {u["id"] for u in uses if u["name"] in AGENT_TOOLS}
+    return any(u["name"] == "Bash" and u["input"].get("command") == cmd and u["parent"] in agent_ids for u in uses)
 
 
 def wait_child(live, name, limit=60):
@@ -3362,7 +3388,9 @@ def r2x_kill_case(kind):
         facts["k4"] = {"sleep": process_ids(target["pid"]) if target else None, "shell": process_ids(target["ppid"]) if target else None,
                        "cli": process_ids(cli)}
         t0 = time.time()
-        if target:
+        cli_running = live.proc.poll() is None           # 发信号之前先确认 CLI 还没退出、没被回收：组号还归它（1/F-1）
+        facts["发信号时 CLI 还在"] = cli_running
+        if target and cli_running:
             if kind == "k1": os.killpg(cli, signal.SIGKILL)
             elif kind == "k2": live.proc.stdin.close()
             else: os.kill(cli, signal.SIGTERM)
@@ -3374,10 +3402,9 @@ def r2x_kill_case(kind):
             if kind == "k1":                                  # 命令会不会接着跑完：等到 sleep 本该结束之后再看哨兵
                 while time.time() - t0 < 70: time.sleep(1)
                 facts["70 秒后哨兵出现了（命令接着跑完）"] = os.path.exists(late)
-        facts["前台"] = fg
         label = {"k1": "k1 前台命令跑着时 SIGKILL CLI 的进程组", "k2": "k2 前台命令跑着时只关输入", "k3": "k3 前台命令跑着时给 CLI 发 SIGTERM"}[kind]
-        record(info_if(target is not None and fg and alive_now), f"R2X {label}（只记录；k4 的进程号也在这一行）",
-               json.dumps(facts, ensure_ascii=False))
+        status, why = r2x_live_record(evs, alive_now, 0, {SLEEP_SEEN: target is not None, FOREGROUND_SEEN: fg, "发信号时 CLI 还在": cli_running})
+        record(status, f"R2X {label}（只记录；k4 的进程号也在这一行）", "；".join(x for x in (why, json.dumps(facts, ensure_ascii=False)) if x))
     finally:
         live.close(escape_expected=True)          # 命令脱组是这几格要量的事，不另记「进程组」FAIL；还活着的由收尾清掉
 
@@ -3413,8 +3440,11 @@ def r2x_background(kind, env):
         if kind == "b2":
             facts["目标调用的结果（前 200 字）"] = tool_result_texts(evs, {u["id"] for u in bash_uses})
         label = {"b1": "b1 关后台任务时调子代理", "b2": "b2 关后台任务时后台跑 Bash", "n1": "n1 不关后台任务时调子代理"}[kind]
-        record(info_if(alive_now and facts["init 个数"] >= 1 and facts["result 个数"] >= 1 and bool(bash_uses)), f"R2X {label}（只记录，常驻流式输入）",
-               json.dumps(facts, ensure_ascii=False))
+        extra = {"目标 Bash 调用发出过": bool(bash_uses)}
+        if kind != "b2":                                 # 子代理格：要看见真实的子代理工具调用，目标 Bash 的父调用就是它（1/F-3）
+            extra["看见了子代理工具调用、目标 Bash 的 parent_tool_use_id 对得上它"] = subagent_ran_target(uses, cmd)
+        status, why = r2x_live_record(evs, alive_now, 1, extra)
+        record(status, f"R2X {label}（只记录，常驻流式输入）", "；".join(x for x in (why, json.dumps(facts, ensure_ascii=False)) if x))
     finally:
         live.close(escape_expected=True)
 
@@ -3438,13 +3468,77 @@ def r2x_tool_lists():
                f"子代理工具={subagent_tool_listed(tools)} init.tools={tools} exit={r['exit']}")
 
 
+# --part net（architect 的沙箱联网报告第 4 节最要紧的 4 格；产品那样的沙箱设置，只记录）
+# p1 只打印名字：值里有代理口令。不用 env | cut 的写法，值可能跨行，cut 会把口令的片段当成「名字」带出来
+PROXY_NAMES_BODY = ("python3 -c \"import os,re;print('\\n'.join(sorted(k for k in os.environ "
+                    "if re.search('PROXY|proxy|SRT_|GIT_SSH|SANDBOX', k))))\"")
+# p2 用 Claude Code 给命令的隧道（SRT_SSH_PROXY_COMMAND，GIT_SSH_COMMAND 里那一段）连 github.com 22，只取标准输出的头 8 个字节；
+# 隧道的标准错误丢掉，带口令的 CONNECT 不会进观测文件
+SSH_BANNER_BODY = "sleep 8 | /bin/sh -c 'eval \"$SRT_SSH_PROXY_COMMAND\"' sh github.com 22 2>/dev/null | head -c 8"
+
+
+def proxy_names(text):
+    """p1 观测文件里的变量名（只认长得像变量名的行，别的丢掉）。纯函数。"""
+    return [l for l in (text or "").splitlines() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", l)]
+
+
+def local_listener():
+    """p4：脚本自己在沙箱外起的本机监听（只绑 127.0.0.1、随机端口），每接一个连接回一句问候。返回 (端口, 接过几次的计数, 关掉它的函数)。
+    这是实测用的测试桩，不是 iWork 自己的进程。"""
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(4); srv.settimeout(0.5)
+    count, stop = [0], threading.Event()
+    def serve():
+        while not stop.is_set():
+            try: conn, _ = srv.accept()
+            except (socket.timeout, OSError): continue
+            count[0] += 1
+            try: conn.sendall(b"T0G-HELLO\n")
+            finally: conn.close()
+    threading.Thread(target=serve, daemon=True).start()
+    return srv.getsockname()[1], count, lambda: (stop.set(), srv.close())
+
+
+def r2x_net_case(key, label, body, settings, extra_facts=None):
+    """跑一条联网命令（观测文件记下输出与退出码），只记录。返回观测。"""
+    tag = "r2x-" + key
+    cmd, read = observed(tag, body)
+    s, _ = make_settings(tag, "allow-sandboxed", expect(bash=[cmd]), extra=settings)
+    r = claude(tag, ask_bash(cmd), settings=s)
+    ev, obs = bash_ev(r, cmd), read()
+    facts = {"退出码": obs and obs["rc"], **(extra_facts(obs) if extra_facts else {})}
+    record(info_if(ev["ok"] and obs is not None), f"R2X {label}（只记录）", "；".join(x for x in (ev["why"], json.dumps(facts, ensure_ascii=False)) if x))
+    return obs
+
+
+def r2x_net(item):
+    product = sandbox_settings(local_binding=True)          # 产品那样：allowedDomains ["*"]、allowLocalBinding
+    if item == "p1":
+        r2x_net_case("p1", "p1 沙箱里命令拿到的代理类环境变量的名字", PROXY_NAMES_BODY, product,
+                     lambda o: {"名字": proxy_names(o and o["out"])})
+    elif item == "p2":
+        r2x_net_case("p2", "p2 沙箱里经 Claude Code 的隧道连 github.com 22", SSH_BANNER_BODY, product,
+                     lambda o: {"读到 SSH 问候": bool(o) and o["out"].startswith("SSH-2.0-")})
+    else:
+        port, count, stop = local_listener()
+        try:
+            body = (f"python3 -c \"import socket;s=socket.create_connection(('127.0.0.1',{port}),5);"
+                    f"print(s.recv(16).decode().strip())\"")
+            for key, label, st in (("p4a", "p4 沙箱里连沙箱外起的本机监听（带 allowLocalBinding）", product),
+                                   ("p4b", "p4 沙箱里连沙箱外起的本机监听（不带 allowLocalBinding）", sandbox_settings())):
+                before = count[0]
+                r2x_net_case(key, label, body, st, lambda o: {"读到问候": bool(o) and o["out"].strip() == "T0G-HELLO", "监听这一格接到的连接": count[0] - before})
+        finally:
+            stop()
+
+
 def r2x():
-    wanted = R2X_PARTS[A.part] if A.part else R2X_PARTS["d"] + R2X_PARTS["rest"]
+    wanted = R2X_PARTS[A.part] if A.part else R2X_PARTS["d"] + R2X_PARTS["rest"] + R2X_PARTS["net"]
     for item in wanted:
         if item in ("k1", "k2", "k3"): r2x_kill_case(item)
         elif item in ("b1", "b2"): r2x_background(item, BACKGROUND_OFF)
         elif item == "n1": r2x_background("n1", None)
         elif item == "c1": g4_c1()
+        elif item in ("p1", "p2", "p4"): r2x_net(item)
         else: r2x_tool_lists()
 
 
@@ -4165,7 +4259,42 @@ def selftest_r2x():
     assert set(R2X_PARTS["rest"]) == {"c1", "n1", "tools"} and not set(R2X_PARTS["d"]) & set(R2X_PARTS["rest"])
     assert set(R2X_TOOL_CASES) == {"--tools Read,Task", "--tools Read,Agent", "--disallowedTools Task", "--disallowedTools Agent", "--disallowedTools Bash（只禁 Bash）"}
     assert R2X_TOOL_CASES["--disallowedTools Bash（只禁 Bash）"] == ["--disallowedTools", "Bash"], "只禁 Bash，不再连带别的"
+    # 1/F-2：流式格复用有效会话的证据；init 的插件没过核对 → 只记 INCONCLUSIVE
+    init_ok = {"type": "system", "subtype": "init", "plugins": []}
+    dirty = {"type": "system", "subtype": "init", "plugins": [{"name": "u", "source": "u@inline"}]}
+    assert r2x_live_record([init_ok, res_], True, 1, {"x": True})[0] == "INFO"
+    assert r2x_live_record([init_ok, dirty, res_], True, 1, {"x": True})[0] == "INCONCLUSIVE", "第二个 init 带了外来插件：环境不干净"
+    assert r2x_live_record([init_ok], True, 1, {"x": True})[0] == "INCONCLUSIVE" and r2x_live_record([init_ok, res_], False, 1, {"x": True})[0] == "INCONCLUSIVE"
+    assert r2x_live_record([init_ok, res_], True, 1, {"x": False})[0] == "INCONCLUSIVE"
+    # 1/F-3：子代理格要看见子代理工具调用，目标 Bash 的父调用就是它；主代理自己代跑不算
+    C = "touch /x/s"
+    ag = {"id": "a1", "name": "Agent", "input": {}, "parent": None}
+    assert subagent_ran_target([ag, {"id": "b", "name": "Bash", "input": {"command": C}, "parent": "a1"}], C)
+    assert not subagent_ran_target([{"id": "b", "name": "Bash", "input": {"command": C}, "parent": None}], C), "主代理自己代跑了 touch"
+    assert not subagent_ran_target([ag, {"id": "b", "name": "Bash", "input": {"command": C}, "parent": None}], C), "有子代理调用，但目标 Bash 不在它里面"
+    assert not subagent_ran_target([ag, {"id": "b", "name": "Bash", "input": {"command": C}, "parent": "zz"}], C), "父调用对不上"
+    assert subagent_ran_target([{**ag, "name": "Task"}, {"id": "b", "name": "Bash", "input": {"command": C}, "parent": "a1"}], C), "Task 也认"
     assert BACKGROUND_OFF == {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
+    # --part net：p1 只出变量名（值跨行、带口令也不漏），p2 只拿标准输出的头 8 个字节（隧道的标准错误不进输出），p4 的本机监听
+    assert R2X_PARTS["net"] == ("p1", "p2", "p4")
+    secret = "S3CR3T-" + secrets.token_hex(4)
+    planted = {"HTTPS_PROXY": f"http://u:{secret}@127.0.0.1:1", "SRT_SSH_PROXY_COMMAND": f"printf 'SSH-2.0-OpenSSH_9\\n'; echo 'Proxy-Authorization: Basic {secret}=' >&2",
+               "GIT_SSH_COMMAND": f"ssh -o ProxyCommand=x\nPROXY_LINE={secret}", "NOT_RELATED": secret}
+    env_ = {**os.environ, **planted}
+    out1 = subprocess.run(["sh", "-c", PROXY_NAMES_BODY], env=env_, capture_output=True, text=True)
+    assert out1.returncode == 0 and secret not in out1.stdout + out1.stderr, "只打印名字，值（含跨行的那几行）不出现"
+    names = proxy_names(out1.stdout)
+    assert {"HTTPS_PROXY", "SRT_SSH_PROXY_COMMAND", "GIT_SSH_COMMAND"} <= set(names) and "NOT_RELATED" not in names and "PROXY_LINE" not in names, names
+    assert proxy_names("A_PROXY\nnot a name=1\n") == ["A_PROXY"]
+    out2 = subprocess.run(["sh", "-c", SSH_BANNER_BODY.replace("sleep 8", "sleep 1")], env=env_, capture_output=True, text=True)
+    assert out2.stdout == "SSH-2.0-" and secret not in out2.stdout + out2.stderr, (out2.stdout, out2.stderr)
+    port, count, stop = local_listener()
+    try:
+        got = subprocess.run([sys.executable, "-c", f"import socket;s=socket.create_connection(('127.0.0.1',{port}),5);print(s.recv(16).decode().strip())"],
+                             capture_output=True, text=True, timeout=10).stdout.strip()
+        assert got == "T0G-HELLO" and count[0] == 1, (got, count)
+    finally:
+        stop()
     assert child_env("t", BACKGROUND_OFF)["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1" and child_env("t", BACKGROUND_OFF)["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
 
 
@@ -4271,6 +4400,20 @@ def selftest():
     escaped = end_instance(parent, token, "selftest-escaper", escape_expected=True)
     assert escaped == [child] and not alive(child), (escaped, alive(child))
     ownership_preflight()
+    # 1/F-1：组长已经被回收之后，收尾不再对旧组号发任何信号（号码可能已被别的会话复用），只按所有权清
+    sent = []
+    real_killpg, real_kill = os.killpg, os.kill
+    try:
+        os.killpg = lambda pg, sig: sent.append(("killpg", pg, sig))
+        reaped = subprocess.Popen(["true"], start_new_session=True); reaped.wait()
+        end_instance(reaped, new_mark(), "selftest-reaped")
+        assert not any(c[0] == "killpg" and c[1] == reaped.pid for c in sent), f"回收之后还对旧组号发了信号：{sent}"
+        live_one = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        os.killpg = lambda pg, sig: (sent.append(("killpg", pg, sig)), real_killpg(pg, sig))
+        end_instance(live_one, new_mark(), "selftest-live")
+        assert ("killpg", live_one.pid, signal.SIGKILL) in sent and live_one.returncode is not None, "对照：没回收的照常整组结束"
+    finally:
+        os.killpg, os.kill = real_killpg, real_kill
     # 「进程组」那一行把 hook 探针自己分出来（R2 分析 3.1 F4）：脱组的进程号是本实例 hook 探针的 → INFO，别的照旧 FAIL
     assert split_escaped([11, 12, 13], {12}) == ([12], [11, 13]) and split_escaped([], {1}) == ([], []) and split_escaped([5], set()) == ([], [5])
     hl = R.p("out", "selftest-hookpids"); os.makedirs(hl)
@@ -4784,8 +4927,9 @@ def main():
     ap.add_argument("--allowed-domains", default="*", help="G4 ② 试的「放行全部」写法")
     ap.add_argument("--corpus", default="", help="T07 导出的对拍语料：cargo run -p iwork-core --example dump-credential-corpus > corpus.json")
     ap.add_argument("--repeat", type=int, default=3, help="G7i 重复次数")
-    ap.add_argument("--part", choices=["d", "rest"], default=None,
-                    help="只给 --only R2X：d = k1–k3、b1、b2（5 个实例，先跑，定 D2、D5）；rest = c1、n1 与工具清单（8 个）；不给就都跑")
+    ap.add_argument("--part", choices=["d", "rest", "net"], default=None,
+                    help="只给 --only R2X：d = k1–k3、b1、b2（5 个实例，先跑，定 D2、D5）；rest = c1、n1 与工具清单（8 个）；"
+                         "net = 沙箱联网 p1、p2、p4 两格（4 个）；不给就都跑")
     ap.add_argument("--quick", action="store_true", help="G2 只跑普通 Bash 一行（结论只能是 INCONCLUSIVE，不能进已验证表）")
     ap.add_argument("--disposable-env", action="store_true",
                     help="声明这是一次性环境（临时系统用户 / 虚拟机，里面没有要紧的东西）：故障探针不等外层保护验证就跑，G5、G9d 也跑。日常用的账号下不要加")

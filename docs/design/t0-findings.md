@@ -520,11 +520,12 @@ R2 合计约 120 个实例，加 6 个探查（每条命令 1 个）。
 | 序 | 命令 | 约几个实例 | 看什么 |
 | --- | --- | --- | --- |
 | 1 | `python3 tools/t0/iwork-t0g.py --selftest` | 0 | 最后一行 `selftest ok` |
-| 2 | `python3 tools/t0/iwork-t0g.py --only R2X --part d` | 5 | **先跑这一条，D2、D5 靠它定**，约 5 分钟（k1 要等 70 秒）。几行都只记录（`INFO`），看说明里的事实：<br>· `R2X k1`：SIGKILL CLI 的进程组之后，「停 CLI 5 秒后 sleep 还在」「70 秒后哨兵出现了（命令接着跑完）」<br>· `R2X k2`：只关输入之后，「CLI 30 秒内退出了」「CLI 退出之后 sleep 还在」<br>· `R2X k3`：发 SIGTERM 之后，同上两样<br>· k1–k3 每行的 `k4`：`sleep`、它的 shell、CLI 各自的父进程号、进程组号、会话号（shell 的父进程是不是 CLI，决定 D2 的 b′ 按后代找不找得到）<br>· `R2X b1`（设 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`，调子代理）：`is_backgrounded`、`init` 与 `result` 的次序和个数、目标调用在不在子代理里、进没进 hook<br>· `R2X b2`（同一变量，后台跑 Bash）：输入里还带不带 `run_in_background`、目标调用的结果、哨兵出没出现<br>任何一行 `INCONCLUSIVE` 是那一格没走到（模型没照做、没看到 `sleep`），单独重跑这条命令 |
+| 2 | `python3 tools/t0/iwork-t0g.py --only R2X --part d` | 5 | **先跑这一条，D2、D5 靠它定**，约 5 分钟（k1 要等 70 秒）。几行都只记录（`INFO`），看说明里的事实：<br>· `R2X k1`：SIGKILL CLI 的进程组之后，「停 CLI 5 秒后 sleep 还在」「70 秒后哨兵出现了（命令接着跑完）」<br>· `R2X k2`：只关输入之后，「CLI 30 秒内退出了」「CLI 退出之后 sleep 还在」<br>· `R2X k3`：发 SIGTERM 之后，同上两样<br>· k1–k3 每行的 `k4`：`sleep`、它的 shell、CLI 各自的父进程号、进程组号、会话号（shell 的父进程是不是 CLI，决定 D2 的 b′ 按后代找不找得到）<br>· `R2X b1`（设 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`，调子代理）：`is_backgrounded`、`init` 与 `result` 的次序和个数、目标调用在不在子代理里、进没进 hook<br>· `R2X b2`（同一变量，后台跑 Bash）：输入里还带不带 `run_in_background`、目标调用的结果、哨兵出没出现<br>任何一行 `INCONCLUSIVE` 是那一格没走到：模型没照做、没看到 `sleep`、发信号时 CLI 已经退出，或者会话的证据不齐（某个 `init` 的插件没过核对，即环境不干净）；b1 另要看见真实的子代理工具调用、目标 Bash 就在它里面。单独重跑这条命令 |
 | 3 | `python3 tools/t0/iwork-t0g.py --only R2X --part rest` | 8 | · `G4 ①c′`、`G4 ①d′`：去掉 `credentials.files` 之后，假凭据目录里只读区之外的文件仍然读不到、写不了，两行都要 `PASS`（有一行 `FAIL` 回 architect，第 8 节翻译表那条改动要重想）<br>· `R2X n1`（不设变量，常驻流式输入下调子代理）：两个 `init`、两个 `result` 的先后<br>· `R2X 工具清单` 五行：`--tools Read,Task` 与 `--tools Read,Agent` 各自的 `init.tools` 里有没有子代理工具（P11 的白名单写的是 `Task`）；`--disallowedTools Task` 与 `--disallowedTools Agent` 之后子代理工具还在不在；只禁 Bash 时的 `init.tools`（Monitor 还在不在） |
 | 4 | `python3 tools/t0/iwork-t0g.py --only G5` | 11 | G5 重跑（根目录名改了之后），看什么同上面 R2 第 7 条 |
+| 5 | `python3 tools/t0/iwork-t0g.py --only R2X --part net` | 4 | 沙箱联网（architect 的沙箱联网报告第 4 节最要紧的几格；设置照产品：`allowedDomains: ["*"]`、`allowLocalBinding`）。都只记录：<br>· `R2X p1`：沙箱里命令拿到的代理类环境变量的**名字**（名字里带 `PROXY`、`SRT_`、`GIT_SSH`、`SANDBOX` 的；只打印名字，值里有代理口令，不落盘）<br>· `R2X p2`：沙箱里用 Claude Code 给的隧道（`SRT_SSH_PROXY_COMMAND`）连 `github.com 22`，「读到 SSH 问候」是不是真（只取头 8 个字节，隧道的错误输出丢掉）<br>· `R2X p4` 两行：脚本在沙箱外起一个只绑 `127.0.0.1` 的本机监听（随机端口，跑完就关），沙箱里的命令去连它，带 / 不带 `allowLocalBinding` 各一格：「读到问候」「监听这一格接到的连接」 |
 
-R2 补测合计约 24 个实例，加 3 个探查。第 2 条先跑，第 3、4 条可以晚一点。
+R2 补测合计约 28 个实例，加 4 个探查。第 2 条先跑，别的可以晚一点。
 
 **R3：一次性环境**（16.2 第 5 项，搭法见下一小节）
 
