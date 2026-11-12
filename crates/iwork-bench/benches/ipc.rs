@@ -2,6 +2,8 @@
 //!
 //! 全部跑在进程内传输上，量的是 ipc 自身（编码、入队、写、解码、交接），不含存储读取（归 T02）与真实 socket。
 //! `IWORK_BENCH_FANOUT_SECS` 调推送扇出与慢消费者对照的时长（默认 10 秒，方案的设定）。
+//! `IWORK_BENCH_SLOW_CONSUMER_CONTROL_PAUSE_MS` 只给 `scripts/check-ipc-bench-invalid.sh` 用：让慢消费者对照组的
+//! A 读到第一条后停这么久，验证前提不成立时这一对报 INVALID、不报数。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -301,11 +303,62 @@ async fn ipc_publish_fanout(conns: usize, secs: u64) {
     );
 }
 
+/// 慢消费者对照里 A 的结局。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AEnd {
+    /// 收齐了全部事件
+    Received,
+    /// 被服务端关了
+    Closed,
+    /// 没收齐，也没被关
+    Open,
+}
+
+/// 一组慢消费者对照的结果：B 的推送延迟和 A 的结局。
+struct SlowConsumerRun {
+    b_latency: Vec<Duration>,
+    a_end: AEnd,
+}
+
+/// 这一对对照的前提哪里不成立（空 = 成立）：对照组的 A 要收齐，停读组的 A 要被关。
+/// 前提不成立时两组的条件不是「A 在读」对「A 停读、被关」，B 的延迟没有可比性。
+fn slow_consumer_invalid(control: AEnd, stalled: AEnd) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if control != AEnd::Received {
+        reasons.push(format!("对照组 A 没收齐（{control:?}）"));
+    }
+    if stalled != AEnd::Closed {
+        reasons.push(format!("停读组 A 没被关（{stalled:?}）"));
+    }
+    reasons
+}
+
+/// 前提成立才报两组 B 的延迟；不成立只打印一行 INVALID 和原因，这一对不报 P50/P95/P99。不 panic、照常退出 0。
+fn report_slow_consumer(mut control: SlowConsumerRun, mut stalled: SlowConsumerRun) {
+    let reasons = slow_consumer_invalid(control.a_end, stalled.a_end);
+    if !reasons.is_empty() {
+        println!(
+            "ipc_slow_consumer INVALID：{}（这一对不报延迟）",
+            reasons.join("；")
+        );
+        return;
+    }
+    report(
+        "ipc_slow_consumer（A 在读，B 的延迟）",
+        &mut control.b_latency,
+    );
+    report(
+        "ipc_slow_consumer（A 停止读被关，B 的延迟）",
+        &mut stalled.b_latency,
+    );
+}
+
 /// 慢消费者对照（T03 方案 S6，P95 < 5ms 的阈值在这里量）：A、B 两条连接订阅同一范围，写线程按 1600/s 发布，
 /// 量 B 的推送延迟。`a_stalled` 为 false 时 A 也持续读（对照组），为 true 时 A 订阅后一直不读。两组同条件：
 /// 预算和集成测试 `slow_consumer` 一样调小（服务端 256KiB / 保底 32KiB，客户端收件 64KiB），让停读的 A 在
 /// 几秒内堆满、被服务端按 QueueFull 关掉，量的是「A 堆满到被关的整个过程」里 B 受没受影响。
-async fn ipc_slow_consumer(a_stalled: bool, secs: u64) {
+/// `control_pause`：对照组的 A 读到第一条后停这么久（只给 INVALID 的检查脚本用，平时为零）。
+async fn ipc_slow_consumer(a_stalled: bool, secs: u64, control_pause: Duration) -> SlowConsumerRun {
     let mut cfg = ServerConfig::new("bench");
     cfg.budget_limit = 256 * 1024;
     cfg.replay_reserve = 32 * 1024;
@@ -332,12 +385,17 @@ async fn ipc_slow_consumer(a_stalled: bool, secs: u64) {
             let mut n = 0u64;
             while n < total {
                 match a_inc.next().await {
-                    Some(IncomingItem::Event(_)) => n += 1,
-                    Some(IncomingItem::Closed(_)) | None => return false,
+                    Some(IncomingItem::Event(_)) => {
+                        n += 1;
+                        if n == 1 && !control_pause.is_zero() {
+                            tokio::time::sleep(control_pause).await;
+                        }
+                    }
+                    Some(IncomingItem::Closed(_)) | None => return AEnd::Closed,
                     Some(_) => {}
                 }
             }
-            true
+            AEnd::Received
         }))
     };
     let b_reader = {
@@ -386,16 +444,10 @@ async fn ipc_slow_consumer(a_stalled: bool, secs: u64) {
             }
         }
     });
-    let mut lat = b_reader.await.unwrap();
+    let b_latency = b_reader.await.unwrap();
     writer.join().unwrap();
-    let a_state = match a_reader {
-        Ok(r) => {
-            if r.await.unwrap() {
-                "A 收齐"
-            } else {
-                "A 被关"
-            }
-        }
+    let a_end = match a_reader {
+        Ok(r) => r.await.unwrap(),
         Err((a, mut a_inc)) => {
             // 停读组：现在才读 A，看排着的事件后面是不是 Closed
             let closed = loop {
@@ -406,16 +458,10 @@ async fn ipc_slow_consumer(a_stalled: bool, secs: u64) {
                 }
             };
             drop(a);
-            if closed { "A 被关" } else { "A 未被关" }
+            if closed { AEnd::Closed } else { AEnd::Open }
         }
     };
-    report(
-        &format!(
-            "ipc_slow_consumer（A {}，B 的延迟，{a_state}）",
-            if a_stalled { "停止读" } else { "在读" }
-        ),
-        &mut lat,
-    );
+    SlowConsumerRun { b_latency, a_end }
 }
 
 async fn ipc_replay_10k() {
@@ -520,6 +566,12 @@ fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
+    let control_pause = Duration::from_millis(
+        std::env::var("IWORK_BENCH_SLOW_CONSUMER_CONTROL_PAUSE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+    );
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -529,8 +581,9 @@ fn main() {
         connect_handshake_latency().await;
         ipc_publish_fanout(1, secs).await;
         ipc_publish_fanout(4, secs).await;
-        ipc_slow_consumer(false, secs).await;
-        ipc_slow_consumer(true, secs).await;
+        let control = ipc_slow_consumer(false, secs, control_pause).await;
+        let stalled = ipc_slow_consumer(true, secs, Duration::ZERO).await;
+        report_slow_consumer(control, stalled);
         ipc_replay_10k().await;
         ipc_scope_change_snapshot().await;
         ipc_view_query_handover(5).await;
