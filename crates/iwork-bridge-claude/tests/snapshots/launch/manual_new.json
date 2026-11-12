@@ -1,0 +1,135 @@
+{
+  "args": [
+    "-p",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--setting-sources",
+    "",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "/Users/u/Library/Application Support/iWork/run/h/0a1b2c3d4e5f/mcp.json",
+    "--settings",
+    "/Users/u/Library/Application Support/iWork/run/h/0a1b2c3d4e5f/settings.json",
+    "--plugin-dir",
+    "/Users/u/Library/Application Support/iWork/imports/plugin-a",
+    "--model",
+    "claude-haiku-5-5",
+    "--effort",
+    "medium",
+    "--append-system-prompt",
+    "你是小助手。",
+    "--disallowedTools",
+    "CronCreate,RemoteTrigger",
+    "--session-id",
+    "11111111-2222-4333-8444-555555555555"
+  ],
+  "cwd": "/work",
+  "env": [
+    [
+      "IWORK_HOOK_SOCK",
+      "/Users/u/Library/Application Support/iWork/run/h/0a1b2c3d4e5f/s"
+    ],
+    [
+      "IWORK_HOOK_TOKEN",
+      "abababababababababababababababababababababababababababababababab"
+    ],
+    [
+      "IWORK_HOOK_BRIDGE_PID",
+      "4242"
+    ],
+    [
+      "IWORK_HOOK_DEADLINE_SECS",
+      "7185"
+    ]
+  ],
+  "mcp": {
+    "mcpServers": {}
+  },
+  "program": "/usr/local/bin/claude",
+  "settings": {
+    "disableAllHooks": false,
+    "hooks": {
+      "PreToolUse": [
+        {
+          "hooks": [
+            {
+              "command": "'/Applications/iWork.app/Contents/MacOS/iwork-claude-hook' pre-tool-use",
+              "onFailure": "block",
+              "timeout": 7200,
+              "type": "command"
+            }
+          ],
+          "matcher": "*"
+        }
+      ],
+      "SessionStart": [
+        {
+          "hooks": [
+            {
+              "command": "'/Applications/iWork.app/Contents/MacOS/iwork-claude-hook' session-start",
+              "timeout": 30,
+              "type": "command"
+            }
+          ]
+        }
+      ]
+    },
+    "permissions": {
+      "defaultMode": "dontAsk",
+      "disableBypassPermissionsMode": "disable"
+    },
+    "sandbox": {
+      "allowUnsandboxedCommands": true,
+      "autoAllowBashIfSandboxed": false,
+      "credentials": {
+        "envVars": [
+          {
+            "mode": "deny",
+            "name": "IWORK_HOOK_TOKEN"
+          }
+        ],
+        "files": [
+          {
+            "mode": "deny",
+            "path": "/Users/u/.ssh"
+          },
+          {
+            "mode": "deny",
+            "path": "/Users/u/Library/Application Support/iWork"
+          }
+        ]
+      },
+      "enabled": true,
+      "excludedCommands": [
+        "git push *",
+        "gh *"
+      ],
+      "filesystem": {
+        "allowRead": [
+          "/Users/u/Library/Application Support/iWork/attachments",
+          "/Users/u/Library/Application Support/iWork/imports"
+        ],
+        "allowWrite": [
+          "/work"
+        ],
+        "denyRead": [
+          "/Users/u/.ssh",
+          "/Users/u/Library/Application Support/iWork"
+        ],
+        "denyWrite": [
+          "/Users/u/.ssh",
+          "/Users/u/Library/Application Support/iWork"
+        ]
+      },
+      "network": {
+        "allowedDomains": [
+          "*"
+        ]
+      }
+    }
+  }
+}
