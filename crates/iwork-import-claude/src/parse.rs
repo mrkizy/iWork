@@ -330,15 +330,20 @@ impl<'de> Deserialize<'de> for Registry {
                 f.write_str("an object")
             }
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Registry, A::Error> {
-                let mut plugins = Vec::new();
+                // 文件在就该有 plugins：没有这个键是形状不对（换了结构、拼错了），不当成「没装插件」（审查 1/F-1）
+                let mut plugins = None;
                 while let Some(key) = map.next_key::<String>()? {
                     if key == "plugins" {
-                        plugins.extend(map.next_value::<PluginMap>()?.0);
+                        plugins
+                            .get_or_insert_with(Vec::new)
+                            .extend(map.next_value::<PluginMap>()?.0);
                     } else {
                         map.next_value::<IgnoredAny>()?;
                     }
                 }
-                Ok(Registry(plugins))
+                plugins
+                    .map(Registry)
+                    .ok_or_else(|| de::Error::missing_field("plugins"))
             }
         }
         d.deserialize_map(V)

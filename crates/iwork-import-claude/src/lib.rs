@@ -39,7 +39,8 @@ pub struct ConfigPaths {
 }
 
 impl ConfigPaths {
-    /// `claude_config_dir` 是后台环境里 `CLAUDE_CONFIG_DIR` 的值（空串当作没设）。
+    /// `claude_config_dir` 是后台环境里 `CLAUDE_CONFIG_DIR` 的值（空串当作没设）。照 CLI 自己的规则按「设没设」分支，不比值：
+    /// 显式设成 `~/.claude` 时用户配置也在 `~/.claude/.claude.json`（2.1.322 程序：`join(CLAUDE_CONFIG_DIR || homedir(), ".claude.json")`）。
     pub fn resolve(home: &Path, claude_config_dir: Option<&OsStr>) -> ConfigPaths {
         match claude_config_dir.filter(|d| !d.is_empty()) {
             Some(dir) => {

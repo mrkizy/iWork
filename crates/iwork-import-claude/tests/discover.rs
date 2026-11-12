@@ -684,6 +684,43 @@ fn discover_names_reports_malformed_source() {
     ));
 }
 
+/// 插件登记文件三种情形分开（T10f A 审查 1/F-1）：文件不存在 → 空；`plugins` 是空表 → 空；文件在而没有 `plugins` 这个键
+/// → 形状不对，报 Malformed，不当成「没装插件」。错误里照样只有来源种类与行列。
+#[test]
+fn registry_without_plugins_field_is_malformed() {
+    let registry = |body: &str| {
+        FakeFiles::default().file(&format!("{CFG}/plugins/installed_plugins.json"), body)
+    };
+    assert_eq!(ok(FakeFiles::default()).0.len(), 0, "文件不存在：空");
+    assert_eq!(
+        ok(registry(r#"{"version": 2, "plugins": {}}"#)).0.len(),
+        0,
+        "合法的空表：空"
+    );
+    for body in [
+        r#"{"version": 2}"#,
+        r#"{"version": 2, "plugin": {"OTHER_TYPO_KEY@m": []}}"#,
+        "{}",
+    ] {
+        let err = discover(registry(body)).0.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LocalImportError::Malformed {
+                    source: SourceRef::PluginRegistry,
+                    line: 1,
+                    ..
+                }
+            ),
+            "{body}: {err:?}"
+        );
+        assert!(
+            !format!("{err} {err:?}").contains("OTHER_TYPO_KEY"),
+            "{err}"
+        );
+    }
+}
+
 #[test]
 fn missing_source_is_empty_not_error() {
     // 什么都没有：查询成功、列表为空
@@ -730,6 +767,15 @@ fn config_dir_from_env_or_home() {
         ConfigPaths::resolve(home, Some(std::ffi::OsStr::new(""))),
         ConfigPaths::resolve(home, None),
         "空串当没设"
+    );
+    // 审查 1/F-2：显式设成默认目录也按「设了」走，读 $HOME/.claude/.claude.json，不读 $HOME/.claude.json。
+    // 依据 2.1.322 程序：`globalConfig: join(CLAUDE_CONFIG_DIR || homedir(), ".claude.json")`，按变量有没有设分支，不比值
+    assert_eq!(
+        ConfigPaths::resolve(home, Some(std::ffi::OsStr::new("/home/u/.claude"))),
+        ConfigPaths {
+            config_dir: "/home/u/.claude".into(),
+            user_config: "/home/u/.claude/.claude.json".into()
+        }
     );
 }
 
