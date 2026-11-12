@@ -39,12 +39,11 @@ fn main() -> ExitCode {
             std::process::exit(64);
         }
     }
-    let mut cases: Vec<Case> = vec![
+    let source_checks: [Case; 2] = [
         ("exit_zero_appears_only_where_registered", source_exit_zero),
         ("main_never_returns", source_main_signature),
     ];
-    #[cfg(unix)]
-    cases.extend(unix::CASES);
+    let cases: Vec<Case> = source_checks.into_iter().chain(platform_cases()).collect();
     let mut failed = 0;
     for (name, case) in &cases {
         match case() {
@@ -61,6 +60,17 @@ fn main() -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// 对真进程的故障注入用例：只在 unix 上有（M1 不支持 Windows，AGENTS.md）；源码检查各平台都跑。
+#[cfg(unix)]
+fn platform_cases() -> Vec<Case> {
+    unix::CASES.to_vec()
+}
+
+#[cfg(not(unix))]
+fn platform_cases() -> Vec<Case> {
+    Vec::new()
 }
 
 fn src_dir() -> &'static Path {
