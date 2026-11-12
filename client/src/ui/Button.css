@@ -17,8 +17,9 @@
 .iw-btn:hover:not(:disabled) {
   background: var(--surf2);
 }
+/* 禁用、悬停都不动 opacity：悬停提示是控件自己的 ::after，会跟着变淡（UI 审查 4/F-2）。只给文字、图标、底色降色。 */
 .iw-btn:disabled {
-  opacity: 0.45;
+  color: var(--idle);
   cursor: not-allowed;
 }
 .iw-btn--primary {
@@ -27,8 +28,12 @@
   color: var(--priTx);
 }
 .iw-btn--primary:hover:not(:disabled) {
-  background: var(--pri);
-  opacity: 0.9;
+  background: color-mix(in srgb, var(--pri) 90%, var(--surf));
+}
+.iw-btn--primary:disabled {
+  background: color-mix(in srgb, var(--pri) 45%, var(--surf));
+  border-color: transparent;
+  color: var(--priTx);
 }
 .iw-btn--accent {
   background: var(--acc);
@@ -36,8 +41,12 @@
   color: var(--accTx);
 }
 .iw-btn--accent:hover:not(:disabled) {
-  background: var(--acc);
-  opacity: 0.9;
+  background: color-mix(in srgb, var(--acc) 90%, var(--surf));
+}
+.iw-btn--accent:disabled {
+  background: color-mix(in srgb, var(--acc) 45%, var(--surf));
+  border-color: transparent;
+  color: var(--accTx);
 }
 .iw-btn--ghost {
   background: transparent;
@@ -75,7 +84,7 @@
   color: var(--tx);
 }
 .iw-icon-btn:disabled {
-  opacity: 0.4;
+  color: var(--idle);
   cursor: not-allowed;
 }
 

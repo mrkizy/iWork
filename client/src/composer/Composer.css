@@ -88,8 +88,9 @@
   background: var(--sideOn);
   color: var(--tx);
 }
+/* 禁用不动 opacity，见 ui/Button.css（提示会跟着变淡，4/F-2） */
 .iw-pill:disabled {
-  opacity: 0.5;
+  color: var(--idle);
   cursor: not-allowed;
 }
 /* 全开：赭红粗体、底色淡赭红，常驻醒目（2 节第 9 条） */
@@ -114,7 +115,7 @@
   cursor: pointer;
 }
 .iw-send:disabled {
-  opacity: 0.4;
+  background: color-mix(in srgb, var(--acc) 40%, var(--surf));
   cursor: not-allowed;
 }
 .iw-send--stop {
@@ -182,7 +183,7 @@
 }
 .iw-segmented button:disabled {
   cursor: not-allowed;
-  opacity: 0.5;
+  color: var(--idle);
 }
 .iw-model-id {
   display: flex;
