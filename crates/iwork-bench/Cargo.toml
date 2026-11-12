@@ -51,3 +51,8 @@ harness = false
 [[bench]]
 name = "view"
 harness = false
+
+# T09 组 2b 审查第 6 轮：时间线满了之后持久事件经 Store::apply 的耗时（Timeline::fit 每次写入后都跑）。
+[[bench]]
+name = "timeline_apply"
+harness = false

@@ -304,10 +304,11 @@ fn trim_keeps_same_seq_rows_together() {
     let seqs = |s: &Store| keys(s).iter().map(|(k, _)| k.seq).collect::<Vec<_>>();
 
     // 旧的一端：上限 3，看最新一行。五行：10、20（分隔线 + 消息）、30（分隔线 + 消息）。先丢 10 剩四行，还超；
-    // 再丢 20 的两行（按行丢的话只丢分隔线就停了，边界落在 20 的两行中间）。m20 没了，30 的分隔线也没了依据
+    // 再丢 20 的两行（按行丢的话只丢分隔线就停了，边界落在 20 的两行中间）。30 的分隔线留着：它说的「切换」本身
+    // 成立，往上翻回 20 时照样对
     let mut s = store(3);
     s.apply(support::snapshot(CONV, 100, vec![page()]));
-    assert_eq!(seqs(&s), [30], "{:?}", keys(&s));
+    assert_eq!(seqs(&s), [30, 30], "{:?}", keys(&s));
     assert_eq!(tl(&s).edge_older, Some(30));
 
     // 新的一端：上限 4，看最旧一行。丢 30 的两行，边界是 20
@@ -804,5 +805,77 @@ mod live {
         }
         let entity: BTreeSet<String> = seen.into_iter().filter(|k| all.contains(k)).collect();
         assert_eq!(entity, all, "见过的行 = 整个对话的全部行");
+    }
+}
+
+// ---------- 审查第 6 轮的复现（reviewer e036441c，收成正式用例） ----------
+
+/// 6/F-3：「回到最新」重建成最新页时，不能沿用重建前网页声明的旧窗口当焦点（旧窗口指着已经不在的行），
+/// 否则会把最新的一端裁掉、at_tail 变假，回到最新之后又不接着最新。
+#[test]
+fn latest_rebuild_reattaches_tail() {
+    let mut w = World::new();
+    let approval = w.long_turn("x", 200, Some(10)).unwrap();
+    let mut s = store(40);
+    open(&mut s, &w);
+    around(&mut s, &w, approval);
+    look_at_top(&mut s);
+    assert!(!tl(&s).at_tail, "对照：在看旧的一段");
+    s.apply(Item::ViewResult {
+        purpose: QueryPurpose::LatestPage {
+            conversation_id: CID.into(),
+        },
+        result: Box::new(w.get(pb::GetConversation {
+            limit: PAGE_SIZE,
+            ..Default::default()
+        })),
+    });
+    assert!(
+        tl(&s).at_tail,
+        "回到最新之后没接着最新：{:?}",
+        tl(&s).identities()
+    );
+    assert_eq!(tl(&s).edge_newer, None);
+    // 旧窗口也不能留着：下一条实时事件之后照样接着最新，新消息进了时间线
+    let seq = w.push(f::user_message("q-after", CID, "又一句"));
+    s.apply(support::persisted(
+        seq,
+        &[CONV],
+        f::user_message("q-after", CID, "又一句").event.unwrap(),
+    ));
+    assert!(
+        tl(&s).at_tail && tl(&s).row("q-after").is_some(),
+        "下一条事件后脱离了最新"
+    );
+}
+
+/// 6/F-2：裁剪之后不能再派生出新的行（模型切换行）把行数顶回上限之上：任何一条事件之后都不超上限。
+#[test]
+fn model_note_trim_stays_under_cap() {
+    let mut s = store(4);
+    s.apply(support::snapshot(
+        CONV,
+        0,
+        vec![support::page(0, vec![], false)],
+    ));
+    let events = vec![
+        (1, f::with_model(f::turn_queued("old", CID, f::IWORK), "a")),
+        (2, f::turn_state("old", T::Queued, T::Running, None)),
+        (3, f::turn_state("old", T::Running, T::Interrupted, None)),
+        (5, f::model_changed(CID, "b")),
+        (8, f::user_message("q", CID, "go")),
+        (10, f::with_model(f::turn_queued("new", CID, f::IWORK), "b")),
+        (11, f::tool_started("new", "x", "Bash", "ls")),
+        (12, f::tool_started("new", "y", "Bash", "ls")),
+        (13, f::tool_started("new", "z", "Bash", "ls")),
+    ];
+    for (seq, e) in events {
+        s.apply(support::persisted(seq, &[CONV], e.event.unwrap()));
+        assert!(
+            tl(&s).len() <= 4,
+            "seq {seq} 之后 {} 行：{:?}",
+            tl(&s).len(),
+            tl(&s).identities()
+        );
     }
 }

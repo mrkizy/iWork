@@ -179,6 +179,8 @@ pub struct Timeline {
     text: HashMap<String, String>,
     /// 工具调用 id → 行身份（`ToolOutputDelta` 只带 tool_call_id）。
     tool_by_call: HashMap<String, String>,
+    /// 现有的继续 / 放弃卡片行的身份（`resume:<turn>`）。同步卡片每次写入后都跑，靠它不扫全表。
+    resume_rows: BTreeSet<String>,
     pub turns: BTreeMap<String, pb::Turn>,
     pub attachments: BTreeMap<String, pb::Attachment>,
     pub usage_total: Option<pb::Usage>,
@@ -264,6 +266,7 @@ impl Timeline {
             cap,
             text: HashMap::new(),
             tool_by_call: HashMap::new(),
+            resume_rows: BTreeSet::new(),
             turns: BTreeMap::new(),
             attachments: BTreeMap::new(),
             usage_total: None,
@@ -386,6 +389,9 @@ impl Timeline {
                 for a in &m.attachment_ids {
                     self.attachments.remove(a);
                 }
+            }
+            Row::Resume(_) => {
+                self.resume_rows.remove(&id);
             }
             // 回合条目只在从老的一端截时删：从新的一端截（往上翻超过上限）时，回合结束行先被截掉，可这个回合
             // 更早的消息与工具行还在，它们的表情、前面的模型切换行都要读这个回合（审查 3/F-1）。
@@ -985,17 +991,16 @@ impl Timeline {
             }
         }
         let mut change = TimelineChange::default();
-        let have: Vec<String> = self
-            .by_id
-            .keys()
-            .filter(|k| k.starts_with("resume:"))
+        let gone: Vec<String> = self
+            .resume_rows
+            .iter()
+            .filter(|id| !want.contains_key(*id))
             .cloned()
             .collect();
-        for id in have {
-            if !want.contains_key(&id) {
-                self.remove(&id);
-                change.rows.insert(id);
-            }
+        for id in gone {
+            self.remove(&id);
+            self.resume_rows.remove(&id);
+            change.rows.insert(id);
         }
         for (id, card) in want {
             if card.created_seq == 0 {
@@ -1006,6 +1011,7 @@ impl Timeline {
                 continue;
             }
             if self.row(&id) != Some(&Row::Resume(card.clone())) {
+                self.resume_rows.insert(id.clone());
                 change.merge(self.insert(
                     RowKey::entity(card.created_seq),
                     id,
@@ -1121,21 +1127,23 @@ impl Timeline {
         (lo, hi)
     }
 
-    /// 每次往时间线里写东西之后调（方案 2.2「查询结果怎么进时间线」第 4 条、R14）：按已加载范围同步继续卡片与
-    /// 重建得出的行，再查行数上限，超了从离 `focus` 远的一端按 seq 成组丢、记下边界。返回被丢的行（网页删掉）。
+    /// 每次往时间线里写东西之后调（方案 2.2「查询结果怎么进时间线」第 4 条、R14）：按已加载范围同步继续卡片，
+    /// 再查行数上限，超了从离 `focus` 远的一端按 seq 成组丢、记下边界。返回被丢的行（网页删掉）。
+    ///
+    /// 实时事件每条都走这里，开销只能跟变化量走、不能跟总行数走（`cargo bench -p iwork-bench --bench
+    /// timeline_apply`）：卡片靠 `resume_rows` 索引，裁剪按键区间；重建得出的行不在这里整份重算——事件那条路是
+    /// 增量的，取页时 `apply_page` 整份重算一次；裁掉的一端它们随 seq 成组丢，留下的仍然成立。
     pub fn fit<'a>(
         &mut self,
         focus: Focus,
         cards: impl Iterator<Item = &'a pb::ResumeCard> + Clone,
     ) -> TimelineChange {
         let mut c = self.sync_resume_cards(cards.clone());
-        c.merge(self.rebuild_derived());
         let trimmed = self.trim(focus);
         if !trimmed.is_empty() {
-            // 范围缩了：范围外的卡片与重建得出的行一起去掉（只会减少，不会再超）
+            // 范围缩了：范围外的卡片去掉（只会减少，不会再超）
             c.merge(trimmed);
             c.merge(self.sync_resume_cards(cards));
-            c.merge(self.rebuild_derived());
         }
         c
     }

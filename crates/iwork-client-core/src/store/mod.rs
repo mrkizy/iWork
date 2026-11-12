@@ -1058,6 +1058,13 @@ impl Store {
                 }
                 let cid = page.conversation.as_ref().map(|c| c.id.as_str());
                 // 裁剪的焦点（方案 2.2 第 4 条）：居中加载还没有窗口，拿目标行当窗口；快照重建成最新页，看最新一行
+                // 不接着最新时收到最新页（「回到最新」）：整个重建成最新页，重建前的窗口指着已经不在的行，
+                // 不能拿它当焦点（会把最新的一端裁掉，审查 6/F-3），也不能留着给之后的事件用
+                let latest_rebuild =
+                    mode == PageMode::LiveLatest && self.open.as_ref().is_some_and(|t| !t.at_tail);
+                if latest_rebuild {
+                    self.window = None;
+                }
                 // 网页还没声明窗口时：往前翻的结果是用户在往上看，焦点在最旧一端；别的看最新一行
                 let focus = match mode {
                     PageMode::Around { center } => Focus::at(center),
