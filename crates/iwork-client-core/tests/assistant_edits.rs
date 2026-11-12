@@ -472,3 +472,58 @@ fn same_value_re_edit_after_other_writer_is_resent() {
         true,
     );
 }
+
+// ---------- 主循环推闸不白重算 ----------
+
+/// 会话层每轮主循环都对忙着的助手推一次闸（`Store::step_assistant_edit`）。闸没变就不标助手主页脏
+/// （热路径：标了就每帧重算、重发一遍主页）；闸变了（发出、落定）才标。
+#[test]
+fn idle_step_does_not_mark_assistant_page_dirty() {
+    use iwork_client_core::store::{Store, ViewKey};
+    let mut store = Store::new();
+    store.summary.assistants.push(pb::Assistant {
+        id: ID.into(),
+        version: 1,
+        config: Some(pb::AssistantConfig {
+            name: "阿森".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    store.dirty = Default::default();
+    let sent = store.step_assistant_edit(ID, |e, b| e.edit(ID, Field::Prompt("新".into()), b));
+    assert!(sent.is_some(), "对照：改动发出去了");
+    assert!(
+        store.dirty.views.contains(&ViewKey::Assistant),
+        "闸变了：标脏"
+    );
+
+    store.dirty = Default::default();
+    assert!(
+        store
+            .step_assistant_edit(ID, |e, b| e.observed(ID, b))
+            .is_none()
+    );
+    assert!(
+        !store.dirty.views.contains(&ViewKey::Assistant),
+        "闸忙着、摘要没变：不标脏"
+    );
+
+    // 后台受理、摘要追上：落定，闸变了
+    let sent = sent.unwrap();
+    store.step_assistant_edit(ID, |e, b| e.accepted(ID, b));
+    let a = store
+        .summary
+        .assistants
+        .iter_mut()
+        .find(|a| a.id == ID)
+        .unwrap();
+    a.version = 2;
+    a.config = Some(sent.config.clone());
+    store.dirty = Default::default();
+    store.step_assistant_edit(ID, |e, b| e.observed(ID, b));
+    assert!(
+        store.dirty.views.contains(&ViewKey::Assistant),
+        "落定：标脏"
+    );
+}

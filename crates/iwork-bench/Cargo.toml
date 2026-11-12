@@ -56,3 +56,7 @@ harness = false
 [[bench]]
 name = "timeline_apply"
 harness = false
+
+[[bench]]
+name = "assistant_edits"
+harness = false

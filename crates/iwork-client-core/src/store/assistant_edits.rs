@@ -92,7 +92,7 @@ pub struct Send {
 type Edits = BTreeMap<FieldKey, (u64, Field)>;
 
 /// 在途的那一次。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct Flight {
     expected: u32,
     /// 这一次带的改动（落定时从 `unsettled` 里去掉编号相同的：之后又改过的留着）。
@@ -103,7 +103,7 @@ struct Flight {
     accepted: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct Slot {
     unsettled: Edits,
     next_edit: u64,
@@ -115,7 +115,7 @@ struct Slot {
     error: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct AssistantEdits {
     slots: BTreeMap<String, Slot>,
 }

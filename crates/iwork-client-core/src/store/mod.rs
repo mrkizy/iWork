@@ -348,19 +348,28 @@ impl Store {
             Option<assistant_edits::Base<'_>>,
         ) -> Option<assistant_edits::Send>,
     ) -> Option<assistant_edits::Send> {
-        self.dirty.mark(ViewKey::Assistant);
-        let Some(a) = self.summary.assistant(id) else {
-            self.assistant_edits.forget(id);
-            return None;
+        // 会话层每轮主循环都推一次忙着的闸：闸没变就不让助手主页重算、重发（热路径，基准 assistant_edits）
+        let before = self.assistant_edits.clone();
+        let sent = match self.summary.assistant(id) {
+            None => {
+                self.assistant_edits.forget(id);
+                None
+            }
+            Some(a) => match a.config.as_ref() {
+                None => None,
+                Some(config) => step(
+                    &mut self.assistant_edits,
+                    Some(assistant_edits::Base {
+                        version: a.version,
+                        config,
+                    }),
+                ),
+            },
         };
-        let config = a.config.as_ref()?;
-        step(
-            &mut self.assistant_edits,
-            Some(assistant_edits::Base {
-                version: a.version,
-                config,
-            }),
-        )
+        if self.assistant_edits != before {
+            self.dirty.mark(ViewKey::Assistant);
+        }
+        sent
     }
 
     pub fn with_timeline_cap(cap: usize) -> Self {
