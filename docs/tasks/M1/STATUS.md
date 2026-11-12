@@ -72,6 +72,18 @@
 - T04 组 3：reviewer `5166257f` 第 2 轮初步看到 F-1 没修全（已有注册项更新失败：macOS bootout 失败、Linux daemon-reload 失败后下一轮早退），托管实例 set(true) 自 bootout 也成立；等它记账。
 - AGENTS.md 加了「加删素材后清 .vitest-cache」（`9dcac56`）。
 
+**18:55 进展（最新，冲突以这里为准）**：
+- **T10e 方案全部定稿**：安全清单 0e38d98（任务 lists 第 4 轮 []）、卡片部分 83fefad（第 5 轮 []），账上 0 开。待办：第 12 节交接转 T10a（删除四步、观察者唤醒）、T10b（删助手意图）、T02（投影器 check_cascade）、T04（ShutdownDaemon 受理改异步、card-host 致命任务、K6 存储卡 I/O、空闲 CPU 算 30 秒对账）、T07/T01（Edit 暂不出卡片、「用户执行失败」文案）；Q1–Q6 与 K6 交产品负责人。
+- **T06 D2 方案定稿**（6fcd26d，第 4 轮只 1 nit 已改 5260d45）：S6-5 可按 5.4a 开工（要改 T05 process.rs 等退出那段；含产品负责人选「这次顺手修」的根组回收前清树）。
+- **D5 = a**（M1 关后台任务 + Monitor 禁用；M2 和多成员一起开放），**P16 改回照常加载**（不经 --setting-sources project，iWork 读 CLAUDE.md/AGENTS.md 接系统提示、复制 .claude/skills|commands|agents 成插件经 --plugin-dir），**PD-5 内联命令不关**、**P17 接受**、**技能文件头 hook 照常跑**、**PD-A1 名字照原样**、**Linux 出生时间刻度边界接受**、回合定义「到运行时静下来」、M1 回合中消息排队（0 档，不做停止并发送）——全部进需求附录 B / 第 9 章 / AGENTS.md。
+- T06 3.1c（P16 做法）方案第 1 轮不过（f5380551，任务 2026-11-12-m1-t06-plan-p16：1 blocking 插件放 run/h 被底线拦，4 important），`47737e78` 在改。P15 子代理记忆重开（放开真实会话前要 RC6 结论）。3.1c 不算放开真实会话的前提，实现排 S6-3 之后单开一批。
+- S6-2 送审，`6114386d` 第 1 轮 3 条（1 blocking stdout 无界/协议错误被吞，2 important account 留存、取消 open 漏清目录），`4ea1efca` 在修。
+- T04 组 3 第 3 轮（最后一轮）`5166257f` 在审 da2b0ac。
+- T10f 第一部分 A 定稿（b88c802 PD-A1 版 + e877c60 插件只认 user 范围）；`b57765cc` 在做 A-1～A-3；script6（G1/G8/G7 改产品设置 28 实例 + RC1–RC7 12 实例 + AGENTS.md 两格）排在它之后，表在 scratchpad/script6-cells.md。
+- 实测已跑：--part skill（175237）、--cell k3（180013），分析 scratchpad/r2y-analysis.md。
+- **事故**：18:05 blob 办法写法错误把工作区需求文档截空，已从不可达 blob ae69b84 三方合并恢复（备份 2aad52f），记忆 blob-method-write-order。
+- 磁盘 18:50 一度只剩 8 GB（StorageFull 打断 reviewer 全量），删了 c0814d74 worktree、main 的 target、各 scratchpad 变异副本的 target、两个空闲 worktree 的 incremental，回到 47 GB。
+
 **17:45 进展（最新，冲突以这里为准）**：
 - 合入：S6-1 → main e949487（CI 43187465223 绿）；`4ea1efca` 接着做 S6-2。
 - 产品负责人新定：回合定义改成「到运行时静下来为止」（附录 B bf3bd9b）；Q7 选 a（4ef3479）。**待答**：PD-A1（本机导入列表显不显示合语法的名字，推荐 a，没答按 b 做）；M1 插话做到哪档（推荐 0 档 + 停止并发送，D5 选 a；1 档「发出就交 CLI」约 13–20 人天放 T10a 后或 M2；2 档放 M2；评估报告 scratchpad/non-strict-turns-assessment.md）。D5 随插话一起定。
