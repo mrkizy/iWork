@@ -809,26 +809,33 @@ async fn startup_permission_mismatch_preserves_kind() {
 
 /// 4.4、4.6 第 14 行在 ACP 这一层：hook 在等答复时死了（被 CLI 杀掉、自己到期），桥接看到 hook 断开，
 /// 这一轮以 `approval_backstop` 失败、会话收掉，不等后台以后的答复。后台这边一直不答。
+///
+/// 后台收到权限请求时建一个文件，假 CLI 等它出现再杀 hook 的整个进程组：这时 hook 一定已经连上、在等答复。
+/// 原来按「起来 300 毫秒后只杀 sh」：Linux 的 dash 不把 `sh -c` exec 成 hook，hook 活着、连接不断；
+/// 机器慢时 hook 还没连上就被杀，桥接根本不知道有这次调用。两种都让这一轮永远不结束（CI 43280644009）。
 #[tokio::test(flavor = "multi_thread")]
 async fn hook_lost_while_waiting_ends_the_session() {
-    struct Never;
+    struct Never(std::path::PathBuf);
     impl iwork_ports::agent::PermissionHandler for Never {
         async fn on_permission(
             &self,
             _req: iwork_ports::agent::PermissionRequest,
         ) -> PermissionDecision {
+            std::fs::write(&self.0, b"").unwrap();
             std::future::pending().await
         }
     }
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("ran");
+    let asked = dir.path().join("asked");
     let input = json!({ "command": "touch", "marker": marker.display().to_string() });
     let rig = Rig::new(script(vec![
         read_user(),
         init(),
-        json!({ "step": "tool", "id": "toolu_1", "name": "Bash", "input": input, "kill_hook_after_ms": 300 }),
+        json!({ "step": "tool", "id": "toolu_1", "name": "Bash", "input": input,
+            "kill_hook_when": asked.display().to_string() }),
     ]));
-    let s = rig.open(rig.spec(), Never).await.unwrap();
+    let s = rig.open(rig.spec(), Never(asked.clone())).await.unwrap();
     let updates = tokio::time::timeout(std::time::Duration::from_secs(10), turn(&s, "跑一下"))
         .await
         .expect("hook 死了之后 10 秒内这一轮结束")
