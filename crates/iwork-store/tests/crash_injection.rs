@@ -184,22 +184,12 @@ fn run_round(
         }
     }
     if !ready {
-        // stdout 读到 EOF 时子进程可能还没被系统回收，只查一次 try_wait 会误报「关了 stdout」；给它一段宽限期
-        let exit_deadline = Instant::now() + Duration::from_secs(5);
-        let msg = loop {
-            if let Some(msg) = early_exit(&mut child, "在握手前") {
-                break msg;
-            }
-            if Instant::now() > exit_deadline {
-                break format!("第 {round} 轮子进程关了 stdout 却没握手");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        let _ = child.kill();
-        let _ = child.wait();
+        // stdout 已到 EOF：子进程正在退出（或已退出），直接等它收尸拿退出状态。
+        // 不用 try_wait 轮询加宽限期：EOF 和系统回收之间的间隔在慢机器上没有上限可言
+        let status = child.wait().map_err(|e| format!("wait 失败：{e}"))?;
         let _ = out_reader.join();
         return Err(format!(
-            "{msg}；stderr：{}",
+            "第 {round} 轮子进程在握手前就退出了（{status}）；stderr：{}",
             err_reader.join().unwrap_or_default()
         ));
     }
