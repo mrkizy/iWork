@@ -25,3 +25,8 @@ harness = false
 [[test]]
 name = "panic_denies"
 harness = false
+
+# 同上：带环境变量时自己是 panic 探针（3.4a 第 3 条的故障注入）
+[[test]]
+name = "exit_code"
+harness = false
