@@ -1,0 +1,243 @@
+//! 交出 prompt 之前认取消（T10a 方案 D1a；7.2 第 ① 条，7.2a 的 K8、K9）。
+//!
+//! 五个等待点各一格（`pre_prompt_cancel_at_each_wait`，表驱动），外加裁决点两种先后一格
+//! （`cancel_just_before_and_after_pass_prompt`）。每格用闸门把编排停在那个等待点，这时取消，再放开。
+//! 「收到 prompt」按会话实例分开数：调用了 prompt、却因进程已退出没收下的，不算收到。
+
+use super::*;
+
+/// 编排停在哪儿时到的取消。
+#[derive(Debug, Clone, Copy)]
+enum Wait {
+    /// 交接表还没建（宿主刚过派发边界）
+    BeforeSlot,
+    /// 开会话里
+    OpeningSession,
+    /// 续接失败、读摘要里
+    ReadingSummary,
+    /// 第一笔提交（会话绑定、进 Running）里
+    FirstCommit,
+    /// 沿用的进程已退出、重开会话里（第一笔已提交）
+    Reopening,
+}
+
+const CANCELLED_BEFORE_START: [&str; 2] = ["Queued -> Cancelled", "finished Cancelled"];
+const CANCELLED_AFTER_START: [&str; 4] = [
+    "Queued -> Running",
+    "Running -> Cancelling",
+    "Cancelling -> Cancelled",
+    "finished Cancelled",
+];
+
+fn received(w: &W<Reference>) -> Vec<usize> {
+    w.ctl.received.lock().unwrap().clone()
+}
+
+fn prompt_calls(w: &W<Reference>) -> Vec<usize> {
+    w.ctl.prompt_calls.lock().unwrap().clone()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pre_prompt_cancel_at_each_wait() {
+    for wait in [
+        Wait::BeforeSlot,
+        Wait::OpeningSession,
+        Wait::ReadingSummary,
+        Wait::FirstCommit,
+        Wait::Reopening,
+    ] {
+        cancel_at(wait).await;
+    }
+}
+
+async fn cancel_at(wait: Wait) {
+    let first = queued_turn(1);
+    let w = W::<Reference>::new(&first).await;
+    // 「重开」那格要一条已经跑过一个回合、会话开着的线；别的格从新线开始
+    let (line, turn) = match wait {
+        Wait::Reopening => {
+            let task = w.running(first).await;
+            w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+            let (result, line) = task.await.unwrap();
+            assert_eq!(result.unwrap(), TurnState::Completed);
+            (line, queued_turn_seeded(&w, 2))
+        }
+        Wait::ReadingSummary => (
+            SessionLine::new(w.decider.clone(), Some(OLD_ID.into())),
+            first,
+        ),
+        _ => (w.line(), first),
+    };
+    let t = turn.id;
+    let received_before = received(&w);
+    let canceller = line.canceller();
+
+    let gate = Arc::new(Notify::new());
+    match wait {
+        Wait::BeforeSlot => {}
+        Wait::OpeningSession => *w.ctl.open_gate.lock().unwrap() = Some(gate.clone()),
+        Wait::ReadingSummary => {
+            w.history.set(history());
+            w.ctl
+                .open_errors
+                .lock()
+                .unwrap()
+                .push_back(lost(SessionLostReason::NotFound));
+            w.ctl.fresh_ids.lock().unwrap().push_back(NEW_ID.into());
+            *w.history.gate.lock().unwrap() = Some(gate.clone());
+        }
+        Wait::FirstCommit => *w.store.before_commit.lock().unwrap() = Some(gate.clone()),
+        Wait::Reopening => {
+            w.ctl
+                .prompt_errors
+                .lock()
+                .unwrap()
+                .push_back(AgentError::ProcessExited {
+                    message: "退出了".into(),
+                });
+            *w.ctl.open_gate.lock().unwrap() = Some(gate.clone());
+        }
+    }
+
+    let task = if let Wait::BeforeSlot = wait {
+        // 交接表还没建：取消先记在 TurnSlot 上
+        canceller.cancel(t);
+        w.spawn(line, w.plan(turn))
+    } else {
+        let task = w.spawn(line, w.plan(turn));
+        let what = format!("停在 {wait:?}");
+        wait_until(&what, || match wait {
+            Wait::OpeningSession | Wait::Reopening => w.ctl.opening.load(Ordering::SeqCst),
+            Wait::ReadingSummary => w.history.reading.load(Ordering::SeqCst),
+            Wait::FirstCommit => w.store.commit_entered.load(Ordering::SeqCst),
+            Wait::BeforeSlot => unreachable!(),
+        })
+        .await;
+        canceller.cancel(t);
+        gate.notify_one();
+        task
+    };
+    let (result, line) = task.await.unwrap();
+
+    assert_eq!(result.unwrap(), TurnState::Cancelled, "{wait:?}");
+    assert_eq!(
+        received(&w),
+        received_before,
+        "{wait:?}：没有哪个会话实例收下这一趟的 prompt"
+    );
+    let expected: &[&str] = match wait {
+        Wait::BeforeSlot | Wait::OpeningSession | Wait::ReadingSummary => &CANCELLED_BEFORE_START,
+        Wait::FirstCommit | Wait::Reopening => &CANCELLED_AFTER_START,
+    };
+    assert_eq!(trail(&w.store, t), strings(expected), "{wait:?}");
+    match wait {
+        Wait::BeforeSlot => {
+            assert_eq!(w.ctl.opens.load(Ordering::SeqCst), 0, "不开会话");
+            assert!(prompt_calls(&w).is_empty());
+        }
+        Wait::OpeningSession => {
+            assert!(prompt_calls(&w).is_empty());
+            assert!(line.session().is_some(), "开好的会话留给下一回合");
+        }
+        Wait::ReadingSummary => {
+            assert!(prompt_calls(&w).is_empty());
+            assert_eq!(
+                line.resume_id(),
+                Some(OLD_ID),
+                "没收下 prompt 的新会话不算数"
+            );
+            assert!(line.session().is_none());
+            assert!(line.is_settled());
+        }
+        Wait::FirstCommit => {
+            assert!(prompt_calls(&w).is_empty());
+            assert_eq!(message_endings(&w.store), [MessageStatus::Interrupted]);
+        }
+        Wait::Reopening => {
+            // 旧实例 1 被调用过两次：第一回合收下，这一回合那次因进程已退出没收下；新实例 2 一次都没被调用
+            assert_eq!(prompt_calls(&w), [1, 1], "{wait:?}");
+            assert_eq!(received(&w), [1], "旧实例这一回合 0 条、新实例 0 条");
+            assert_eq!(w.ctl.opens.load(Ordering::SeqCst), 2);
+        }
+    }
+}
+
+/// 续接的回合在第一笔提交之前看到取消：什么都不提交，原样停在 Interrupted。
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_resume_before_start_commits_nothing() {
+    let turn = queued_turn(1);
+    let w = W::<Reference>::new(&turn).await;
+    let turn = interrupted_turn(&w, turn);
+    let t = turn.id;
+    let before = w.store.all().len();
+    let line = w.line();
+    line.canceller().cancel(t);
+    let (result, _) = w.spawn(line, w.resume_plan(turn)).await.unwrap();
+    assert_eq!(
+        result.unwrap(),
+        TurnState::Interrupted {
+            reason: InterruptReason::Crash
+        }
+    );
+    assert_eq!(w.store.all().len(), before, "没有提交任何东西");
+    assert_eq!(w.ctl.opens.load(Ordering::SeqCst), 0);
+}
+
+/// 别的回合的取消、上一回合留下没用上的取消，都不落到这个回合头上。
+#[tokio::test(flavor = "current_thread")]
+async fn early_cancel_for_another_turn_is_dropped() {
+    let turn = queued_turn(1);
+    let w = W::<Reference>::new(&turn).await;
+    let line = w.line();
+    line.canceller().cancel(queued_turn(9).id);
+    let task = w.spawn(line, w.plan(turn.clone()));
+    wait_until("prompt", || !received(&w).is_empty()).await;
+    w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+    assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Completed);
+}
+
+/// 裁决点两种先后：取消在裁决之前（第一笔已落盘、回执还没到）→ 不交出；在裁决之后（prompt 已在路上）→
+/// 照在跑的回合取消，运行时收到 prompt 和 `session/cancel`。
+#[tokio::test(flavor = "current_thread")]
+async fn cancel_just_before_and_after_pass_prompt() {
+    // 之前：第一笔处理完、回执停在闸门上
+    let turn = queued_turn(1);
+    let t = turn.id;
+    let w = W::<Reference>::new(&turn).await;
+    let gate = Arc::new(Notify::new());
+    *w.store.receipt_gate.lock().unwrap() = Some(gate.clone());
+    let line = w.line();
+    let canceller = line.canceller();
+    let task = w.spawn(line, w.plan(turn));
+    wait_until("第一笔已落盘", || {
+        w.state(t) == Some(TurnState::Running)
+    })
+    .await;
+    canceller.cancel(t);
+    gate.notify_one();
+    let (result, _) = task.await.unwrap();
+    assert_eq!(result.unwrap(), TurnState::Cancelled);
+    assert!(prompt_calls(&w).is_empty(), "取消先到：没有 prompt");
+    assert_eq!(trail(&w.store, t), strings(&CANCELLED_AFTER_START));
+
+    // 之后：裁决已过、prompt 停在运行时收下之前
+    let turn = queued_turn(1);
+    let t = turn.id;
+    let w = W::<Reference>::new(&turn).await;
+    let gate = Arc::new(Notify::new());
+    *w.ctl.prompt_gate.lock().unwrap() = Some(gate.clone());
+    let line = w.line();
+    let canceller = line.canceller();
+    let task = w.spawn(line, w.plan(turn));
+    wait_until("prompt 在路上", || {
+        w.ctl.prompting.load(Ordering::SeqCst)
+    })
+    .await;
+    canceller.cancel(t);
+    gate.notify_one();
+    let (result, _) = task.await.unwrap();
+    assert_eq!(result.unwrap(), TurnState::Cancelled);
+    assert_eq!(received(&w), [1], "裁决先过：prompt 已交出");
+    assert_eq!(w.ctl.wire(), ["session/cancel"]);
+    assert_eq!(trail(&w.store, t), strings(&CANCELLED_AFTER_START));
+}

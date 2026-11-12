@@ -6,6 +6,7 @@ mod resume_note;
 mod resume_summary;
 mod runner;
 mod scheduler;
+mod settle;
 
 pub use permission::{
     Decided, PermissionDecider, PermissionGate, STUB_DENY_MESSAGE, StubDecider, TURN_GONE_MESSAGE,
@@ -18,3 +19,4 @@ pub use runner::{
     ORCHESTRATOR_ACTOR, REQUEST_HEADER, ResumeRequest, SUMMARY_RECENT_LIMIT, SessionLine,
     TREE_NOT_CLEARED, TurnCanceller, TurnEntry, TurnPlan, TurnPorts, TurnRunError,
 };
+pub use settle::{OwedBy, OwedError, owed_turn_events};
