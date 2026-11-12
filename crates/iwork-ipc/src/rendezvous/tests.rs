@@ -101,6 +101,7 @@ fn relaunchable_by_code_table() {
         (ExitCode::EndpointRefused, NotWithThisProgram),
         (ExitCode::StoreRefused, NotWithThisProgram),
         (ExitCode::BindFailed, Yes),
+        (ExitCode::IdentityUnsettled, Yes),
         (ExitCode::Fatal, Yes),
         (ExitCode::RestartRequested, Yes),
     ];
@@ -113,7 +114,7 @@ fn relaunchable_by_code_table() {
 #[test]
 fn exit_code_numbers_match_table() {
     let numbers: Vec<u8> = ExitCode::ALL.iter().map(|c| c.code()).collect();
-    assert_eq!(numbers, [0, 2, 10, 11, 12, 13, 20, 21]);
+    assert_eq!(numbers, [0, 2, 10, 11, 12, 13, 14, 20, 21]);
 }
 
 fn any_reason() -> impl Strategy<Value = StopReason> {

@@ -11,6 +11,7 @@
 use std::path::Path;
 
 use iwork_ipc::peer::{self, ImageId, MANIFEST_FILE, Manifest, SelfIdentity, SignerIdentity, Want};
+use iwork_ipc::rendezvous::{ExeStamp, ExitCode};
 
 pub mod manifest_form;
 #[cfg(target_os = "macos")]
@@ -119,6 +120,73 @@ pub fn installed_complete(forms: &[Box<dyn PackageForm>], exe_dir: &Path) -> Com
     }
 }
 
+/// 启动表第 1 步（取身份）失败时，磁盘上是什么情况（T04 方案 2.2「第 1 步失败分两种」）。前四种是「暂时读不到」
+/// （逻辑码 14，拉起方过一会儿再拉），后两种是「真的不行」（10）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityFailure {
+    /// 取得到运行映像的身份，而磁盘上的后台文件不是我，或者读不了。
+    DaemonNotMe,
+    /// 程序文件的戳和第 1 步开头取的不一样。
+    StampChanged,
+    /// 程序文件的戳有一次取不到（含取不到自己的路径）。
+    StampUnavailable,
+    /// 磁盘上没有装齐的包。
+    Incomplete,
+    /// 平台不支持（M1 的 Windows）。
+    PlatformUnsupported,
+    /// 程序文件没动过、包是装齐的、（取得到运行身份时）磁盘上的后台就是我，身份还是算不出。
+    Settled,
+}
+
+impl IdentityFailure {
+    pub fn code(self) -> ExitCode {
+        match self {
+            Self::DaemonNotMe | Self::StampChanged | Self::StampUnavailable | Self::Incomplete => {
+                ExitCode::IdentityUnsettled
+            }
+            Self::PlatformUnsupported | Self::Settled => ExitCode::Unsupported,
+        }
+    }
+
+    /// stderr 里写明是哪一问中的。
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::DaemonNotMe => "磁盘上的后台程序已经不是正在运行的这一份（安装可能还在进行）",
+            Self::StampChanged => "程序文件在启动期间变了（安装可能还在进行）",
+            Self::StampUnavailable => "读不到程序文件（安装可能还在进行）",
+            Self::Incomplete => "包没装齐（安装可能还在进行）",
+            Self::PlatformUnsupported => "平台不支持",
+            Self::Settled => "磁盘上的安装是稳定、装齐的",
+        }
+    }
+}
+
+/// 第 1 步失败的分类（纯函数，方案 2.2 的四问，先中先得）。判成 10 要有正面证据：哪一样证据拿不到，就按
+/// 「可能还在装」处理。`daemon_is_me` 为 `None` 表示运行映像的身份取不到，跳过那一问。
+pub fn classify_identity_failure(
+    supported: bool,
+    daemon_is_me: Option<bool>,
+    stamp_before: Option<ExeStamp>,
+    stamp_after: Option<ExeStamp>,
+    complete: bool,
+) -> IdentityFailure {
+    if !supported {
+        return IdentityFailure::PlatformUnsupported;
+    }
+    if daemon_is_me == Some(false) {
+        return IdentityFailure::DaemonNotMe;
+    }
+    match (stamp_before, stamp_after) {
+        (Some(a), Some(b)) if a != b => return IdentityFailure::StampChanged,
+        (Some(_), Some(_)) => {}
+        _ => return IdentityFailure::StampUnavailable,
+    }
+    if !complete {
+        return IdentityFailure::Incomplete;
+    }
+    IdentityFailure::Settled
+}
+
 /// 判定结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -166,6 +234,91 @@ mod tests {
         DiskView {
             daemon: daemon.map(|b| vec![id(b)]),
             manifest: m,
+        }
+    }
+
+    /// 方案 2.2「第 1 步失败分两种」逐行（期望值从方案的表抄来），外加每一问「拿不到证据」的变体。
+    #[test]
+    fn identity_failure_classification() {
+        use IdentityFailure::*;
+        let s = |n: u64| {
+            Some(ExeStamp {
+                len: 1,
+                modified_unix_ns: n,
+            })
+        };
+        let rows = [
+            (
+                "平台不支持",
+                (false, Some(true), s(1), s(1), true),
+                PlatformUnsupported,
+                10,
+            ),
+            (
+                "平台不支持先于其他各问",
+                (false, Some(false), None, s(2), false),
+                PlatformUnsupported,
+                10,
+            ),
+            (
+                "磁盘上的后台不是我（或读不了）",
+                (true, Some(false), s(1), s(1), true),
+                DaemonNotMe,
+                14,
+            ),
+            (
+                "戳变了",
+                (true, Some(true), s(1), s(2), true),
+                StampChanged,
+                14,
+            ),
+            (
+                "开头的戳取不到",
+                (true, Some(true), None, s(1), true),
+                StampUnavailable,
+                14,
+            ),
+            (
+                "后来的戳取不到",
+                (true, Some(true), s(1), None, true),
+                StampUnavailable,
+                14,
+            ),
+            (
+                "包没装齐",
+                (true, Some(true), s(1), s(1), false),
+                Incomplete,
+                14,
+            ),
+            (
+                "都稳定、装齐",
+                (true, Some(true), s(1), s(1), true),
+                Settled,
+                10,
+            ),
+            (
+                "运行身份取不到：跳过那一问，照后面判（装齐）",
+                (true, None, s(1), s(1), true),
+                Settled,
+                10,
+            ),
+            (
+                "运行身份取不到：跳过那一问，照后面判（没装齐）",
+                (true, None, s(1), s(1), false),
+                Incomplete,
+                14,
+            ),
+            (
+                "运行身份取不到：跳过那一问，照后面判（戳变了）",
+                (true, None, s(1), s(2), true),
+                StampChanged,
+                14,
+            ),
+        ];
+        for (what, (sup, me, a, b, complete), want, code) in rows {
+            let got = classify_identity_failure(sup, me, a, b, complete);
+            assert_eq!(got, want, "{what}");
+            assert_eq!(got.code().code(), code, "{what}");
         }
     }
 

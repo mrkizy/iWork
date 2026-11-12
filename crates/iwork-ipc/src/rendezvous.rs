@@ -132,7 +132,7 @@ pub enum ExitCode {
     Stopped,
     /// 参数不认识。
     Usage,
-    /// 算不出自己的身份（含 M1 的 Windows）。
+    /// 算不出自己的身份，而磁盘上是一个稳定、装齐的安装；或平台不支持（含 M1 的 Windows）。
     Unsupported,
     /// 端点或数据目录不可用。
     EndpointRefused,
@@ -140,6 +140,8 @@ pub enum ExitCode {
     StoreRefused,
     /// 拿到锁却绑不上 socket。
     BindFailed,
+    /// 身份暂时读不到：程序文件正在被换，或磁盘上的包还没装齐（T04 方案 2.2「第 1 步失败分两种」）。
+    IdentityUnsettled,
     /// 运行中（或启动阶段）的不可恢复故障。
     Fatal,
     /// 自行重启时 `exec` 失败。
@@ -148,13 +150,14 @@ pub enum ExitCode {
 
 impl ExitCode {
     /// 全部逻辑退出码（测试与诊断页列举用）。
-    pub const ALL: [ExitCode; 8] = [
+    pub const ALL: [ExitCode; 9] = [
         ExitCode::Stopped,
         ExitCode::Usage,
         ExitCode::Unsupported,
         ExitCode::EndpointRefused,
         ExitCode::StoreRefused,
         ExitCode::BindFailed,
+        ExitCode::IdentityUnsettled,
         ExitCode::Fatal,
         ExitCode::RestartRequested,
     ];
@@ -168,6 +171,7 @@ impl ExitCode {
             ExitCode::EndpointRefused => 11,
             ExitCode::StoreRefused => 12,
             ExitCode::BindFailed => 13,
+            ExitCode::IdentityUnsettled => 14,
             ExitCode::Fatal => 20,
             ExitCode::RestartRequested => 21,
         }
@@ -221,8 +225,11 @@ fn after_exit_without_reason(code: ExitCode) -> Relaunchable {
         | ExitCode::Unsupported
         | ExitCode::EndpointRefused
         | ExitCode::StoreRefused => Relaunchable::NotWithThisProgram,
-        // 可能是暂时的，或本来就是要重启
-        ExitCode::BindFailed | ExitCode::Fatal | ExitCode::RestartRequested => Relaunchable::Yes,
+        // 可能是暂时的（含安装还没做完），或本来就是要重启
+        ExitCode::BindFailed
+        | ExitCode::IdentityUnsettled
+        | ExitCode::Fatal
+        | ExitCode::RestartRequested => Relaunchable::Yes,
     }
 }
 

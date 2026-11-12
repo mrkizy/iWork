@@ -423,6 +423,89 @@ fn abandoned_install_warns_after_a_while() {
     assert_eq!(readies(&sb).len(), 1);
 }
 
+/// 起安装目录里的后台，等它退出，返回退出状态与 stderr。
+fn run_installed(
+    sb: &Sandbox,
+    inst: &Install,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> (Option<i32>, String) {
+    let mut d = sb.spawn_exe(&inst.daemon(), args, env);
+    let status = d.wait_exit(START);
+    (code(status), d.stderr())
+}
+
+const FAIL_IDENTITY: (&str, &str) = ("IWORK_DEV_FAIL_AT", "identity");
+
+/// S11f（1/F-9）：安装进行中被拉起的托管实例第 1 步失败 → 逻辑码 14、退出状态 14（非零，服务管理器会再拉），
+/// 不拿锁、不写状态。两格：包没装齐；第 1 步期间程序文件被改写（戳变了）。补齐之后再起（服务管理器的下一次拉起）→ 就绪。
+#[test]
+fn identity_failure_mid_install_is_relaunched() {
+    let _slot = Slot::take();
+    let sb = Sandbox::new();
+    let inst = installed(&sb, "A");
+    // 清单登记的是 B 的后台，磁盘上还是 A：没装齐
+    inst.put_manifest(&[("iwork-daemon", "B"), ("iwork-client", "A")]);
+    let (status, err) = run_installed(&sb, &inst, &["--service"], &[FAIL_IDENTITY]);
+    assert_eq!(status, Some(14), "{err}");
+    assert!(
+        err.contains("逻辑退出码 14") && err.contains("包没装齐"),
+        "{err}"
+    );
+    assert!(sb.untouched(), "不拿锁、不写状态");
+
+    // 另一格：包是齐的，第 1 步期间程序文件被改写（测试的子进程改它的修改时间）
+    inst.put_manifest(&[("iwork-daemon", "A"), ("iwork-client", "A")]);
+    let resume = sb.home.join("resume");
+    let mut d = sb.spawn_exe(
+        &inst.daemon(),
+        &["--service"],
+        &[
+            FAIL_IDENTITY,
+            ("IWORK_DEV_PAUSE_AT", "identity"),
+            ("IWORK_DEV_RESUME_FILE", resume.to_str().unwrap()),
+        ],
+    );
+    d.wait_stderr("IWORK-PAUSED identity", START);
+    let ok = std::process::Command::new("touch")
+        .args(["-m", "-t", "202001010000"])
+        .arg(inst.daemon())
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "touch 失败");
+    std::fs::write(&resume, b"").unwrap();
+    let status = d.wait_exit(START);
+    assert_eq!(code(status), Some(14), "{}", d.stderr());
+    assert!(
+        d.stderr().contains("程序文件在启动期间变了"),
+        "{}",
+        d.stderr()
+    );
+    assert!(sb.untouched());
+
+    // 装齐、去掉注入：下一次拉起到就绪
+    start(&sb, &inst, &["--service"]);
+}
+
+/// S11f 对照（1/F-9）：包是装齐的、程序文件不动，第 1 步照样失败 → 逻辑码 10：托管实例退出状态 0（服务管理器不再拉），
+/// 非托管 10；不拿锁、不写状态。
+#[test]
+fn identity_failure_on_settled_install_exits_zero() {
+    let _slot = Slot::take();
+    let sb = Sandbox::new();
+    let inst = installed(&sb, "A");
+    let (status, err) = run_installed(&sb, &inst, &["--service"], &[FAIL_IDENTITY]);
+    assert_eq!(status, Some(0), "{err}");
+    assert!(
+        err.contains("逻辑退出码 10") && err.contains("稳定、装齐"),
+        "{err}"
+    );
+    let (status, err) = run_installed(&sb, &inst, &[], &[FAIL_IDENTITY]);
+    assert_eq!(status, Some(10), "{err}");
+    assert!(sb.untouched());
+}
+
 #[cfg(target_os = "macos")]
 mod bundle {
     //! 两种包形态之间的升级（S7b、S7c、S7d、S7e）。整包签名用 ad-hoc 整包签名造封印：对安装检查来说和证书签名
