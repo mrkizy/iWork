@@ -107,11 +107,13 @@ pub fn form_a(root: &Path, version: &str) -> PathBuf {
     dir
 }
 
-/// 测试用的签名身份：临时钥匙串里的自签证书（`scripts/test-signing-identity.sh`）。丢弃时删钥匙串。
+/// 测试用的签名身份：钥匙串里的自签证书（`scripts/test-signing-identity.sh`）。钥匙串是这一次新建的（本机），丢弃时
+/// 删掉；是 CI 给的共用钥匙串（IWORK_TEST_SIGNING_KEYCHAIN）就不删，由 ci.yml 收尾。不碰钥匙串搜索列表（审查 2/F-2）。
 #[cfg(target_os = "macos")]
 pub struct Signer {
     _dir: tempfile::TempDir,
     pub keychain: String,
+    owned: bool,
     pub identity: String,
     pub leaf: [u8; 32],
     /// 叶证书的 SHA-1：codesign 按它指定身份，签的恰好是这一张
@@ -135,6 +137,7 @@ impl Signer {
         };
         Signer {
             keychain: field("keychain"),
+            owned: field("owned") == "yes",
             identity: field("identity"),
             sha1: field("sha1"),
             leaf: hex::decode(field("leaf_sha256"))
@@ -159,6 +162,9 @@ impl Signer {
 #[cfg(target_os = "macos")]
 impl Drop for Signer {
     fn drop(&mut self) {
+        if !self.owned {
+            return;
+        }
         let _ = Command::new("security")
             .args(["delete-keychain", &self.keychain])
             .output();

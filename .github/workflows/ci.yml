@@ -12,9 +12,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # macOS 的 codesign 只在用户搜索列表里的钥匙串找身份：测试与形态 B 打包建的临时钥匙串要加进去
-  # （scripts/test-signing-identity.sh；探针 CI run 43302065465）
-  IWORK_TEST_SIGNING_SEARCH_LIST: "1"
 
 jobs:
   # 与平台无关的检查只在 Linux 跑一次
@@ -72,7 +69,26 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo test
+        if: runner.os != 'macOS'
         run: cargo test --workspace
+      - name: cargo test（macOS：签名测试用 CI 建的共用钥匙串）
+        if: runner.os == 'macOS'
+        run: |
+          # 共用的签名钥匙串：CI 的 macOS 上 codesign 只在用户搜索列表里的钥匙串找身份（探针 CI run 43302065465）。
+          # 改搜索列表只在这里做：先存原列表（读不出或读出空列表就让这一步失败，不改），加进去，跑完不论成败恢复原列表、
+          # 删钥匙串。仓库里的脚本与 Rust 测试一概不改搜索列表（审查 2/F-2）；证书由 test-signing-identity.sh 导入它。
+          kc="$RUNNER_TEMP/iwork-test-signing.keychain-db"
+          security create-keychain -p t "$kc"
+          security unlock-keychain -p t "$kc"
+          security set-keychain-settings "$kc"
+          saved=$(security list-keychains -d user)
+          orig=()
+          while IFS= read -r k; do k=${k#*\"}; k=${k%\"*}; [ -n "$k" ] && orig+=("$k"); done <<< "$saved"
+          [ ${#orig[@]} -gt 0 ] || { echo "读出的钥匙串搜索列表是空的，不改" >&2; security delete-keychain "$kc"; exit 1; }
+          trap 'security list-keychains -d user -s "${orig[@]}"; security delete-keychain "$kc"' EXIT
+          security list-keychains -d user -s "$kc" "${orig[@]}"
+          export IWORK_TEST_SIGNING_KEYCHAIN="$kc"
+          cargo test --workspace
 
       # T04：后台服务的真进程用例（真起 iwork-daemon：单实例、等锁接班、崩溃恢复、停机、投递、自行重启、自启、日志脱敏）
       #   与客户端拉起（卡验收 2）。要 dev feature：测试进程不是受信映像，后台要带 --dev-trust。
@@ -195,12 +211,25 @@ jobs:
       - name: 发布包（macOS 形态 B：自签证书，整包签名）
         if: runner.os == 'macOS'
         run: |
+          # 共用的签名钥匙串：CI 的 macOS 上 codesign 只在用户搜索列表里的钥匙串找身份（探针 CI run 43302065465）。
+          # 改搜索列表只在这里做：先存原列表（读不出或读出空列表就让这一步失败，不改），加进去，跑完不论成败恢复原列表、
+          # 删钥匙串。仓库里的脚本与 Rust 测试一概不改搜索列表（审查 2/F-2）；证书由 test-signing-identity.sh 导入它。
+          kc="$RUNNER_TEMP/iwork-test-signing.keychain-db"
+          security create-keychain -p t "$kc"
+          security unlock-keychain -p t "$kc"
+          security set-keychain-settings "$kc"
+          saved=$(security list-keychains -d user)
+          orig=()
+          while IFS= read -r k; do k=${k#*\"}; k=${k%\"*}; [ -n "$k" ] && orig+=("$k"); done <<< "$saved"
+          [ ${#orig[@]} -gt 0 ] || { echo "读出的钥匙串搜索列表是空的，不改" >&2; security delete-keychain "$kc"; exit 1; }
+          trap 'security list-keychains -d user -s "${orig[@]}"; security delete-keychain "$kc"' EXIT
+          security list-keychains -d user -s "$kc" "${orig[@]}"
+          export IWORK_TEST_SIGNING_KEYCHAIN="$kc"
           sign="$RUNNER_TEMP/iwork-sign"
           mkdir -p "$sign"
           out=$(scripts/test-signing-identity.sh "$sign" "iWork CI Signer")
-          kc=$(printf '%s\n' "$out" | sed -n 's/^keychain=//p')
-          trap 'security delete-keychain "$kc"' EXIT
-          IWORK_SIGN_IDENTITY="iWork CI Signer" IWORK_SIGN_KEYCHAIN="$kc" pnpm -C client tauri build
+          identity=$(printf '%s\n' "$out" | sed -n 's/^identity=//p')
+          IWORK_SIGN_IDENTITY="$identity" IWORK_SIGN_KEYCHAIN="$kc" pnpm -C client tauri build
           bin=target/release/dist/signed/iWork.app/Contents/MacOS
           scripts/check-no-dev-trust.sh --artifacts "$bin/iwork-client" "$bin/iwork-daemon"
 
