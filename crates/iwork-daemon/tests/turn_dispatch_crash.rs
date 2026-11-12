@@ -25,9 +25,10 @@ use iwork_core::turn::{
     Decided, PermissionDecider, SessionLine, TurnEntry, TurnPlan, TurnPorts, VoidPlanError,
 };
 use iwork_domain::approval::VoidReason;
+use iwork_domain::assistant::{Assistant, AssistantConfig, AssistantVersion, Avatar};
 use iwork_domain::common::{ModelId, ModelSelection, Timestamp, ToolGroups};
 use iwork_domain::conversation::{Conversation, ConversationKind, ConversationState};
-use iwork_domain::event::{ConversationCreated, DomainEvent, TurnQueued};
+use iwork_domain::event::{AssistantCreated, ConversationCreated, DomainEvent, TurnQueued};
 use iwork_domain::id::{AssistantId, CommandId, ConversationId, RawUlid, RuntimeId, Seq, TurnId};
 use iwork_domain::session::{AllowWrite, NetworkPolicy, SessionConstraints, SessionToolSet};
 use iwork_domain::settings::GlobalSettings;
@@ -309,6 +310,31 @@ fn plan(turn: Turn) -> TurnPlan {
 async fn seed(store: &Store, turn: u128, command: u128) {
     let mut events: Vec<DomainEvent> = Vec::new();
     if turn == FIRST_TURN {
+        // 排回合前要有它的助手（T10a A3 的归属存续）
+        events.push(
+            AssistantCreated {
+                assistant: Assistant {
+                    id: AssistantId::from_raw(id(1)),
+                    builtin: false,
+                    current: AssistantVersion {
+                        version: 1,
+                        config: AssistantConfig {
+                            name: "a1".into(),
+                            avatar: Avatar {
+                                initial: "A".into(),
+                                color: "#123456".into(),
+                            },
+                            prompt: "p".into(),
+                            runtime_id: RuntimeId::from_raw(id(2)),
+                            model: model(),
+                            disabled_groups: ToolGroups::new(),
+                        },
+                        created_at: Timestamp(0),
+                    },
+                },
+            }
+            .into(),
+        );
         events.push(
             ConversationCreated {
                 conversation: Conversation {

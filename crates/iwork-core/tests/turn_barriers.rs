@@ -1023,6 +1023,13 @@ async fn resume_failure_fails_interrupted_turn() {
         iwork_domain::event::TurnStateChanged {
             turn_id: t,
             from: TurnState::Running,
+            to: TurnState::WaitingApproval,
+            reason: None,
+        }
+        .into(),
+        iwork_domain::event::TurnStateChanged {
+            turn_id: t,
+            from: TurnState::WaitingApproval,
             to: wait_limit(),
             reason: None,
         }
@@ -1045,7 +1052,7 @@ async fn resume_failure_fails_interrupted_turn() {
     let why = trail(&w.store, t);
     assert!(
         why.last().unwrap() == "finished Failed"
-            && why[2].starts_with("Interrupted { reason: ApprovalWaitLimit } -> Failed (上一棵"),
+            && why[3].starts_with("Interrupted { reason: ApprovalWaitLimit } -> Failed (上一棵"),
         "{why:?}"
     );
 }

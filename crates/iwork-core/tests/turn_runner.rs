@@ -1336,13 +1336,29 @@ mod delivery_gate {
             "没有别的票在等：和回到 Running 同一笔"
         );
         assert!(events.iter().any(|e| matches!(e, DomainEvent::ApprovalDecided(d) if d.approval_id == id && matches!(d.state, ApprovalState::Approved { .. }))));
-        // 随后回合中断（扮演等待上限）
-        w.store.seed(vec![interrupted(t, TurnState::Running)]);
+        // 随后回合中断（扮演等待上限）：等待上限只从等审批出发（转换表，存储在提交时校验），
+        // 所以先扮演又一次权限请求让回合进等审批
+        w.store.seed(vec![
+            TurnStateChanged {
+                turn_id: t,
+                from: TurnState::Running,
+                to: TurnState::WaitingApproval,
+                reason: None,
+            }
+            .into(),
+            interrupted(t, TurnState::WaitingApproval),
+        ]);
         w.engine.sync().await.unwrap();
         assert!(w.engine.grant(id).is_none(), "交付过的批准不留一次性放行");
         assert!(w.engine.turns_to_resume().is_empty());
+        // 回合在编排背后被记成中断了：编排随后那笔 `Running → Completed` 过不了提交时校验（T10a A4），
+        // 以存储错误收场（宿主按 D5 补账）
         w.b.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
-        task.await.unwrap().unwrap();
+        let ended = task.await.unwrap();
+        assert!(
+            format!("{ended:?}").contains("Projection"),
+            "迟到的一笔被拒：{ended:?}"
+        );
     }
 
     /// 对照：批准落盘了、编排的交付那笔还没入队，回合就中断了 → 一次性放行，并要求续接。
