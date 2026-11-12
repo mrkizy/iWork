@@ -269,6 +269,10 @@ async fn failure(
     method: &str,
     error: &agent_client_protocol::Error,
 ) -> AgentError {
+    // 运行时说会话已经结束：它在等后台清树（T06 方案 5.4a 第 5 条），这时它和 CLI 都还活着，范围找得全
+    if bridge_error::session_ended(error.data.as_ref()) {
+        process.kill_tree();
+    }
     if let Some(reason) = shared.fatal() {
         return AgentError::Protocol { message: reason };
     }
@@ -490,7 +494,11 @@ async fn start_connection<H: PermissionHandler + 'static>(
                     shared.raw.record_incoming(&line);
                     Some((Ok(line), out))
                 }
-                Ok(None) => None,
+                Ok(None) => {
+                    // 运行时的输出到头了（崩了、退了、关了 stdout）：这棵树不会再有用，清掉（5.4a 第 5 条）
+                    process.kill_tree();
+                    None
+                }
                 Err(e) => {
                     // 读坏了（超长、非 UTF-8）就不再信任这个运行时
                     shared.raw.record_rejected_frame();

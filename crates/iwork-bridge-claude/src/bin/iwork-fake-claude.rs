@@ -71,6 +71,89 @@ enum Step {
     },
     /// 一直读 stdin 到关掉（之后接着下一步）
     WaitStdinEof,
+    /// 另立会话跑一条 `sh -c` 命令，不等它（代表 CLI 起的 Bash 命令，k4：命令的 shell 自成会话）。记下它的进程号
+    Spawn {
+        command: String,
+    },
+    /// 不理 stdin，记下收到的 SIGHUP、SIGINT、SIGCONT（每收到一个记一笔 `signal`），收到 SIGTERM 记一笔后以 0
+    /// 退出。`ignore_hup` 为真时 SIGHUP 照样记下、不退出；为假时记下后按默认动作退出（以 SIGHUP 结束自己）
+    LogSignalsUntilTerm {
+        #[serde(default)]
+        ignore_hup: bool,
+    },
+}
+
+/// 收到过的信号（处理函数里只置位，主循环里记日志）。
+#[cfg(unix)]
+static SIGNALS_SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(unix)]
+extern "C" fn note_signal(sig: libc::c_int) {
+    SIGNALS_SEEN.fetch_or(1 << sig, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn log_signals_until_term(fake: &Fake, ignore_hup: bool) -> ! {
+    use std::sync::atomic::Ordering;
+    let watched = [
+        (libc::SIGHUP, "SIGHUP"),
+        (libc::SIGINT, "SIGINT"),
+        (libc::SIGCONT, "SIGCONT"),
+        (libc::SIGTERM, "SIGTERM"),
+    ];
+    for (sig, _) in watched {
+        // SAFETY: 处理函数只做一次原子写
+        unsafe { libc::signal(sig, note_signal as *const () as libc::sighandler_t) };
+    }
+    fake.log("watching_signals", json!({}));
+    loop {
+        std::thread::sleep(Duration::from_millis(5));
+        let seen = SIGNALS_SEEN.swap(0, Ordering::SeqCst);
+        for (sig, name) in watched {
+            if seen & (1 << sig) != 0 {
+                fake.log("signal", json!({ "signal": name }));
+            }
+        }
+        if seen & (1 << libc::SIGTERM) != 0 {
+            std::process::exit(0);
+        }
+        if seen & (1 << libc::SIGHUP) != 0 && !ignore_hup {
+            // SAFETY: 恢复默认动作后给自己发 SIGHUP：照默认动作结束
+            unsafe {
+                libc::signal(libc::SIGHUP, libc::SIG_DFL);
+                libc::raise(libc::SIGHUP);
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn log_signals_until_term(_fake: &Fake, _ignore_hup: bool) -> ! {
+    unimplemented!("log_signals_until_term 只在 unix 上")
+}
+
+/// 另立会话起一条命令。
+#[cfg(unix)]
+fn spawn_detached(command: &str) -> u32 {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", command])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: fork 之后只调 setsid（异步信号安全）
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    cmd.spawn().expect("起得了命令").id()
+}
+
+#[cfg(not(unix))]
+fn spawn_detached(_command: &str) -> u32 {
+    unimplemented!("spawn 只在 unix 上")
 }
 
 /// 把 SIGTERM 屏蔽掉，再用 sigwait 同步地等它（不装处理函数），返回收到的信号号。
@@ -240,6 +323,11 @@ impl Fake {
                 std::process::exit(0);
             }
             Step::SleepMs { ms } => std::thread::sleep(Duration::from_millis(ms)),
+            Step::Spawn { command } => {
+                let pid = spawn_detached(&command);
+                self.log("spawned", json!({ "pid": pid }));
+            }
+            Step::LogSignalsUntilTerm { ignore_hup } => log_signals_until_term(self, ignore_hup),
             Step::Exit { code } => {
                 self.log("exit", json!({ "code": code }));
                 std::process::exit(code);
@@ -367,10 +455,11 @@ fn main() {
         .position(|a| a == "--settings")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from);
-    // 设置文件随会话目录一起删，测试要看它就从这里看
-    if let Some(path) = &settings {
-        let _ = std::fs::copy(path, record.join("settings.json"));
-    }
+    // 设置文件随会话目录一起删（收摊时就删，5.4a）：测试要看它、之后再起 hook 都从这份副本读
+    let settings = settings.map(|path| {
+        let copy = record.join("settings.json");
+        std::fs::copy(&path, &copy).map(|_| copy).unwrap_or(path)
+    });
     let mut fake = Fake {
         record,
         settings,

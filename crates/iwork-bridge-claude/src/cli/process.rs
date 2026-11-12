@@ -156,6 +156,19 @@ impl CliProcess {
         self.child.kill().await
     }
 
+    /// 请 CLI 自己收拾、退出（SIGTERM，k3：它会结束自己的前台命令），等 `limit`；没退就杀掉。只管 CLI 自己。
+    #[cfg(unix)]
+    pub async fn terminate(&mut self, limit: std::time::Duration) {
+        if let Some(pid) = self.child.id().and_then(|p| libc::pid_t::try_from(p).ok()) {
+            // SAFETY: kill 只读两个整数参数；进程还没被等到，进程号不会是别人的
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+            if tokio::time::timeout(limit, self.child.wait()).await.is_ok() {
+                return;
+            }
+        }
+        let _ = self.child.kill().await;
+    }
+
     /// stderr 的最后一段（按 UTF-8 宽松解码）。只给诊断用，不进日志。
     pub fn stderr_tail(&self) -> String {
         let tail = self.stderr_tail.lock().expect("锁没有中毒");
