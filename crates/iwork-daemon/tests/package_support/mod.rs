@@ -111,6 +111,8 @@ pub struct Signer {
     pub keychain: String,
     pub identity: String,
     pub leaf: [u8; 32],
+    /// 叶证书的 SHA-1：codesign 按它指定身份（按名字时不受信任的自签证书找不到）
+    pub sha1: String,
 }
 
 #[cfg(target_os = "macos")]
@@ -131,6 +133,7 @@ impl Signer {
         Signer {
             keychain: field("keychain"),
             identity: field("identity"),
+            sha1: field("sha1"),
             leaf: hex::decode(field("leaf_sha256"))
                 .unwrap()
                 .try_into()
@@ -142,7 +145,7 @@ impl Signer {
     /// `codesign -f -s <身份> [-i <标识>] <路径>`
     pub fn sign(&self, path: &Path, id: Option<&str>) {
         let mut cmd = Command::new("codesign");
-        cmd.args(["-f", "-s", &self.identity, "--keychain", &self.keychain]);
+        cmd.args(["-f", "-s", &self.sha1, "--keychain", &self.keychain]);
         if let Some(id) = id {
             cmd.args(["-i", id]);
         }

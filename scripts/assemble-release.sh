@@ -94,10 +94,15 @@ if [ "$FORM" = signed ]; then
   [ -n "${IWORK_SIGN_KEYCHAIN:-}" ] && codesign_args=(--keychain "$IWORK_SIGN_KEYCHAIN")
   find_args=(-a -c "$SIGN_ID" -Z)
   [ -n "${IWORK_SIGN_KEYCHAIN:-}" ] && find_args+=("$IWORK_SIGN_KEYCHAIN")
-  leaves=$(security find-certificate "${find_args[@]}" 2>/dev/null | sed -n 's/^SHA-256 hash: //p' | tr 'A-F' 'a-f' | sort -u)
+  found=$(security find-certificate "${find_args[@]}" 2>/dev/null || true)
+  leaves=$(printf '%s\n' "$found" | sed -n 's/^SHA-256 hash: //p' | tr 'A-F' 'a-f' | sort -u)
   count=$(printf '%s' "$leaves" | grep -c . || true)
   [ "$count" = 1 ] || die 1 "按名字「${SIGN_ID}」在钥匙串里找到 ${count} 张证书，要恰好一张"
   EXPECT_LEAF=(--expect-leaf "$leaves")
+  # 签名时用这张证书的 SHA-1 指定身份：按名字找时 codesign 只认受信任的证书，自签证书在干净的机器上不受信任
+  # （CI run 43291145630：no identity found）；按指纹指定照用。名字只用来找到恰好这一张
+  SIGN_HASH=$(printf '%s\n' "$found" | sed -n 's/^SHA-1 hash: //p' | head -1)
+  [ -n "$SIGN_HASH" ] || die 1 "取不到证书「${SIGN_ID}」的 SHA-1"
 fi
 
 if [ "$PLATFORM" = macos ]; then
@@ -113,8 +118,8 @@ if [ "$PLATFORM" = macos ]; then
     "$ROOT/scripts/write-install-manifest.sh" "$BIN" >/dev/null                               # 5
   else
     [ -e "$BIN/$MANIFEST_FILE" ] && die 1 "签名的包里不能有清单：$BIN/$MANIFEST_FILE"            # 5
-    codesign -f -s "$SIGN_ID" ${codesign_args[@]+"${codesign_args[@]}"} -i "$DAEMON_SIGN_ID" "$BIN/iwork-daemon"
-    codesign -f -s "$SIGN_ID" ${codesign_args[@]+"${codesign_args[@]}"} "$PKG"                                    # 6
+    codesign -f -s "$SIGN_HASH" ${codesign_args[@]+"${codesign_args[@]}"} -i "$DAEMON_SIGN_ID" "$BIN/iwork-daemon"
+    codesign -f -s "$SIGN_HASH" ${codesign_args[@]+"${codesign_args[@]}"} "$PKG"                                    # 6
   fi
 else
   PKG="$STAGE/iwork"

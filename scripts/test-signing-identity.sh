@@ -3,10 +3,12 @@
 # 形态 B 打包共用这一个建法（做法照 tools/t0/iwork-t04-bundle-probe.sh 155–172 行，N5 量过）。
 #
 # 用法：scripts/test-signing-identity.sh <目录> <证书名>
-# 输出三行（stdout）：
+# 输出四行（stdout）：
 #   keychain=<钥匙串文件的绝对路径>
 #   identity=<证书名>
 #   leaf_sha256=<叶证书 DER 的 SHA-256，64 个十六进制位>
+#   sha1=<叶证书 DER 的 SHA-1，40 个十六进制位>：签名时用它当 codesign -s 的身份。按名字找身份时，codesign 只认
+#        「受信任」的证书，自签证书在 CI 上不受信任会报 no identity found；按 SHA-1 指定则照用（CI run 43291145630）
 #
 # 只动 <目录> 里的东西：钥匙串不加进当前用户的搜索列表（`security create-keychain` 不改搜索列表，本机实测），不设
 # 默认钥匙串，不改登录钥匙串。签名时由调用方给 `codesign --keychain <钥匙串>`。用完删：
@@ -49,6 +51,8 @@ security set-key-partition-list -S apple-tool:,apple: -s -k t "$kc" >/dev/null
 rm -f "$dir/cert.key" "$dir/cert.p12"
 
 leaf=$(openssl x509 -in "$dir/cert.pem" -outform der | shasum -a 256 | cut -d' ' -f1)
+sha1=$(openssl x509 -in "$dir/cert.pem" -outform der | shasum -a 1 | cut -d' ' -f1)
 echo "keychain=$kc"
 echo "identity=$name"
 echo "leaf_sha256=$leaf"
+echo "sha1=$sha1"

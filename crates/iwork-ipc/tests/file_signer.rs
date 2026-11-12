@@ -4,9 +4,8 @@
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use iwork_ipc::peer::{ImageId, SignerIdentity, Want, file_image_ids, file_signer};
+use iwork_ipc::peer::{ImageId, SignerIdentity, file_signer};
 
 /// 一份能签名的程序：本测试程序的拷贝（不执行它，只读）。
 fn program_copy(dir: &Path, name: &str) -> PathBuf {
@@ -40,6 +39,8 @@ fn linux_file_signer_is_whole_file_sha256() {
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
+    use iwork_ipc::peer::{Want, file_image_ids};
+    use std::process::Command;
 
     fn run(cmd: &mut Command) -> String {
         let out = cmd.output().unwrap();
@@ -55,7 +56,8 @@ mod macos {
     struct Signer {
         _dir: tempfile::TempDir,
         keychain: String,
-        identity: String,
+        /// 叶证书的 SHA-1：codesign 按它指定身份（按名字时不受信任的自签证书找不到）
+        sha1: String,
         leaf: [u8; 32],
     }
 
@@ -77,7 +79,7 @@ mod macos {
                 .unwrap();
             Signer {
                 keychain: field("keychain"),
-                identity: field("identity"),
+                sha1: field("sha1"),
                 leaf,
                 _dir: dir,
             }
@@ -85,7 +87,7 @@ mod macos {
 
         fn sign(&self, path: &Path) {
             run(Command::new("codesign")
-                .args(["-f", "-s", &self.identity, "--keychain", &self.keychain])
+                .args(["-f", "-s", &self.sha1, "--keychain", &self.keychain])
                 .arg(path));
         }
     }
