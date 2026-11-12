@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use iwork_core::turn::{
-    Decided, PermissionDecider, SessionLine, TURN_GONE_MESSAGE, TurnCanceller, TurnPlan, TurnPorts,
-    TurnRunError, VoidPlanError,
+    Decided, PermissionDecider, SessionLine, TURN_GONE_MESSAGE, TurnCanceller, TurnEntry, TurnPlan,
+    TurnPorts, TurnRunError, VoidPlanError,
 };
 use iwork_domain::action::ToolRef;
 use iwork_domain::approval::VoidReason;
@@ -33,6 +33,8 @@ use iwork_ports::store::{
 use tokio::sync::{mpsc, oneshot};
 
 mod support;
+
+use support::history::FakeHistory;
 
 // ---------- 假运行时 ----------
 
@@ -523,6 +525,7 @@ impl Bench {
     fn plan(&self) -> TurnPlan {
         let id = |n| RawUlid::from_u128(self.ids.0.fetch_add(1, Ordering::SeqCst) as u128 + n);
         TurnPlan {
+            entry: TurnEntry::New,
             turn: Turn {
                 id: TurnId::from_raw(id(1)),
                 conversation_id: ConversationId::from_raw(id(1)),
@@ -578,12 +581,14 @@ impl Bench {
     ) -> tokio::task::JoinHandle<(Result<TurnState, TurnRunError>, Line)> {
         let b = self.clone();
         tokio::spawn(async move {
+            let history = FakeHistory::default();
             let ports = TurnPorts {
                 store: &b.store,
                 clock: &b.clock,
                 ids: &b.ids,
                 live: &b.live,
                 timer: &b.timer,
+                history: &history,
             };
             let result = line.run_turn(&FakeAgent(b.ctl.clone()), ports, plan).await;
             (result, line)
@@ -1216,12 +1221,14 @@ mod delivery_gate {
             let b = b.clone();
             let store = store.clone();
             tokio::spawn(async move {
+                let history = FakeHistory::default();
                 let ports = TurnPorts {
                     store: &store,
                     clock: &b.clock,
                     ids: &b.ids,
                     live: &b.live,
                     timer: &b.timer,
+                    history: &history,
                 };
                 line.run_turn(&FakeAgent(b.ctl.clone()), ports, plan).await
             })

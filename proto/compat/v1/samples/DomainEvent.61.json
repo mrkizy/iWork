@@ -1,0 +1,10 @@
+{
+  "turnSessionBound": {
+    "turnId": "01JC0T0000000000000000TRN1",
+    "runtimeSessionId": "sess-2",
+    "replaced": {
+      "oldRuntimeSessionId": "sess-1",
+      "reason": "SESSION_LOST_REASON_CORRUPT"
+    }
+  }
+}

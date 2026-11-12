@@ -240,6 +240,9 @@ async fn run() -> Result<(), String> {
             async move |req: LoadSessionRequest, responder, _cx| {
                 s3.record.request("session/load", &req);
                 let info = &s3.script.agent;
+                if let Some(code) = &info.load_error {
+                    return responder.respond_with_result(Err(named_error(code, None)));
+                }
                 let mut inner = Map::new();
                 if let Some(sandbox) = &info.session_sandbox {
                     inner.insert("sandbox".into(), json!(sandbox));
@@ -682,13 +685,16 @@ impl Ctx<'_> {
                 self.report(value.clone())?;
                 Ok(Flow::Done)
             }
-            Step::Error { code, reason } => {
-                let mut inner = json!({ "code": code });
-                if let Some(reason) = reason {
-                    inner["reason"] = json!(reason);
-                }
-                Err(agent_client_protocol::Error::internal_error().data(json!({ META_KEY: inner })))
-            }
+            Step::Error { code, reason } => Err(named_error(code, reason.as_deref())),
         }
     }
+}
+
+/// 带点名错误码的 JSON-RPC 错误：`data` 为 `{"iwork": {"code", "reason"?}}`。
+fn named_error(code: &str, reason: Option<&str>) -> agent_client_protocol::Error {
+    let mut inner = json!({ "code": code });
+    if let Some(reason) = reason {
+        inner["reason"] = json!(reason);
+    }
+    agent_client_protocol::Error::internal_error().data(json!({ META_KEY: inner }))
 }

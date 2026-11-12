@@ -49,3 +49,15 @@ pub struct SessionToolSet {
     /// 是否提供不属于四个分组、自身无副作用的工具。AI 审查回合为 false
     pub include_always_on: bool,
 }
+
+/// 续接时运行时自己的会话记录为什么用不了（需求第 12 章 v1.78）。三类分得开，编排据此用摘要新开一条
+/// 会话线（T06 方案 5.2a）；认不出是哪一类的续接失败不归这里。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SessionLostReason {
+    /// 记录不在了（被运行时自动清理或被用户清掉）
+    NotFound,
+    /// 记录在，运行时读不了
+    Corrupt,
+    /// 记录是别的版本写的，这个版本不认
+    Incompatible,
+}

@@ -10,6 +10,7 @@ use std::time::Duration;
 use iwork_agent_acp::AcpRuntime;
 use iwork_agent_acp::registry::{CliInfo, RuntimeRegistration};
 use iwork_domain::common::{EffortLevel, ModelId, ModelSelection, Timestamp, Usage};
+use iwork_domain::session::SessionLostReason;
 use iwork_ports::agent::{
     AgentError, AgentPort, AgentSession, AgentUpdate, ModelOption, ModelUnavailableReason,
     PermissionDecision, PermissionHandler, PermissionRequest, QuotaReading, RuntimeCapabilities,
@@ -140,6 +141,26 @@ async fn resume_uses_session_load_and_requires_capability() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("不支持续接会话"), "{err}");
+}
+
+/// 续接时运行时点名「会话记录用不了」：三个错误码各映射到 `SessionLost` 的一种，不是协议错误（T06 方案 5.2a）。
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_session_codes_surface_as_session_lost() {
+    for (code, reason) in [
+        ("session_not_found", SessionLostReason::NotFound),
+        ("session_corrupt", SessionLostReason::Corrupt),
+        ("session_incompatible", SessionLostReason::Incompatible),
+    ] {
+        let fake = Fake::new(&one_text_turn(json!({ "load_error": code })));
+        let mut s = spec(fake.dir.path());
+        s.resume = Some("old-session".into());
+        let err = AcpRuntime::new(fake.launch.clone())
+            .open_session(s, AllowAll)
+            .await
+            .unwrap_err();
+        assert_eq!(err, AgentError::SessionLost { reason }, "{code}");
+        assert_eq!(fake.params_of("session/load").len(), 1);
+    }
 }
 
 /// 本机导入功能接入前，会话挂 MCP 报可读错误，且不发出 session/new（透传移交 T10）。

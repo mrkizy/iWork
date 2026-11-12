@@ -36,6 +36,8 @@ pub struct AgentInfo {
     pub session_sandbox: Option<String>,
     /// 报了就放进 `session/load` 响应的 `_meta.iwork.cliSessionId`
     pub resumed_session_id: Option<String>,
+    /// 报了就让 `session/load` 以点名错误码失败（`data` 为 `{"iwork": {"code"}}`），扮演续接时会话记录用不了
+    pub load_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +62,7 @@ impl Default for AgentInfo {
             models: Vec::new(),
             session_sandbox: None,
             resumed_session_id: None,
+            load_error: None,
         }
     }
 }
