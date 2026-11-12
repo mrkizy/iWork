@@ -17,3 +17,4 @@ pub mod setup;
 /// 开会话（3.5 的次序），和 hook 通道一样只在 unix 上
 #[cfg(unix)]
 pub mod startup;
+pub mod turn_gate;

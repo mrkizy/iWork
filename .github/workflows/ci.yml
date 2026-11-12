@@ -89,6 +89,10 @@ jobs:
           security list-keychains -d user -s "$kc" "${orig[@]}"
           export IWORK_TEST_SIGNING_KEYCHAIN="$kc"
           cargo test --workspace
+      # T06 方案 4.3：hook timeout 调成 10 秒的故障注入（只在测试 feature 下编译，见 scripts/check-no-dev-trust.sh）
+      - name: 桥接故障注入
+        if: runner.os != 'Windows'
+        run: cargo test -p iwork-bridge-claude --features fake-cli,fault-injection --test fault_injection
 
       # T04：后台服务的真进程用例（真起 iwork-daemon：单实例、等锁接班、崩溃恢复、停机、投递、自行重启、自启、日志脱敏）
       #   与客户端拉起（卡验收 2）。要 dev feature：测试进程不是受信映像，后台要带 --dev-trust。

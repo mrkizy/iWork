@@ -216,6 +216,7 @@ async fn cli_gets_exactly_the_launch_env() {
     names.sort_unstable();
     let mut want = vec![
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
         "IWORK_FAKE_CLAUDE_RECORD",
         "IWORK_FAKE_CLAUDE_SCRIPT",
         "IWORK_HOOK_BRIDGE_PID",

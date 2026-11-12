@@ -12,7 +12,7 @@ use std::time::Duration;
 use iwork_claude_hook::client::{ENV_BRIDGE_PID, ENV_DEADLINE, ENV_SOCK, ENV_TOKEN};
 use serde_json::Value;
 
-use self::env::{DISABLE_AUTO_MEMORY, LaunchEnv};
+use self::env::{DISABLE_AUTO_MEMORY, DISABLE_BACKGROUND_TASKS, LaunchEnv};
 use crate::setup::{Setup, SetupInvalid};
 
 /// 桥接这个进程的事实，和会话无关。
@@ -37,6 +37,9 @@ pub struct Channel {
     pub bridge_pid: u32,
     /// hook 自己的期限（`deadlines().hook`）
     pub hook_deadline: Duration,
+    /// PreToolUse hook 的 timeout：写进设置文件，三个期限也由它算（同一个值，审查 S6-4 1/F-2）。产品里是
+    /// `HOOK_TIMEOUT_SECS`，故障注入时可以调短
+    pub hook_timeout: Duration,
 }
 
 /// ACP 请求给的、`SessionSetup` 之外的东西。
@@ -63,7 +66,7 @@ pub struct LaunchPlan {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
-    /// CLI 的完整环境：桥接的环境原样，再设上关自动记忆与 hook 通道的五个（3.1a）
+    /// CLI 的完整环境：桥接的环境原样，再设上两个开关与 hook 通道的四个（3.1a）
     pub env: LaunchEnv,
     pub settings: Value,
     pub mcp: Value,
@@ -88,13 +91,19 @@ pub fn build_launch(
             &env.inherited,
             &[
                 (DISABLE_AUTO_MEMORY, "1".to_owned()),
+                (DISABLE_BACKGROUND_TASKS, "1".to_owned()),
                 (ENV_SOCK, files.socket.display().to_string()),
                 (ENV_TOKEN, channel.token_hex.clone()),
                 (ENV_BRIDGE_PID, channel.bridge_pid.to_string()),
                 (ENV_DEADLINE, channel.hook_deadline.as_secs().to_string()),
             ],
         ),
-        settings: settings::settings_json(&setup.constraints, &env.hook_program, &files.memory),
+        settings: settings::settings_json(
+            &setup.constraints,
+            &env.hook_program,
+            &files.memory,
+            channel.hook_timeout,
+        ),
         mcp: settings::mcp_json(),
     })
 }

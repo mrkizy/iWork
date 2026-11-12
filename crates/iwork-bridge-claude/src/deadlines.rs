@@ -5,6 +5,10 @@
 
 use std::time::Duration;
 
+/// 取消时发了 `interrupt` 之后，等这一轮的 `result` 最多多久；到点没等到就给 CLI 发 SIGTERM（5.1，D2 选 b″）。
+/// 必须小于后台的 3 秒（后台到点结束整棵进程树），SIGTERM 才有机会让 CLI 自己收拾、把会话记录写完整。
+pub const CANCEL_TERM_AFTER: Duration = Duration::from_millis(1500);
+
 /// 三方各自的期限，都从 hook 开始等算起。`0 < daemon < bridge < hook < h`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Deadlines {
@@ -35,6 +39,12 @@ mod tests {
     use super::*;
 
     /// 现在的 h = 7200 秒：7080 / 7155 / 7185（方案 4.3 的表）。
+    /// 取消时给 SIGTERM 的点要在后台 3 秒结束整棵树之前（5.1）。
+    #[test]
+    fn cancel_term_comes_before_the_daemon_kills_the_tree() {
+        assert!(CANCEL_TERM_AFTER < Duration::from_secs(3));
+    }
+
     #[test]
     fn product_timeout() {
         assert_eq!(

@@ -55,7 +55,14 @@ enum Step {
         id: String,
         name: String,
         input: Value,
+        /// 给了的话：等这个文件出现（测试在后台收到权限请求时建它，说明 hook 已经连上、正在等答复）再把 hook
+        /// 连同它所在的进程组一起杀掉（hook 在等答复时死了，桥接那边看到的是 hook 断开）。杀整组而不是只杀
+        /// `sh`：`sh -c` 不一定 exec 成 hook（Linux 的 dash 上 hook 是 sh 的子进程，只杀 sh 它还活着）
+        #[serde(default)]
+        kill_hook_when: Option<PathBuf>,
     },
+    /// 不理 stdin，等 SIGTERM：收到就记一笔、以 0 退出（测试据此确认桥接发的是 SIGTERM、不是 SIGKILL）
+    WaitForSigterm,
     SleepMs {
         ms: u64,
     },
@@ -64,6 +71,46 @@ enum Step {
     },
     /// 一直读 stdin 到关掉（之后接着下一步）
     WaitStdinEof,
+}
+
+/// 把 SIGTERM 屏蔽掉，再用 sigwait 同步地等它（不装处理函数），返回收到的信号号。
+#[cfg(unix)]
+fn wait_for_sigterm() -> i32 {
+    // SAFETY: 假 CLI 是单线程的；set 与 got 都是本地变量，调用顺序照 sigwait(3) 的要求
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        let mut got: libc::c_int = 0;
+        libc::sigwait(&set, &mut got);
+        got
+    }
+}
+
+/// M1 不支持 Windows（AGENTS.md）：用到这一步的测试只在 unix 上跑。
+#[cfg(not(unix))]
+fn wait_for_sigterm() -> i32 {
+    unimplemented!("wait_for_sigterm 只在 unix 上")
+}
+
+/// 杀掉 hook 所在的整个进程组（组号就是 `sh` 的进程号，见 [`Fake::tool`]）。
+#[cfg(unix)]
+fn kill_group(child: &std::process::Child) {
+    let pgid = libc::pid_t::try_from(child.id()).expect("进程号放得进 pid_t");
+    // SAFETY: 只发信号，参数是我们自己起的进程组
+    let rc = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    assert_eq!(
+        rc,
+        0,
+        "杀得掉 hook 的进程组：{}",
+        std::io::Error::last_os_error()
+    );
+}
+
+#[cfg(not(unix))]
+fn kill_group(_child: &std::process::Child) {
+    unimplemented!("kill_hook_when 只在 unix 上")
 }
 
 fn success() -> String {
@@ -181,7 +228,17 @@ impl Fake {
                 self.out(&json!({ "type": "system", "subtype": "big", "pad": "x".repeat(bytes) }));
                 self.log("emitted", json!({ "bytes": bytes }));
             }
-            Step::Tool { id, name, input } => self.tool(&id, &name, input),
+            Step::Tool {
+                id,
+                name,
+                input,
+                kill_hook_when,
+            } => self.tool(&id, &name, input, kill_hook_when.as_deref()),
+            Step::WaitForSigterm => {
+                let sig = wait_for_sigterm();
+                self.log("got_signal", json!({ "signal": sig }));
+                std::process::exit(0);
+            }
             Step::SleepMs { ms } => std::thread::sleep(Duration::from_millis(ms)),
             Step::Exit { code } => {
                 self.log("exit", json!({ "code": code }));
@@ -228,7 +285,7 @@ impl Fake {
     }
 
     /// 一次工具调用：问 hook，按决定「执行」。
-    fn tool(&self, id: &str, name: &str, input: Value) {
+    fn tool(&self, id: &str, name: &str, input: Value, kill_hook_when: Option<&std::path::Path>) {
         let stdin = json!({
             "session_id": "fake",
             "hook_event_name": "PreToolUse",
@@ -237,8 +294,12 @@ impl Fake {
             "tool_use_id": id,
             "cwd": std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
         });
-        let mut child = Command::new("sh")
-            .args(["-c", &self.hook_command("PreToolUse")])
+        let mut command = Command::new("sh");
+        command.args(["-c", &self.hook_command("PreToolUse")]);
+        // hook 自成一个进程组，杀的时候连 sh 带 hook 一起杀
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -250,6 +311,17 @@ impl Fake {
             .expect("stdin 是 piped")
             .write_all(stdin.to_string().as_bytes())
             .expect("hook 的 stdin 写得进去");
+        if let Some(signal) = kill_hook_when {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while !signal.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "30 秒内等到 {signal:?}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            kill_group(&child);
+        }
         let out = child.wait_with_output().expect("等得到 hook");
         let decided: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
         let d = &decided["hookSpecificOutput"];
@@ -295,6 +367,10 @@ fn main() {
         .position(|a| a == "--settings")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from);
+    // 设置文件随会话目录一起删，测试要看它就从这里看
+    if let Some(path) = &settings {
+        let _ = std::fs::copy(path, record.join("settings.json"));
+    }
     let mut fake = Fake {
         record,
         settings,

@@ -97,6 +97,8 @@ pub enum Fatal {
     BadLine(LineError),
     /// 权限模式对不上 → `isolation_broken`
     Isolation(IsolationBroken),
+    /// 后台任务起来了（D5 的开关没生效）→ 这一轮 `cli_error`、`reason: background_task`，会话收掉；不停用运行时
+    BackgroundTask,
 }
 
 /// 一个回合里的去重状态。
@@ -224,6 +226,7 @@ impl StreamMapper {
             }
             CliEvent::ControlResponse(r) => out.push(Out::Control(r)),
             CliEvent::Unknown => out.push(Out::Diagnostic(Diagnostic::UnknownEvent)),
+            CliEvent::BackgroundTask => return Err(Fatal::BackgroundTask),
             CliEvent::OtherSystem | CliEvent::OtherStream => {}
             CliEvent::User { ref tool_results } if !tool_results.is_empty() => {
                 out.extend(tool_results.iter().map(|r| Out::ToolResultSeen {

@@ -5,9 +5,9 @@
 //! - `session/new` / `session/load`：解 `SessionSetup`，按 3.5 的次序开会话（[`startup::open`]）；成功后会话交给
 //!   一个后台任务（[`run_session`]）独占：CLI 的输出、hook 通道、权限答复、prompt 请求都在它一个循环里处理，
 //!   回合之外到的东西也有人收。
-//! - 这条会话的沙箱（`_meta.iwork.sandbox`）报 `unavailable`：第 8 节要求只有证据时才报 `enforced`（`system/init`
-//!   里的沙箱状态字段，或 `failIfUnavailable` 保证起不来就退出），这两样现在都没有（P4 未定），静态的「平台支持」
-//!   不许冒充会话的实际状态。
+//! - 这条会话的沙箱（`_meta.iwork.sandbox`）报 `unavailable`：第 8 节要求只有证据时才报 `enforced`。设置里已经
+//!   写了 `failIfUnavailable`（P4 选 a），但「沙箱起不来 CLI 就真的退出」在 macOS 上还没实测成立，成立之前不改，
+//!   静态的「平台支持」不许冒充会话的实际状态。
 //! - 致命错误（输出坏了、隔离失效、对账不成立、兜底）：正在跑的 prompt 回点名错误码，杀掉 CLI，会话作废。
 //!   怎么停才不留下命令（5.4a）归 S6-5；取消（`session/cancel`）归 S6-4。
 
@@ -18,13 +18,14 @@ use std::time::Duration;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::ConnectionTo;
 use agent_client_protocol::v1::schema::{
-    AgentCapabilities, ContentBlock, ContentChunk, Implementation, InitializeRequest,
-    InitializeResponse, LoadSessionRequest, LoadSessionResponse, Meta, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PermissionOptionKind, PromptCapabilities, PromptRequest,
-    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SessionCapabilities, SessionId, SessionInfoUpdate, SessionNotification,
-    SessionSystemPromptCapabilities, SessionUpdate, StopReason, SystemPrompt, TextContent,
-    ToolCall, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+    AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Implementation,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, Meta,
+    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
+    PromptCapabilities, PromptRequest, PromptResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SessionCapabilities, SessionId,
+    SessionInfoUpdate, SessionNotification, SessionSystemPromptCapabilities, SessionUpdate,
+    StopReason, SystemPrompt, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate,
+    ToolCallUpdateFields,
 };
 use agent_client_protocol::{Agent, Client, Lines};
 use base64::Engine as _;
@@ -36,10 +37,10 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::cli::errors::TurnEnd;
 use crate::cli::facts::{IsolationBroken, SessionExpect};
-use crate::cli::input::{InputBlock, user_line};
+use crate::cli::input::{InputBlock, control_request_line, user_line};
 use crate::cli::map::{Fatal, Out, Report, StreamMapper};
 use crate::cli::process::{InputError, InputQueue, ReadError};
-use crate::deadlines::deadlines;
+use crate::deadlines::{CANCEL_TERM_AFTER, deadlines};
 use crate::hook_server::HookEvent;
 use crate::hook_server::input::{self as hook_input, HookInput};
 use crate::hook_server::pending::{BackendAnswer, CallId, Delivery};
@@ -48,6 +49,7 @@ use crate::launch::{BridgeEnv, Opening, Start};
 use crate::rewrite::{CommandRewriter, NoRewrite};
 use crate::setup;
 use crate::startup::{self, OpenRequest, OpenSession};
+use crate::turn_gate::{HookVerdict, TurnGate};
 
 /// iWork 在 ACP `_meta` 里占用的键（方案 2.5；和 `iwork-agent-acp::convert` 同一份字符串，由端到端测试对拍）。
 const META_KEY: &str = "iwork";
@@ -65,6 +67,11 @@ const REJECT_ID: &str = "reject-once";
 /// 回合之外到的工具调用、解析不了的 hook 输入，回给模型的话。
 pub const REASON_NO_TURN: &str = "iWork 当前没有进行中的回合，这次调用没有执行";
 pub const REASON_BAD_HOOK_INPUT: &str = "iWork 无法解析这次工具调用，没有执行";
+/// 取消时还在等的 hook 答的话：和后台撤票用的同一句（T05 的 `TURN_GONE_MESSAGE`）。
+pub const REASON_TURN_GONE: &str = "回合已结束，权限请求作废";
+/// 桥接发的 `interrupt` 控制请求的编号。
+const INTERRUPT_REQUEST_ID: &str = "iwork-interrupt";
+
 /// 后台拒绝却没给原因时（不该发生）。
 const REASON_DENIED: &str = "iWork 拒绝了这次调用";
 
@@ -107,10 +114,29 @@ impl BridgeConfig {
                 hook_program,
                 inherited: crate::launch::env::LaunchEnv::from_vars(std::env::vars_os().collect()),
             },
-            hook_timeout: Duration::from_secs(crate::launch::settings::HOOK_TIMEOUT_SECS),
+            hook_timeout: hook_timeout()?,
             startup_limit: startup::STARTUP_LIMIT,
         })
     }
+}
+
+/// 故障注入时把 hook 的 timeout 调短（秒，正整数）。只在 `fault-injection` feature 下认。
+#[cfg(feature = "fault-injection")]
+pub const ENV_HOOK_TIMEOUT: &str = "IWORK_BRIDGE_HOOK_TIMEOUT_SECS";
+
+/// PreToolUse hook 的 timeout：产品里是写死的常量；`fault-injection` 构建可以用环境变量改（方案 4.3）。
+fn hook_timeout() -> Result<Duration, String> {
+    let product = Duration::from_secs(crate::launch::settings::HOOK_TIMEOUT_SECS);
+    #[cfg(feature = "fault-injection")]
+    if let Some(v) = std::env::var_os(ENV_HOOK_TIMEOUT) {
+        return v
+            .to_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|n| *n >= 5)
+            .map(Duration::from_secs)
+            .ok_or_else(|| format!("{ENV_HOOK_TIMEOUT} 要是不小于 5 的整数秒"));
+    }
+    Ok(product)
 }
 
 type Conn = ConnectionTo<Client>;
@@ -152,6 +178,8 @@ enum Command {
         blocks: Vec<InputBlock>,
         done: oneshot::Sender<Result<StopReason, agent_client_protocol::Error>>,
     },
+    /// `session/cancel`（5.1）
+    Cancel,
 }
 
 /// 桥接进程里那一条会话。会话任务是它的唯一写入方（开会话时放进发送端，结束时记下原因、拿走发送端）。
@@ -179,10 +207,23 @@ pub async fn serve<T>(config: BridgeConfig, transport: T) -> Result<(), String>
 where
     T: agent_client_protocol::ConnectTo<agent_client_protocol::Agent> + 'static,
 {
+    serve_with(config, transport, Arc::new(Mutex::new(Slot::default()))).await
+}
+
+/// 次序约定（审查 S6-4 1/F-1）：会改会话状态的消息（开会话占位、prompt 入队、cancel 入队）都在处理函数里
+/// **同步**做完，处理函数按 ACP 收到的次序被调用，所以会话任务看到的次序就是收到的次序；只有「等结果」
+/// （开会话的握手、等这一轮的答复）放进 `cx.spawn` 的任务里。
+async fn serve_with<T>(
+    config: BridgeConfig,
+    transport: T,
+    slot: Arc<Mutex<Slot>>,
+) -> Result<(), String>
+where
+    T: agent_client_protocol::ConnectTo<agent_client_protocol::Agent> + 'static,
+{
     let config = Arc::new(config);
-    let slot = Arc::new(Mutex::new(Slot::default()));
     let (c1, c2, c3) = (config.clone(), config.clone(), config.clone());
-    let (s1, s2, s3) = (slot.clone(), slot.clone(), slot.clone());
+    let (s1, s2, s3, s4) = (slot.clone(), slot.clone(), slot.clone(), slot.clone());
     Agent
         .v1()
         .name("iwork-bridge-claude")
@@ -195,6 +236,9 @@ where
         .on_receive_request(
             async move |req: NewSessionRequest, responder, cx: Conn| {
                 let (config, slot) = (c2.clone(), s1.clone());
+                if let Err(e) = claim(&slot) {
+                    return responder.respond_with_result(Err(e));
+                }
                 cx.clone().spawn(async move {
                     let session_id = new_session_id();
                     let opened = open(
@@ -220,6 +264,9 @@ where
         .on_receive_request(
             async move |req: LoadSessionRequest, responder, cx: Conn| {
                 let (config, slot) = (c3.clone(), s2.clone());
+                if let Err(e) = claim(&slot) {
+                    return responder.respond_with_result(Err(e));
+                }
                 cx.clone().spawn(async move {
                     let opened = open(
                         &config,
@@ -244,12 +291,27 @@ where
         .on_receive_request(
             async move |req: PromptRequest, responder, cx: Conn| {
                 let slot = s3.clone();
+                // 先按收到的次序入队（同步），再把等答复交给任务：紧跟着的 cancel 一定排在它后面
+                let queued = enqueue_prompt(&slot, &req.prompt);
                 cx.spawn(async move {
-                    let result = prompt(&slot, &req.prompt).await.map(PromptResponse::new);
-                    responder.respond_with_result(result)
+                    let result = match queued {
+                        Ok(answer) => wait_prompt(&slot, answer).await,
+                        Err(e) => Err(e),
+                    };
+                    responder.respond_with_result(result.map(PromptResponse::new))
                 })
             },
             agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |_n: CancelNotification, _cx| {
+                // 会话还没开、或已经没了：没有可取消的
+                if let Some(commands) = &s4.lock().expect("锁没有中毒").commands {
+                    let _ = commands.send(Command::Cancel);
+                }
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
         )
         .connect_to(transport)
         .await
@@ -341,13 +403,6 @@ async fn open(
     system_prompt: String,
     start: Start,
 ) -> Result<(), agent_client_protocol::Error> {
-    {
-        let mut slot = slot.lock().expect("锁没有中毒");
-        if slot.opened {
-            return Err(named_error("setup_invalid", Some("session")));
-        }
-        slot.opened = true;
-    }
     let meta = meta.map(|m| Value::Object(m.clone()));
     let setup =
         setup::from_meta(meta.as_ref()).map_err(|e| named_error("setup_invalid", Some(e.field)))?;
@@ -383,7 +438,7 @@ async fn open(
         rewriter: Box::new(NoRewrite),
         mapper,
         reconciler: Reconciler::default(),
-        turn: None,
+        gate: TurnGate::default(),
     };
     // 开会话期间收下的行（`init` 可能已经在里面）先过映射与对账：这时确认的致命错误（隔离失效、没经允许的工具
     // 结果）让开会话失败，不留到之后（审查 1/F-5）。失败时 `session` 在这里丢掉：CLI 被杀、通道停、目录删
@@ -407,28 +462,47 @@ async fn open(
     Ok(())
 }
 
-/// 把 prompt 交给会话任务，等这一轮结束。
-async fn prompt(
+/// 一个桥接进程只开一次会话：在处理函数里同步占位（两条开会话的请求连着到时，次序就是收到的次序）。
+fn claim(slot: &Mutex<Slot>) -> Result<(), agent_client_protocol::Error> {
+    let mut slot = slot.lock().expect("锁没有中毒");
+    if slot.opened {
+        return Err(named_error("setup_invalid", Some("session")));
+    }
+    slot.opened = true;
+    Ok(())
+}
+
+/// prompt 的答复。
+type Answer = oneshot::Receiver<Result<StopReason, agent_client_protocol::Error>>;
+
+/// 把 prompt 交给会话任务（同步，在处理函数里调），返回等答复的一端。
+fn enqueue_prompt(
     slot: &Mutex<Slot>,
     blocks: &[ContentBlock],
-) -> Result<StopReason, agent_client_protocol::Error> {
+) -> Result<Answer, agent_client_protocol::Error> {
     let blocks = blocks
         .iter()
         .map(input_block)
         .collect::<Result<Vec<_>, _>>()?;
-    let commands = {
-        let slot = slot.lock().expect("锁没有中毒");
-        match (&slot.commands, slot.opened) {
-            (Some(c), _) => c.clone(),
-            (None, true) => return Err(slot.ended_error()),
-            (None, false) => return Err(named_error("setup_invalid", Some("session"))),
-        }
+    let slot = slot.lock().expect("锁没有中毒");
+    let commands = match (&slot.commands, slot.opened) {
+        (Some(c), _) => c,
+        (None, true) => return Err(slot.ended_error()),
+        (None, false) => return Err(named_error("setup_invalid", Some("session"))),
     };
-    let (done, result) = oneshot::channel();
-    if commands.send(Command::Prompt { blocks, done }).is_err() {
-        return Err(slot.lock().expect("锁没有中毒").ended_error());
-    }
-    match result.await {
+    let (done, answer) = oneshot::channel();
+    commands
+        .send(Command::Prompt { blocks, done })
+        .map_err(|_| slot.ended_error())?;
+    Ok(answer)
+}
+
+/// 等这一轮结束。
+async fn wait_prompt(
+    slot: &Mutex<Slot>,
+    answer: Answer,
+) -> Result<StopReason, agent_client_protocol::Error> {
+    match answer.await {
         Ok(r) => r,
         // 会话任务没回就结束了：拿它记下的原因
         Err(_) => Err(slot.lock().expect("锁没有中毒").ended_error()),
@@ -456,9 +530,12 @@ struct Worker {
     rewriter: Box<dyn CommandRewriter>,
     mapper: StreamMapper,
     reconciler: Reconciler,
-    /// 正在跑的那一轮：结束时往这里回
-    turn: Option<oneshot::Sender<Result<StopReason, agent_client_protocol::Error>>>,
+    /// 这一轮的状态（接不接 prompt、取消、SIGTERM 期限、hook 转不转）：只在这一处（`turn_gate.rs`）
+    gate: TurnGate<Done, tokio::time::Instant>,
 }
+
+/// prompt 的回复通道。
+type Done = oneshot::Sender<Result<StopReason, agent_client_protocol::Error>>;
 
 /// 一次权限请求的结论，回到会话任务里交给 hook。
 struct Answered {
@@ -521,6 +598,11 @@ impl From<Fatal> for SessionFatal {
                     _ => None,
                 },
             },
+            Fatal::BackgroundTask => Self {
+                code: "cli_error",
+                reason: Some("background_task"),
+                plugin: None,
+            },
         }
     }
 }
@@ -557,9 +639,11 @@ async fn run_session(
     // stdin 交给单独的写任务：写卡住时这里照样读 stdout、收 hook 事件（审查 1/F-1）
     let mut input = s.cli.input_queue();
     let fatal = loop {
+        let term_at = w.gate.term_at();
         let result = tokio::select! {
             cmd = commands.recv() => match cmd {
                 Some(Command::Prompt { blocks, done }) => w.begin(&input, blocks, done),
+                Some(Command::Cancel) => w.cancel(&s, &input),
                 // 连接没了：没有人再发 prompt，会话到此为止
                 None => break None,
             },
@@ -570,6 +654,10 @@ async fn run_session(
             },
             Some(a) = answered.recv() => w.on_answered(&s, a),
             () = input.failed() => Err(CLI_EXITED),
+            _ = async { tokio::time::sleep_until(term_at.expect("有期限才进这一支")).await }, if term_at.is_some() => {
+                w.term_cli(&s);
+                Ok(())
+            }
         };
         if let Err(f) = result {
             break Some(f);
@@ -577,7 +665,7 @@ async fn run_session(
     };
     if let Some(f) = &fatal {
         tracing::warn!(code = f.code, reason = ?f.reason, "会话出现致命错误，结束 CLI");
-        if let Some(done) = w.turn.take() {
+        if let Some(done) = w.gate.end() {
             let _ = done.send(Err(f.to_error()));
         }
     }
@@ -674,7 +762,8 @@ impl Worker {
                 // 桥接在会话里不发别的控制请求（取消归 S6-4）
                 Out::Control(_) => {}
                 Out::End(end) => {
-                    if let Some(done) = self.turn.take() {
+                    // 这一轮结束：回复通道交回，取消中的话 SIGTERM 期限随之作废（`TurnGate::finish`）
+                    if let Some(done) = self.gate.finish() {
                         let _ = done.send(match end {
                             TurnEnd::Completed => Ok(StopReason::EndTurn),
                             TurnEnd::Cancelled => Ok(StopReason::Cancelled),
@@ -694,9 +783,9 @@ impl Worker {
         &mut self,
         input: &InputQueue,
         blocks: Vec<InputBlock>,
-        done: oneshot::Sender<Result<StopReason, agent_client_protocol::Error>>,
+        done: Done,
     ) -> Result<(), SessionFatal> {
-        if self.turn.is_some() {
+        if self.gate.in_turn() {
             let _ = done.send(Err(named_error("setup_invalid", Some("prompt"))));
             return Ok(());
         }
@@ -719,10 +808,50 @@ impl Worker {
                 return Err(CLI_EXITED);
             }
         }
-        self.turn = Some(done);
+        if let Err((done, why)) = self.gate.begin(done) {
+            // 上面已经排除了在跑的回合；会话结束之后会话任务不再收 prompt。两样都不该走到这里
+            tracing::warn!(?why, "prompt 没被接下");
+            let _ = done.send(Err(CLI_EXITED.to_error()));
+            return Ok(());
+        }
         let outs = self.mapper.begin_turn();
         self.emit(outs);
         Ok(())
+    }
+
+    /// 取消（5.1，D2 选 b″）：在跑的回合第一次取消时，还在等的 hook 全部拒绝 → `interrupt` 放进输入队列 →
+    /// 映射按取消收这一轮；[`CANCEL_TERM_AFTER`] 内没等到 `result` 就给 CLI 发 SIGTERM（[`Self::term_cli`]）。
+    /// 别的时候什么都不做（`TurnGate::cancel`）。
+    fn cancel(&mut self, s: &OpenSession, input: &InputQueue) -> Result<(), SessionFatal> {
+        let Some(plan) = self
+            .gate
+            .cancel(tokio::time::Instant::now() + CANCEL_TERM_AFTER)
+        else {
+            return Ok(());
+        };
+        let denied = s.pending.deny_all(REASON_TURN_GONE);
+        tracing::info!(denied, term_at = ?plan.term_at, "取消：还在等的 hook 已拒绝，发 interrupt");
+        self.mapper.request_cancel();
+        input
+            .send(&control_request_line(INTERRUPT_REQUEST_ID, "interrupt"))
+            .map_err(|_| CLI_EXITED)
+    }
+
+    /// 取消后到点还没等到这一轮结束：只给 CLI 发 SIGTERM（不发给进程组），让它自己收拾、写完会话记录再退。
+    /// 它退了之后照「CLI 退出」那条路回报；后台 3 秒后照样结束整棵树，正确性不靠这一步（5.1 第 3 步）。
+    fn term_cli(&mut self, s: &OpenSession) {
+        if !self.gate.term_due() {
+            return;
+        }
+        let Some(pid) = s.cli.id().and_then(|p| i32::try_from(p).ok()) else {
+            return;
+        };
+        tracing::warn!(pid, "取消后没等到这一轮结束，给 CLI 发 SIGTERM");
+        // SAFETY: 只对我们自己起的、还没被等到退出的 CLI 进程号发信号
+        let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+        if rc != 0 {
+            tracing::warn!(error = %std::io::Error::last_os_error(), "给 CLI 发 SIGTERM 失败");
+        }
     }
 
     fn on_line(&mut self, line: Result<Option<String>, ReadError>) -> Result<(), SessionFatal> {
@@ -791,9 +920,16 @@ impl Worker {
                 return;
             }
         };
-        if !self.mapper.in_turn() {
-            s.pending.answer(id, reject(REASON_NO_TURN));
-            return;
+        match self.gate.hook() {
+            HookVerdict::Forward => {}
+            HookVerdict::DenyNoTurn => {
+                s.pending.answer(id, reject(REASON_NO_TURN));
+                return;
+            }
+            HookVerdict::DenyTurnGone => {
+                s.pending.answer(id, reject(REASON_TURN_GONE));
+                return;
+            }
         }
         if let Some(out) =
             self.mapper
@@ -903,6 +1039,8 @@ fn backend_answer(
 mod tests {
     use agent_client_protocol::v1::schema::SelectedPermissionOutcome;
 
+    use crate::launch::BridgeEnv;
+
     use super::*;
 
     /// 审查 2/F-1：开会话失败的每一种都带上该带的东西。握手时权限模式不符、没有那个键、等不到响应（三种都是
@@ -930,6 +1068,119 @@ mod tests {
         ] {
             let f = SessionFatal::from(e);
             assert_eq!((f.code, f.reason, f.plugin), (code, None, None));
+        }
+    }
+
+    /// 接线交错（审查 S6-4 1/F-1）：`TurnGate` 的属性测试只管状态机，管不到「ACP 收到的次序 → 进会话任务的
+    /// 次序」这一层。这里把随机的 prompt / cancel 序列一口气写进真实的 `serve_with` 处理函数（中间不等任何回应），
+    /// 断言会话任务收到的命令次序和写进去的次序一样。prompt 要是在 `cx.spawn` 里才入队，`[Prompt, Cancel]`
+    /// 就会变成先 Cancel 后 Prompt（取消被状态机当成空闲时的取消丢掉）。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Sent {
+        Prompt,
+        Cancel,
+    }
+
+    fn sent() -> impl proptest::strategy::Strategy<Value = Sent> {
+        proptest::prop_oneof![
+            proptest::strategy::Just(Sent::Prompt),
+            proptest::strategy::Just(Sent::Cancel)
+        ]
+    }
+
+    /// 写进去的一串消息，会话任务这一侧收到的命令次序。
+    fn received_order(seq: &[Sent]) -> Vec<Sent> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let slot = Arc::new(Mutex::new(Slot {
+                commands: Some(tx),
+                opened: true,
+                ended: None,
+            }));
+            let config = BridgeConfig {
+                data_dir: "/nonexistent".into(),
+                bridge: BridgeEnv {
+                    cli: "/nonexistent/claude".into(),
+                    hook_program: "/nonexistent/hook".into(),
+                    inherited: crate::launch::env::LaunchEnv::from_vars(Vec::new()),
+                },
+                hook_timeout: Duration::from_secs(60),
+                startup_limit: Duration::from_secs(1),
+            };
+            let (client, bridge) = tokio::io::duplex(1 << 16);
+            let (bridge_read, _bridge_write) = tokio::io::split(bridge);
+            let incoming = futures::stream::unfold(BufReader::new(bridge_read).lines(), |mut l| async {
+                match l.next_line().await {
+                    Ok(Some(line)) => Some((Ok(line), l)),
+                    Ok(None) => None,
+                    Err(e) => Some((Err(e), l)),
+                }
+            });
+            let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+            let outgoing = futures::sink::unfold(out_tx, |tx, line: String| async move {
+                tx.send(line).map_err(std::io::Error::other)?;
+                Ok::<_, std::io::Error>(tx)
+            });
+            let serving = tokio::spawn(serve_with(
+                config,
+                Lines::new(Box::pin(outgoing), Box::pin(incoming)),
+                slot,
+            ));
+            let (_r, mut w) = tokio::io::split(client);
+            w.write_all(
+                format!("{}\n", json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize",
+                    "params": { "protocolVersion": 1, "clientCapabilities": {} } }))
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+            // 握手完成才能发会话方法
+            loop {
+                let line = out_rx.recv().await.unwrap();
+                if serde_json::from_str::<Value>(&line).unwrap()["id"] == 0 {
+                    break;
+                }
+            }
+            let mut batch = String::new();
+            for (i, m) in seq.iter().enumerate() {
+                let v = match m {
+                    Sent::Prompt => json!({ "jsonrpc": "2.0", "id": i + 1, "method": "session/prompt",
+                        "params": { "sessionId": "s", "prompt": [{ "type": "text", "text": "x" }] } }),
+                    Sent::Cancel => json!({ "jsonrpc": "2.0", "method": "session/cancel",
+                        "params": { "sessionId": "s" } }),
+                };
+                batch.push_str(&format!("{v}\n"));
+            }
+            w.write_all(batch.as_bytes()).await.unwrap();
+            let mut got = Vec::new();
+            // prompt 的回复通道攥着不丢，免得处理函数那边提前收尾
+            let mut held = Vec::new();
+            while got.len() < seq.len() {
+                match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+                    Ok(Some(Command::Prompt { done, .. })) => {
+                        held.push(done);
+                        got.push(Sent::Prompt);
+                    }
+                    Ok(Some(Command::Cancel)) => got.push(Sent::Cancel),
+                    Ok(None) | Err(_) => break,
+                }
+            }
+            serving.abort();
+            got
+        })
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn acp_receive_order_is_queue_order(seq in proptest::collection::vec(sent(), 1..8)) {
+            proptest::prop_assert_eq!(received_order(&seq), seq);
         }
     }
 

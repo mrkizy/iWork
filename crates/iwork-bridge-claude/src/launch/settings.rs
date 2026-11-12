@@ -30,9 +30,13 @@ pub const SELECTED: SelectedConfig = SelectedConfig {
 };
 
 /// 生成的设置文件。
-///
-/// P4 未定：S6 开工前定了再加 `sandbox.failIfUnavailable`，带快照（方案第 8 节最后一行、18 节 P4）。
-pub fn settings_json(constraints: &Constraints, hook_program: &str, memory_dir: &Path) -> Value {
+/// `hook_timeout`：PreToolUse hook 的 timeout，和算期限用的是同一个值（产品里是 [`HOOK_TIMEOUT_SECS`]）。
+pub fn settings_json(
+    constraints: &Constraints,
+    hook_program: &str,
+    memory_dir: &Path,
+    hook_timeout: std::time::Duration,
+) -> Value {
     let hook = shell_quote(hook_program);
     json!({
         // 3.1a：自动记忆的目录改到会话目录里的空目录（开关另由环境变量 CLAUDE_CODE_DISABLE_AUTO_MEMORY 给）。
@@ -48,7 +52,7 @@ pub fn settings_json(constraints: &Constraints, hook_program: &str, memory_dir: 
             "PreToolUse": [{ "matcher": "*", "hooks": [{
                 "type": "command",
                 "command": format!("{hook} pre-tool-use"),
-                "timeout": HOOK_TIMEOUT_SECS,
+                "timeout": hook_timeout.as_secs(),
                 "onFailure": SELECTED.on_failure,
             }]}],
             "SessionStart": [{ "hooks": [{
@@ -76,6 +80,8 @@ fn sandbox_json(c: &Constraints) -> Value {
     };
     json!({
         "enabled": true,
+        // P4 选 a（2026-11-12）：本该有沙箱的平台上沙箱起不来，CLI 不启动，会话开不了
+        "failIfUnavailable": true,
         // 沙箱内也不自动放行：问不问由 iWork 定
         "autoAllowBashIfSandboxed": false,
         "allowUnsandboxedCommands": c.allow_unsandboxed_retry,
