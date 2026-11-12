@@ -74,4 +74,8 @@ pub struct LocalConfigItem {
     /// 来源目录或配置文件，给人看
     pub source: String,
     pub imported: bool,
+    /// MCP：要用户填值的键名（只有键名，值不读）；别的种类为空
+    pub value_keys: Vec<String>,
+    /// 导不了的原因（给人看，后台拼好）；`None` = 能导
+    pub blocked_reason: Option<String>,
 }

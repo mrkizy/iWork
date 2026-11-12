@@ -1,0 +1,19 @@
+{
+  "seq": "1015",
+  "listLocalConfig": {
+    "items": [
+      {
+        "id": "mcp:user:0",
+        "kind": "LOCAL_CONFIG_KIND_MCP",
+        "name": "github",
+        "description": "stdio，要填 2 个键",
+        "source": "用户配置",
+        "valueKeys": [
+          "GITHUB_TOKEN",
+          "GITHUB_HOST"
+        ],
+        "blockedReason": "MCP 导入还没启用"
+      }
+    ]
+  }
+}

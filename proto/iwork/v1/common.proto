@@ -104,6 +104,8 @@ enum ErrorCode {
 
   // 密钥 120–129
   ERROR_CODE_SECRET_STORE_FAILURE = 120;
+  // 本机导入被拒（T10f 方案 A3.3）。details：{条目 id: 原因}，每个勾选项一条。
+  ERROR_CODE_LOCAL_IMPORT_REJECTED = 121;
 
   // 制品 130–139
   ERROR_CODE_ARTIFACT_NOT_FOUND = 130;

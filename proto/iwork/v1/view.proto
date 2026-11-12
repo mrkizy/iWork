@@ -600,6 +600,10 @@ message ImportItem {
   string description = 3;
   string source = 4;
   bool imported = 5;
+  // 同 LocalConfigItem.value_keys：MCP 要填值的键名。
+  repeated string value_keys = 6;
+  // 同 LocalConfigItem.blocked_reason：非空 = 导不了，界面照它置灰并显示原因，自己不判断。
+  string blocked_reason = 7;
 }
 
 // ---------- 助手主页 ----------

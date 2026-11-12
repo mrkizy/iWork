@@ -1,0 +1,8 @@
+{
+  "code": "ERROR_CODE_LOCAL_IMPORT_REJECTED",
+  "message": "勾选的条目都导不了",
+  "details": {
+    "mcp:user:0": "MCP 导入还没启用",
+    "plugin:1": "技能导入还没启用"
+  }
+}

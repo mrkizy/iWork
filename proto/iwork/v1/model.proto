@@ -687,6 +687,11 @@ message LocalConfigItem {
   // 来源目录或配置文件，给人看。
   string source = 5;
   bool imported = 6;
+  // MCP：要用户填值的键名（只有键名，值一律不读）。别的种类为空（T10f 方案 A3.4）。
+  repeated string value_keys = 7;
+  // 非空 = 这一项导不了，这里是原因（给人看，后台拼好）。
+  string blocked_reason = 11;
+  // 8–10、12–17 留给 T10f 方案已经排好的字段（第二部分 3.5；17 等 PD-A1 之后的方案定），这里不加。
 }
 
 enum LocalConfigKind {

@@ -1584,6 +1584,8 @@ pub fn local_config_item_to_proto(i: &LocalConfigItem) -> pb::LocalConfigItem {
         description: i.description.clone(),
         source: i.source.clone(),
         imported: i.imported,
+        value_keys: i.value_keys.clone(),
+        blocked_reason: i.blocked_reason.clone().unwrap_or_default(),
     }
 }
 
@@ -1595,6 +1597,9 @@ pub fn local_config_item_from_proto(i: &pb::LocalConfigItem) -> R<LocalConfigIte
         description: i.description.clone(),
         source: i.source.clone(),
         imported: i.imported,
+        value_keys: i.value_keys.clone(),
+        // 线上空串 = 没有原因（proto3 不区分空与缺省）
+        blocked_reason: Some(i.blocked_reason.clone()).filter(|r| !r.is_empty()),
     })
 }
 

@@ -477,6 +477,8 @@ fn local_config_item() -> LocalConfigItem {
         description: s("GitHub MCP"),
         source: s("~/.config/runtime-a/mcp.json"),
         imported: true,
+        value_keys: vec![],
+        blocked_reason: s(""),
     }
 }
 
@@ -1728,4 +1730,37 @@ pub fn ev_approval_delivered() -> DomainEvent {
         approval_id: s(APPROVAL),
         turn_id: s(TURN),
     }))
+}
+
+// ---------- 本机导入（T10f 方案 A3.4）：LocalConfigItem 的 value_keys、blocked_reason 与错误码 121 ----------
+
+pub fn query_result_list_local_config() -> QueryResult {
+    QueryResult {
+        seq: 1015,
+        kind: Some(query_result::Kind::ListLocalConfig(ListLocalConfigResult {
+            items: vec![LocalConfigItem {
+                id: s("mcp:user:0"),
+                kind: LocalConfigKind::Mcp.into(),
+                name: s("github"),
+                description: s("stdio，要填 2 个键"),
+                source: s("用户配置"),
+                imported: false,
+                value_keys: vec![s("GITHUB_TOKEN"), s("GITHUB_HOST")],
+                blocked_reason: s("MCP 导入还没启用"),
+            }],
+        })),
+    }
+}
+
+pub fn error_local_import_rejected() -> Error {
+    Error {
+        code: ErrorCode::LocalImportRejected.into(),
+        message: s("勾选的条目都导不了"),
+        retryable: false,
+        details: [
+            (s("mcp:user:0"), s("MCP 导入还没启用")),
+            (s("plugin:1"), s("技能导入还没启用")),
+        ]
+        .into(),
+    }
 }

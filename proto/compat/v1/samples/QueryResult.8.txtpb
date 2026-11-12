@@ -1,0 +1,12 @@
+seq: 1015
+list_local_config {
+  items: [{
+    id: "mcp:user:0"
+    kind: LOCAL_CONFIG_KIND_MCP
+    name: "github"
+    description: "stdio\357\274\214\350\246\201\345\241\253 2 \344\270\252\351\224\256"
+    source: "\347\224\250\346\210\267\351\205\215\347\275\256"
+    value_keys: ["GITHUB_TOKEN", "GITHUB_HOST"]
+    blocked_reason: "MCP \345\257\274\345\205\245\350\277\230\346\262\241\345\220\257\347\224\250"
+  }]
+}

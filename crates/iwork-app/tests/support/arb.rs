@@ -782,15 +782,22 @@ fn local_item() -> impl Strategy<Value = LocalConfigItem> + Clone {
         text(),
         text(),
         any::<bool>(),
+        prop::collection::vec(text(), 0..3),
+        // 线上空串表示「没有原因」，所以有原因时不会是空串
+        prop::option::of(".{1,8}"),
     )
         .prop_map(
-            |(id, kind, name, description, source, imported)| LocalConfigItem {
-                id,
-                kind,
-                name,
-                description,
-                source,
-                imported,
+            |(id, kind, name, description, source, imported, value_keys, blocked_reason)| {
+                LocalConfigItem {
+                    id,
+                    kind,
+                    name,
+                    description,
+                    source,
+                    imported,
+                    value_keys,
+                    blocked_reason,
+                }
             },
         )
 }

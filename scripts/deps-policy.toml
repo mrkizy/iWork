@@ -54,6 +54,12 @@ internal = ["iwork-domain", "iwork-ports", "iwork-shell"]
 # tracing：日志门面，审批引擎在没有返回值的提醒路径上记错误（T07 方案 6.10.4），不带输出端
 direct = ["thiserror", "futures-channel", "futures-core", "sha2", "serde_json", "tracing"]
 
+[crates.iwork-import-claude]
+# Claude Code 本机配置的发现（T10f 方案 A2）：只读名字，选择性解析 JSON；不碰数据库、不起进程
+internal = ["iwork-ports", "iwork-domain"]
+direct = ["serde", "serde_json"]
+direct_dev = ["pollster", "tempfile"]
+
 [crates.iwork-app]
 internal = ["iwork-core", "iwork-shell", "iwork-ports", "iwork-proto", "iwork-domain"]
 
@@ -89,7 +95,7 @@ transitive_exempt = ["tokio"]
 internal = [
     "iwork-domain", "iwork-ports", "iwork-proto", "iwork-core", "iwork-shell", "iwork-app",
     "iwork-store", "iwork-agent-acp", "iwork-vcs-git", "iwork-host", "iwork-ipc",
-    "iwork-rootfs",
+    "iwork-rootfs", "iwork-import-claude",
 ]
 deny_transitive = "none"
 

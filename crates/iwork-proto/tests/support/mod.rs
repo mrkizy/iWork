@@ -73,6 +73,7 @@ sample_types! {
         b::query_result_list_conversations_page,
         b::query_result_list_assistants_activity,
         b::query_result_pending_resume_seq,
+        b::query_result_list_local_config,
     ],
     // 只许在末尾追加：main 的 approval_with_call 先占了 Approval.2，T09 的两条排在它后面。
     Approval => [b::approval_full, b::approval_with_call, b::approval_approved, b::approval_voided],
@@ -80,7 +81,7 @@ sample_types! {
     UserActionCard => [b::user_action_card_full, b::user_action_card_seq],
     Rule => [b::rule_full, b::rule_composite, b::rule_argument_path, b::rule_flag_deny],
     RuntimeStatus => [b::runtime_status_full],
-    Error => [b::error],
+    Error => [b::error, b::error_local_import_rejected],
     SessionConstraints => [b::session_constraints],
     SessionToolSet => [b::session_tool_set],
     SessionModel => [b::session_model],

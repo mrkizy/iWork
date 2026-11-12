@@ -81,6 +81,8 @@ fn import_groups(store: &Store) -> Vec<pb::ImportGroup> {
                     description: i.description.clone(),
                     source: i.source.clone(),
                     imported: i.imported,
+                    value_keys: i.value_keys.clone(),
+                    blocked_reason: i.blocked_reason.clone(),
                 })
                 .collect();
             (!items.is_empty()).then(|| pb::ImportGroup {

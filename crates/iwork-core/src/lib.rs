@@ -4,8 +4,10 @@
 //! （只用无运行时的 `futures-channel` 做内部信箱）。
 //!
 //! - [`project_identity`]：项目身份规则（去重、重新定位、路径检查），T08。
+//! - [`local_import`]：本机导入的开关与判定（T10f 方案 A3.2），M1 里一律拒绝。
 
 pub mod approval;
+pub mod local_import;
 pub mod project_identity;
 pub mod recovery;
 pub mod turn;

@@ -3023,6 +3023,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "iwork-import-claude"
+version = "0.1.0"
+dependencies = [
+ "iwork-domain",
+ "iwork-ports",
+ "pollster",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "iwork-ipc"
 version = "0.1.0"
 dependencies = [

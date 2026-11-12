@@ -18,6 +18,7 @@ pub mod discovery;
 pub mod exec;
 pub mod fs;
 pub mod live;
+pub mod local_import;
 pub mod notify;
 pub mod project_files;
 pub mod read_model;
