@@ -15,7 +15,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use iwork_proto::pb;
 
 pub use summary::{Refresh, Summary, SummaryTable};
-pub use timeline::{Focus, PageCursor, PageMode, ROW_PAGE, Row, RowKey, Timeline, TimelineChange};
+pub use timeline::{
+    PageCursor, PageMode, PageSide, ROW_PAGE, Row, RowKey, Timeline, TimelineChange, TrimPlan,
+    page_anchor,
+};
 
 use timeline::{Delta, DeltaOutcome, DeltaTarget};
 
@@ -436,16 +439,27 @@ impl Store {
         self.anchors_follow_window();
     }
 
-    /// 裁剪时间线的焦点：网页声明的可见窗口换算成 seq（ordinal = seq × 2 + slot）；没声明窗口时是最新一行。
-    fn timeline_focus(&self) -> Focus {
-        let seq = |ordinal: i64| u64::try_from(ordinal).unwrap_or(0) / 2;
-        match self.window {
-            Some((first, last)) => Focus {
-                lo: seq(first),
-                hi: seq(last),
-            },
-            None => Focus::NEWEST,
+    /// 实时事件、继续卡片同步这类写入的裁剪条件：没有专门的锚，用记着的窗口（方案 2.2 第 4 条锚表最后一行）。
+    fn live_trim_plan(&self) -> TrimPlan {
+        TrimPlan {
+            anchor: None,
+            window: self.window,
+            page: None,
         }
+    }
+
+    /// 网页声明的窗口顶着已加载的最旧一行（往前翻页的条件，方案 2.3）。会话层发查询与这里判断结果合不合并共用。
+    pub fn window_touches_oldest(&self) -> bool {
+        self.open
+            .as_ref()
+            .is_some_and(|t| t.window_touches_oldest(self.window))
+    }
+
+    /// 网页声明的窗口底着已加载的最新一行（往后翻页的条件）。
+    pub fn window_touches_newest(&self) -> bool {
+        self.open
+            .as_ref()
+            .is_some_and(|t| t.window_touches_newest(self.window))
     }
 
     /// 可见窗口第一行的 seq（锚点的当前位置按它算，Q17）。没声明窗口时按最新一行。
@@ -831,11 +845,11 @@ impl Store {
             }
             _ => {}
         }
-        let focus = self.timeline_focus();
+        let plan = self.live_trim_plan();
         if let Some(t) = self.open.as_mut() {
             match t.apply_event(seq, at, event) {
                 Some(mut c) => {
-                    c.merge(t.fit(focus, self.summary.resume_cards()));
+                    c.merge(t.fit(plan, self.summary.resume_cards()));
                     self.dirty.conversation(c);
                 }
                 None => {
@@ -1012,9 +1026,9 @@ impl Store {
                 self.summary.pending = l.items;
                 self.pending_replaced = true;
                 self.mark_summary_views();
-                let focus = self.timeline_focus();
+                let plan = self.live_trim_plan();
                 if let Some(t) = self.open.as_mut() {
-                    let c = t.fit(focus, self.summary.resume_cards());
+                    let c = t.fit(plan, self.summary.resume_cards());
                     self.dirty.conversation(c);
                 }
             }
@@ -1057,42 +1071,69 @@ impl Store {
                     tracing::debug!(target: "iwork_client", seq, "居中加载的结果到达时已不再等它");
                 }
                 let cid = page.conversation.as_ref().map(|c| c.id.as_str());
-                // 裁剪的焦点（方案 2.2 第 4 条）：居中加载还没有窗口，拿目标行当窗口；快照重建成最新页，看最新一行
-                // 不接着最新时收到最新页（「回到最新」）：整个重建成最新页，重建前的窗口指着已经不在的行，
-                // 不能拿它当焦点（会把最新的一端裁掉，审查 6/F-3），也不能留着给之后的事件用
-                let latest_rebuild =
-                    mode == PageMode::LiveLatest && self.open.as_ref().is_some_and(|t| !t.at_tail);
-                if latest_rebuild {
-                    self.window = None;
-                }
-                // 网页还没声明窗口时：往前翻的结果是用户在往上看，焦点在最旧一端；别的看最新一行
-                let focus = match mode {
-                    PageMode::Around { center } => Focus::at(center),
-                    PageMode::Snapshot => Focus::NEWEST,
-                    PageMode::Older | PageMode::OlderRows { .. } if self.window.is_none() => {
-                        Focus::at(0)
-                    }
-                    _ => self.timeline_focus(),
-                };
                 if let Some(QueryPurpose::OlderPage { before, .. }) = p
                     && self.open.as_ref().and_then(Timeline::older_cursor).as_ref() != Some(before)
                 {
                     tracing::debug!(target: "iwork_client", ?before, "翻页结果到达时游标已经变了，丢掉");
                     return;
                 }
+                // 翻页的方向，以及游标在时间线上的位置（锚是这一页里紧挨它的那一组）
+                let paging = match p {
+                    Some(QueryPurpose::OlderPage { before, .. }) => Some((PageSide::Older, before)),
+                    Some(QueryPurpose::NewerPage { after, .. }) => Some((PageSide::Newer, after)),
+                    _ => None,
+                };
+                let paging = paging.and_then(|(side, cursor)| {
+                    let seq = match cursor {
+                        PageCursor::Seq(s) => Some(*s),
+                        PageCursor::Message(id) => {
+                            self.open.as_ref().and_then(|t| t.key_of(id)).map(|k| k.seq)
+                        }
+                    }?;
+                    Some((side, seq))
+                });
+                // 窗口已经离开这一端、又装不下：这次结果不合并，时间线不动；窗口贴回来时会话层按 2.3 重发
+                if let Some((side, _)) = paging
+                    && self
+                        .open
+                        .as_ref()
+                        .is_some_and(|t| t.page_result_would_evict_window(side, self.window))
+                {
+                    tracing::debug!(target: "iwork_client", ?side, "翻页结果到达时窗口已离开这一端、装不下，不合并");
+                    return;
+                }
+                // Q9（产品负责人 2026-11-11）：快照重建时用户正在看旧消息 → 回到最新并提示。要在窗口作废之前判断。
+                // 「在看旧消息」= 网页声明的窗口没顶到最新一行，或时间线已不接着最新。
+                let reading_old = mode == PageMode::Snapshot
+                    && self.open.as_ref().is_some_and(|t| {
+                        t.identities().last().is_some_and(|(newest, _)| {
+                            !t.at_tail
+                                || self.window.is_some_and(|(_, last)| last < newest.ordinal())
+                        })
+                    });
+                // 这次裁剪的锚与窗口（方案 2.2 第 4 条锚表）：整条重建成最新页（订阅快照、不接着最新时收到最新页）
+                // 锚是最新一组、旧窗口作废（6/F-3）；居中加载锚是目标行、旧窗口作废；翻页的锚是这一页紧挨游标的一组
+                let latest_rebuild = mode == PageMode::Snapshot
+                    || (mode == PageMode::LiveLatest
+                        && self.open.as_ref().is_some_and(|t| !t.at_tail));
+                if latest_rebuild || matches!(mode, PageMode::Around { .. }) {
+                    self.window = None;
+                }
+                let plan = TrimPlan {
+                    anchor: match (mode, paging) {
+                        (PageMode::Around { center }, _) => Some(center),
+                        (_, Some((side, cursor))) => page_anchor(&page, side, cursor),
+                        _ => None,
+                    },
+                    window: self.window,
+                    page: paging.map(|(side, _)| side),
+                };
                 if let Some(t) = self.open.as_mut()
                     && (cid == Some(t.conversation_id.as_str())
                         || matches!(p, Some(QueryPurpose::OlderPage { conversation_id, .. } | QueryPurpose::LatestPage { conversation_id }) if *conversation_id == t.conversation_id))
                 {
-                    // Q9（产品负责人 2026-11-11）：快照重建时用户正在看旧消息 → 回到最新并提示。
-                    // 「在看旧消息」= 网页声明的窗口没顶到最新一行，或时间线已不接着最新。
-                    let reading_old = mode == PageMode::Snapshot
-                        && t.identities().last().is_some_and(|(newest, _)| {
-                            !t.at_tail
-                                || self.window.is_some_and(|(_, last)| last < newest.ordinal())
-                        });
                     let mut c = t.apply_page(&page, mode);
-                    c.merge(t.fit(focus, self.summary.resume_cards()));
+                    c.merge(t.fit(plan, self.summary.resume_cards()));
                     match mode {
                         // 打开对话、重连走了快照：时间线回到最新，不再跳，锚点按最新位置重取（Q9 一并）
                         PageMode::Snapshot => {

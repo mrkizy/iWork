@@ -303,13 +303,13 @@ fn trim_keeps_same_seq_rows_together() {
     };
     let seqs = |s: &Store| keys(s).iter().map(|(k, _)| k.seq).collect::<Vec<_>>();
 
-    // 旧的一端：上限 3，看最新一行。五行：10、20（分隔线 + 消息）、30（分隔线 + 消息）。先丢 10 剩四行，还超；
-    // 再丢 20 的两行（按行丢的话只丢分隔线就停了，边界落在 20 的两行中间）。30 的分隔线留着：它说的「切换」本身
-    // 成立，往上翻回 20 时照样对
+    // 旧的一端：上限 3，看最新一行。五行：10、20（分隔线 + 消息）、30（分隔线 + 消息）。丢掉 10 之后，20 的分隔线
+    // 没了依据（上一条消息不在了），同一个循环里随即去掉，剩三行就停（6/F-2 的循环：同步派生行 → 查上限）。
+    // 所以旧的一端，带分隔线的那一组一成为最外一组，分隔线就没了；成组丢在新的一端才看得出来（下一例）
     let mut s = store(3);
     s.apply(support::snapshot(CONV, 100, vec![page()]));
-    assert_eq!(seqs(&s), [30, 30], "{:?}", keys(&s));
-    assert_eq!(tl(&s).edge_older, Some(30));
+    assert_eq!(seqs(&s), [20, 30, 30], "{:?}", keys(&s));
+    assert_eq!(tl(&s).edge_older, Some(20));
 
     // 新的一端：上限 4，看最旧一行。丢 30 的两行，边界是 20
     let mut s = store(4);
@@ -505,6 +505,8 @@ mod never_exceeds {
         /// 可见窗口放在第 n 行（取模）上。
         Window(usize),
         Pending(bool),
+        /// 换模型并留下当次说明，再开一个用新模型的回合（派生出模型切换行；之后的裁剪会碰到「正好丢掉说明」）。
+        Model(bool),
     }
 
     fn op() -> impl Strategy<Value = Op> {
@@ -516,13 +518,15 @@ mod never_exceeds {
             2 => any::<usize>().prop_map(Op::Around),
             3 => any::<usize>().prop_map(Op::Window),
             1 => any::<bool>().prop_map(Op::Pending),
+            2 => any::<bool>().prop_map(Op::Model),
         ]
     }
 
     proptest! {
         #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
 
-        /// 随机的实时事件、各种查询结果、可见窗口位置：任何一步之后行数都不超上限（上限设成 40 逼出裁剪；R14）。
+        /// 随机的实时事件（含换模型、当次说明）、各种查询结果、可见窗口位置：任何一步之后（同步完成之后，派生行也算）
+        /// 行数都不超上限（上限设成 40 逼出裁剪；R14）。
         #[test]
         fn timeline_never_exceeds_cap(ops in proptest::collection::vec(op(), 1..60)) {
             const CAP: usize = 40;
@@ -567,6 +571,19 @@ mod never_exceeds {
                         if !ids.is_empty() {
                             let o = ids[i % ids.len()].0.ordinal();
                             s.set_window(CID, o, o + 6, i % 2 == 0);
+                        }
+                    }
+                    Op::Model(a) => {
+                        n += 1;
+                        let model = if a { "fake-small" } else { "fake-large" };
+                        let turn = format!("tm-{n}");
+                        for e in [
+                            f::model_changed(CID, model),
+                            f::with_model(f::turn_queued(&turn, CID, f::IWORK), model),
+                            f::tool_started(&turn, &format!("{turn}-c"), "Bash", "ls"),
+                        ] {
+                            let seq = w.push(e.clone());
+                            s.apply(support::persisted(seq, &[CONV], e.event.unwrap()));
                         }
                     }
                     Op::Pending(with) => {
@@ -813,7 +830,7 @@ mod live {
 /// 6/F-3：「回到最新」重建成最新页时，不能沿用重建前网页声明的旧窗口当焦点（旧窗口指着已经不在的行），
 /// 否则会把最新的一端裁掉、at_tail 变假，回到最新之后又不接着最新。
 #[test]
-fn latest_rebuild_reattaches_tail() {
+fn back_to_latest_ends_at_tail() {
     let mut w = World::new();
     let approval = w.long_turn("x", 200, Some(10)).unwrap();
     let mut s = store(40);
@@ -836,6 +853,8 @@ fn latest_rebuild_reattaches_tail() {
         tl(&s).identities()
     );
     assert_eq!(tl(&s).edge_newer, None);
+    assert_eq!(s.window, None, "旧窗口作废");
+    assert!(tl(&s).row("a-x").is_some(), "最新一行在");
     // 旧窗口也不能留着：下一条实时事件之后照样接着最新，新消息进了时间线
     let seq = w.push(f::user_message("q-after", CID, "又一句"));
     s.apply(support::persisted(
@@ -849,9 +868,10 @@ fn latest_rebuild_reattaches_tail() {
     );
 }
 
-/// 6/F-2：裁剪之后不能再派生出新的行（模型切换行）把行数顶回上限之上：任何一条事件之后都不超上限。
+/// 6/F-2（reviewer 的复现原样）：裁剪丢掉一条模型当次说明后，原来被它压着的模型切换行贴了出来；同步与裁剪在一个
+/// 循环里，最后一步永远是查上限，所以任何一条事件之后都不超上限。
 #[test]
-fn model_note_trim_stays_under_cap() {
+fn derived_row_appearing_after_trim_is_trimmed_too() {
     let mut s = store(4);
     s.apply(support::snapshot(
         CONV,
@@ -878,4 +898,427 @@ fn model_note_trim_stays_under_cap() {
             tl(&s).identities()
         );
     }
+}
+
+/// 6/F-1：对话之间穿插了别的事件，全局 seq 跳了一大段。往前翻时取回的一页必须留下、边界必须往前走，
+/// 不能因为「离窗口远」把刚取回的整页又丢掉，翻页原地打转。
+#[test]
+fn older_paging_advances_across_sparse_seq() {
+    let mut w = World::new();
+    w.long_turn("old", 60, None);
+    // 别的对话里的事件把全局 seq 消耗掉一大段
+    w.head += 10_000;
+    w.long_turn("new", 80, None);
+    let mut s = store(40);
+    open(&mut s, &w);
+    for step in 0..50 {
+        look_at_top(&mut s);
+        let before = tl(&s).identities()[0].0.seq;
+        if !older(&mut s, &w) {
+            return;
+        }
+        let after = tl(&s).identities()[0].0.seq;
+        assert!(
+            after < before,
+            "第 {step} 步没往前走：before={before}, after={after}, cursor={:?}, has_older={}",
+            tl(&s).older_cursor(),
+            tl(&s).has_older
+        );
+    }
+    panic!("往前翻不到头");
+}
+
+/// 6/F-1 的另一个方向：往后翻同样必须前进。
+#[test]
+fn newer_paging_advances_across_sparse_seq() {
+    let mut w = World::new();
+    w.long_turn("old", 80, None);
+    w.head += 10_000;
+    w.long_turn("new", 60, None);
+    let mut s = store(40);
+    open(&mut s, &w);
+    around(&mut s, &w, 3);
+    for step in 0..50 {
+        look_at_bottom(&mut s);
+        let before = tl(&s).identities().last().unwrap().0.seq;
+        if !newer(&mut s, &w) {
+            return;
+        }
+        let after = tl(&s).identities().last().unwrap().0.seq;
+        assert!(
+            after > before,
+            "第 {step} 步没往后走：before={before}, after={after}, cursor={:?}, at_tail={}",
+            tl(&s).newer_cursor(),
+            tl(&s).at_tail
+        );
+    }
+    panic!("往后翻不到头");
+}
+
+// ---------- 方案第 7 节第 6 轮之后加的（2.2 第 4 条「丢哪一端」） ----------
+
+/// 两段行之间隔一万个 seq（别的对话占掉的号），上限 40。往前一页页翻，每一步最旧一行的 seq 严格变小，直到
+/// `has_older == false`；再往后翻，每一步最新一行严格变大，直到 `at_tail`。窗口声明过、没声明过各跑一遍。
+#[test]
+fn sparse_seq_paging_makes_strict_progress() {
+    for declare_window in [true, false] {
+        let mut w = World::new();
+        w.long_turn("old", 70, None);
+        w.head += 10_000;
+        w.long_turn("new", 70, None);
+        let full = unlimited(&w);
+        let mut s = store(40);
+        open(&mut s, &w);
+        let mut seen: std::collections::BTreeMap<RowKey, String> = keys(&s).into_iter().collect();
+        let mut steps = 0;
+        loop {
+            if declare_window {
+                look_at_top(&mut s);
+            }
+            let before = keys(&s)[0].0.seq;
+            if !older(&mut s, &w) {
+                break;
+            }
+            let after = keys(&s)[0].0.seq;
+            assert!(
+                after < before,
+                "窗口={declare_window} 第 {steps} 步往前没动：{before} → {after}"
+            );
+            seen.extend(keys(&s));
+            steps += 1;
+            assert!(steps <= full.len(), "往前翻不到头");
+        }
+        assert!(!tl(&s).has_older);
+        loop {
+            if declare_window {
+                look_at_bottom(&mut s);
+            }
+            let before = keys(&s).last().unwrap().0.seq;
+            if !newer(&mut s, &w) {
+                break;
+            }
+            let after = keys(&s).last().unwrap().0.seq;
+            assert!(
+                after > before,
+                "窗口={declare_window} 第 {steps} 步往后没动：{before} → {after}"
+            );
+            seen.extend(keys(&s));
+            steps += 1;
+            assert!(steps <= 2 * full.len(), "往后翻不到头");
+        }
+        assert!(tl(&s).at_tail);
+        assert_eq!(
+            seen.into_iter().collect::<Vec<_>>(),
+            full,
+            "窗口={declare_window}：不重、不漏"
+        );
+    }
+}
+
+mod terminates {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 48, ..ProptestConfig::default() })]
+
+        /// 随机的稀疏 seq（几段之间各隔一大段）、随机上限（不小于 2）、随机窗口（声明不声明、贴在哪一行）：往一个方向
+        /// 翻，途中最外一行严格单调，步数不超过对话的行数就到头。
+        #[test]
+        fn paging_always_terminates(
+            gaps in proptest::collection::vec(0u64..20_000, 1..4),
+            tools in 5usize..60,
+            cap in 2usize..60,
+            window_at in proptest::option::of(0usize..10),
+            older_first in any::<bool>(),
+        ) {
+            let mut w = World::new();
+            for (i, gap) in gaps.iter().enumerate() {
+                w.long_turn(&format!("s{i}"), tools, None);
+                w.head += gap;
+            }
+            let total = unlimited(&w).len();
+            let mut s = store(cap);
+            open(&mut s, &w);
+            if !older_first {
+                // 先跳到最旧的一段，再往后翻
+                let first = unlimited(&w)[0].0.seq;
+                around(&mut s, &w, first);
+            }
+            let mut steps = 0;
+            loop {
+                if let Some(i) = window_at {
+                    let ids = tl(&s).identities();
+                    // 窗口贴着要翻的那一端（发起翻页的条件），离端点 i 行以内
+                    let o = if older_first {
+                        ids[0].0.ordinal()
+                    } else {
+                        ids[ids.len() - 1 - i.min(ids.len() - 1)].0.ordinal()
+                    };
+                    let (lo, hi) = if older_first { (o, ids[i.min(ids.len() - 1)].0.ordinal()) } else { (o, ids.last().unwrap().0.ordinal()) };
+                    s.set_window(CID, lo, hi, false);
+                }
+                let edge = |s: &Store| if older_first { keys(s)[0].0.seq } else { keys(s).last().unwrap().0.seq };
+                let before = edge(&s);
+                let moved = if older_first { older(&mut s, &w) } else { newer(&mut s, &w) };
+                if !moved {
+                    break;
+                }
+                let after = edge(&s);
+                let advanced = if older_first { after < before } else { after > before };
+                prop_assert!(advanced, "第 {} 步没动：{} → {}", steps, before, after);
+                prop_assert!(tl(&s).len() <= cap);
+                steps += 1;
+                prop_assert!(steps <= total, "{} 步还没到头（共 {} 行）", steps, total);
+            }
+            let reached_end = if older_first { !tl(&s).has_older } else { tl(&s).at_tail };
+            prop_assert!(reached_end, "停下时没到头");
+        }
+    }
+}
+
+/// 订阅快照重建成最新页：锚是最新一组、旧窗口作废，重建之后一定接着最新。
+#[test]
+fn snapshot_rebuild_ends_at_tail() {
+    let mut w = World::new();
+    let approval = w.long_turn("x", 200, Some(10)).unwrap();
+    let mut s = store(40);
+    open(&mut s, &w);
+    around(&mut s, &w, approval);
+    look_at_top(&mut s);
+    assert!(!tl(&s).at_tail, "对照：在看旧的一段");
+    open(&mut s, &w);
+    assert!(
+        tl(&s).at_tail && tl(&s).row("a-x").is_some(),
+        "{:?}",
+        keys(&s)
+    );
+    assert_eq!(s.window, None, "旧窗口作废");
+    assert!(tl(&s).len() <= 40);
+}
+
+/// 居中加载：旧窗口说的是旧时间线的行，作废；锚是目标行，留着。
+#[test]
+fn around_load_discards_old_window() {
+    let mut w = World::new();
+    let approval = w.long_turn("x", 200, Some(150)).unwrap();
+    let mut s = store(40);
+    open(&mut s, &w);
+    look_at_bottom(&mut s);
+    assert!(s.window.is_some(), "对照：声明过窗口");
+    around(&mut s, &w, approval);
+    assert_eq!(s.window, None, "旧窗口作废");
+    assert!(tl(&s).row("ap-x").is_some(), "目标行留着");
+    assert!(tl(&s).len() <= 40);
+}
+
+/// 结果到达时窗口已经离开那一端（中间隔着别的已加载的行），锚、中间的行和整个窗口一起装不下：不合并，时间线不动。
+/// （会话层：结果到达时在飞表这一项已经清掉、`want_older` 也清了，窗口不贴着最旧一行就不会再发；贴回去才重发——
+/// 发不发看的是 `Store::window_touches_oldest`，和这里判断合不合并是同一个条件。）
+#[test]
+fn stale_page_result_is_dropped_when_window_left_the_edge() {
+    let mut w = World::new();
+    w.long_turn("x", 300, None);
+    let mut s = store(40);
+    open(&mut s, &w);
+    look_at_top(&mut s);
+    // 会话按顶着最旧一行发出往前翻页，结果回来之前用户往下滚走了：窗口在最新那几行
+    let before = tl(&s).older_cursor().unwrap();
+    let page = w.get(match &before {
+        PageCursor::Message(id) => pb::GetConversation {
+            before_message_id: Some(id.clone()),
+            limit: PAGE_SIZE,
+            ..Default::default()
+        },
+        PageCursor::Seq(seq) => pb::GetConversation {
+            before_seq: Some(*seq),
+            limit: ROW_PAGE,
+            ..Default::default()
+        },
+    });
+    look_at_bottom(&mut s);
+    assert!(!s.window_touches_oldest(), "对照：窗口已离开最旧一端");
+    let rows_before = keys(&s);
+    s.apply(Item::ViewResult {
+        purpose: QueryPurpose::OlderPage {
+            conversation_id: CID.into(),
+            before,
+        },
+        result: Box::new(page),
+    });
+    assert_eq!(keys(&s), rows_before, "不合并，时间线不动");
+    // 窗口贴回最旧一端：照常合并、往前走
+    look_at_top(&mut s);
+    assert!(s.window_touches_oldest());
+    let oldest = keys(&s)[0].0.seq;
+    assert!(older(&mut s, &w));
+    assert!(keys(&s)[0].0.seq < oldest, "贴回去之后翻页往前走了");
+}
+
+/// 对照：窗口还贴着那一端时，哪怕锚加窗口已经超上限也合并；窗口远的那一侧被裁，边界前进。
+#[test]
+fn page_result_merges_while_window_touches_the_edge() {
+    let mut w = World::new();
+    w.long_turn("x", 300, None);
+    let mut s = store(40);
+    open(&mut s, &w);
+    // 窗口很大：从最旧一行一直到最新一行，贴着最旧一端
+    let first = keys(&s)[0].0.ordinal();
+    let last = keys(&s).last().unwrap().0.ordinal();
+    s.set_window(CID, first, last, false);
+    let oldest = keys(&s)[0].0.seq;
+    assert!(older(&mut s, &w));
+    assert!(keys(&s)[0].0.seq < oldest, "合并了、边界往前走了");
+    assert!(!tl(&s).at_tail, "新的一端被裁");
+    assert!(tl(&s).len() <= 40);
+}
+
+/// 锚所在那一组永远不被裁（方案 2.2 第 4 条锚表，表驱动）：五种操作各一行，另加「窗口离锚很远」一行。
+#[test]
+fn anchor_group_is_never_trimmed() {
+    use iwork_client_core::store::{PageMode, PageSide, Timeline, TrimPlan};
+    // 一页 30 条消息，seq 10、20 … 300；上限 5
+    let msgs = |range: std::ops::RangeInclusive<u64>| -> pb::GetConversationResult {
+        match support::page(
+            1000,
+            range
+                .map(|i| {
+                    support::assistant_msg(
+                        &format!("m{i}"),
+                        i * 10,
+                        pb::MessageStatus::Completed,
+                        "x",
+                    )
+                })
+                .collect(),
+            true,
+        )
+        .kind
+        .unwrap()
+        {
+            pb::query_result::Kind::GetConversation(g) => g,
+            _ => unreachable!(),
+        }
+    };
+    struct Case {
+        name: &'static str,
+        mode: PageMode,
+        plan: TrimPlan,
+        anchor_row: &'static str,
+    }
+    let ord = |seq: u64| RowKey::entity(seq).ordinal();
+    let cases = [
+        Case {
+            name: "往前翻的结果：锚是这一页最新的一组",
+            mode: PageMode::Older,
+            plan: TrimPlan {
+                anchor: Some(300),
+                window: None,
+                page: Some(PageSide::Older),
+            },
+            anchor_row: "m30",
+        },
+        Case {
+            name: "往后翻的结果：锚是这一页最旧的一组",
+            mode: PageMode::Newer,
+            plan: TrimPlan {
+                anchor: Some(10),
+                window: None,
+                page: Some(PageSide::Newer),
+            },
+            anchor_row: "m1",
+        },
+        Case {
+            name: "居中加载：锚是目标行",
+            mode: PageMode::Around { center: 150 },
+            plan: TrimPlan {
+                anchor: Some(150),
+                window: None,
+                page: None,
+            },
+            anchor_row: "m15",
+        },
+        Case {
+            name: "重建成最新页：锚是最新一组",
+            mode: PageMode::Snapshot,
+            plan: TrimPlan {
+                anchor: None,
+                window: None,
+                page: None,
+            },
+            anchor_row: "m30",
+        },
+        Case {
+            name: "实时事件：锚是窗口里最新的一组",
+            mode: PageMode::Snapshot,
+            plan: TrimPlan {
+                anchor: None,
+                window: Some((ord(100), ord(120))),
+                page: None,
+            },
+            anchor_row: "m12",
+        },
+        Case {
+            name: "窗口离锚很远：锚照样留着",
+            mode: PageMode::Older,
+            plan: TrimPlan {
+                anchor: Some(300),
+                window: Some((ord(10), ord(20))),
+                page: Some(PageSide::Older),
+            },
+            anchor_row: "m30",
+        },
+    ];
+    for c in cases {
+        let mut t = Timeline::with_cap(CID, 5);
+        t.apply_page(&msgs(1..=30), c.mode);
+        t.fit(c.plan, std::iter::empty());
+        assert!(t.len() <= 5, "{}：{} 行", c.name, t.len());
+        assert!(
+            t.row(c.anchor_row).is_some(),
+            "{}：锚 {} 被裁了，剩 {:?}",
+            c.name,
+            c.anchor_row,
+            t.identities()
+        );
+    }
+}
+
+/// 到窗口的距离按已加载的行数数，不按 seq 相减（方案 2.2 第 4 条「丢哪一端」第 3 条）：旧的一端只隔 5 行、seq 却差
+/// 一万；新的一端隔 27 行、seq 只差 27。按行数是新的一端远，丢新的一端（按 seq 相减会反过来丢旧的一端）。
+#[test]
+fn distance_counts_rows_not_seq() {
+    use iwork_client_core::store::{PageMode, Timeline, TrimPlan};
+    let msg =
+        |i: u64| support::assistant_msg(&format!("m{i}"), i, pb::MessageStatus::Completed, "x");
+    let mut all: Vec<pb::Message> = (1..=5).map(msg).collect();
+    all.extend((10_001..=10_030).map(msg));
+    let page = match support::page(20_000, all, false).kind.unwrap() {
+        pb::query_result::Kind::GetConversation(g) => g,
+        _ => unreachable!(),
+    };
+    let mut t = Timeline::with_cap(CID, 30);
+    t.apply_page(&page, PageMode::Snapshot);
+    assert_eq!(t.len(), 35, "对照：超了 5 行");
+    // 窗口在第二段开头三行
+    let window = Some((
+        RowKey::entity(10_001).ordinal(),
+        RowKey::entity(10_003).ordinal(),
+    ));
+    t.fit(
+        TrimPlan {
+            anchor: None,
+            window,
+            page: None,
+        },
+        std::iter::empty(),
+    );
+    assert_eq!(t.len(), 30);
+    assert!(
+        t.row("m1").is_some(),
+        "旧的一端（只隔 5 行）留着：{:?}",
+        t.identities()
+    );
+    assert!(t.row("m10030").is_none(), "新的一端（隔 27 行）丢了");
+    assert!(!t.at_tail);
 }

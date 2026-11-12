@@ -1007,10 +1007,8 @@ impl<D: Dialer> Session<D> {
                 .subscription_of(&ScopeKind::Conversation(cid.clone()))
                 .and_then(|id| self.store.view_state(id))
                 == Some(crate::store::ViewState::Ready);
-            let window_at_top = match (self.store.window, tl.identities().first()) {
-                (Some((first, _)), Some((k, _))) => first <= k.ordinal(),
-                _ => false,
-            };
+            // 和 store 判断「翻页结果合不合并」用同一个条件（方案 2.2 第 4 条、2.3）
+            let window_at_top = self.store.window_touches_oldest();
             if ready
                 && tl.has_older
                 && (self.want_older || window_at_top)
@@ -1043,10 +1041,7 @@ impl<D: Dialer> Session<D> {
                 self.want_tail = false;
             }
             // 往下翻到这一段的末尾、而后面还有（跳到旧处之后）：往后翻一页，接到最新就回到 at_tail（G11）
-            let window_at_bottom = match (self.store.window, tl.identities().last()) {
-                (Some((_, last)), Some((k, _))) => last >= k.ordinal(),
-                _ => false,
-            };
+            let window_at_bottom = self.store.window_touches_newest();
             if ready
                 && !tl.at_tail
                 && window_at_bottom

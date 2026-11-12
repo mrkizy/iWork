@@ -227,22 +227,28 @@ pub enum PageCursor {
 /// 行级翻页一页取多少行（请求的 limit 与合并时挑的行数是同一个数，只写这一处；后台封顶 1000，见方案 2.9）。
 pub const ROW_PAGE: u32 = 200;
 
-/// 裁剪时以哪里为中心（方案 2.2 第 4 条「离可见窗口远的一端」）：可见窗口两端的 seq；居中加载时是目标行；
-/// 网页还没声明窗口时是最新一行（`u64::MAX`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Focus {
-    pub lo: u64,
-    pub hi: u64,
+/// 一次裁剪的条件（方案 2.2 第 4 条「丢哪一端」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TrimPlan {
+    /// 锚所在那一组的 seq：这一组不许丢。`None`：有窗口用窗口里最新的一组，没有窗口用最新一组。
+    pub anchor: Option<u64>,
+    /// 网页声明的可见窗口（两个行号；行号 = seq × 2 + slot）。只用来认哪些已加载的行在窗口里。作废了就是 `None`。
+    pub window: Option<(i64, i64)>,
+    /// 这是翻页的结果：一样远时丢「不是这次取回来的那一端」。
+    pub page: Option<PageSide>,
 }
 
-impl Focus {
-    pub const NEWEST: Focus = Focus {
-        lo: u64::MAX,
-        hi: u64::MAX,
-    };
-    pub fn at(seq: u64) -> Focus {
-        Focus { lo: seq, hi: seq }
-    }
+/// 翻页的方向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageSide {
+    Older,
+    Newer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum End {
+    Old,
+    New,
 }
 
 /// 回合有没有结束行：结束了、不在跑、不是中断（中断的回合显示继续卡片）。行级游标数行时后台用同一个条件。
@@ -1022,7 +1028,67 @@ impl Timeline {
         change
     }
 
-    /// 重算重建得出的两种行（模型切换、项目分隔线）。
+    /// 相邻两个回合之间的模型切换行（贴在后一个前）：模型不同、两者之间没有模型当次说明、后一个在已加载范围里
+    /// 才有。整份重算与裁剪后的边缘修补共用这一条规则。
+    fn model_switch_row(&self, prev: &pb::Turn, next: &pb::Turn) -> Option<(String, RowKey, Row)> {
+        let (lo, hi) = self.loaded_range();
+        // 只贴在已加载范围里：行级翻页带来的回合可以在范围外，照着它贴会在范围外长出一行（同继续卡片）。
+        if model_id(prev) == model_id(next)
+            || !(lo..=hi).contains(&next.created_seq)
+            || self.has_note_between(prev.created_seq, next.created_seq, NoteKind::Model)
+        {
+            return None;
+        }
+        Some((
+            format!("model:{}", next.id),
+            RowKey::derived(next.created_seq),
+            Row::ModelSwitch {
+                model: next.model.clone().unwrap_or_default(),
+            },
+        ))
+    }
+
+    /// 相邻两条消息之间的项目分隔线（贴在后一条前）：项目不同、两者之间没有项目当次说明才有。
+    fn divider_row(
+        &self,
+        (ps, prev): (u64, &pb::Message),
+        (ns, next): (u64, &pb::Message),
+    ) -> Option<(String, RowKey, Row)> {
+        if prev.context_project_id == next.context_project_id
+            || self.has_note_between(ps, ns, NoteKind::DmProject)
+        {
+            return None;
+        }
+        Some((
+            format!("divider:{}", next.id),
+            RowKey::derived(ns),
+            Row::Divider {
+                project_id: next.context_project_id.clone(),
+            },
+        ))
+    }
+
+    /// 把一行重建得出的行放成想要的样子：`want` 为 `None` 时去掉身份为 `id` 的那一行。
+    fn put_derived(&mut self, id: String, want: Option<(RowKey, Row)>) -> TimelineChange {
+        match want {
+            Some((key, row)) => {
+                if self.key_of(&id) != Some(key) || self.row(&id) != Some(&row) {
+                    self.insert(key, id, row)
+                } else {
+                    TimelineChange::default()
+                }
+            }
+            None => {
+                if self.remove(&id).is_some() {
+                    TimelineChange::row(id)
+                } else {
+                    TimelineChange::default()
+                }
+            }
+        }
+    }
+
+    /// 重算重建得出的两种行（模型切换、项目分隔线），整份。取页时调。
     fn rebuild_derived(&mut self) -> TimelineChange {
         let mut change = TimelineChange::default();
         let old: Vec<String> = self
@@ -1033,32 +1099,16 @@ impl Timeline {
             .collect();
         let mut want: BTreeMap<String, (RowKey, Row)> = BTreeMap::new();
 
-        // 模型切换：按回合的 created_seq 排序，相邻不同模型贴在后一个前；两者之间已有模型当次说明就不贴。
-        // 只贴在已加载范围里：行级翻页带来的回合可以在范围外，照着它贴会在范围外长出一行（同继续卡片）。
-        let (lo, hi) = self.loaded_range();
+        // 模型切换：按回合的 created_seq 排序，相邻不同模型贴在后一个前。
         let mut turns: Vec<&pb::Turn> =
             self.turns.values().filter(|t| t.created_seq != 0).collect();
         turns.sort_by_key(|t| t.created_seq);
         for pair in turns.windows(2) {
-            let (prev, next) = (pair[0], pair[1]);
-            if model_id(prev) == model_id(next) || !(lo..=hi).contains(&next.created_seq) {
-                continue;
+            if let Some((id, key, row)) = self.model_switch_row(pair[0], pair[1]) {
+                want.insert(id, (key, row));
             }
-            if self.has_note_between(prev.created_seq, next.created_seq, NoteKind::Model) {
-                continue;
-            }
-            want.insert(
-                format!("model:{}", next.id),
-                (
-                    RowKey::derived(next.created_seq),
-                    Row::ModelSwitch {
-                        model: next.model.clone().unwrap_or_default(),
-                    },
-                ),
-            );
         }
-
-        // 项目分隔线：相邻两条消息的 context_project_id 不同。
+        // 项目分隔线：相邻两条消息。
         let messages: Vec<(u64, &pb::Message)> = self
             .rows
             .iter()
@@ -1068,22 +1118,9 @@ impl Timeline {
             })
             .collect();
         for pair in messages.windows(2) {
-            let ((ps, prev), (ns, next)) = (pair[0], pair[1]);
-            if prev.context_project_id == next.context_project_id {
-                continue;
+            if let Some((id, key, row)) = self.divider_row(pair[0], pair[1]) {
+                want.insert(id, (key, row));
             }
-            if self.has_note_between(ps, ns, NoteKind::DmProject) {
-                continue;
-            }
-            want.insert(
-                format!("divider:{}", next.id),
-                (
-                    RowKey::derived(ns),
-                    Row::Divider {
-                        project_id: next.context_project_id.clone(),
-                    },
-                ),
-            );
         }
 
         for id in old {
@@ -1092,12 +1129,52 @@ impl Timeline {
                 change.rows.insert(id);
             }
         }
-        for (id, (key, row)) in want {
-            if self.key_of(&id) != Some(key) || self.row(&id) != Some(&row) {
-                change.merge(self.insert(key, id, row));
-            }
+        for (id, w) in want {
+            change.merge(self.put_derived(id, Some(w)));
         }
         change
+    }
+
+    /// 旧的一端刚丢过一组之后，只有旧边缘的两处重建得出的行会变（整份重算的结果在别处不变）：
+    /// - 新的最旧一条消息：前一条不在了，它的分隔线没了依据；
+    /// - 新的最旧一个回合（created_seq 不小于新边界的第一个）：它和前一个回合之间的模型当次说明可能刚被丢掉，
+    ///   原来被说明压着不贴的模型切换行这时要贴出来（6/F-2：派生行会因裁剪变多，所以裁剪循环最后一步永远是查上限）。
+    ///
+    /// 别的回合对、消息对的两头都还在、中间也没丢东西，结果不变。实时事件每条都可能走到这里，所以不整份重算。
+    fn derive_at_old_edge(&mut self) -> TimelineChange {
+        let Some(lo) = self.rows.keys().next().map(|k| k.seq) else {
+            return TimelineChange::default();
+        };
+        let mut c = TimelineChange::default();
+        let first_message = self
+            .rows
+            .range(RowKey::derived(lo)..)
+            .find_map(|(_, r)| match r {
+                Row::Message(m) => Some(m.id.clone()),
+                _ => None,
+            });
+        if let Some(id) = first_message {
+            c.merge(self.put_derived(format!("divider:{id}"), None));
+        }
+        let next = self
+            .turns
+            .values()
+            .filter(|t| t.created_seq >= lo)
+            .min_by_key(|t| t.created_seq)
+            .cloned();
+        if let Some(next) = next {
+            let prev = self
+                .turns
+                .values()
+                .filter(|t| t.created_seq != 0 && t.created_seq < next.created_seq)
+                .max_by_key(|t| t.created_seq)
+                .cloned();
+            let want = prev
+                .and_then(|p| self.model_switch_row(&p, &next))
+                .map(|(_, k, r)| (k, r));
+            c.merge(self.put_derived(format!("model:{}", next.id), want));
+        }
+        c
     }
 
     fn has_note_between(&self, from: u64, to: u64, kind: NoteKind) -> bool {
@@ -1127,63 +1204,190 @@ impl Timeline {
         (lo, hi)
     }
 
-    /// 每次往时间线里写东西之后调（方案 2.2「查询结果怎么进时间线」第 4 条、R14）：按已加载范围同步继续卡片，
-    /// 再查行数上限，超了从离 `focus` 远的一端按 seq 成组丢、记下边界。返回被丢的行（网页删掉）。
+    /// 每次往时间线里写东西之后调（方案 2.2「查询结果怎么进时间线」第 4 条、R14）。一个循环：按已加载范围同步
+    /// 继续卡片（刚丢过旧端时还要修旧边缘的重建得出的行）→ 行数不超就结束 → 超了照 [`Timeline::pick_end`] 丢一组
+    /// → 回到开头。**最后一步永远是查上限**（6/F-2）。每一轮至少丢掉一组，行有限，所以会停；只剩锚那一组时停。
     ///
     /// 实时事件每条都走这里，开销只能跟变化量走、不能跟总行数走（`cargo bench -p iwork-bench --bench
-    /// timeline_apply`）：卡片靠 `resume_rows` 索引，裁剪按键区间；重建得出的行不在这里整份重算——事件那条路是
-    /// 增量的，取页时 `apply_page` 整份重算一次；裁掉的一端它们随 seq 成组丢，留下的仍然成立。
+    /// timeline_apply`）：卡片靠 `resume_rows` 索引；重建得出的行不在这里整份重算（事件那条路是增量的，取页时
+    /// `apply_page` 整份重算一次），只修旧边缘（[`Timeline::derive_at_old_edge`]）；比远近只走到较近的那一端。
     pub fn fit<'a>(
         &mut self,
-        focus: Focus,
+        plan: TrimPlan,
         cards: impl Iterator<Item = &'a pb::ResumeCard> + Clone,
     ) -> TimelineChange {
-        let mut c = self.sync_resume_cards(cards.clone());
-        let trimmed = self.trim(focus);
-        if !trimmed.is_empty() {
-            // 范围缩了：范围外的卡片去掉（只会减少，不会再超）
-            c.merge(trimmed);
-            c.merge(self.sync_resume_cards(cards));
+        let mut c = TimelineChange::default();
+        let anchor = self.resolve_anchor(&plan);
+        let mut dropped_old = false;
+        loop {
+            c.merge(self.sync_resume_cards(cards.clone()));
+            if std::mem::take(&mut dropped_old) {
+                c.merge(self.derive_at_old_edge());
+            }
+            if self.rows.len() <= self.cap {
+                break;
+            }
+            let Some(end) = self.pick_end(anchor, plan) else {
+                break;
+            };
+            c.merge(self.drop_group(end));
+            dropped_old = end == End::Old;
         }
         c
     }
 
-    /// 超过上限时从离 `focus` 远的一端丢，每丢一次重新比；同一个 seq 的行（重建得出的行与它贴着的那一行）一起丢，
-    /// 边界两侧的 seq 才不同，严格比较的行级游标取得回留在外面的那一行。丢旧端记 `edge_older`、`has_older`；
-    /// 丢新端记 `edge_newer`、`at_tail = false`。只剩一个 seq 时停下（同一 seq 最多两行，上限至少 2 时不会超）。
-    fn trim(&mut self, focus: Focus) -> TimelineChange {
-        let mut c = TimelineChange::default();
-        while self.rows.len() > self.cap {
-            let (Some(old), Some(new)) = (
-                self.rows.keys().next().map(|k| k.seq),
-                self.rows.keys().next_back().map(|k| k.seq),
-            ) else {
-                break;
-            };
-            if old == new {
-                break;
-            }
-            let from_old = focus.lo.saturating_sub(old) >= new.saturating_sub(focus.hi);
-            let seq = if from_old { old } else { new };
-            let keys: Vec<RowKey> = self
-                .rows
-                .range(RowKey::derived(seq)..=RowKey { seq, slot: u8::MAX })
-                .map(|(k, _)| *k)
-                .collect();
-            for k in keys {
-                if let Some(id) = self.remove_key(k, from_old) {
-                    c.rows.insert(id);
+    /// 锚所在那一组的 seq（方案 2.2 第 4 条的锚表）：给了就用；没给时有窗口用窗口里最新的一组，窗口里没有已加载的行
+    /// 或没有窗口时用最新一组。
+    fn resolve_anchor(&self, plan: &TrimPlan) -> Option<u64> {
+        plan.anchor.or_else(|| {
+            let in_window = plan.window.and_then(|(wf, wl)| {
+                self.rows
+                    .keys()
+                    .rev()
+                    .find(|k| (wf..=wl).contains(&k.ordinal()))
+                    .map(|k| k.seq)
+            });
+            in_window.or_else(|| self.rows.keys().next_back().map(|k| k.seq))
+        })
+    }
+
+    /// 这一次丢哪一端（方案 2.2 第 4 条「丢哪一端」，前一条分得出就不看后一条）：
+    /// 1. 锚所在的那一组不丢；两端都是它就停（`None`）。
+    /// 2. 一端最外一组在可见窗口里、另一端的不在 → 丢不在的那一端。
+    /// 3. 比两端到窗口的距离，按已加载的行一行一行数（不是 seq 相减）；远的那一端丢。没有窗口时拿锚当窗口。
+    /// 4. 一样远 → 翻页的结果丢「不是这次取回来的那一端」；别的丢旧端。
+    fn pick_end(&self, anchor: Option<u64>, plan: TrimPlan) -> Option<End> {
+        let old = self.rows.keys().next()?.seq;
+        let new = self.rows.keys().next_back()?.seq;
+        if old == new {
+            return None;
+        }
+        if anchor == Some(old) {
+            return Some(End::New);
+        }
+        if anchor == Some(new) {
+            return Some(End::Old);
+        }
+        let (wf, wl) = plan.window.unwrap_or_else(|| match anchor {
+            Some(a) => (
+                RowKey::derived(a).ordinal(),
+                RowKey {
+                    seq: a,
+                    slot: u8::MAX,
                 }
+                .ordinal(),
+            ),
+            // 没有锚也没有窗口：时间线是空的才会这样，上面已经返回了
+            None => (i64::MAX, i64::MAX),
+        });
+        let in_window = |seq: u64| {
+            self.rows
+                .range(RowKey::derived(seq)..=RowKey { seq, slot: u8::MAX })
+                .any(|(k, _)| (wf..=wl).contains(&k.ordinal()))
+        };
+        match (in_window(old), in_window(new)) {
+            (true, false) => return Some(End::New),
+            (false, true) => return Some(End::Old),
+            _ => {}
+        }
+        // 两端各自往窗口走，一行一行数，先到的那端近（只走到较近那端的距离为止）
+        let mut from_old = self.rows.keys().take_while(|k| k.ordinal() < wf);
+        let mut from_new = self.rows.keys().rev().take_while(|k| k.ordinal() > wl);
+        loop {
+            match (from_old.next().is_some(), from_new.next().is_some()) {
+                (true, true) => continue,
+                (false, true) => return Some(End::New),
+                (true, false) => return Some(End::Old),
+                (false, false) => break,
             }
-            if from_old {
+        }
+        Some(match plan.page {
+            Some(PageSide::Older) => End::New,
+            Some(PageSide::Newer) | None => End::Old,
+        })
+    }
+
+    /// 丢一端最外的一组（同一个 seq 的行一起丢：重建得出的行与它贴着的那一行 seq 相同，只丢一个的话边界正好落在
+    /// 两行中间，严格比较的行级游标取不回留在外面的那一行），记下边界。
+    fn drop_group(&mut self, end: End) -> TimelineChange {
+        let mut c = TimelineChange::default();
+        let seq = match end {
+            End::Old => self.rows.keys().next(),
+            End::New => self.rows.keys().next_back(),
+        }
+        .map(|k| k.seq);
+        let Some(seq) = seq else {
+            return c;
+        };
+        let keys: Vec<RowKey> = self
+            .rows
+            .range(RowKey::derived(seq)..=RowKey { seq, slot: u8::MAX })
+            .map(|(k, _)| *k)
+            .collect();
+        for k in keys {
+            if let Some(id) = self.remove_key(k, end == End::Old) {
+                c.rows.insert(id);
+            }
+        }
+        match end {
+            End::Old => {
                 self.has_older = true;
                 self.edge_older = self.rows.keys().next().map(|k| k.seq);
-            } else {
+            }
+            End::New => {
                 self.at_tail = false;
                 self.edge_newer = self.rows.keys().next_back().map(|k| k.seq);
             }
         }
         c
+    }
+
+    /// 网页声明的窗口顶着最旧一行（往前翻页的条件，方案 2.3）：窗口第一行号不大于最旧一行的行号。
+    pub fn window_touches_oldest(&self, window: Option<(i64, i64)>) -> bool {
+        match (window, self.rows.keys().next()) {
+            (Some((first, _)), Some(k)) => first <= k.ordinal(),
+            _ => false,
+        }
+    }
+
+    /// 网页声明的窗口底着最新一行（往后翻页的条件）。
+    pub fn window_touches_newest(&self, window: Option<(i64, i64)>) -> bool {
+        match (window, self.rows.keys().next_back()) {
+            (Some((_, last)), Some(k)) => last >= k.ordinal(),
+            _ => false,
+        }
+    }
+
+    /// 翻页结果到达时窗口已经离开这一端，而锚、中间已加载的行和整个窗口一起留下会超上限：这次结果不合并
+    /// （方案 2.2 第 4 条；否则为了保住锚会把用户正在看的那一屏丢掉）。窗口还贴着这一端、或没声明过窗口时一定合并。
+    /// 锚那一组按两行算（一组最多两行）。
+    pub fn page_result_would_evict_window(
+        &self,
+        side: PageSide,
+        window: Option<(i64, i64)>,
+    ) -> bool {
+        let Some((wf, wl)) = window else {
+            return false;
+        };
+        let kept = match side {
+            PageSide::Older => {
+                if self.window_touches_oldest(window) {
+                    return false;
+                }
+                self.rows.keys().take_while(|k| k.ordinal() <= wl).count()
+            }
+            PageSide::Newer => {
+                if self.window_touches_newest(window) {
+                    return false;
+                }
+                self.rows
+                    .keys()
+                    .rev()
+                    .take_while(|k| k.ordinal() >= wf)
+                    .count()
+            }
+        };
+        kept + 2 > self.cap
     }
 
     pub fn identities_where(&self, pred: impl Fn(&Row) -> bool) -> Vec<String> {
@@ -1283,49 +1487,67 @@ struct Picked {
     span: Option<(u64, u64)>,
 }
 
-/// 照后台同一个办法再挑一遍：把结果里能造出来的行（四个实体列表的行，加上 `turns` 里结束位置在游标这一侧的
-/// 结束行）按排序字段排好，只取紧挨游标的 [`ROW_PAGE`] 行。后台选中的行都在候选里、候选又都在游标这一侧，
-/// 所以挑出来的正好是后台选中的那些；多带来的回合结束行（回合很久以后才结束）这次不建，翻到那里再建。
-fn pick_rows(page: &pb::GetConversationResult, side: impl Fn(u64) -> bool, older: bool) -> Picked {
-    #[derive(PartialEq, Eq, PartialOrd, Ord)]
-    enum Id<'a> {
-        Message(&'a str),
-        Tool(&'a str, &'a str),
-        Approval(&'a str),
-        UserAction(&'a str),
-        End(&'a str),
-    }
-    let mut all: Vec<(u64, Id<'_>)> = Vec::new();
+/// 一页结果里能造出来的「行」（方案 2.9 的定义：四个实体列表的行，加上 `turns` 里有结束行的回合的结束行）。
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum PageRow<'a> {
+    Message(&'a str),
+    Tool(&'a str, &'a str),
+    Approval(&'a str),
+    UserAction(&'a str),
+    End(&'a str),
+}
+
+/// 一页里的全部行，按排序字段排好：(seq, 行)。
+fn page_rows(page: &pb::GetConversationResult) -> Vec<(u64, PageRow<'_>)> {
+    let mut all: Vec<(u64, PageRow<'_>)> = Vec::new();
     all.extend(
         page.messages
             .iter()
-            .map(|m| (m.created_seq, Id::Message(&m.id))),
+            .map(|m| (m.created_seq, PageRow::Message(&m.id))),
     );
     all.extend(
         page.tool_calls
             .iter()
-            .map(|t| (t.created_seq, Id::Tool(&t.turn_id, &t.tool_call_id))),
+            .map(|t| (t.created_seq, PageRow::Tool(&t.turn_id, &t.tool_call_id))),
     );
     all.extend(
         page.approvals
             .iter()
-            .map(|a| (a.created_seq, Id::Approval(&a.id))),
+            .map(|a| (a.created_seq, PageRow::Approval(&a.id))),
     );
     all.extend(
         page.user_actions
             .iter()
-            .map(|c| (c.created_seq, Id::UserAction(&c.id))),
+            .map(|c| (c.created_seq, PageRow::UserAction(&c.id))),
     );
     all.extend(
         page.turns
             .iter()
             .filter(|t| has_end_row(t))
-            .map(|t| (t.ended_seq, Id::End(&t.id))),
+            .map(|t| (t.ended_seq, PageRow::End(&t.id))),
     );
-    all.retain(|(seq, _)| side(*seq));
     all.sort();
+    all
+}
+
+/// 翻页结果的锚（方案 2.2 第 4 条锚表）：这一页里在游标这一侧、紧挨游标的那一行的 seq。往前翻是这一页最新的一组，
+/// 往后翻是最旧的一组。页是空的为 `None`。
+pub fn page_anchor(page: &pb::GetConversationResult, side: PageSide, cursor: u64) -> Option<u64> {
+    let seqs = page_rows(page).into_iter().map(|(seq, _)| seq);
+    match side {
+        PageSide::Older => seqs.filter(|s| *s < cursor).max(),
+        PageSide::Newer => seqs.filter(|s| *s > cursor).min(),
+    }
+}
+
+/// 照后台同一个办法再挑一遍：把结果里能造出来的行按排序字段排好，只取紧挨游标的 [`ROW_PAGE`] 行。后台选中的行
+/// 都在候选里、候选又都在游标这一侧，所以挑出来的正好是后台选中的那些；多带来的回合结束行（回合很久以后才结束）
+/// 这次不建，翻到那里再建。
+fn pick_rows(page: &pb::GetConversationResult, side: impl Fn(u64) -> bool, older: bool) -> Picked {
+    let mut all = page_rows(page);
+    all.retain(|(seq, _)| side(*seq));
     let take = ROW_PAGE as usize;
-    let chosen: &[(u64, Id<'_>)] = if older {
+    let chosen: &[(u64, PageRow<'_>)] = if older {
         &all[all.len().saturating_sub(take)..]
     } else {
         &all[..all.len().min(take)]
@@ -1334,17 +1556,17 @@ fn pick_rows(page: &pb::GetConversationResult, side: impl Fn(u64) -> bool, older
         .first()
         .map(|(lo, _)| *lo)
         .zip(chosen.last().map(|(hi, _)| *hi));
-    let has = |id: Id<'_>| chosen.iter().any(|(_, x)| *x == id);
+    let has = |id: PageRow<'_>| chosen.iter().any(|(_, x)| *x == id);
     let mut out = page.clone();
-    out.messages.retain(|m| has(Id::Message(&m.id)));
+    out.messages.retain(|m| has(PageRow::Message(&m.id)));
     out.tool_calls
-        .retain(|t| has(Id::Tool(&t.turn_id, &t.tool_call_id)));
-    out.approvals.retain(|a| has(Id::Approval(&a.id)));
-    out.user_actions.retain(|c| has(Id::UserAction(&c.id)));
+        .retain(|t| has(PageRow::Tool(&t.turn_id, &t.tool_call_id)));
+    out.approvals.retain(|a| has(PageRow::Approval(&a.id)));
+    out.user_actions.retain(|c| has(PageRow::UserAction(&c.id)));
     let ends = chosen
         .iter()
         .filter_map(|(_, id)| match id {
-            Id::End(t) => Some((*t).to_owned()),
+            PageRow::End(t) => Some((*t).to_owned()),
             _ => None,
         })
         .collect();
