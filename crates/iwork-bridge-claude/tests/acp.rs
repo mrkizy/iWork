@@ -568,3 +568,33 @@ async fn isolation_failure_while_opening_fails_the_open() {
         "会话目录删了"
     );
 }
+
+/// 审查 2/F-1：握手时（`initialize` 响应）权限模式不符、或响应里没有那个键：开会话失败，种类是
+/// `PermissionMode`，不是 `Unknown`。等不到响应的那一格要等满 20 秒的 `STARTUP_LIMIT`，在这一层不跑：
+/// 它在开会话里得到的是同一个 `PermissionMode { reported: None }`（`tests/startup.rs` 的
+/// `initialize_without_mode_blocks_session`），转成错误时和「没有那个键」走同一条路（`acp.rs` 的
+/// `open_errors_keep_their_reason`）。
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_permission_mismatch_preserves_kind() {
+    for mode in [Some("default"), None] {
+        let rig = Rig::new(Value::Array(vec![
+            json!({ "step": "session_start" }),
+            json!({ "step": "read_line" }),
+            json!({ "step": "answer_initialize", "mode": mode }),
+            wait_eof(),
+        ]));
+        let err = rig
+            .open(rig.spec(), allow_all())
+            .await
+            .err()
+            .expect("开会话失败");
+        assert_eq!(
+            err,
+            AgentError::IsolationBroken {
+                kind: IsolationKind::PermissionMode,
+                plugin: None
+            },
+            "{mode:?}"
+        );
+    }
+}

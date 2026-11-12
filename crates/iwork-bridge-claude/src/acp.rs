@@ -367,7 +367,7 @@ async fn open(
     .await
     .map_err(|e| {
         tracing::warn!(code = e.code(), error = %e, "开会话失败");
-        named_error(e.code(), None)
+        SessionFatal::from(e).to_error()
     })?;
     let expect = SessionExpect {
         plugin_dirs: setup.plugin_dirs.clone(),
@@ -487,6 +487,22 @@ impl SessionFatal {
 
     fn to_error(&self) -> agent_client_protocol::Error {
         named_error_with(self.code, self.reason, self.plugin.as_deref())
+    }
+}
+
+/// 开会话失败 → 给后台的错误。和会话里的致命错误走同一套：隔离失效带上种类（握手时权限模式不符、没有那个键、
+/// 等不到响应都是 `permission_mode`，方案 2.6 第 7 条表下），配置不对带上字段名（审查 S6-3 2/F-1）。
+impl From<startup::OpenError> for SessionFatal {
+    fn from(e: startup::OpenError) -> Self {
+        match e {
+            startup::OpenError::IsolationBroken(i) => Fatal::Isolation(i).into(),
+            startup::OpenError::SetupInvalid(s) => Self {
+                code: "setup_invalid",
+                reason: Some(s.field),
+                plugin: None,
+            },
+            other => Self::code(other.code()),
+        }
     }
 }
 
@@ -888,6 +904,34 @@ mod tests {
     use agent_client_protocol::v1::schema::SelectedPermissionOutcome;
 
     use super::*;
+
+    /// 审查 2/F-1：开会话失败的每一种都带上该带的东西。握手时权限模式不符、没有那个键、等不到响应（三种都是
+    /// `PermissionMode`，`reported` 分别是别的值、`None`、`None`，见 `tests/startup.rs`）都给 `permission_mode`；
+    /// 配置不对给字段名；别的只给错误码。
+    #[test]
+    fn open_errors_keep_their_reason() {
+        use crate::setup::SetupInvalid;
+        use crate::startup::OpenError;
+        for reported in [Some("default".to_owned()), None] {
+            let f = SessionFatal::from(OpenError::IsolationBroken(
+                IsolationBroken::PermissionMode { reported },
+            ));
+            assert_eq!(
+                (f.code, f.reason),
+                ("isolation_broken", Some("permission_mode"))
+            );
+        }
+        let f = SessionFatal::from(OpenError::SetupInvalid(SetupInvalid { field: "cwd" }));
+        assert_eq!((f.code, f.reason), ("setup_invalid", Some("cwd")));
+        for (e, code) in [
+            (OpenError::HookInactive, "hook_inactive"),
+            (OpenError::CliExited { code: Some(3) }, "cli_exited"),
+            (OpenError::ChannelFailed("x".into()), "channel_failed"),
+        ] {
+            let f = SessionFatal::from(e);
+            assert_eq!((f.code, f.reason, f.plugin), (code, None, None));
+        }
+    }
 
     /// 名字形状不合规定的插件：错误里不带名字，只带种类。
     #[test]
