@@ -256,6 +256,10 @@ fn write_status_does_not_follow_links() {
 }
 
 /// 一边反复写两份不同的状态，一边反复读：每次读到的都是两份之一，从不是半份或 `None`。
+/// 只在 Unix 上跑：Windows 上读的一方开着目标文件时，改名覆盖它会偶发失败（CI run 43215005205：写到第 168 次
+/// `write_status` 返回 NotFound）。M1 不支持 Windows，后台在启动表第 1 步就拒绝、走不到写状态文件（方案 2.15），
+/// 按 AGENTS.md 的约定限定 `cfg(unix)`，不为它改产品代码。
+#[cfg(unix)]
 #[test]
 fn write_is_atomic() {
     let dir = tempfile::tempdir().unwrap();
