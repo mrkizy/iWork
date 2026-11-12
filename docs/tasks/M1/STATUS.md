@@ -64,6 +64,14 @@
 | `da37bce2` | architect（T10e） | T10e 方案第 2 轮不过（2/F-1～F-4），在改，第 3 轮是最后一轮；reviewer `8036b426` | Q1～Q6、K1～K5 等产品负责人 |
 | `a2c030fb` | architect（T10f） | T10f 方案第 2 版 `5460e55`，reviewer `9a5980a0` 第 2 轮在审 | PD-1～PD-9 等产品负责人；1/F-8（仓库技能 hooks/allowed-tools，改动前就有）等 `--part skill` 结果交产品负责人 |
 
+**16:20 之后的变化**：
+- T09：方案改完 `43034ce`（行级游标 R14、2.9 行级语义、步 5c，另补同 seq 一起丢、客户端取 limit 行、继续卡片跟范围走）。`b20e49db` 本地已提交 5/F-2 `0b32fb8`、5/F-1 `00e1322`（另把全开档药丸底色 12%→6%，请 UI reviewer 看）、形象一览 `c72b2f0`（`/preview.html#/characters`），在做步 5c，做完一起跑全量和重录。真后台的行级查询归 T10a（方案第 3 节五条要点，和卡片 `6376fce` 一致）。
+- T10e：方案第 3 版 `6eb61c3`（换成「卡片宿主」对账机制），reviewer `8036b426` 第 3 轮（最后一轮）在审。**过了之后**把 1.4 的 A2（提交观察者唤醒卡片宿主）、A5（删除对话收尾挂在已提交事件上）写进 T10a 卡片。
+- T10f：第 2 轮 5 条（2/F-1 blocking：门槛关着时 discover 仍读凭据内容；2/F-2～F-5 important），1/F-2/3/4/6/7/9 已关 fixed；交回 `a2c030fb` 改，第 3 轮最后一轮。问产品负责人 PD-9 时带上漏网例子（`secrets/production.json`、`credentials/team.yaml`、`credentials.dev.json`）。`--part skill` 还缺 K3e/K3f/K3g，T10f 启用前要 T06 那边补格。
+- T06 S6-1：reviewer `6114386d` 中间结论 2 条 blocking（1/F-1 hook 连接断开不发失败事件、已入队 allow 会无声丢；1/F-2 后台答完就撤 backstop、写响应无期限），等最终汇报和 `4ea1efca` 的基准。
+- T04 组 3：reviewer `5166257f` 第 2 轮初步看到 F-1 没修全（已有注册项更新失败：macOS bootout 失败、Linux daemon-reload 失败后下一轮早退），托管实例 set(true) 自 bootout 也成立；等它记账。
+- AGENTS.md 加了「加删素材后清 .vitest-cache」（`9dcac56`）。
+
 **R2 补测已跑（产品负责人，2026-11-12 15:27–16:13）**：D2：SIGKILL CLI 进程组后前台命令照样跑完（k1），只关输入 CLI 不退（k2），**SIGTERM 时 CLI 自己收拾前台命令并退出（k3）**；D5：设 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` 后子代理在前台跑、`run_in_background` 被拒后模型改前台重发（b1/b2），不设时子代理后台跑、2 个 init 2 个 result（n1）；D4 ①c′①d′ PASS；net：经隧道连 github:22 读到问候，带 allowLocalBinding 能连本机监听、不带连不上；`--tools`/`--disallowedTools` 认 Task 和 Agent 两个名字；G5 记忆写 PASS、记忆读 INCONCLUSIVE（脚本没跟上 b543196 放宽的甲）、子代理记忆守卫预检没过（改 R3）。**等 architect 报告后问产品负责人 D2、D5、P3 远端连接、P15**。
 
 **等产品负责人的**：T10d PD 8 条（已发表格，推荐全按推荐）；T10e、T10f 的问题等审完整理；D2/D5/P3/P15 等分析；仓库 CLAUDE.md 在 `--setting-sources ""` 下不加载（等 `--part skill` 的 L1/L2）；要真机试：选择框「取消后再弹」与「重新定位」入口、Option 切「完全退出」、侧栏拖动（做好后）。
