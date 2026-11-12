@@ -9,7 +9,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use std::ffi::OsString;
+
 use iwork_bridge_claude::launch::args::NEVER_PASSED;
+use iwork_bridge_claude::launch::env::LaunchEnv;
 use iwork_bridge_claude::launch::settings::{HOOK_TIMEOUT_SECS, SELECTED};
 use iwork_bridge_claude::launch::{BridgeEnv, Channel, LaunchPlan, Opening, Start, build_launch};
 use iwork_bridge_claude::setup::{
@@ -60,7 +63,33 @@ fn setup(tier: Tier, tools: Tools) -> Setup {
         tools,
         disabled_tools: vec!["CronCreate".into(), "RemoteTrigger".into()],
         plugin_dirs: vec![format!("{DATA}/imports/plugin-a").into()],
+        builtin_tool_allowlist: None,
     }
+}
+
+/// 桥接自己的环境（假的值）：会被原样交给 CLI（3.1a，P14 不筛选）。继承来的自动记忆开关是 `0`（强制打开）。
+const INHERITED: [(&str, &str); 6] = [
+    ("PATH", "/usr/bin:/bin"),
+    ("HOME", "/Users/u"),
+    ("HTTPS_PROXY", "http://proxy.invalid:3128"),
+    ("ANTHROPIC_API_KEY", "sk-fake-not-a-key"),
+    ("CLAUDE_CODE_PLUGIN_DIRS", "/Users/u/fake-plugins"),
+    ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "0"),
+];
+
+fn inherited() -> LaunchEnv {
+    LaunchEnv::from_vars(
+        INHERITED
+            .iter()
+            .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+            .collect(),
+    )
+}
+
+/// 表外 CLI 版本的会话：带内置工具白名单（方案第 9 节，P11 的 d）。
+fn with_allowlist(mut s: Setup) -> Setup {
+    s.builtin_tool_allowlist = Some(vec!["Bash".into(), "Edit".into(), "Read".into()]);
+    s
 }
 
 fn opening(start: Start) -> Opening {
@@ -90,6 +119,7 @@ fn plan(setup: &Setup, start: Start) -> LaunchPlan {
         &BridgeEnv {
             cli: "/usr/local/bin/claude".into(),
             hook_program: "/Applications/iWork.app/Contents/MacOS/iwork-claude-hook".into(),
+            inherited: inherited(),
         },
         &Channel {
             dir: format!("{DATA}/run/h/0a1b2c3d4e5f").into(),
@@ -132,6 +162,13 @@ fn cases() -> Vec<(&'static str, LaunchPlan)> {
             "ai_review_new",
             plan(&setup(Tier::Manual, Tools::None), new_session()),
         ),
+        (
+            "unverified_cli_allowlist_new",
+            plan(
+                &with_allowlist(setup(Tier::Manual, Tools::Default)),
+                new_session(),
+            ),
+        ),
     ]
 }
 
@@ -157,7 +194,12 @@ fn render(p: &LaunchPlan) -> String {
         "program": p.program,
         "args": p.args,
         "cwd": p.cwd,
-        "env": p.env.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
+        "env": p
+            .env
+            .vars()
+            .iter()
+            .map(|(k, v)| json!([k.to_string_lossy(), v.to_string_lossy()]))
+            .collect::<Vec<_>>(),
         "settings": p.settings,
         "mcp": p.mcp,
     });
@@ -306,10 +348,9 @@ fn start_and_tools_args() {
 fn token_stays_in_env_only() {
     let p = plan(&setup(Tier::Manual, Tools::Default), new_session());
     let token = "ab".repeat(32);
-    assert!(
-        p.env
-            .iter()
-            .any(|(k, v)| *k == "IWORK_HOOK_TOKEN" && *v == token)
+    assert_eq!(
+        p.env.get("IWORK_HOOK_TOKEN"),
+        Some(std::ffi::OsStr::new(&token))
     );
     assert!(!p.args.iter().any(|a| a.contains(&token)));
     assert!(!p.settings.to_string().contains(&token));
@@ -330,6 +371,7 @@ fn relative_cwd_is_refused() {
         &BridgeEnv {
             cli: "/c".into(),
             hook_program: "/h".into(),
+            inherited: inherited(),
         },
         &Channel {
             dir: "/d".into(),
@@ -340,4 +382,99 @@ fn relative_cwd_is_refused() {
     )
     .unwrap_err();
     assert_eq!(err.field, "cwd");
+}
+
+/// 不筛选是定下来的做法（P14）：桥接环境里的变量都原样在给 CLI 的环境里，包括用户可能带进来的插件目录变量。
+/// 这条测试防的是有人顺手加一条筛选而没改方案（3.1a）。
+#[test]
+fn launch_env_inherits_everything_else() {
+    let p = plan(&setup(Tier::Manual, Tools::Default), new_session());
+    for (k, v) in INHERITED
+        .iter()
+        .filter(|(k, _)| *k != "CLAUDE_CODE_DISABLE_AUTO_MEMORY")
+    {
+        assert_eq!(p.env.get(k), Some(std::ffi::OsStr::new(v)), "{k}");
+    }
+    // 只多出关自动记忆与 hook 通道这五个
+    let extra: Vec<_> = p
+        .env
+        .vars()
+        .iter()
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .filter(|k| !INHERITED.iter().any(|(name, _)| name == k))
+        .collect();
+    assert_eq!(
+        extra,
+        [
+            "IWORK_HOOK_SOCK",
+            "IWORK_HOOK_TOKEN",
+            "IWORK_HOOK_BRIDGE_PID",
+            "IWORK_HOOK_DEADLINE_SECS"
+        ]
+    );
+}
+
+/// 继承来的是 `0`（强制打开）也变成 `1`，而且只有一条。
+#[test]
+fn launch_env_forces_auto_memory_off() {
+    let p = plan(&setup(Tier::Manual, Tools::Default), new_session());
+    let all: Vec<_> = p
+        .env
+        .vars()
+        .iter()
+        .filter(|(k, _)| k == "CLAUDE_CODE_DISABLE_AUTO_MEMORY")
+        .map(|(_, v)| v.clone())
+        .collect();
+    assert_eq!(all, [OsString::from("1")]);
+}
+
+/// 设置里有 autoMemoryDirectory，指向会话目录里的空目录 m/（3.1a、3.3）。
+#[test]
+fn settings_redirect_auto_memory() {
+    let p = plan(&setup(Tier::Manual, Tools::Default), new_session());
+    assert_eq!(
+        p.settings["autoMemoryDirectory"],
+        format!("{DATA}/run/h/0a1b2c3d4e5f/m")
+    );
+}
+
+/// `--tools` 出现的次数与跟在后面的值。
+fn tools_flags(args: &[String]) -> Vec<&str> {
+    args.windows(2)
+        .filter(|w| w[0] == "--tools")
+        .map(|w| w[1].as_str())
+        .collect()
+}
+
+/// 有白名单 → `--tools a,b,c`，`--disallowedTools` 照旧（两者同用时禁用优先，G8d）。
+#[test]
+fn allowlist_becomes_tools_flag() {
+    let p = plan(
+        &with_allowlist(setup(Tier::Manual, Tools::Default)),
+        new_session(),
+    );
+    assert_eq!(tools_flags(&p.args), ["Bash,Edit,Read"]);
+    let at = p
+        .args
+        .iter()
+        .position(|a| a == "--disallowedTools")
+        .expect("禁用照旧");
+    assert_eq!(p.args[at + 1], "CronCreate,RemoteTrigger");
+}
+
+/// 没有白名单（表内版本）→ 不传 `--tools`。
+#[test]
+fn no_allowlist_no_tools_flag() {
+    let p = plan(&setup(Tier::Manual, Tools::Default), new_session());
+    assert!(tools_flags(&p.args).is_empty(), "{:?}", p.args);
+}
+
+/// AI 审查回合仍是 `--tools ""`：白名单管不到它，两者都有时以它为准，而且只出现一次。
+#[test]
+fn ai_review_turn_keeps_empty_tools() {
+    let p = plan(
+        &with_allowlist(setup(Tier::Manual, Tools::None)),
+        new_session(),
+    );
+    assert_eq!(tools_flags(&p.args), [""]);
 }

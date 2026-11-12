@@ -33,6 +33,7 @@
 | T05 补丁 | **已合入 main `b18b947`**（2026-11-11） | — | `2026-11-10-m1-t05-dispatch` 两轮通过 | — | T04 1/F-11、1/F-12 已关；T04 可以开工 |
 | T04 | 方案定稿（+实施期改 `004c7f9`、1/F-4 产品负责人定 `4827d77`、`84fb176`）；**组 1 `6d5e145`、组 2（步 4–6）`efe06f9` 已合入 main**（2026-11-12，审查三轮） | developer `e5b90212` 做组 3（步 7–11） | `2026-11-11-m1-t04-g2` 已关 | 留给 T10：无人认领那条道每次叫醒整批读 payload（可改只取 id、target）；`after_uncertain` 收尾失败时那条停在 Dispatched、道会先投后面的（下次启动对账收回）；`boot::read_defaults` 的 projects_root 是占位 | 组 3 = 9a 自启注销、autostart-align、install-watch、SetAutostart、lifecycle 基准（用真 PublishObserver）、Launcher、CI 加 `--features dev --test process`；L9 Linux 挂起待实测 |
 | T06 | 方案定稿（D1=A 大改 `624aa28`…`4a96669`，审查任务 `2026-11-12-m1-t06-plan-d1` 三轮通过）；**第一批 `d075a94`、S2 `a0d6cba`、S2b `a0a4bfb`、S3a–S5 `75b59a0` 已合入 main**（2026-11-12；隔离方案 `2026-11-12-m1-t06-plan-iso` 三轮通过，P14 不筛选环境变量） | developer `4ea1efca` 做 P11 白名单（任务 `2026-11-12-m1-t06-p11`）；developer `b57765cc` 做脚本第二批（任务 `2026-11-12-m1-t06-s0-script2`，方案 3.4/16.1 的新格子）；architect `47737e78` 留着 | 脚本任务 `2026-11-12-m1-t06-s0-script` 第一批已合入 `655449e`，1/F-7（本机用户名进结果包，改动前就有）**等产品负责人定** | **产品负责人 2026-11-12 定**：D1=A（hook 不表态时 CLI 不问的动作照 CLI 规则走，已知限制；AGENTS.md 例外条款、技术设计第 1 节、t0-findings 2.4 已写）；只读命令一项接受；P12 记为已知限制（不在添加项目时拒绝）；需求第 9 章由产品负责人自己加（草稿已给）。**P11 已定 d + a（2026-11-12）**（S4 已在 P11 定之前写完，`builtin_tool_allowlist` 与 `--tools` 白名单另批补，S8 前要有）；P13 已定六个都禁（T07 登记表由 `b57765cc` 加）；**隔离线索待 architect 分析**：`--setting-sources ""` 下用户的插件 8、技能 19、命令 55、子代理 5 仍进会话（MCP 被挡），可能违反隔离不变量；P4（Linux 沙箱起不来时拒绝启动还是照跑，推荐 a）是 S6 开工前置：S4 的设置常量暂不写 `sandbox.failIfUnavailable`，定了再加；S5 样本由 developer 本机录（产品负责人同意，≤10 个 Haiku，入库前脱敏、grep 零命中，supervisor 合入前再核）；D2 后台命令脱组等 R2。S0 第一轮、R1、R1x（14 个实例，其中 7 个因我的分析脚本 bug 重跑）已跑；**R2 等脚本第二批审过再问产品负责人**（约百来个实例）；R3 要一次性环境（S6 起每组合入前要 R3 的 G2 硬格子全 PASS）；第一轮 ④ 的 17 行不回填 T07 |
+- T06 R2（2026-11-12，产品负责人在普通终端跑，约 673 万 token）：分析 scratchpad `r2-analysis.md`，方案已记 `b543196`。G2 先行五格、G1、G8（P11 d2 两前提成立）、G7c′ 都成立；**G7e 前台命令也脱离 CLI 进程组（D2）**；子代理默认后台跑（D5）；G4 四条是 CLI 真实行为（D4 改翻译表、本机端口加 allowLocalBinding、非 HTTP 外连 P3 待产品负责人）；G5 记忆三行因脚本根目录名带下划线没测成。**R2 补测**（约 23 个实例，先跑 k1–k3、b1、b2 定 D2、D5）脚本由 `b57765cc` 在做（任务 `2026-11-12-m1-t06-s0-script3`），审过后请产品负责人在普通终端跑。D2、D5 定之前 S6 放开真实会话的那组不合入。S6 开工清单（developer 记忆 t06-s6-kickoff-checklist）：S5 样本是在带插件的环境录的，S6 录新样本时一起重录；子代理工具 Task / Agent 两个名字都要认（审批登记表不加 Task）。
 | T07 | **已合入 main `d1086d4`**（2026-11-11），完成记录见 T07.md | — | 已关 | — | 遗留：性能 +13% 原因待查（开小任务）、启动折叠与 T04 冷启动一起定、真实观察者接线归 T10a；macOS CI 抖动 `turn_runner::answer_arriving_while_cancelling_is_rejected`（iwork-core，T04 组 2 CI 首跑红、重跑绿，2026-11-11）待开小任务查 |
 | T07 引擎方案（已定稿、已实施） | `docs/plans/T07.md` 6.10 + `docs/plans/T02.md` 状态前提（未提交） | architect `890c712d`；reviewer `099b7f24` | `2026-11-10-m1-t07-engine-plan` **第 4 轮通过，定稿 `b6bf0a6`** | — | developer f8877913 在分支上按 6.10.14 做 E1–E7；真实观察者接线测试归 T10a 合入门槛 |
 | T09 | 方案 `docs/plans/T09.md`（未提交，429 行） | architect `62db2f05`；reviewer `9cbb7f89` | `2026-11-10-m1-t09-plan` 第 2 轮不通过：2/F-1（断线丢在飞的摘要重查）、2/F-2（reload 不释放 Tauri 旧帧暂存）、2/F-3（非时间线大 patch 超 1 MiB 永远发不出，blocking）；1/F-3～F-7 已解决可关，1/F-1、F-2 部分 | 见左 | 第 3 轮不通过（3/F-1 interceptor 守门无效、3/F-2 跨代旧响应覆盖），**方案定稿 `1df7d74`**，实施见下一行；设计窗口 Q9～Q12 待答 |
@@ -41,11 +42,33 @@
 - 新表情（产品负责人 2026-11-12，设计 `cb6a9f2`，ui-m1 2a 第 14 条）：13 个形象 × 15 种表情，素材按清单数据驱动、不用改代码就能出现；但 `confused`（待回答卡片）、`tired`（运行时本机额度用完）、`sleep`（空闲 30 分钟）三种要接真实状态，并按新优先级（等你 > 疑惑 > 工作中 > 没电 > 出错 > 完成 > 瞌睡 > 空闲）改 `derive/avatar.rs` 的 MOODS：`confused` 与待回答卡片归 T09 组 3（7b），`tired` 的额度数据归 T10g，`sleep` 的计时可随组 3 做。彩蛋 5 种 M1 不触发。
 - 费用显示（设计窗口 2026-11-12，ui-m1 2a 第 15 条、技术设计 9.4）：「本对话用量」标签只显示 token，金额只在悬停里写「按官方标价估算」；订阅或登录方式未知时加一行说明。要跟：本对话用量的视图数据带登录方式（订阅 / API Key / 未知，取 `authMethod`、`subscriptionType`）和「有回合缺少费用」标记（client-core 视图归 T10g，登录方式来自 T06 S8 探测）；`turns.cost_usd` 照原样存，缺失为 None（T06 6.3 已改）。
 - 代码块与行内代码（设计窗口 2026-11-12，ui-m1 2a 第 16 条，截图 `ui/18-CodeBlock-*`，令牌 `--cd*`）：Markdown 代码块与编辑类工具卡片的代码 / diff 共用一个组件，超 20 行折叠成 12 行、流式中与刚生成的不折叠、未闭合围栏边输出边画、增量高亮；文件路径点击交 Rust 打开。归 T09 时间线渲染（组 3 7b/7c 的工具卡片与正文 Markdown）。深色 `--cdC` 已调到 `#909DA9`（新增行底上 4.81:1）。
-| T10a～T10g、T11 | 未开工；T10 已拆成七张小卡（产品负责人 2026-11-10 同意，见 T10.md） | — | — | — | T10a 等 T04、T06、T07、T09 第一组合入；T10d/e/f 先出方案，可以和 T10a 的实施同时写 |
+- 侧栏可拖动调宽（设计窗口 2026-11-12，ui-m1 2a 第 12 条 `069b7bf`，令牌 `--sidebar-w-min/max/rail`）：64（仅头像）～390px，全局一个偏好值，走偏好命令（GlobalSettings 加字段、照 SetPlayfulUi 那样的命令，加法）；前端 `--sidebar-w` + rAF；验收 64、240、296、390 四个宽度。T09 2b 合入后由 T09 developer 做（协议、假后台、客户端），真后台受理归 T10a。
+- 待排小卡（2026-11-12）：① CI Ubuntu 的 test job 用 33 分钟，离 40 分钟上限只剩 7 分钟（cargo test 本身约 25 分钟；前端已拆成单独 job，fed3802），可按 crate 拆 cargo test 或把 release 构建挪成单独 job；② e2e:webview 的 reload 用例偶发失败，像是启动 5 秒取基线时客户端还在预热（不是泄漏，峰值都在 120 MB 上下），改成等页面报加载完成或取稳定值。
+| T10a～T10g、T11 | T10a 未开工（等 T04 组 3、T06 S6–S9）；**T10d/e/f 方案 2026-11-12 开写**（产品负责人「现在派」）：architect `93d94e7c`（T10d 附件）、`da37bce2`（T10e 亲手执行与安全清单）、`a2c030fb`（T10f 本机导入），各写 `docs/plans/T10x.md` | — | 写完各开审方案任务 `<任务>-plan` | — | 方案审过后等 T10a 合入再实施 |
 
 查开着的问题：`agent-scaffold findings list --task <任务 ID> --open`。记账工具轮次只能 1～9，超过换新任务 ID。
 
 - **收窄（产品负责人 2026-11-11）**（已结束：T05、T07 合入，T04 开工）：机器负载 30、磁盘 12G，先让 T05 补丁与 T07 走完合入，T06、T09 暂停跑重测试（只推送让 CI 跑）；合入后删对应 worktree 腾磁盘，再放开 T06、T09。
+
+## 3a 进行中快照（2026-11-12 16:20，清上下文前）
+
+**worker 与在途任务**
+| worker | 角色 | 在做 | 下一步 |
+| --- | --- | --- | --- |
+| `e5b90212` | developer | T04 组 3 第 1 轮修完（HEAD `bd5c883`，CI 绿；F-9 照 `9b6bdc1` 退出码 14） | reviewer `5166257f` 第 2 轮；**F-7 卡在打包**：tauri build 产物里没有后台程序和清单，要定打包方式（a tauri.conf 加 externalBin sidecar；b tauri build 后脚本放后台、写清单）与归属，待 supervisor/产品负责人定 |
+| `b20e49db` | developer | T09 2b 第 5 轮修复中（`cao/165268d4`，HEAD `81d257c` 之后）：5/F-2 小幅滚动取消、5/F-1 强调按钮悬停对比度、13 个形象预览场景；5/F-3 选了行级游标 A（`before_seq/after_seq`），**等 architect 改 T09 方案 G11、2.2 第 4 条、R5、第 3 节的提交号再动 proto** | 下一轮是 2b 的第 3 轮（任务 round 6，最后一轮），code `e036441c` + UI `dbe31771`；预览 1444（PID 23651）。4/F-6 未关（随 5/F-2）；4/F-3 等设计窗口（1024 宽锚点导轨）|
+| `4ea1efca` | developer | T06 S6-1 已送审（`cao/4ea1efca-s6-1` `9157424`，reviewer `6114386d` 第 1 轮，疑 hook 断开不发失败事件）；**在补 hook cold_start 基准**（9ef3808 对 9157424 交替 3 轮），之后做 S6-2 | S6 共 5 批（方案 `3096cb7`）：S6-4 合入等 D2、D5 |
+| `b57765cc` | developer | 实测脚本 script4（`--part skill`，6 格）第 1 轮 5 条已修（`575e80c`） | reviewer `ad7b3f77` 第 2 轮；过了合入 main，请产品负责人跑 `--only R2X --part skill`。另：selftest 与真实运行同时在家目录跑会让「运行前后原有文件核对」误报，待单开 |
+| `47737e78` | architect（T06） | ① 借改 T09 方案（行级游标，5/F-3）；② 写 R2 补测分析报告（结果解压在 scratchpad `r2x/`），给 D2、D5 推荐并改 T06 方案 | — |
+| `93d94e7c` | architect（T10d） | T10d 方案三轮审过（`25c4b14`），1/F-2、1/F-4 等 PD-6、PD-9 | 等产品负责人定 PD-1～PD-4、PD-6～PD-9（PD-5 等实测 A2） |
+| `da37bce2` | architect（T10e） | T10e 方案第 2 轮不过（2/F-1～F-4），在改，第 3 轮是最后一轮；reviewer `8036b426` | Q1～Q6、K1～K5 等产品负责人 |
+| `a2c030fb` | architect（T10f） | T10f 方案第 2 版 `5460e55`，reviewer `9a5980a0` 第 2 轮在审 | PD-1～PD-9 等产品负责人；1/F-8（仓库技能 hooks/allowed-tools，改动前就有）等 `--part skill` 结果交产品负责人 |
+
+**R2 补测已跑（产品负责人，2026-11-12 15:27–16:13）**：D2：SIGKILL CLI 进程组后前台命令照样跑完（k1），只关输入 CLI 不退（k2），**SIGTERM 时 CLI 自己收拾前台命令并退出（k3）**；D5：设 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` 后子代理在前台跑、`run_in_background` 被拒后模型改前台重发（b1/b2），不设时子代理后台跑、2 个 init 2 个 result（n1）；D4 ①c′①d′ PASS；net：经隧道连 github:22 读到问候，带 allowLocalBinding 能连本机监听、不带连不上；`--tools`/`--disallowedTools` 认 Task 和 Agent 两个名字；G5 记忆写 PASS、记忆读 INCONCLUSIVE（脚本没跟上 b543196 放宽的甲）、子代理记忆守卫预检没过（改 R3）。**等 architect 报告后问产品负责人 D2、D5、P3 远端连接、P15**。
+
+**等产品负责人的**：T10d PD 8 条（已发表格，推荐全按推荐）；T10e、T10f 的问题等审完整理；D2/D5/P3/P15 等分析；仓库 CLAUDE.md 在 `--setting-sources ""` 下不加载（等 `--part skill` 的 L1/L2）；要真机试：选择框「取消后再弹」与「重新定位」入口、Option 切「完全退出」、侧栏拖动（做好后）。
+
+**待排**：侧栏可拖动调宽（T09，2b 合入后）；CI 两张小卡（Ubuntu test job 余量、e2e reload 预热）；Windows outbox 测试偶发（T04 组 3 CI）；iwork-vcs-git 测试 ETXTBSY 隐患；rootfs 临时文件名可预测（T04 g3 报）。
 
 ## 4 合入时要处理
 

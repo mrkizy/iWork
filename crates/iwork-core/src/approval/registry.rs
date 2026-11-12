@@ -171,6 +171,38 @@ pub const TOOLS: &[ToolSpec] = &[
         class: C::Disabled,
         group: None,
     },
+    // 产品负责人 2026-11-12 定（T06 方案 P13，技术设计 7.1）：前三个把东西送出 iWork，Workflow 起的子代理不受
+    // iWork 回合控制，两个 worktree 工具会在会话中途换工作目录
+    ToolSpec {
+        name: "DesignSync",
+        class: C::Disabled,
+        group: None,
+    },
+    ToolSpec {
+        name: "PushNotification",
+        class: C::Disabled,
+        group: None,
+    },
+    ToolSpec {
+        name: "SendMessage",
+        class: C::Disabled,
+        group: None,
+    },
+    ToolSpec {
+        name: "Workflow",
+        class: C::Disabled,
+        group: None,
+    },
+    ToolSpec {
+        name: "EnterWorktree",
+        class: C::Disabled,
+        group: None,
+    },
+    ToolSpec {
+        name: "ExitWorktree",
+        class: C::Disabled,
+        group: None,
+    },
 ];
 
 /// 查一个工具的登记。表外（含 MCP）返回 `None`。

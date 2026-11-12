@@ -60,6 +60,28 @@ pub struct Init {
     pub model: Option<String>,
     pub permission_mode: Option<String>,
     pub tools: Vec<String>,
+    /// `plugins`；这个键没有或不是数组为 `None`（会话内容核对把它当成失效，3.5）
+    pub plugins: Option<Vec<InitPlugin>>,
+    /// `memory_paths.auto`（3.1a 的改道核对）
+    pub memory_auto: MemoryAuto,
+}
+
+/// `init.plugins` 的一项（2.1.322：`name`、`path`、`source`，有的带 `version`）。缺的或不是字符串记 `None`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitPlugin {
+    pub name: Option<String>,
+    pub source: Option<String>,
+    pub path: Option<String>,
+}
+
+/// `init.memory_paths.auto` 报了什么。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryAuto {
+    /// 没有这个键（设了开关之后报不报没实测，3.5：「没有」算过）
+    Absent,
+    Path(String),
+    /// 有这个键但不是字符串
+    Malformed,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -173,6 +195,20 @@ pub fn parse_line(line: &str) -> Result<CliEvent, LineError> {
                             .collect()
                     })
                     .unwrap_or_default(),
+                plugins: v.get("plugins").and_then(Value::as_array).map(|a| {
+                    a.iter()
+                        .map(|p| InitPlugin {
+                            name: s(p, "name"),
+                            source: s(p, "source"),
+                            path: s(p, "path"),
+                        })
+                        .collect()
+                }),
+                memory_auto: match v.get("memory_paths").and_then(|m| m.get("auto")) {
+                    None => MemoryAuto::Absent,
+                    Some(Value::String(p)) => MemoryAuto::Path(p.clone()),
+                    Some(_) => MemoryAuto::Malformed,
+                },
             })
         }
         Some("system") => CliEvent::OtherSystem,
@@ -528,6 +564,46 @@ mod tests {
             (gaps.windows.clone(), gaps.incomplete),
             (vec![w("b", 0.2, 2)], 2)
         );
+    }
+
+    fn init_of(extra: &str) -> Init {
+        let line =
+            format!(r#"{{"type":"system","subtype":"init","permissionMode":"dontAsk"{extra}}}"#);
+        match parse_line(&line) {
+            Ok(CliEvent::Init(i)) => i,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 3.5 会话内容核对要的两个字段：`plugins` 的每一项与 `memory_paths.auto`。
+    #[test]
+    fn init_plugins_and_memory_path() {
+        let i = init_of(
+            r#","plugins":[{"name":"a","source":"a@builtin","path":"a","version":"1"},{"name":"b","path":7}],"memory_paths":{"auto":"/d/m"}"#,
+        );
+        assert_eq!(
+            i.plugins,
+            Some(vec![
+                InitPlugin {
+                    name: Some("a".into()),
+                    source: Some("a@builtin".into()),
+                    path: Some("a".into()),
+                },
+                InitPlugin {
+                    name: Some("b".into()),
+                    source: None,
+                    path: None,
+                },
+            ])
+        );
+        assert_eq!(i.memory_auto, MemoryAuto::Path("/d/m".into()));
+
+        let i = init_of("");
+        assert_eq!((i.plugins, i.memory_auto), (None, MemoryAuto::Absent));
+        let i = init_of(r#","plugins":{"n":8},"memory_paths":{"auto":1}"#);
+        assert_eq!((i.plugins, i.memory_auto), (None, MemoryAuto::Malformed));
+        let i = init_of(r#","memory_paths":{}"#);
+        assert_eq!(i.memory_auto, MemoryAuto::Absent);
     }
 
     #[test]

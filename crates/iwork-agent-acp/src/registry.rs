@@ -101,6 +101,96 @@ pub fn check_compatibility(
     }
 }
 
+/// 已验证 CLI 版本里实测到的内置工具，按会话形状分开记（T06 方案第 9 节，P11 的 d，产品负责人 2026-11-12 定）。
+///
+/// 表外的 CLI 版本开会话时只给这里见过的工具（`SessionSetup.builtin_tool_allowlist` → `--tools`），新出现的内置工具
+/// 不进会话。挑哪一个形状、取并集归版本策略（S8）；这一张表是那一步与 d1 退路（第 9 节：不用 `--tools`、把多出来的
+/// 工具追加进 `disabled_tools`）共用的数据。代码里没有工具名，名字只在这张表里。
+///
+/// 一个版本进已验证表（S8 的 `VERIFIED_CLI`）时同时在这里登记它的清单，数据来自那个版本的 G1a 与 G8c。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedTools {
+    pub adapter_name: &'static str,
+    pub cli_version: &'static str,
+    pub shapes: &'static [ToolShape],
+}
+
+/// 一种会话形状：这些工具被禁用时，`system/init.tools` 是什么。
+///
+/// 名字照 `init.tools` 记。子代理工具在这里叫 `Task`，在工具调用、hook 输入里叫 `Agent`（审批登记表按后者）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolShape {
+    pub disabled: &'static [&'static str],
+    pub tools: &'static [&'static str],
+}
+
+/// 每个已验证版本至少有「什么都不禁」这一种形状。
+pub const VERIFIED_TOOLS: &[VerifiedTools] = &[VerifiedTools {
+    adapter_name: "iwork-bridge-claude",
+    cli_version: "2.1.322",
+    // R2（2026-11-12，干净环境，结果包 iwork-t0g-results-20261112-141011-8ff1ae）：什么都不禁时 24 个；
+    // G8c 禁 Bash、CronCreate、RemoteTrigger 时 22 个（Monitor 也不在了，多出 Glob、Grep）。S0 记的 25 个多一个
+    // ToolSearch，是带着用户插件的环境；只禁 Bash 的形状 R2 没量，不登记
+    shapes: &[
+        ToolShape {
+            disabled: &[],
+            tools: &[
+                "Task",
+                "Bash",
+                "CronCreate",
+                "CronDelete",
+                "CronList",
+                "DesignSync",
+                "Edit",
+                "EnterWorktree",
+                "ExitWorktree",
+                "ListAgents",
+                "Monitor",
+                "NotebookEdit",
+                "PushNotification",
+                "Read",
+                "RemoteTrigger",
+                "ReportFindings",
+                "ScheduleWakeup",
+                "SendMessage",
+                "Skill",
+                "TaskStop",
+                "WebFetch",
+                "WebSearch",
+                "Workflow",
+                "Write",
+            ],
+        },
+        ToolShape {
+            disabled: &["Bash", "CronCreate", "RemoteTrigger"],
+            tools: &[
+                "Task",
+                "CronDelete",
+                "CronList",
+                "DesignSync",
+                "Edit",
+                "EnterWorktree",
+                "ExitWorktree",
+                "Glob",
+                "Grep",
+                "ListAgents",
+                "NotebookEdit",
+                "PushNotification",
+                "Read",
+                "ReportFindings",
+                "ScheduleWakeup",
+                "SendMessage",
+                "Skill",
+                "TaskStop",
+                "WebFetch",
+                "WebSearch",
+                "Workflow",
+                "Write",
+            ],
+        },
+    ],
+}];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +260,67 @@ mod tests {
             check_compatibility(&reg("codex-acp", "2.5.0", None), KNOWN_INCOMPATIBLE),
             Ok(())
         );
+    }
+
+    /// 已验证工具清单的形状（方案第 9 节）：每个版本都有清单、至少有「什么都不禁」这一种；每种形状的清单不空、
+    /// 不重名、不含它自己禁掉的工具；名字过得了桥接对工具名的校验（不空、不带逗号与空白，会拼进 `--tools`）。
+    #[test]
+    fn verified_tools_table_is_well_formed() {
+        assert!(!VERIFIED_TOOLS.is_empty());
+        for v in VERIFIED_TOOLS {
+            let who = format!("{} {}", v.adapter_name, v.cli_version);
+            assert!(
+                v.shapes.iter().any(|s| s.disabled.is_empty()),
+                "{who}：缺「什么都不禁」的形状"
+            );
+            for shape in v.shapes {
+                assert!(!shape.tools.is_empty(), "{who} {:?}", shape.disabled);
+                let mut seen = std::collections::BTreeSet::new();
+                for t in shape.tools {
+                    assert!(seen.insert(*t), "{who}：{t} 重复");
+                    assert!(!shape.disabled.contains(t), "{who}：{t} 被禁用却在清单里");
+                    assert!(
+                        !t.is_empty() && !t.contains(',') && !t.chars().any(char::is_whitespace),
+                        "{who}：工具名 {t:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 2.1.322 的两种形状（期望值手写，R2 的 G0 与 G8c）：默认 24 个，没有 Grep、Glob、ToolSearch；禁掉 Bash、
+    /// CronCreate、RemoteTrigger 时这三个和 Monitor 都不在了，多出 Grep 与 Glob，别的一样。
+    #[test]
+    fn claude_2_1_322_shapes() {
+        let v = VERIFIED_TOOLS
+            .iter()
+            .find(|v| v.adapter_name == "iwork-bridge-claude" && v.cli_version == "2.1.322")
+            .expect("基准版本已登记");
+        let shape = |disabled: &[&str]| -> std::collections::BTreeSet<&str> {
+            v.shapes
+                .iter()
+                .find(|s| s.disabled == disabled)
+                .unwrap_or_else(|| panic!("缺形状 {disabled:?}"))
+                .tools
+                .iter()
+                .copied()
+                .collect()
+        };
+        let default = shape(&[]);
+        assert_eq!(default.len(), 24);
+        assert!(
+            default.contains("Bash") && default.contains("Monitor") && default.contains("Task")
+        );
+        for absent in ["Grep", "Glob", "ToolSearch", "Agent"] {
+            assert!(!default.contains(absent), "{absent}");
+        }
+        let mut expected = default.clone();
+        for gone in ["Bash", "CronCreate", "RemoteTrigger", "Monitor"] {
+            assert!(expected.remove(gone), "{gone}");
+        }
+        expected.extend(["Grep", "Glob"]);
+        let no_bash = shape(&["Bash", "CronCreate", "RemoteTrigger"]);
+        assert_eq!(no_bash.len(), 22);
+        assert_eq!(no_bash, expected);
     }
 }

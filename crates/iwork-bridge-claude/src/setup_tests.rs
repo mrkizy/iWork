@@ -47,6 +47,7 @@ pub(crate) fn valid() -> pb::SessionSetup {
         }),
         disabled_tools: vec!["CronCreate".into()],
         plugin_dirs: vec![abs("/data/imports/p1")],
+        builtin_tool_allowlist: None,
     }
 }
 
@@ -84,6 +85,7 @@ fn decodes_valid_setup() {
             tools: Tools::Default,
             disabled_tools: vec!["CronCreate".into()],
             plugin_dirs: vec![abs("/data/imports/p1").into()],
+            builtin_tool_allowlist: None,
         }
     );
 }
@@ -195,5 +197,43 @@ fn every_effort_level_is_accepted() {
         let mut s = valid();
         s.model.as_mut().unwrap().effort = Some(level.into());
         assert_eq!(validate(s).unwrap().model.effort, level);
+    }
+}
+
+fn with_allowlist(tools: &[&str]) -> pb::SessionSetup {
+    pb::SessionSetup {
+        builtin_tool_allowlist: Some(pb::BuiltinToolAllowlist {
+            tools: tools.iter().map(|t| (*t).to_owned()).collect(),
+        }),
+        ..valid()
+    }
+}
+
+/// 表外 CLI 版本的白名单原样转过来；没给就是 None（对照）。
+#[test]
+fn allowlist_is_decoded() {
+    assert_eq!(
+        validate(with_allowlist(&["Read", "Bash"]))
+            .unwrap()
+            .builtin_tool_allowlist,
+        Some(vec!["Read".to_owned(), "Bash".to_owned()])
+    );
+    assert_eq!(validate(valid()).unwrap().builtin_tool_allowlist, None);
+}
+
+/// 「给了空的」不是「一个工具都不给」：只可能是注册表数据错了，拒绝开会话（方案第 9 节）。
+/// 名字空、带逗号或空白同样拒绝（会把 `--tools` 拆错）。
+#[test]
+fn empty_allowlist_is_setup_invalid() {
+    assert_eq!(
+        validate(with_allowlist(&[])),
+        Err(invalid("builtin_tool_allowlist"))
+    );
+    for bad in [&["Read", ""][..], &["Read,Bash"], &["Web Fetch"]] {
+        assert_eq!(
+            validate(with_allowlist(bad)),
+            Err(invalid("builtin_tool_allowlist")),
+            "{bad:?}"
+        );
     }
 }
