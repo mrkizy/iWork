@@ -59,10 +59,11 @@
   R2X R2 补测（方案 19 节）：--part d = k1–k3、b1、b2（定 D2、D5）；--part rest = ①c′ ①d′、n1、子代理工具名与只禁 Bash 的工具清单；
       --part net = 沙箱联网 p1（代理变量名）、p2（经隧道连 github.com 22）、p4（连沙箱外的本机监听，带 / 不带 allowLocalBinding）；
       --part skill = 仓库的 CLAUDE.md、技能、子代理、命令加不加载（L1，L2 对照）、技能内联命令（K3b、K3c）、allowed-tools 故障探针（K2c）、
-      插件 hook 答允许对 iWork 的拒绝（H1）
+      插件 hook 答允许对 iWork 的拒绝（H1）；
+      --part recheck = G1、G8、G7（非 cfg 格）带产品设置重跑；--part p4 = macOS 上沙箱起不来时 CLI 停不停（F1、F2）
 --selftest：不调用 claude，只自测脚本自己的机制。
 """
-import argparse, ast, base64, collections, fcntl, hashlib, inspect, json, os, re, secrets, shlex, shutil, signal, socket, stat, subprocess, sys, tarfile, tempfile, threading, time
+import argparse, ast, base64, collections, ctypes, fcntl, hashlib, inspect, json, os, re, secrets, shlex, shutil, signal, socket, stat, subprocess, sys, tarfile, tempfile, threading, time
 
 HOME = os.path.expanduser("~")
 A = None            # 命令行参数
@@ -139,12 +140,49 @@ def settle(case, verdict, detail=""):
 
 # ---------- 进程所有权（1/F-10、2/F-6）----------
 def ps_table():
-    out = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,comm="], capture_output=True, text=True).stdout
+    """本用户能看到的进程：[{pid, ppid, pgid, comm}]。comm 是进程名（不带路径）。
+    不调 `ps -ax`：它要枚举全部进程，机器负载很高时会被某个卡在内核里的进程拖住不返回（2026-11-13 实测，卡了十几分钟）。
+    macOS 用 libproc（proc_listallpids + proc_pidinfo），Linux 读 /proc；拿不到信息的进程（别的用户的、刚退出的）跳过。"""
+    return _ps_table_darwin() if sys.platform == "darwin" else _ps_table_proc()
+
+
+class _ProcBsdInfo(ctypes.Structure):
+    """<sys/proc_info.h> 的 struct proc_bsdinfo（PROC_PIDTBSDINFO）。"""
+    _fields_ = [("pbi_flags", ctypes.c_uint32), ("pbi_status", ctypes.c_uint32), ("pbi_xstatus", ctypes.c_uint32),
+                ("pbi_pid", ctypes.c_uint32), ("pbi_ppid", ctypes.c_uint32), ("pbi_uid", ctypes.c_uint32), ("pbi_gid", ctypes.c_uint32),
+                ("pbi_ruid", ctypes.c_uint32), ("pbi_rgid", ctypes.c_uint32), ("pbi_svuid", ctypes.c_uint32), ("pbi_svgid", ctypes.c_uint32),
+                ("rfu_1", ctypes.c_uint32), ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32), ("pbi_nfiles", ctypes.c_uint32),
+                ("pbi_pgid", ctypes.c_uint32), ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32), ("e_tpgid", ctypes.c_uint32),
+                ("pbi_nice", ctypes.c_int32), ("pbi_start_tvsec", ctypes.c_uint64), ("pbi_start_tvusec", ctypes.c_uint64)]
+
+
+PROC_PIDTBSDINFO = 3
+
+
+def _ps_table_darwin():
+    lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    n = lib.proc_listallpids(None, 0)
+    pids = (ctypes.c_int * (n + 256))()
+    got = lib.proc_listallpids(pids, ctypes.sizeof(pids))
     rows = []
-    for line in out.splitlines():
-        parts = line.split(None, 3)
-        if len(parts) == 4 and parts[0].isdigit():
-            rows.append({"pid": int(parts[0]), "ppid": int(parts[1]), "pgid": int(parts[2]), "comm": parts[3]})
+    for pid in pids[:max(got, 0)]:
+        info = _ProcBsdInfo()
+        if pid <= 0 or lib.proc_pidinfo(pid, PROC_PIDTBSDINFO, ctypes.c_uint64(0), ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
+            continue
+        rows.append({"pid": pid, "ppid": int(info.pbi_ppid), "pgid": int(info.pbi_pgid), "comm": info.pbi_comm.decode("utf-8", "replace")})
+    return rows
+
+
+def _ps_table_proc():
+    rows = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit(): continue
+        try: stat_text = open(f"/proc/{name}/stat").read()
+        except OSError: continue
+        # 第 2 列是括号里的进程名（里面可能有空格和括号），从最后一个右括号往后才是定长的字段
+        comm = stat_text[stat_text.index("(") + 1:stat_text.rindex(")")]
+        fields = stat_text[stat_text.rindex(")") + 2:].split()
+        rows.append({"pid": int(name), "ppid": int(fields[1]), "pgid": int(fields[2]), "comm": comm})
     return rows
 
 
@@ -196,10 +234,13 @@ def find_owned(token):
     return sorted(pids)
 
 
-# 起 CLI 的环境：P14（产品负责人 2026-11-12 定）不筛选环境变量，其余原样继承，只设上关自动记忆的开关（覆盖继承来的值：
-# 设成 0 会把自动记忆强制打开）。不读任何变量的值。干净的环境靠运行说明保证（从普通终端起，不要从 Claude Code 里起），
-# 结果包里的 env-names.json 供事后核对。表只在这一处，别处都经 child_env 取
-LAUNCH_ENV_SET = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
+# 起 CLI 的环境：P14（产品负责人 2026-11-12 定）不筛选环境变量，其余原样继承，只设上产品的两个开关（覆盖继承来的值）：
+# 关自动记忆（设成 0 会把它强制打开）；关后台任务（D5，需求 1e8b88e）。不读任何变量的值。干净的环境靠运行说明保证
+# （从普通终端起，不要从 Claude Code 里起），结果包里的 env-names.json 供事后核对。表只在这一处，别处都经 child_env 取。
+# 有意不设的格子在 env_skip 里点名并写明理由（G5 不设记忆开关的几格；g7-bg、R2X n1 不设后台开关）
+LAUNCH_ENV_SET = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
+# 不设后台任务开关的格子用的 env_skip：只记厂商默认行为（后台任务开着时怎样），M2 开放后台任务时用
+NO_BACKGROUND_SWITCH = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",)
 # 结果包里记哪些环境变量的名字（只记名字，不记值）
 RECORDED_ENV_PREFIXES = ("CLAUDE", "ANTHROPIC")
 
@@ -588,13 +629,16 @@ def unexpected_plugins(init, given_dirs=()):
 UNCLEAN = "环境不干净：init.plugins 里有不该有的插件（方案 16.1，这一格不下别的结论）"
 
 
-def claude(name, prompt, settings=None, extra_args=(), iso=True, cwd=None, env=None, timeout=300, env_skip=(), plugin_check=True, plugin_dirs=()):
+def claude(name, prompt, settings=None, extra_args=(), iso=True, cwd=None, env=None, timeout=300, env_skip=(), plugin_check=True, plugin_dirs=(),
+           launch_prefix=()):
     """一次性运行。返回结构化证据 + exit / timed_out / secs。每个实例的 init.plugins 都过核对（plugin_check=False 只给 G5 环境行的阳性格），
     报了东西挂在 unclean_plugins 上：run_valid 当它无效，痕迹先判 FAIL 的几处也先看它（这一格只记「环境不干净」）。
-    plugin_dirs：这一格自己给的插件目录（都在本次根目录里），经 --plugin-dir 给 CLI，核对时它们之下的插件算该有的（方案 3.5）。"""
+    plugin_dirs：这一格自己给的插件目录（都在本次根目录里），经 --plugin-dir 给 CLI，核对时它们之下的插件算该有的（方案 3.5）。
+    launch_prefix：套在 claude 外面的命令（P4 的 F 格用外层 sandbox-exec 造「沙箱起不来」）。"""
     t0 = time.time()
     extra_args = list(extra_args) + [x for d in plugin_dirs for x in ("--plugin-dir", d)]
-    out, err, code, timed_out, pid = run_instance(base_argv(settings, extra_args, iso, prompt=prompt), name, cwd, env, timeout, env_skip=env_skip)
+    argv = list(launch_prefix) + base_argv(settings, extra_args, iso, prompt=prompt)
+    out, err, code, timed_out, pid = run_instance(argv, name, cwd, env, timeout, env_skip=env_skip)
     out, err = redact_stream(out), redact_stream(err)
     open(os.path.join(R.out, f"{name}-stream.jsonl"), "w").write(scrub(out))
     open(os.path.join(R.out, f"{name}-stderr.txt"), "w").write(scrub(err))
@@ -613,11 +657,11 @@ def finish_run(r, name, plugin_check=True, plugin_dirs=()):
 class Live:
     """流式输入的常驻会话：自己的进程组与标记，后台线程按到达时间收事件。用完必须 close()。
     argv 只给 selftest 用：换成一个假的会话程序，测收事件与落盘这条路。"""
-    def __init__(self, name, settings, extra_args=(), env=None, argv=None):
+    def __init__(self, name, settings, extra_args=(), env=None, argv=None, env_skip=()):
         self.name, self.events, self.lock, self.token = name, [], threading.Lock(), new_mark()
         self.proc = subprocess.Popen(argv or base_argv(settings, extra_args, stream_input=True), cwd=R.work, stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                                     env=child_env(self.token, env), start_new_session=True)
+                                     env=child_env(self.token, env, env_skip), start_new_session=True)
         self.raw = []
         threading.Thread(target=self._read, daemon=True).start()
 
@@ -695,6 +739,7 @@ VERDICT_FUNCS = {
     "cell_verdict", "g2_summary", "excluded_guard_verdict", "g3_verdict", "g4_no_retry_verdict", "corpus_verdict", "g5_verdict",
     "mcp_disable_verdict", "integrity_verdict", "unsandboxed_pair_verdict", "g5_env_verdict", "g5_memory_read_verdict", "g5_memory_write_verdict",
     "g5_agent_memory_verdict", "g5_guard_precheck", "target_guard_decision", "unsandboxed_group_verdict", "g4_write_outside_verdict",
+    "p4_verdict",
 }
 
 
@@ -835,7 +880,7 @@ def pass_literal_sites(src):
 
 
 # 计数表的键、自测里的期望值、检查函数自己拿来比较的那一个；别的只许出现在 VERDICT_FUNCS 登记的函数里
-PASS_LITERAL_ALLOWED = {"COUNTS", "selftest", "selftest_g2_matrix", "selftest_g5_isolation", "pass_literal_sites"}
+PASS_LITERAL_ALLOWED = {"COUNTS", "selftest", "selftest_g2_matrix", "selftest_g5_isolation", "selftest_recheck_and_p4", "pass_literal_sites"}
 
 
 def live_seen(events, alive, results_needed):
@@ -985,6 +1030,32 @@ def g1_cwd_prompt(c_cd, c_pwd):
             f"First: {c_cd}\nSecond: {c_pwd}\nThen reply DONE.")
 
 
+# 跑命令的 G1 探针（用 allow-sandboxed：沙箱外重试一律拒绝）；别的探针用 allow
+G1_COMMAND_PROBES = ("Bash", "Agent", "BashBg")
+# 产品设置下 init.tools 的预期个数（architect 47737e78；2.1.322，两个环境开关都设、dontAsk、产品沙箱）
+G1_EXPECTED_TOOLS = 24
+
+
+def g1_agent_shape_verdict(r):
+    """G1d′：关后台任务时，子代理那一格的事件流是一个 init、一个 result，没有报 is_backgrounded 为真。纯函数。"""
+    shape = stream_shape(r.get("events", []))
+    ok = shape["init 个数"] == 1 and shape["result 个数"] == 1 and "True" not in shape["is_backgrounded"]
+    return affirm({"运行有效": run_valid(r)}, ok)
+
+
+def g1_bashbg_record(r, cmd, rows):
+    """g1-BashBg 记录格（关后台任务时让模型后台跑 Bash）：目标调用的结果文字（CLI 拒 run_in_background 的报错）、
+    每次调用进没进 hook、输入里的字段名。只记录：证据齐了 INFO。返回 (状态, 行名, 说明)。纯函数。"""
+    ev = bash_ev(r, cmd, many=True)
+    hooked = {(row.get("input") or {}).get("tool_use_id") for row in rows}
+    uses = ev.get("uses", [])
+    facts = {"目标调用次数": len(uses), "每次都进了 hook": bool(uses) and all(u["id"] in hooked for u in uses),
+             "输入里的字段名": sorted({k for u in uses for k in u["input"]}), "带 run_in_background": [u["input"].get("run_in_background") for u in uses],
+             "结果（前 200 字）": [res["text"][:200] for res in ev.get("results", [])], "结果是报错": [res["is_error"] for res in ev.get("results", [])]}
+    return (info_if(ev["ok"]), "G1 BashBg 关后台任务时后台跑 Bash（只记录）",
+            "；".join(x for x in (ev["why"], json.dumps(facts, ensure_ascii=False)) if x))
+
+
 def g1():
     json.dump(INV["tools"], open(os.path.join(R.out, "g1-init-tools.json"), "w"), indent=1)
     json.dump(INV["harmless"], open(os.path.join(R.out, "g1-harmless-registered.json"), "w"), indent=1)
@@ -1012,7 +1083,8 @@ def g1():
     probe_args = {"Grep": ["--tools", "Read,Grep,Glob"], "Glob": ["--tools", "Read,Grep,Glob"]}
     runs, by_probe = {}, {}
     for k, (prompt, exp) in probes.items():
-        s, logdir = make_settings(f"g1-{k}", "allow", exp)
+        # 产品设置（architect 47737e78）：dontAsk、产品那样的沙箱、两个环境开关；跑命令的格用 allow-sandboxed
+        s, logdir = product_settings(f"g1-{k}", "allow-sandboxed" if k in G1_COMMAND_PROBES else "allow", exp)
         runs[k] = claude(f"g1-{k}", prompt, settings=s, extra_args=probe_args.get(k, []))
         by_probe[k] = hook_calls(logdir)
     calls = [c for rows in by_probe.values() for c in rows]
@@ -1027,10 +1099,16 @@ def g1():
     settle("G1d 子代理里的工具调用也进 hook（验收 2a）", g1_sub_verdict(sub_ev, hooked), sub_ev["why"])
     settle("G1e 导出各工具 tool_input 字段名", g1_export_verdict(valid, len(shapes)), json.dumps({k: sorted(v) for k, v in shapes.items()}, ensure_ascii=False))
     settle("G1f 每个工具结果都先过了 hook（含报错的结果）", g1_hooked_verdict(list(runs.values()), hooked), f"运行有效的探针 {valid}/{len(runs)} 个")
+    settle("G1d′ 关后台任务时子代理不进后台：一个 init、一个 result、is_backgrounded 不为真", g1_agent_shape_verdict(runs["Agent"]),
+           json.dumps(stream_shape(runs["Agent"]["events"]), ensure_ascii=False))
+    record(*g1_bashbg_record(runs["BashBg"], c_bg, by_probe["BashBg"]))
+    tools_now = (runs["Bash"]["init"] or {}).get("tools") or []
+    record(info_if(run_valid(runs["Bash"])), "G1a′ 产品设置下 init.tools 的个数（只记录；预期 24 个，产品另带禁用名单时再减去名单）",
+           f"{len(tools_now)} 个，等于 24={len(tools_now) == G1_EXPECTED_TOOLS} init.tools={tools_now}")
     # cwd 跨 cd（X1）：先 cd 进子目录，再单独一条命令记下 pwd；比对第二条调用 hook 给的 cwd 与真实 pwd
     sub, pwd_out = os.path.join(R.work, "sub"), os.path.join(R.obs, "g1-pwd.out")
     c_cd, c_pwd = f"cd {sub}", f"pwd > {pwd_out}"
-    s2, logdir2 = make_settings("g1-cwd", "allow", expect(bash=[c_cd, c_pwd]))
+    s2, logdir2 = product_settings("g1-cwd", "allow-sandboxed", expect(bash=[c_cd, c_pwd]))
     r = claude("g1-cwd", g1_cwd_prompt(c_cd, c_pwd), settings=s2)
     ev_cd, ev_pwd = bash_ev(r, c_cd), bash_ev(r, c_pwd)
     row = hook_row(ev_pwd, hook_calls(logdir2))
@@ -3101,7 +3179,8 @@ def g7_initialize_only():
     alive1, body1 = initialize_only("g7c2-ok", s1)
     settle("G7c' 只发 initialize：20 秒内有响应，current_permission_mode 是选定配置的模式", g7c2_verdict(alive1, body1, mode),
            f"取值={(body1 or {}).get('current_permission_mode')} 期望={MODE_ALIASES.get(mode, mode)}")
-    # 故意校验不过：permissions.allow 应当是数组，这里写成字符串（-p 模式下校验不过的设置文件会被整个忽略）
+    # 故意校验不过：permissions.allow 应当是数组，这里写成字符串（-p 模式下校验不过的设置文件会被整个忽略）。
+    # 这一格有意不带产品设置：量的就是坏设置文件时 CLI 报什么
     bad = {"permissions": {"defaultMode": mode, **PRODUCT_PERMS, "allow": "iwork-t0g-not-a-list"}, "disableAllHooks": False}
     s2, _ = make_settings("g7c2-bad", "allow", timeout=HOOK_TIMEOUT_SECS, on_failure="block", extra=bad, session_start=True)
     alive2, body2 = initialize_only("g7c2-bad", s2)
@@ -3114,8 +3193,9 @@ def g7_background():
     interrupt 之后还在不在；CLI 正常收尾（关掉输入、等它自己退出）之后还在不在。"""
     late = os.path.join(R.obs, "g7-bg-late")
     c_bg = f"/bin/sleep 90; touch {late}"
+    # 有意不带产品设置、不设后台任务开关：量的是后台任务开着时的厂商默认行为（只记录，M2 开放后台任务时用）
     s, _ = make_settings("g7-bg", "allow", expect(bash=[c_bg], tools=INV["harmless"]))
-    live = Live("g7-bg", s)
+    live = Live("g7-bg", s, env_skip=NO_BACKGROUND_SWITCH)
     try:
         live.user("Run this with the Bash tool in the background (set run_in_background to true), exactly once, character for character, "
                   f"and do not wait for it or check on it. Then reply DONE.\n{c_bg}")
@@ -3145,8 +3225,25 @@ def g7_background():
 
 
 def g7():
+    g7_sessions()
+    g7_initialize_only()
+    g7_interrupt()
+    g7_background()
+    g7_kill_resume()
+    g7_cfg()
+
+
+# G7 里带产品设置重跑的格子（architect 47737e78；R2X --part recheck 也跑它们）：g7-live、g7-ss-resume、g7-int、g7-kill0–2 与 g7-resume0–2。
+# 有意不带的：g7-bg（不设后台开关，只记厂商默认行为）、g7c2-bad（故意坏设置）、g7-cfg-*（量的就是换沙箱设置）
+def g7_product_cells():
+    g7_sessions()
+    g7_interrupt()
+    g7_kill_resume()
+
+
+def g7_sessions():
     # a 多轮；b system/init 的时机；c initialize 控制请求；d 用量与额度字段
-    s, logdir = make_settings("g7", "allow", session_start=True)
+    s, logdir = product_settings("g7", "allow", session_start=True)        # 产品设置（architect 47737e78）
     live = Live("g7-live", s, ["--include-partial-messages", "--replay-user-messages"])
     sid = None
     try:
@@ -3176,7 +3273,7 @@ def g7():
     finally:
         live.close()
     # b'' 续接时 SessionStart 是否同样在第一条输入前触发
-    s_r, log_r = make_settings("g7-ss-resume", "allow", session_start=True)
+    s_r, log_r = product_settings("g7-ss-resume", "allow", session_start=True)
     live = Live("g7-ss-resume", s_r, ["--resume", sid or "missing"])
     try:
         deadline = time.time() + 20
@@ -3188,12 +3285,14 @@ def g7():
                f"报到 {len(ss)} 次；这次 init 报的会话 id 与原会话相同={bool(sid) and init_session_id(evs) == sid}")
     finally:
         live.close()
-    g7_initialize_only()
+
+
+def g7_interrupt():
     # e 进程组；f interrupt；g set_model
     late = os.path.join(R.obs, "g7-late")
     # 第一段不能是裸的 `sleep N`：2.1.322 的 Bash 会直接拦下前台的 `sleep N; …`，模型改成后台跑，测到的就成了后台任务（S0 实测）
     c_long = f"/bin/sleep 61; touch {late}"
-    s2, _ = make_settings("g7-int", "allow", expect(bash=[c_long]))
+    s2, _ = product_settings("g7-int", "allow-sandboxed", expect(bash=[c_long]))     # 命令在产品那样的沙箱里跑（G7f 停的是沙箱里的前台命令）
     live = Live("g7-int", s2)
     try:
         live.user(ask_bash(c_long, FOREGROUND_NOTE))
@@ -3224,13 +3323,15 @@ def g7():
         record("INFO", "G7g set_model 控制请求前后 assistant 消息报的模型（只记录）", str(models[:1] + models[-1:]))
     finally:
         live.close()
-    g7_background()
+
+
+def g7_kill_resume():
     # h 等审批时杀掉整组后续接、--session-id；i 续接后原样重发的一致率
     same, total = 0, 0
     for n in range(A.repeat):
         sid2 = f"00000000-0000-4000-8000-{secrets.token_hex(6)}"
         cmd = f"touch {R.obs}/g7-resume-{n}"
-        s3, log3 = make_settings(f"g7-kill{n}", "sleep-deny:120", expect(bash=[cmd]), timeout=7200)
+        s3, log3 = product_settings(f"g7-kill{n}", "sleep-deny:120", expect(bash=[cmd]))      # hook 的 timeout 照产品（HOOK_TIMEOUT_SECS）
         token = new_mark()
         proc = subprocess.Popen(base_argv(s3, ["--session-id", sid2], prompt=ask_bash(cmd)), cwd=R.work, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=child_env(token), start_new_session=True)
@@ -3240,7 +3341,7 @@ def g7():
         finally:
             end_instance(proc, token, f"g7-kill{n}")
         before = [c["input"].get("tool_input") for c in hook_calls(log3)]
-        s4, log4 = make_settings(f"g7-resume{n}", "allow", expect(bash=[cmd]))
+        s4, log4 = product_settings(f"g7-resume{n}", "allow-sandboxed", expect(bash=[cmd]))
         r = claude(f"g7-resume{n}", "The tool call that was paused is now approved. Re-issue exactly the same tool call as before, with identical parameters.", settings=s4, extra_args=["--resume", sid2])
         after = [c["input"].get("tool_input") for c in hook_calls(log4)]
         if n == 0:
@@ -3249,6 +3350,9 @@ def g7():
         if before and after and run_valid(r):
             total += 1; same += before[0] == after[0]
     record(info_if(total == A.repeat), "G7i 续接后原样重发：tool_input 逐字段相同的比率（X2）", f"{same}/{total}（共试 {A.repeat} 次；只数续接那次运行有效、前后都有探针记录的）")
+
+
+def g7_cfg():
     # j 换配置续接：前后两次启动的沙箱设置相反，结果要跟着「这一次启动」的设置走（T07 第 12 节 ⑦）
     strict, loose = sandbox_settings(), sandbox_settings(extra_write=[R.outside])
     for label, a, b, want_a, want_b in (("先严后松", strict, loose, False, True), ("先松后严", loose, strict, True, False)):
@@ -3299,7 +3403,8 @@ G8_MCP_TOOLS = [MCP_TOOL, "ToolSearch"]
 
 
 def g8():
-    s, _ = make_settings("g8", "allow")
+    # 产品设置（architect 47737e78）：G8e、G8g 要在 dontAsk 下成立（P11 d2）
+    s, _ = product_settings("g8", "allow")
     with_mcp = [ISO[0], ISO[1], "--strict-mcp-config", "--mcp-config", mcp_probe_files()]
     for case, (tag, extra, pred) in G8_TOOL_CASES.items():
         r = claude("g8-" + tag, "Reply with exactly: OK", settings=s, extra_args=extra)
@@ -3307,7 +3412,7 @@ def g8():
     # MCP：先用同一份 MCP 配置证明目标工具加载了、调得动（阳性对照），再看禁用之后
     def mcp_run(tag, extra):
         name = f"g8-{tag}"
-        sm, _ = make_settings(name, "allow", expect(tools=G8_MCP_TOOLS))
+        sm, _ = product_settings(name, "allow", expect(tools=G8_MCP_TOOLS))       # 探针登记这次 MCP 调用，答允许
         rr = claude(name, literal_last("Call the MCP tool touch_sentinel with the name on the last line, exactly as written. Then reply DONE.", name), settings=sm, extra_args=with_mcp + extra, iso=False)
         return mcp_facts(rr, os.path.exists(os.path.join(R.obs, name)))
     control = mcp_run("mcp-control", [])
@@ -3366,7 +3471,6 @@ def g9():
 # ---------- R2X：R2 补测（方案 19 节 S0 行「R2 补测」；都在日常账号，除 --part skill 的 K2c（故障探针，过运行门）外都是好的探针）----------
 # --part d：k1–k3（k4 在里面顺带记）、b1、b2，5 个实例，先跑，定 D2、D5；--part rest：c1（G4 ①c′ ①d′）、n1、子代理工具名与只禁 Bash 的工具清单，8 个；
 # --part net：4 个；--part skill：L1、L2、K3b、K3c、K2c、H1，6 个，日常账号下 K2c 另加 1 个预检
-BACKGROUND_OFF = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
 LONG_SLEEP = 61
 
 
@@ -3399,7 +3503,7 @@ UNSANDBOXED_ABSENT = "流里没有带 dangerouslyDisableSandbox 的 Bash 调用"
 
 def r2x_live_settings(name, exp, **kw):
     """k1–k3、b1、b2、n1 的设置：产品设置（r2x_settings），探针只放行登记的调用、沙箱外重试一律拒绝（allow-sandboxed）。"""
-    return r2x_settings(name, "allow-sandboxed", exp, **kw)
+    return product_settings(name, "allow-sandboxed", exp, **kw)
 
 
 def no_unsandboxed_calls(events):
@@ -3434,7 +3538,7 @@ def wait_child(live, name, limit=60):
     return None
 
 
-def r2x_settings(name, behaviour, exp=None, extra=None, **kw):
+def product_settings(name, behaviour, exp=None, extra=None, **kw):
     """R2X 各格的设置：产品那样的权限与沙箱（默认 sandbox_settings(local_binding=True)：dontAsk、allowedDomains ["*"]、
     allowLocalBinding；net 的对照格自己给 extra），hook 照产品写 timeout 与 onFailure: block。init 报的权限模式、命令在不在沙箱里
     都和产品一致（architect 47737e78：原来 k、b、n、工具清单几格不带，init 报 default、命令不进沙箱）。
@@ -3443,11 +3547,26 @@ def r2x_settings(name, behaviour, exp=None, extra=None, **kw):
                          extra=sandbox_settings(local_binding=True) if extra is None else extra, **kw)
 
 
+SANDBOX_PRESENT = "沙箱在场（命令开头往工作区外写被挡下，退出码非 0、文件没出现）"
+
+
+def sandbox_probe_prefix(target, rc_file):
+    """命令开头的一段：往工作区外写一笔，把退出码写进工作区里的观测文件。错误输出丢掉。"""
+    return f"touch {target} 2>/dev/null; echo $? > {rc_file}; "
+
+
+def sandbox_was_present(rc_text, target_exists):
+    """沙箱在场的直接证据：那一笔的退出码写下来了、不是 0，文件也没出现。没写下退出码（命令没跑到）是 False。纯函数。"""
+    return rc_text is not None and rc_text.strip() not in ("", "0") and not target_exists
+
+
 def r2x_kill_case(kind):
     """k1 硬杀 CLI 的进程组 / k2 只关输入 / k3 给 CLI 发 SIGTERM：前台命令跑着的时候这样停 CLI，命令还在不在（D2）。
     k4 在同一格里顺带记：那个 shell 的父进程号、进程组号、会话号（D2 的 b′ 按后代找找不找得到）。只记录。"""
     late = os.path.join(R.obs, f"r2x-{kind}-late")
-    cmd = f"/bin/sleep {LONG_SLEEP}; touch {late}"
+    # 命令开头先往工作区外写一笔（该被沙箱挡下），退出码写进观测文件：沙箱在场的直接证据，不多花实例（architect 47737e78）
+    blocked, blocked_rc = os.path.join(R.outside, f"r2x-{kind}-sandbox-probe"), os.path.join(R.obs, f"r2x-{kind}-sandbox-probe.rc")
+    cmd = sandbox_probe_prefix(blocked, blocked_rc) + f"/bin/sleep {LONG_SLEEP}; touch {late}"
     s, _ = r2x_live_settings(f"r2x-{kind}", expect(bash=[cmd]))
     live = Live(f"r2x-{kind}", s)
     facts = {}
@@ -3478,16 +3597,19 @@ def r2x_kill_case(kind):
                 while time.time() - t0 < 70: time.sleep(1)
                 facts["70 秒后哨兵出现了（命令接着跑完）"] = os.path.exists(late)
         label = {"k1": "k1 前台命令跑着时 SIGKILL CLI 的进程组", "k2": "k2 前台命令跑着时只关输入", "k3": "k3 前台命令跑着时给 CLI 发 SIGTERM"}[kind]
+        in_sandbox = sandbox_was_present(read_obs_path(blocked_rc), os.path.exists(blocked))
+        facts["沙箱在场（命令开头往工作区外写被挡下）"] = in_sandbox
         status, why = r2x_live_record(evs, alive_now, 0, {SLEEP_SEEN: target is not None, FOREGROUND_SEEN: fg, "发信号时 CLI 还在": cli_running,
-                                                           UNSANDBOXED_ABSENT: no_unsandboxed_calls(evs)})
+                                                           UNSANDBOXED_ABSENT: no_unsandboxed_calls(evs), SANDBOX_PRESENT: in_sandbox})
         record(status, f"R2X {label}（只记录；k4 的进程号也在这一行）", "；".join(x for x in (why, json.dumps(facts, ensure_ascii=False)) if x))
     finally:
         live.close(escape_expected=True)          # 命令脱组是这几格要量的事，不另记「进程组」FAIL；还活着的由收尾清掉
 
 
-def r2x_background(kind, env):
-    """b1（设 CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1，子代理）、b2（同一变量，后台 Bash）、n1（不设变量，子代理）：
-    常驻的流式输入模式下记下事件流的形状、子代理的调用进不进 hook、后台参数还在不在（D5）。只记录。"""
+def r2x_background(kind, env_skip=()):
+    """b1（产品环境，后台任务开关是设上的，子代理）、b2（同上，后台 Bash）、n1（env_skip 去掉后台开关，子代理）：
+    常驻的流式输入模式下记下事件流的形状、子代理的调用进不进 hook、后台参数还在不在（D5）。只记录。
+    n1 有意不设后台开关：只记厂商默认行为，M2 开放后台任务时用。"""
     sentinel = os.path.join(R.obs, f"r2x-{kind}-s")
     if kind == "b2":
         cmd = f"/bin/sleep 3; touch {sentinel}"
@@ -3499,7 +3621,7 @@ def r2x_background(kind, env):
         prompt = literal_last("Use a subagent (the Agent tool) whose only job is to run the Bash command on the last line once, character for character. Then reply DONE.", cmd)
         exp = expect(bash=[cmd], tools=AGENT_TOOLS + INV["harmless"])
     s, logdir = r2x_live_settings(f"r2x-{kind}", exp, session_start=True)
-    live = Live(f"r2x-{kind}", s, env=env)
+    live = Live(f"r2x-{kind}", s, env_skip=env_skip)
     try:
         t0 = live.user(prompt)
         live.wait(is_result, 180)
@@ -3513,7 +3635,7 @@ def r2x_background(kind, env):
                  "目标调用在子代理里": any(u["parent"] for u in bash_uses), "目标调用进了 hook": any(u["id"] in hooked for u in bash_uses),
                  "输入里带 run_in_background": [u["input"].get("run_in_background") for u in bash_uses],
                  "子代理工具的输入里带 run_in_background": [u["input"].get("run_in_background") for u in uses if u["name"] in AGENT_TOOLS],
-                 "哨兵出现了": os.path.exists(sentinel), "设了关后台任务的变量": bool(env)}
+                 "哨兵出现了": os.path.exists(sentinel), "设了关后台任务的变量": not env_skip}
         if kind == "b2":
             facts["目标调用的结果（前 200 字）"] = tool_result_texts(evs, {u["id"] for u in bash_uses})
         label = {"b1": "b1 关后台任务时调子代理", "b2": "b2 关后台任务时后台跑 Bash", "n1": "n1 不关后台任务时调子代理"}[kind]
@@ -3537,7 +3659,7 @@ R2X_TOOL_CASES = {
 
 
 def r2x_tool_lists():
-    s, _ = r2x_settings("r2x-tools", "allow")
+    s, _ = product_settings("r2x-tools", "allow")
     for i, (label, args) in enumerate(R2X_TOOL_CASES.items()):
         r = claude(f"r2x-tools-{i}", "Reply with exactly: OK", settings=s, extra_args=args)
         tools = (r["init"] or {}).get("tools")
@@ -3579,7 +3701,7 @@ def r2x_net_case(key, label, body, settings, extra_facts=None):
     """跑一条联网命令（观测文件记下输出与退出码），只记录。返回观测。"""
     tag = "r2x-" + key
     cmd, read = observed(tag, body)
-    s, _ = r2x_settings(tag, "allow-sandboxed", expect(bash=[cmd]), extra=settings)
+    s, _ = product_settings(tag, "allow-sandboxed", expect(bash=[cmd]), extra=settings)
     r = claude(tag, ask_bash(cmd), settings=s)
     ev, obs = bash_ev(r, cmd), read()
     facts = {"退出码": obs and obs["rc"], **(extra_facts(obs) if extra_facts else {})}
@@ -3874,12 +3996,77 @@ def r2x_hook_vs_hook():
     record(status, "R2X H1 插件的 hook 答允许、iWork 的探针答拒绝（只记录）", "；".join(x for x in (why or ev["why"], json.dumps(facts, ensure_ascii=False)) if x))
 
 
+# --part p4（T06 方案第 8 节 F 格，P4=a 之后；16.2 第 3 项的 macOS 替代）：macOS 上验「沙箱起不来时 CLI 会不会停」。
+# 造法：外面套一层全放行的 sandbox-exec 再起 claude；系统的沙箱不能再套一层，CLI 给 Bash 起沙箱那一步就会失败。这是照 macOS 的
+# 一般行为设计的、没试过，先不经 claude 预检一遍。F1 带 failIfUnavailable: true，F2 去掉它作对照。2 个实例，日常账号：
+# 探针是好的、只放行登记的那一条 touch，目标是本次根目录里的临时目录
+OUTER_SANDBOX = ["sandbox-exec", "-p", "(version 1)(allow default)"]
+
+
+def nested_sandbox_preflight():
+    """预检（不经 claude）：外层全放行的 sandbox-exec 自己起得来（对照），在它里面再起一层 sandbox-exec 失败。返回 (成立, 说明)。"""
+    if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
+        return False, "这台机器上没有 sandbox-exec（F 格只在 macOS 上跑）"
+    outer = subprocess.run(OUTER_SANDBOX + ["/usr/bin/true"], capture_output=True, timeout=60).returncode
+    nested = subprocess.run(OUTER_SANDBOX + OUTER_SANDBOX + ["/usr/bin/true"], capture_output=True, timeout=60).returncode
+    return outer == 0 and nested != 0, f"外层一层的退出码={outer} 套两层的退出码={nested}"
+
+
+def p4_facts(r, written, cmd):
+    """一格的事实：文件写没写进去、CLI 有没有拒绝开会话（没有 init、退出码非 0）、目标调用有没有被拒的证据。"""
+    ev = bash_ev(r, cmd, many=True)
+    return {"written": written, "refused": r.get("init") is None and not r.get("timed_out") and r.get("exit") not in (0, None),
+            "blocked": blocked(ev, written), "exit": r.get("exit")}
+
+
+def p4_verdict(preflight_ok, f1, f2):
+    """F1、F2 的结论（方案第 8 节）。纯函数。返回 (F1 的状态, F2 的状态, 说明)。
+    预检没过 → 两格都没测成；F2 里文件没写进去 → 沙箱其实起来了、造法无效，两格都没测成；
+    F1 写进去了 → F1 FAIL（这个键拦不住）；F1 没写进去，还要有正面证据：CLI 拒绝开会话，或者目标调用每一次都被拒 → F1 PASS；
+    都没有（模型没发调用、超时）→ F1 没测成。F2 是对照：文件写进去了就是 PASS。"""
+    if not preflight_ok: return "INCONCLUSIVE", "INCONCLUSIVE", "预检没过：套两层 sandbox-exec 没有失败，造法不成立（候选：PATH 里换一个一运行就失败的 sandbox-exec 替身）"
+    if not f2["written"]: return "INCONCLUSIVE", "INCONCLUSIVE", "F2 里工作区外的文件没写进去：沙箱其实起来了，造法无效"
+    if f1["written"]: return "FAIL", "PASS", "F1 里文件写进去了：failIfUnavailable 拦不住，enforced 不能照「能开起来」推"
+    if f1["refused"] or f1["blocked"]: return "PASS", "PASS", ("CLI 没开会话" if f1["refused"] else "目标命令被拒、没执行")
+    return "INCONCLUSIVE", "PASS", "F1 里文件没写进去，但既没看到 CLI 拒绝开会话，也没有目标调用被拒的证据"
+
+
+def r2x_p4():
+    ok, why = nested_sandbox_preflight()
+    record(info_if(ok), "R2X P4 预检：外层 sandbox-exec 里再套一层失败（不经 claude）", why)
+    out_dir = R.p("p4-out"); os.makedirs(out_dir, exist_ok=True)        # 工作区外、不在沙箱写白名单里的临时目录
+    facts = {}
+    for key, fail_if in (("f1", True), ("f2", False)):
+        target = os.path.join(out_dir, key)
+        cmd = f"touch {target}"
+        if not ok:
+            facts[key] = {"written": False, "refused": False, "blocked": False, "exit": None}
+            continue
+        st = sandbox_settings(local_binding=True)
+        if fail_if: st["sandbox"]["failIfUnavailable"] = True
+        else: st["sandbox"].pop("failIfUnavailable", None)
+        s, _ = product_settings(f"p4-{key}", "allow-sandboxed", expect(bash=[cmd]), extra=st)
+        r = claude(f"p4-{key}", ask_bash(cmd), settings=s, launch_prefix=OUTER_SANDBOX)
+        facts[key] = p4_facts(r, os.path.exists(target), cmd)
+        stderr = open(os.path.join(R.out, f"p4-{key}-stderr.txt")).read().lower()
+        init = r.get("init") or {}
+        caps = init.get("capabilities")
+        facts[key].update({"stderr 提到 sandbox": "sandbox" in stderr, "init 的顶层键": sorted(init),
+                           "init.capabilities 的键": sorted(caps) if isinstance(caps, dict) else caps})
+    f1, f2, why = p4_verdict(ok, facts["f1"], facts["f2"])
+    detail = json.dumps(facts, ensure_ascii=False)
+    settle("R2X P4 F1 沙箱起不来时（带 failIfUnavailable: true）CLI 不开会话或命令不执行", f1, f"{why}；{detail}")
+    settle("R2X P4 F2 对照：去掉 failIfUnavailable，工作区外的文件写得进（证明沙箱确实没起）", f2, detail)
+
+
 # R2X 的格子表（审查 1/F-5）：部分 → {格名: 处理器}。--part 的可选值、每部分跑哪几格、按格名分派都只从这里来
 R2X_CELLS = {
     "d": {"k1": lambda: r2x_kill_case("k1"), "k2": lambda: r2x_kill_case("k2"), "k3": lambda: r2x_kill_case("k3"),
-          "b1": lambda: r2x_background("b1", BACKGROUND_OFF), "b2": lambda: r2x_background("b2", BACKGROUND_OFF)},
-    "rest": {"c1": g4_c1, "n1": lambda: r2x_background("n1", None), "tools": r2x_tool_lists},
+          "b1": lambda: r2x_background("b1"), "b2": lambda: r2x_background("b2")},
+    "rest": {"c1": g4_c1, "n1": lambda: r2x_background("n1", NO_BACKGROUND_SWITCH), "tools": r2x_tool_lists},
     "net": {"p1": lambda: r2x_net("p1"), "p2": lambda: r2x_net("p2"), "p4": lambda: r2x_net("p4")},
+    "recheck": {"g1": g1, "g8": g8, "g7": g7_product_cells},             # G1 10、G8 8、G7 9 个实例，带产品设置重跑
+    "p4": {"f": r2x_p4},                                                  # f 是 F1、F2 两格（F2 是 F1 的对照，一起跑），2 个实例
     "skill": {"l": r2x_repo_load, "k3b": lambda: r2x_inline("k3b"), "k3c": lambda: r2x_inline("k3c"),     # l 是 L1、L2 两格（L2 是 L1 的对照，一起跑）
               "k2c": r2x_allowed_tools, "h1": r2x_hook_vs_hook},
 }
@@ -4390,11 +4577,11 @@ def selftest_g2_matrix():
 
 
 def selftest_child_env():
-    """P14：起实例时不筛选环境变量，只设 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1（覆盖继承来的值）；用例故意不设要在 skip 里点名。
+    """P14：起实例时不筛选环境变量，只设产品的两个开关（自动记忆、后台任务，覆盖继承来的值）；用例故意不设要在 skip 里点名。
     结果包里只记 CLAUDE*、ANTHROPIC* 的名字，不记值。走真的 run_instance（claude() 用它）与 Live 起子进程，看子进程实际拿到的环境。"""
-    assert LAUNCH_ENV_SET == {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}, "P14：只设这一个，别的不动"
+    assert LAUNCH_ENV_SET == {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}, "P14、D5：只设这两个，别的不动"
     marker, value = "t0g-plugins-" + secrets.token_hex(4), "t0g-envval-" + secrets.token_hex(4)
-    planted = {"CLAUDE_CODE_PLUGIN_DIRS": marker, "CLAUDE_CODE_SAFE_MODE": marker, "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0",
+    planted = {"CLAUDE_CODE_PLUGIN_DIRS": marker, "CLAUDE_CODE_SAFE_MODE": marker, "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0",
                "CLAUDE_T0G_SELFTEST": value, "ANTHROPIC_T0G_SELFTEST": value, "CLAUDE_CONFIG_DIR": value}
     saved = {k: os.environ.get(k) for k in planted}
     os.environ.update(planted)
@@ -4403,7 +4590,7 @@ def selftest_child_env():
     try:
         out, _, _, _, _ = run_instance([sys.executable, "-c", show], "selftest-env")
         got = json.loads(out)
-        assert got["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "记忆开关设成 1，覆盖继承来的 0"
+        assert got["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == got["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1", "两个开关都设成 1，覆盖继承来的 0"
         assert got["CLAUDE_CODE_PLUGIN_DIRS"] == got["CLAUDE_CODE_SAFE_MODE"] == marker, "P14：不筛选，继承来的照传"
         assert got["CLAUDE_T0G_SELFTEST"] == got["ANTHROPIC_T0G_SELFTEST"] == got["CLAUDE_CONFIG_DIR"] == value
         assert got["PATH"] == os.environ["PATH"] and got["HOME"] == os.environ["HOME"]
@@ -4416,10 +4603,17 @@ def selftest_child_env():
             assert seen and seen[1]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1" and seen[1]["CLAUDE_T0G_SELFTEST"] == value, seen
         finally:
             live.close()
+        live = Live("selftest-env-live-skip", None, env_skip=NO_BACKGROUND_SWITCH,
+                    argv=[sys.executable, "-c", show.replace("print(json.dumps({", "print(json.dumps({'type': 'env', **{").replace("}),flush", "}}),flush") + ";import sys;sys.stdin.read()"])
+        try:
+            seen = live.wait(lambda o: o.get("type") == "env", 10)
+            assert seen and seen[1]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] is None and seen[1]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "常驻会话也能点名不设后台开关"
+        finally:
+            live.close()
         write_env_names(R.out)
         text = open(os.path.join(R.out, "env-names.json")).read()
         rec = json.loads(text)
-        assert set(planted) <= set(rec["names"]) and "PATH" not in rec["names"] and rec["set_for_instances"] == ["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]
+        assert set(planted) <= set(rec["names"]) and "PATH" not in rec["names"] and rec["set_for_instances"] == ["CLAUDE_CODE_DISABLE_AUTO_MEMORY", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"]
         assert value not in text and marker not in text, "结果包里只有变量名，没有值"
     finally:
         for k, v in saved.items():
@@ -4695,7 +4889,7 @@ def selftest_r2x():
     assert not subagent_ran_target([ag, {"id": "b", "name": "Bash", "input": {"command": C}, "parent": None}], C), "有子代理调用，但目标 Bash 不在它里面"
     assert not subagent_ran_target([ag, {"id": "b", "name": "Bash", "input": {"command": C}, "parent": "zz"}], C), "父调用对不上"
     assert subagent_ran_target([{**ag, "name": "Task"}, {"id": "b", "name": "Bash", "input": {"command": C}, "parent": "a1"}], C), "Task 也认"
-    assert BACKGROUND_OFF == {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
+    assert NO_BACKGROUND_SWITCH == ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",)
     # --part net：p1 只出变量名（值跨行、带口令也不漏），p2 只拿标准输出的头 8 个字节（隧道的标准错误不进输出），p4 的本机监听
     assert R2X_PARTS["net"] == ("p1", "p2", "p4")
     secret = "S3CR3T-" + secrets.token_hex(4)
@@ -4716,7 +4910,9 @@ def selftest_r2x():
         assert got == "T0G-HELLO" and count[0] == 1, (got, count)
     finally:
         stop()
-    assert child_env("t", BACKGROUND_OFF)["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1" and child_env("t", BACKGROUND_OFF)["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    assert child_env("t")["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1" and child_env("t")["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "产品环境两个开关都设"
+    n1_env = child_env("t", skip=NO_BACKGROUND_SWITCH)
+    assert "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" not in n1_env and n1_env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "n1、g7-bg 只去掉后台开关"
 
 
 def selftest_r2x_skill():
@@ -4872,15 +5068,15 @@ def selftest_run_isolation():
     assert foreign_roots(["/h/.npmrc"], parent, own) == [] and foreign_roots(["/h/iwork-t0g-aaaa1111/x"], parent, own) == []
 
 
-def selftest_r2x_settings():
+def selftest_product_settings():
     """R2X 各格带产品设置（architect 47737e78）：dontAsk、产品那样的沙箱、hook 的 timeout 与 onFailure；net 的对照格能换沙箱设置。"""
-    st = json.load(open(r2x_settings("st-r2x-set", "allow")[0]))
+    st = json.load(open(product_settings("st-r2x-set", "allow")[0]))
     assert st["permissions"]["defaultMode"] == "dontAsk" and st["sandbox"]["enabled"] and st["sandbox"]["network"].get("allowLocalBinding") is True, st
     h = st["hooks"]["PreToolUse"][0]["hooks"][0]
     assert h["timeout"] == HOOK_TIMEOUT_SECS and h["onFailure"] == "block"
-    st2 = json.load(open(r2x_settings("st-r2x-set2", "allow", extra=sandbox_settings())[0]))
+    st2 = json.load(open(product_settings("st-r2x-set2", "allow", extra=sandbox_settings())[0]))
     assert "allowLocalBinding" not in st2["sandbox"]["network"], "对照：给了 extra 就用它"
-    assert json.load(open(r2x_settings("st-r2x-set3", "allow", session_start=True)[0]))["hooks"].get("SessionStart"), "别的参数照传"
+    assert json.load(open(product_settings("st-r2x-set3", "allow", session_start=True)[0]))["hooks"].get("SessionStart"), "别的参数照传"
 
 
 def selftest_r2x_sandbox_and_cells():
@@ -4940,11 +5136,61 @@ def selftest_prompts():
     assert last(unprompted_probe("Skill", "st-pr5")["prompt"]) == "iwork-t0g-none" and last(unprompted_probe("EnterWorktree", "st-pr6")["prompt"]) == "st-pr6"
 
 
+def selftest_recheck_and_p4():
+    """script6 第一批：G1d′ 与 BashBg 记录格、沙箱在场的证据、P4 的判定、产品设置、列进程不经 ps -ax。每样配反例。"""
+    init_, res_ = {"type": "system", "subtype": "init", "plugins": []}, {"type": "result"}
+    run = lambda events, ok=True: {"init": init_ if ok else None, "timed_out": False, "exit": 0, "events": events, "tool_uses": [], "tool_results": {}}
+    assert g1_agent_shape_verdict(run([init_, res_]))[0] == "PASS"
+    assert g1_agent_shape_verdict(run([init_, {"type": "system", "subtype": "task_started", "is_backgrounded": True}, res_]))[0] == "FAIL", "子代理进了后台"
+    assert g1_agent_shape_verdict(run([init_, res_, init_, res_]))[0] == "FAIL", "两个 init、两个 result：后台跑完又起了一轮"
+    assert g1_agent_shape_verdict(run([init_, res_], ok=False))[0] == "INCONCLUSIVE"
+    cmd = "sleep 20; touch /w/g1-bg"
+    use = {"id": "u1", "name": "Bash", "input": {"command": cmd, "run_in_background": True}, "parent": None}
+    rbg = {**run([init_, res_]), "tool_uses": [use], "tool_results": {"u1": {"is_error": True, "text": "run_in_background is disabled"}}}
+    status, label, detail = g1_bashbg_record(rbg, cmd, [{"input": {"tool_use_id": "u1"}}])
+    assert status == "INFO" and '"每次都进了 hook": true' in detail and "run_in_background is disabled" in detail and '"run_in_background"' in detail, detail
+    assert g1_bashbg_record({**rbg, "tool_uses": []}, cmd, [])[0] == "INCONCLUSIVE", "没有目标调用：没测成"
+    assert '"每次都进了 hook": false' in g1_bashbg_record(rbg, cmd, [])[2]
+    assert G1_COMMAND_PROBES == ("Bash", "Agent", "BashBg") and G1_EXPECTED_TOOLS == 24
+    # 沙箱在场：退出码写下来了、不是 0、文件没出现
+    assert sandbox_was_present("1\n", False) and not sandbox_was_present("0\n", False) and not sandbox_was_present("1", True)
+    assert not sandbox_was_present(None, False), "命令没跑到那一步：不算证据"
+    assert sandbox_probe_prefix("/o/x", "/w/x.rc") == "touch /o/x 2>/dev/null; echo $? > /w/x.rc; "
+    # P4 判定表
+    f = lambda written=False, refused=False, blocked=False: {"written": written, "refused": refused, "blocked": blocked, "exit": 0}
+    assert p4_verdict(False, f(), f(written=True))[:2] == ("INCONCLUSIVE", "INCONCLUSIVE"), "预检没过"
+    assert p4_verdict(True, f(refused=True), f())[:2] == ("INCONCLUSIVE", "INCONCLUSIVE"), "F2 没写进去：造法无效"
+    assert p4_verdict(True, f(written=True), f(written=True))[:2] == ("FAIL", "PASS"), "F1 写进去了：拦不住"
+    assert p4_verdict(True, f(refused=True), f(written=True))[:2] == ("PASS", "PASS")
+    assert p4_verdict(True, f(blocked=True), f(written=True))[:2] == ("PASS", "PASS")
+    assert p4_verdict(True, f(), f(written=True))[:2] == ("INCONCLUSIVE", "PASS"), "F1 没写进去但没有正面证据"
+    ok, why = nested_sandbox_preflight()
+    assert isinstance(ok, bool) and why, why
+    if sys.platform == "darwin": assert "外层一层的退出码=0" in why, f"外层全放行的 sandbox-exec 自己起得来：{why}"
+    # R2X 的新部分：recheck 三项、p4 一项，按名字分派
+    assert R2X_PARTS["recheck"] == ("g1", "g8", "g7") and r2x_handler("g7") is g7_product_cells and r2x_handler("f") is r2x_p4
+    # 产品设置：dontAsk、产品沙箱（failIfUnavailable 在）、hook 的 timeout 与 onFailure
+    st = json.load(open(product_settings("st-prod", "allow-sandboxed", expect(bash=["x"]))[0]))
+    assert st["permissions"]["defaultMode"] == "dontAsk" and st["sandbox"]["enabled"] and "failIfUnavailable" in st["sandbox"]
+    assert st["hooks"]["PreToolUse"][0]["hooks"][0]["onFailure"] == "block" and " allow-sandboxed " in st["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    # 列进程：不经 ps，自己、自己的父进程与进程组都对；子进程查得到
+    rows = ps_table()
+    me = next(r for r in rows if r["pid"] == os.getpid())
+    assert me["ppid"] == os.getppid() and me["pgid"] == os.getpgid(0) and me["comm"], me
+    child = subprocess.Popen(["/bin/sleep", "30"])
+    try:
+        kid = next((r for r in descendants(os.getpid()) if r["pid"] == child.pid), None)
+        assert kid and os.path.basename(kid["comm"]) == "sleep", kid
+    finally:
+        child.kill(); child.wait()
+
+
 def selftest():
     selftest_r2x()
+    selftest_recheck_and_p4()
     selftest_run_isolation()
     selftest_prompts()
-    selftest_r2x_settings()
+    selftest_product_settings()
     selftest_r2x_sandbox_and_cells()
     selftest_r2x_skill()
     # 根目录名只有小写字母和数字（CLI 编码工作目录时会改写 _ 之类的字符，R2 分析 6.2）
@@ -5577,7 +5823,8 @@ def main():
     ap.add_argument("--part", choices=list(R2X_PARTS), default=None,
                     help="只给 --only R2X：d = k1–k3、b1、b2（5 个实例，先跑，定 D2、D5）；rest = c1、n1 与工具清单（8 个）；"
                          "net = 沙箱联网 p1、p2、p4 两格（4 个）；skill = 仓库技能加不加载 L1、L2，内联命令 K3b、K3c，"
-                         "allowed-tools 的故障探针 K2c，插件 hook 对 iWork hook H1（6 个，日常账号下 K2c 另加 1 个预检）；不给就都跑")
+                         "allowed-tools 的故障探针 K2c，插件 hook 对 iWork hook H1（6 个，日常账号下 K2c 另加 1 个预检）；"
+                         "recheck = G1、G8、G7 非 cfg 格带产品设置重跑（27 个）；p4 = macOS 上沙箱起不来时 F1、F2（2 个）；不给就都跑")
     ap.add_argument("--cell", default=None,
                     help="只给 --only R2X：逗号分隔的格名，只跑这几格（优先于 --part），如 --cell k3（带产品设置重记 k3、k4，1 个实例）")
     ap.add_argument("--quick", action="store_true", help="G2 只跑普通 Bash 一行（结论只能是 INCONCLUSIVE，不能进已验证表）")

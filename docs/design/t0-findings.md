@@ -686,7 +686,7 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 - 产品的永久禁用工具名单：`cargo run -p iwork-core --example dump-disabled-tools > disabled-tools.json`（现在 11 个：RemoteTrigger、CronCreate、CronDelete、CronList、ScheduleWakeup，加 P13 定的 DesignSync、PushNotification、SendMessage、Workflow、EnterWorktree、ExitWorktree）。名单从 T07 的工具登记表导出，和产品启动参数是同一个函数的结果，脚本里不另抄。
 
 **环境变量**（P14，产品负责人 2026-11-12 定：不筛选；方案 16.1「交给脚本的」）：
-- 脚本起每个实例时环境原样继承，不删任何变量，只设上 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`（覆盖继承来的值）；每个实例的设置里都带 `autoMemoryDirectory`，把自动记忆改到本次根目录里的一个空目录。只有 G5 里写明「不设开关」「只改道」的格子不照这个做。
+- 脚本起每个实例时环境原样继承，不删任何变量，只设上产品的两个开关 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`、`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`（覆盖继承来的值；后一个是 2026-11-13 script6 加的，D5）；每个实例的设置里都带 `autoMemoryDirectory`，把自动记忆改到本次根目录里的一个空目录。有意不设的格子在脚本里写明理由：G5 里写明「不设开关」「只改道」的格子不设记忆开关；`g7-bg` 与 R2X `n1` 不设后台开关（只记厂商默认行为，M2 开放后台任务时用）。
 - **同一时间只跑一个**：脚本启动时对 `/tmp/iwork-t0g.lock` 加排他锁，实测和 `--selftest` 都拿，拿不到就打印「不跑：另一次 iwork-t0g 正在跑（…pid=…）」并以非零退出码结束，等那一次结束再跑。`--selftest` 的根目录默认建在系统临时目录下，不和实测的根目录、结果包放在家目录同一处；原有文件核对的变化要是全落在别的运行的根目录里，说明里会点明（仍不算 PASS）。
 - **R2、R3 都要从普通终端起，不要从 Claude Code 里起**：Claude Code 会把用户 `settings.json` 的 `env` 块放进自己的环境，从它里面起的实例会带上用户的插件（S0 第一轮就是这样，量的不是产品配置，以 R2、R3 为准）。脚本开头看一眼环境里有没有 `CLAUDE_CODE_PLUGIN_DIRS`（只看有没有，不读值），有就拒绝运行，`summary.txt` 里写一行「拒绝运行」和原因，换一个普通终端再跑。
 - 每个实例的 `system/init.plugins` 都过方案 3.5 那条核对（`@builtin` 之外的都报）。报了东西，`summary.txt` 里多一行「环境不干净」，那一格记 `INCONCLUSIVE`，不下别的结论；出现这种行就交 supervisor。
@@ -721,6 +721,15 @@ R2 合计约 120 个实例，加 6 个探查（每条命令 1 个）。
 | 7 | `python3 tools/t0/iwork-t0g.py --only R2X --cell k3` | 1 | 带产品设置重记 k3、k4（和第 6 条一起跑）。2026-11-12 起 R2X 的 k1–k3、b1、b2、n1、工具清单几格都带产品那样的设置（`dontAsk`、`allowedDomains: ["*"]`、`allowLocalBinding` 的沙箱，hook 的 `timeout` 与 `onFailure: block`），和 net、①c′ ①d′ 一样；之前那次 `--part d` 不带，`init` 报 `default`、命令不在沙箱里跑。看 `R2X k3` 一行：「停 CLI 5 秒后 sleep 还在」「CLI 30 秒内退出了」，以及 `k4` 里 `sleep`、它的父进程、CLI 的父进程号、进程组号、会话号（命令进了沙箱之后，`sleep` 的父进程可能是沙箱的包装进程而不是 shell，照实记）。k、b、n 几格的探针只放行登记的那条命令、沙箱外重试一律拒绝；流里出现过带 `dangerouslyDisableSandbox` 的 Bash（哪怕被拒了），那一格记 `INCONCLUSIVE`（缺「流里没有带 dangerouslyDisableSandbox 的 Bash 调用」），不当成带沙箱的证据。`--cell` 收逗号分隔的格名，只跑这几格；拼错、空项（如 `k3,`）、重复的格名在启动时（拿锁之前）就报错退出 |
 
 R2 补测合计约 35 个实例，加 4 个探查与 K2c 的 1 个预检。第 2 条先跑，别的可以晚一点。
+
+**script6 第一批**（2026-11-13，architect 47737e78 的格子表；日常账号、普通终端；「产品设置」= `dontAsk` + 产品那样的沙箱 + 两个环境开关，跑命令的格探针只放行登记的那条、沙箱外重试一律拒绝）
+
+| 序 | 命令 | 约几个实例 | 看什么 |
+| --- | --- | --- | --- |
+| 1 | `python3 tools/t0/iwork-t0g.py --selftest` | 0 | 最后一行 `selftest ok` |
+| 2 | `python3 tools/t0/iwork-t0g.py --only R2X --part recheck` | 27（G1 10、G8 8、G7 9） | G1、G8、G7 带产品设置重跑，各行看什么同上面 R2 的 G1、G7、G8。新加三行：`G1d′`（关后台任务时子代理一个 `init`、一个 `result`、`is_backgrounded` 不为真，要 `PASS`）；`G1 BashBg`（只记录：`run_in_background` 被拒的报错原文、每次调用进没进 hook、输入里的字段名）；`G1a′`（只记录：产品设置下 `init.tools` 的个数，预期 24）。复核要盯：`G1d` 在 `dontAsk` 加沙箱下仍是 `PASS`；`G8e`、`G8g` 在 `dontAsk` 下成立（P11 d2）；`G7e` 里 shell 的父进程号、进程组号、会话号和 R2X `k3`、`k4` 对得上。G7 的 `g7-bg`、`g7c2-bad`、`g7-cfg-*` 这里不跑（有意不带产品设置，理由写在脚本里） |
+| 3 | `python3 tools/t0/iwork-t0g.py --only R2X --part p4` | 2（加 1 个不经 claude 的预检） | macOS 上「沙箱起不来时 CLI 会不会停」（T06 方案第 8 节 F 格）。`R2X P4 预检`：外层全放行的 `sandbox-exec` 自己起得来、里面再套一层失败，预检没过两格都记 `INCONCLUSIVE`（造法不成立，回 architect 换替身的造法）。`R2X P4 F1`（带 `failIfUnavailable: true`）：要 `PASS`（CLI 没开会话，或命令被拒）；`FAIL` = 工作区外的文件写进去了，这个键拦不住。`R2X P4 F2`（去掉这个键，对照）：要 `PASS`（文件写进去了，证明沙箱确实没起）。两行的说明里另记 stderr 提没提 sandbox、`init` 的顶层键与 `capabilities` 的键（只有键名） |
+| 4 | `python3 tools/t0/iwork-t0g.py --only R2X --cell k3` | 1 | 同上面 R2 补测第 7 行；k1–k3 的命令开头先往工作区外写一笔，说明里「沙箱在场」要是真（退出码非 0、文件没出现）；不是真这一格记 `INCONCLUSIVE` |
 
 **R3：一次性环境**（16.2 第 5 项，搭法见下一小节）
 
