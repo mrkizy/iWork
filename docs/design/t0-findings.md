@@ -445,6 +445,7 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 | 要什么 | 为什么 |
 | --- | --- |
 | 日常账号已经登录 Claude Code（`claude` 能正常回话） | 所有组都要 |
+| 一个普通终端（不是 Claude Code 里的终端），环境里没有 `CLAUDE_CODE_PLUGIN_DIRS` 这类变量 | P14：脚本不筛选环境变量，干净的环境靠这一条（见下文「环境变量」） |
 | `python3`（3.9 以上，只用标准库）；macOS 上要有 `lsof`（系统自带） | 脚本本身；进程清理靠 `lsof` 找工作目录在根目录里的进程，找不到就不开跑 |
 | `cargo`、`npm`、`curl`、`nc`、`gh` 在 `PATH` 上 | G4 的 ②、⑦、⑧；没有的那几行会是 `FAIL`（命令自己退出码非零），记下就行，不影响别的行 |
 | G4 ④ 的语料 `--corpus corpus.json` | 来自 `cargo run -p iwork-core --example dump-credential-corpus > corpus.json`（T07 交付，已合入）。不加 `--corpus` 时 G4 ④ 记 `INCONCLUSIVE` |
@@ -492,7 +493,7 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 - 语料：`cargo run -p iwork-core --example dump-credential-corpus > corpus.json`（现在 44 行，清单并集 36 个条目）；
 - 产品的永久禁用工具名单：`cargo run -p iwork-core --example dump-disabled-tools > disabled-tools.json`（现在 11 个：RemoteTrigger、CronCreate、CronDelete、CronList、ScheduleWakeup，加 P13 定的 DesignSync、PushNotification、SendMessage、Workflow、EnterWorktree、ExitWorktree）。名单从 T07 的工具登记表导出，和产品启动参数是同一个函数的结果，脚本里不另抄。
 
-**环境变量**（方案 3.1a）：脚本起每个实例时照 3.1a 的表处理环境：去掉 `CLAUDE_CODE_PLUGIN_DIRS`、`CLAUDE_CODE_SIMPLE`、`CLAUDE_CODE_SAFE_MODE`、`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`、`CLAUDE_CODE_MESSAGING_SOCKET`、`CLAUDE_CODE_MESSAGING_TOKEN`，设上 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`（覆盖继承来的值）；登录、代理、证书、`PATH`、`HOME` 不动。只按名字删、按固定值设，不读值。故意不照做的只有三处：G5 环境行、记忆行的两个对照格，和 G9d（它测的就是 `CLAUDE_CODE_SAFE_MODE`）。结果包的 `env-names.json` 记下脚本启动时 `CLAUDE*`、`ANTHROPIC*` 开头的变量名，以及去掉了哪几个、设上了哪几个，只有名字，没有值。S0 第一轮的实例是在带着用户插件变量的终端里跑的，量的不是产品配置，以 R2、R3 为准。
+**环境变量**（P14，产品负责人 2026-11-12 定：不筛选）：脚本起每个实例时环境原样继承，只设上 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`（覆盖继承来的值），不读任何变量的值。所以 **R2、R3 都要从普通终端起，不要从 Claude Code 里起**：Claude Code 会把用户 `settings.json` 的 `env` 块放进自己的环境，从它里面起的脚本和实例全带着（S0 第一轮就是这样，实例里多了用户的插件，量的不是产品配置，以 R2、R3 为准）。结果包的 `env-names.json` 记下脚本启动时 `CLAUDE*`、`ANTHROPIC*` 开头的变量名（只有名字，没有值），跑完看一眼：里面不该有 `CLAUDE_CODE_PLUGIN_DIRS`、`CLAUDE_CODE_SIMPLE`、`CLAUDE_CODE_SAFE_MODE`、`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`、`CLAUDE_CODE_MESSAGING_*` 这类，有就说明不是干净环境，交 supervisor 再定这次的结果算不算数。
 
 **G4 两轮不逐格直接比**：第一轮的 `--modes` 默认是 `default,dontAsk`，G4 取第一个，跑在 `default` 下；R2 起默认是 `dontAsk`，G4 跑在 `dontAsk` 下。两轮之间某一格变了，先分清是权限模式换了、脚本改了，还是 CLI 的行为变了；t0-findings 里写 G4 结论时注明模式，产品只用 `dontAsk`，以 R2 的为准。
 
@@ -506,11 +507,11 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 | 4 | `python3 tools/t0/iwork-t0g.py --only G7` | 16 | `G7c'` 两行（只发 initialize 时 `current_permission_mode` 是 `dontAsk`；设置校验不过时的取值）；`G7e`、`G7f` 对前台命令的结论；后台命令一行 |
 | 5 | `python3 tools/t0/iwork-t0g.py --only G1` | 10 | `G1d`；`g1-Agent-stream.jsonl` 里子代理是不是后台跑、有没有第二个 `result`；`G1c`、`G1f` |
 | 6 | `python3 tools/t0/iwork-t0g.py --only G8` | 8 | `G8g`（白名单里写了不存在的工具名时 `init.tools` 只剩存在的）；`G8 MCP 阳性对照`、`G8f`、`G8e` |
-| 7 | `python3 tools/t0/iwork-t0g.py --only G5` | 4 | `G5 环境行` 一行 `PASS`（照 3.1a 去掉插件变量后，测试插件不在 `init.plugins` 里；对照格带着变量时它在）；`G5 记忆行` 一行 `PASS`（设了关记忆的开关，模型答不出记忆文件里的暗号；对照格不设开关时答得出）。任何一行 `FAIL` 回 architect（S6 那一组合入之前要两行都 `PASS`）。日常账号下 G5 别的几行一定是 `INCONCLUSIVE`（只在一次性环境跑），正常。记忆格会在 `~/.claude/projects/<本次工作目录>/memory/` 里放一个带暗号的 `MEMORY.md`，跑完连同这 4 个实例的会话记录一起删掉，只动这一个目录 |
+| 7 | `python3 tools/t0/iwork-t0g.py --only G5` | 4 | **先不跑**：G5 环境行、记忆行等方案第 3 版定了再改脚本（P14 之后环境行的测试格不再去掉插件变量，现在跑一定是 `FAIL`，说明不了问题）。改完再补跑 |
 
-R2 合计约 113 个实例，加 6 个探查。
+R2 合计约 109 个实例，加 5 个探查（G5 那一行补跑时再加 4 个和 1 个探查）。
 
-**R3：一次性环境**（16.2 第 5 项，搭法见下一小节）
+**R3：一次性环境**（16.2 第 5 项，搭法见下一小节）。命令里带 G5，要等 G5 环境行、记忆行照方案第 3 版改完再跑。
 
 | 命令 | 约几个实例 | 看什么 |
 | --- | --- | --- |

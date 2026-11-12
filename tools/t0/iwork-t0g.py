@@ -172,24 +172,19 @@ def find_owned(token):
     return sorted(pids)
 
 
-# 起 CLI 的环境（方案 3.1a 的表，真值在方案那一节与产品的 launch/env.rs，这里照抄）：脚本常在 Claude Code 的终端里跑，
-# 环境带着用户 settings.json 的 env 块，S0 的实例因此都带着用户的插件，测的不是产品的配置。
-# 照名字删、照固定值设，不读任何变量的值；登录、代理、证书、PATH、HOME 不动。表只在这一处，别处都经 child_env 取
-LAUNCH_ENV_REMOVE = ("CLAUDE_CODE_PLUGIN_DIRS", "CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_SAFE_MODE", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
-                     "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN")
-LAUNCH_ENV_SET = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}       # 覆盖继承来的值（设成 0 会把自动记忆强制打开）
+# 起 CLI 的环境：P14（产品负责人 2026-11-12 定）不筛选环境变量，其余原样继承，只设上关自动记忆的开关（覆盖继承来的值：
+# 设成 0 会把自动记忆强制打开）。不读任何变量的值。干净的环境靠运行说明保证（从普通终端起，不要从 Claude Code 里起），
+# 结果包里的 env-names.json 供事后核对。表只在这一处，别处都经 child_env 取
+LAUNCH_ENV_SET = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
 # 结果包里记哪些环境变量的名字（只记名字，不记值）
 RECORDED_ENV_PREFIXES = ("CLAUDE", "ANTHROPIC")
 
 
 def child_env(token, extra=None, skip=()):
-    """起子进程（claude 实例、替身与对照）用的环境（方案 3.1a）。纯函数（只读 os.environ）。
-    继承脚本自己的环境，叠上用例给的变量（extra），再照表处理：LAUNCH_ENV_REMOVE 里的删掉，LAUNCH_ENV_SET 里的设成固定值；
-    最后加归属标记。表压过 extra：用例要故意不照表做（G5 两个对照格、G9d 的 SAFE_MODE），得在 skip 里点名那个变量，
-    这时删除项照 extra / 继承的值留着，设置项不设、继承来的也去掉。所有起实例的地方都经它，不各写一份。"""
+    """起子进程（claude 实例、替身与对照）用的环境。纯函数（只读 os.environ）。继承脚本自己的环境（P14：不筛选），
+    叠上用例给的变量（extra），再把 LAUNCH_ENV_SET 里的设成固定值（压过 extra 与继承来的值），最后加归属标记。
+    用例要故意不设（G5 记忆行的对照格）就在 skip 里点名，这时继承来的值也去掉。所有起实例的地方都经它，不各写一份。"""
     env = {**os.environ, **(extra or {})}
-    for name in LAUNCH_ENV_REMOVE:
-        if name not in skip: env.pop(name, None)
     for name, value in LAUNCH_ENV_SET.items():
         if name in skip: env.pop(name, None)
         else: env[name] = value
@@ -198,10 +193,10 @@ def child_env(token, extra=None, skip=()):
 
 
 def env_names_record():
-    """要写进结果包的环境变量记录：CLAUDE*、ANTHROPIC* 开头的名字，以及起实例时照 3.1a 去掉了哪几个、设上了哪几个。只有名字，没有值。"""
+    """要写进结果包的环境变量记录：脚本启动时 CLAUDE*、ANTHROPIC* 开头的名字（事后核对这次是不是在干净的环境里跑的），
+    以及起实例时设上了哪几个。只有名字，没有值。"""
     names = sorted(k for k in os.environ if k.startswith(RECORDED_ENV_PREFIXES))
-    return {"names": names, "removed_for_instances": [k for k in LAUNCH_ENV_REMOVE if k in os.environ],
-            "set_for_instances": sorted(LAUNCH_ENV_SET)}
+    return {"names": names, "set_for_instances": sorted(LAUNCH_ENV_SET)}
 
 
 def write_env_names(out_dir):
@@ -2778,8 +2773,7 @@ def g9():
     c_safe, sentinel = f"touch {R.obs}/g9-safe", f"{R.obs}/g9-safe"
     s2, logdir2 = make_settings("g9-safe", "deny", extra=g2_settings_extra(default_cfg()), timeout=HOOK_TIMEOUT_SECS, on_failure="block",
                                 session_start=True)
-    r2 = claude("g9-safe", ask_bash(c_safe), settings=s2, extra_args=["--tools", "Bash"], env={"CLAUDE_CODE_SAFE_MODE": "1"},
-                env_skip=("CLAUDE_CODE_SAFE_MODE",))      # 这一格测的就是这个变量：故意不照 3.1a 删
+    r2 = claude("g9-safe", ask_bash(c_safe), settings=s2, extra_args=["--tools", "Bash"], env={"CLAUDE_CODE_SAFE_MODE": "1"})
     settle("G9d 环境里有 CLAUDE_CODE_SAFE_MODE=1：被拒的命令仍不执行", denied_verdict(r2, c_safe, os.path.exists(sentinel)),
            f"{denied_ev(r2, c_safe)['why']} hook 被调用={bool(hook_calls(logdir2))}（没被调用而命令也没执行 = 靠 CLI 自己的默认拒绝守住）")
 
@@ -3230,43 +3224,36 @@ def selftest_g2_matrix():
 
 
 def selftest_child_env():
-    """方案 3.1a：起实例时照表删变量、设记忆开关，登录类变量照传；用例故意不照做要在 skip 里点名。
+    """P14：起实例时不筛选环境变量，只设 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1（覆盖继承来的值）；用例故意不设要在 skip 里点名。
     结果包里只记 CLAUDE*、ANTHROPIC* 的名字，不记值。走真的 run_instance（claude() 用它）与 Live 起子进程，看子进程实际拿到的环境。"""
-    # 期望值照方案 3.1a 的表独立写一份（改表要改方案那一节，也要改这里）
-    expected_removed = {"CLAUDE_CODE_PLUGIN_DIRS", "CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_SAFE_MODE", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
-                        "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"}
-    assert set(LAUNCH_ENV_REMOVE) == expected_removed and LAUNCH_ENV_SET == {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}, "和方案 3.1a 的表对不上"
+    assert LAUNCH_ENV_SET == {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}, "P14：只设这一个，别的不动"
     marker, value = "t0g-plugins-" + secrets.token_hex(4), "t0g-envval-" + secrets.token_hex(4)
-    planted = {**{k: marker for k in expected_removed}, "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0",
+    planted = {"CLAUDE_CODE_PLUGIN_DIRS": marker, "CLAUDE_CODE_SAFE_MODE": marker, "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0",
                "CLAUDE_T0G_SELFTEST": value, "ANTHROPIC_T0G_SELFTEST": value, "CLAUDE_CONFIG_DIR": value}
     saved = {k: os.environ.get(k) for k in planted}
     os.environ.update(planted)
-    watched = sorted(expected_removed) + ["CLAUDE_CODE_DISABLE_AUTO_MEMORY", "CLAUDE_T0G_SELFTEST", "ANTHROPIC_T0G_SELFTEST", "CLAUDE_CONFIG_DIR", "PATH", "HOME"]
+    watched = sorted(planted) + ["PATH", "HOME"]
     show = f"import json,os;print(json.dumps({{k: os.environ.get(k) for k in {watched!r}}}),flush=True)"
     try:
         out, _, _, _, _ = run_instance([sys.executable, "-c", show], "selftest-env")
         got = json.loads(out)
-        assert all(got[k] is None for k in expected_removed), f"表里点名的都删了：{got}"
         assert got["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "记忆开关设成 1，覆盖继承来的 0"
-        assert got["CLAUDE_T0G_SELFTEST"] == got["ANTHROPIC_T0G_SELFTEST"] == got["CLAUDE_CONFIG_DIR"] == value, "对照：别的 CLAUDE*、ANTHROPIC*、CLAUDE_CONFIG_DIR 照传"
+        assert got["CLAUDE_CODE_PLUGIN_DIRS"] == got["CLAUDE_CODE_SAFE_MODE"] == marker, "P14：不筛选，继承来的照传"
+        assert got["CLAUDE_T0G_SELFTEST"] == got["ANTHROPIC_T0G_SELFTEST"] == got["CLAUDE_CONFIG_DIR"] == value
         assert got["PATH"] == os.environ["PATH"] and got["HOME"] == os.environ["HOME"]
-        # 表压过用例给的变量；用例故意不照做要在 skip 里点名（G9d、G5 的两个对照格）
-        assert "CLAUDE_CODE_SAFE_MODE" not in child_env("t", {"CLAUDE_CODE_SAFE_MODE": "1"}), "用例给了也删：表压过 extra"
-        assert child_env("t", {"CLAUDE_CODE_SAFE_MODE": "1"}, skip=("CLAUDE_CODE_SAFE_MODE",))["CLAUDE_CODE_SAFE_MODE"] == "1"
-        assert child_env("t", skip=("CLAUDE_CODE_PLUGIN_DIRS",))["CLAUDE_CODE_PLUGIN_DIRS"] == marker, "环境行对照格：原样带着插件变量"
-        assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in child_env("t", skip=("CLAUDE_CODE_DISABLE_AUTO_MEMORY",)), "记忆行对照格：不设开关，继承来的也去掉"
-        assert child_env("t", skip=("CLAUDE_CODE_PLUGIN_DIRS",))["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "skip 只放开点名的那一个"
+        assert child_env("t", {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"})["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "用例给了别的值也压过"
+        assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in child_env("t", skip=("CLAUDE_CODE_DISABLE_AUTO_MEMORY",)), "点名不设：继承来的也去掉"
+        assert child_env("t", {"CLAUDE_CODE_SAFE_MODE": "1"})["CLAUDE_CODE_SAFE_MODE"] == "1", "用例给的变量照传（G9d）"
         live = Live("selftest-env-live", None, argv=[sys.executable, "-c", show.replace("print(json.dumps({", "print(json.dumps({'type': 'env', **{").replace("}),flush", "}}),flush") + ";import sys;sys.stdin.read()"])
         try:
             seen = live.wait(lambda o: o.get("type") == "env", 10)
-            assert seen and seen[1]["CLAUDE_CODE_PLUGIN_DIRS"] is None and seen[1]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1" and seen[1]["CLAUDE_T0G_SELFTEST"] == value, seen
+            assert seen and seen[1]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1" and seen[1]["CLAUDE_T0G_SELFTEST"] == value, seen
         finally:
             live.close()
         write_env_names(R.out)
         text = open(os.path.join(R.out, "env-names.json")).read()
         rec = json.loads(text)
-        assert {"CLAUDE_CODE_PLUGIN_DIRS", "CLAUDE_T0G_SELFTEST", "ANTHROPIC_T0G_SELFTEST", "CLAUDE_CONFIG_DIR"} <= set(rec["names"]) and "PATH" not in rec["names"]
-        assert rec["removed_for_instances"] == list(LAUNCH_ENV_REMOVE) and rec["set_for_instances"] == ["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]
+        assert set(planted) <= set(rec["names"]) and "PATH" not in rec["names"] and rec["set_for_instances"] == ["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]
         assert value not in text and marker not in text, "结果包里只有变量名，没有值"
     finally:
         for k, v in saved.items():
