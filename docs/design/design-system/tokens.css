@@ -259,7 +259,7 @@
   --sidebar-w-max: 390px; /* 完整侧栏上限；运行时还要保证主区域至少 480px */
   --sidebar-w-rail: 64px; /* 仅头像形态的固定宽度；拖到约 160px 以下收成它 */
   --anchor-rail-w: 44px;  /* 消息锚点导轨宽 */
-  --anchor-gutter: 52px;  /* 宽形态下对话区左内边距 = 导轨 44 + 间隙 8（ui-m1 2a 第 11 条）；主区域 < 600px 切窄形态，回到 ≥ 620px 切回 */
+  --anchor-gutter: 52px;  /* 宽形态下头像左边缘到主区域左边缘 = 导轨 44 + 间隙 8（ui-m1 2a 第 11 条）；对话区左内边距 = calc(var(--anchor-gutter) - 24px)（扣掉行自带的 24px），右内边距 0；主区域 < 600px 切窄形态，回到 ≥ 620px 切回 */
   --content-max: 720px;   /* 对话内容列 */
   --composer-max: 760px;  /* 输入框 */
 }
