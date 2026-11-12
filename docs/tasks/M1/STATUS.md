@@ -72,6 +72,18 @@
 - T04 组 3：reviewer `5166257f` 第 2 轮初步看到 F-1 没修全（已有注册项更新失败：macOS bootout 失败、Linux daemon-reload 失败后下一轮早退），托管实例 set(true) 自 bootout 也成立；等它记账。
 - AGENTS.md 加了「加删素材后清 .vitest-cache」（`9dcac56`）。
 
+**11-13 01:00 进展（最新，冲突以这里为准；产品负责人睡前授权「除非重大、必须他做的决策，今晚由 supervisor 代裁定」）**：
+- 合入：实例锁偶发（842c594）、S6-3（7c2eaf2，三轮）。
+- 产品负责人睡前新定（附录 B）：T10a P1 a / P2 a / P3 接受；T04p PD-1 只出 .app 与 Linux 目录、PD-2 自签证书形态进 CI、PD-3 演练用专用 macOS 账号；仓库技能文件头 hook 照常跑；专用目录设置全部是用户决定并接受两处后果；管理员托管设置记已知限制。
+- T06：S6-4 `4ea1efca` 在做（取消、D5、P4、故障注入；先写交错属性测试）；3.1d（V3）实测方案定稿（51 实例：日常 22、一次性 29，表在 scratchpad/script6-cells.md）。
+- T09 2b：第 8 轮 UI 过（7/F-1 已关），代码 `e036441c` 在审 4518cbb；过了 + CI 绿就合入，之后侧栏拖动单开一组。
+- T10a：义务表第 1 轮 6 条（5 blocking），`da37bce2` 在改；8036b426 审。0a.10 十处已定归 T10a。
+- T04p：方案第 2 轮 4 条（2 blocking），`a2c030fb` 在改，9a5980a0 审；实施者定 e5b90212（含 T09 步 10），等方案过 + T09 2b 合入后开工。
+- T10f A：`b57765cc` 本地 WIP 0f4d51e，在套锁跑全量，过了推送送审。
+- **待产品负责人手验**（醒后）：T09 实时界面 iwork-client PID 80649（4518cbb，long-tool-turn，上限 60），日志 /private/tmp/claude-501/-Users-lilithgames-LiWork-iWork--cao-worktrees-b20e49db/a6310d3b-7a47-4ed4-a967-24c5a7f5c6c2/scratchpad/live-4518cbb.log：① 侧栏点开长工具回合对话，用滚轮滚，`grep -a SetVisibleRows` 见 by_user=true；② 锚点跳审批后两端各翻到头、接回最新；③ 拖侧栏/悬停展开导轨/全开真实切换；④ 真窗口缩不到 880 以下、真切自动/全开/自填模型 ID 时药丸正常。预览 http://127.0.0.1:1447/preview.html。
+- 待转设计窗口：tokens.css 259 行 --sidebar-w-max 注释「主区域至少 480」与 12b 的 568 不一致；P4 沙箱依赖缺失时的提示文案。
+- 小卡待排：iwork-ipc slow_consumer 延迟阈值在高负载下偶发；CI 主干 rust-cache 常 miss。
+
 **23:15 进展（最新，冲突以这里为准）**：
 - 合入：S6-1（e949487）、T04 组 3（139b6f2，1/F-7 拆到新卡 T04p）、CI 余量（d7ac6bc）、偶发修复 replan（287529e）、S6-2（13b1d6c）。main CI 43228979354 绿。
 - 产品负责人晚间新定（全部已进需求/AGENTS）：厂商能力提案 V1（默认开放，三种情况才关，已接受例外保留）、V2（保证面 = 底线 + 有副作用动作 + 越界读）、V3 选 b（专用配置目录），并定**用户亲手写进专用目录的设置是用户的决定**、接受两处后果（恶意仓库持久化写入；唯一出口与底线不可配置的例外）；管理员托管设置记已知限制不测；P16 改回仓库内容照常加载（iWork 读 CLAUDE.md/AGENTS.md、复制 .claude/skills|commands|agents 成插件）；PD-5 内联命令不关；P17 接受；技能文件头 hook 照常跑；PD-A1 名字照原样；D2=b″；D5=a（M1 关后台、M2 开放）；回合定义「到运行时静下来」；M1 回合中消息 0 档排队、不做停止并发送；Linux 出生时间刻度边界接受；Q7=a；最小窗口宽度 880（设计 12b）；我定 P4=a、超三轮授权（修法明确、范围不扩大可自行开轮）。
