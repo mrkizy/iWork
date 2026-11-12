@@ -11,8 +11,21 @@ use std::sync::OnceLock;
 use iwork_ipc::peer::{ImageId, MANIFEST_FILE, Manifest, Want, file_image_ids};
 use package_support::*;
 
-/// 装配在自己建的目录里放的归属标记（scripts/lib/owned-paths.sh 的 OWNED_MARK）。
-const OWNED_MARK: &str = ".iwork-owned";
+/// 装配在成品目录里的记录与锁（scripts/lib/owned-paths.sh 的 JOURNAL_NAME、assemble-release.sh 的 LOCK）。
+const JOURNAL: &str = ".iwork-journal";
+const LOCK: &str = ".iwork-assemble.lock";
+
+/// 照装配脚本的写法往记录里追加一条：<名字>（相对成品目录）是装配的，身份是 <路径> 现在的设备号:inode。
+fn journal_add(dist: &Path, name: &str, identity_of: &Path) {
+    use std::io::Write;
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(identity_of).unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(dist.join(JOURNAL))
+        .unwrap();
+    writeln!(f, "add\t{name}\t{}:{}", m.dev(), m.ino()).unwrap();
+}
 
 /// 跑脚本用的 bash：macOS 上是系统自带的 3.2（打包命令实际用的就是它），别的平台用 PATH 里的。
 const BASH: &str = if cfg!(target_os = "macos") {
@@ -166,12 +179,12 @@ fn digest_tree(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     out
 }
 
-/// 成品目录里除了装配自己的归属标记之外的条目。
+/// 成品目录里除了装配自己的记录与锁之外的条目。
 fn dist_entries(dist: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dist)
         .map(|rd| {
             rd.map(|e| e.unwrap().file_name().into_string().unwrap())
-                .filter(|n| n != OWNED_MARK)
+                .filter(|n| n != JOURNAL && n != LOCK)
                 .collect()
         })
         .unwrap_or_default();
@@ -322,14 +335,23 @@ fn interrupted_run_never_exposes_unchecked() {
         &hang,
         &format!("#!/bin/sh\ntouch '{}'\nexec sleep 30\n", marker.display()),
     );
-    let mut child = i.command().arg("--check").arg(&hang).spawn().unwrap();
+    // 装配在锁里重新跑自己：杀整个进程组（只杀外面那层，锁里的那层会接着跑、一直拿着锁）
+    let mut child = {
+        use std::os::unix::process::CommandExt;
+        i.command()
+            .arg("--check")
+            .arg(&hang)
+            .process_group(0)
+            .spawn()
+            .unwrap()
+    };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while !marker.exists() {
         assert!(std::time::Instant::now() < deadline, "核对没开始");
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     // SAFETY：只对自己起的子进程发信号
-    unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
+    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
     let _ = child.wait();
     assert_eq!(digest_tree(&i.product()), good, "成品路径上还是原来的好包");
     assert!(
@@ -353,8 +375,11 @@ fn interrupted_run_never_exposes_unchecked() {
         dist_entries(&i.dist)
     );
 
-    // ③ 断在两次改名之间：成品不在、留底在 → 改回去（用一个核对必然失败的运行来触发开头的恢复，不发布新的）
+    // ③ 断在两次改名之间：成品不在、留底在 → 改回去（用一个核对必然失败的运行来触发开头的恢复，不发布新的）。
+    //   照脚本的次序造出来：先记下留底（身份就是成品的），再改名
     let current = digest_tree(&i.product());
+    let form = form_dir.file_name().unwrap().to_str().unwrap().to_owned();
+    journal_add(&i.dist, &format!("{form}/.old-99999"), &i.product());
     std::fs::rename(i.product(), form_dir.join(".old-99999")).unwrap();
     let fake_check = i.root.join("check-fails");
     write_executable(&fake_check, "#!/bin/sh\nexit 1\n");
@@ -368,9 +393,10 @@ fn interrupted_run_never_exposes_unchecked() {
     assert_eq!(digest_tree(&i.product()), current, "留底改回了成品");
     assert!(!form_dir.join(".old-99999").exists());
 
-    // ④ 成品在、留底也在 → 删留底
+    // ④ 成品在、留底也在（记录里有它）→ 删留底
     let leftover = form_dir.join(".old-88888");
     std::fs::create_dir_all(leftover.join("x")).unwrap();
+    journal_add(&i.dist, &format!("{form}/.old-88888"), &leftover);
     let out = i
         .command()
         .arg("--check")
@@ -578,7 +604,7 @@ fn form_dir_symlink_is_refused_and_untouched() {
     let elsewhere = i.root.join("unrelated");
     std::fs::create_dir_all(elsewhere.join(".old-important")).unwrap();
     std::fs::write(elsewhere.join(".old-important/keep.txt"), "keep").unwrap();
-    // 先正常装配一次：成品目录是装配建的（带归属标记）；再把形态目录换成指向别处的链接
+    // 先正常装配一次：成品目录、形态目录都在装配的记录里；再把形态目录换成指向别处的链接
     ok(&i.assemble());
     let form = if cfg!(target_os = "macos") {
         "unsigned"
@@ -590,7 +616,11 @@ fn form_dir_symlink_is_refused_and_untouched() {
     let before = digest_tree(&elsewhere);
     let out = i.assemble();
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    assert!(stderr(&out).contains("不是真目录"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("不在装配的记录里"),
+        "{}",
+        stderr(&out)
+    );
     assert_eq!(digest_tree(&elsewhere), before, "链接目标没被动过");
 }
 
@@ -602,9 +632,119 @@ fn foreign_dist_dir_is_refused() {
     std::fs::write(i.dist.join("someone-elses.txt"), "keep").unwrap();
     let out = i.assemble();
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    assert!(stderr(&out).contains("没有归属标记"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("没有本工具的记录"),
+        "{}",
+        stderr(&out)
+    );
     assert_eq!(
         std::fs::read_to_string(i.dist.join("someone-elses.txt")).unwrap(),
         "keep"
     );
+}
+
+/// 审查 2/F-1：别人的非空目录里恰好有叫 .iwork-owned 的普通文件（旧的归属标记），里面的 .staging-* 也有 → 标记不算
+/// 证明：拒绝，整个目录原样留着。
+#[test]
+fn foreign_dir_with_marker_file_is_refused() {
+    let i = Inputs::new("a");
+    std::fs::create_dir_all(i.dist.join(".staging-1/keep")).unwrap();
+    // 两层都放旧的标记文件：旧的认领办法会认下成品目录、把 .staging-1 当成上一次的暂存整个删掉（reviewer 实测）
+    std::fs::write(i.dist.join(".iwork-owned"), "").unwrap();
+    std::fs::write(i.dist.join(".staging-1/.iwork-owned"), "").unwrap();
+    std::fs::write(i.dist.join(".staging-1/keep/file"), "keep").unwrap();
+    let before = digest_tree(&i.dist);
+    let out = i.assemble();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(digest_tree(&i.dist), before, "一个字节都没动");
+}
+
+/// 审查 2/F-1：成品目录有装配的记录，但里面有一个记录里没有的 .staging-*（同名不等于是装配建的）→ 不删，停下报错。
+#[test]
+fn unrecorded_staging_is_refused_and_kept() {
+    let i = Inputs::new("a");
+    ok(&i.assemble());
+    std::fs::create_dir_all(i.dist.join(".staging-424242")).unwrap();
+    std::fs::write(i.dist.join(".staging-424242/keep"), "keep").unwrap();
+    let out = i.assemble();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("不在装配的记录里"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(
+        std::fs::read_to_string(i.dist.join(".staging-424242/keep")).unwrap(),
+        "keep"
+    );
+}
+
+/// 审查 2/F-1：形态目录是装配的，但里面有一个不在记录里的 .old-personal-backup（人放的备份），成品不在 → 不删、
+/// 也不当成留底提升为成品；停下报错。
+#[test]
+fn unrecorded_backup_is_neither_deleted_nor_promoted() {
+    let i = Inputs::new("a");
+    ok(&i.assemble());
+    let form_dir = i.product().parent().unwrap().to_path_buf();
+    let backup = form_dir.join(".old-personal-backup");
+    std::fs::create_dir_all(&backup).unwrap();
+    std::fs::write(backup.join("keep"), "keep").unwrap();
+    // 成品在、成品不在两种情形都试：前者以前会删它，后者以前会把它改名成成品
+    for remove_product in [false, true] {
+        if remove_product {
+            std::fs::remove_dir_all(i.product()).unwrap();
+        }
+        let out = i.assemble();
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(
+            stderr(&out).contains("不在装配的记录里"),
+            "{}",
+            stderr(&out)
+        );
+        assert_eq!(
+            std::fs::read_to_string(backup.join("keep")).unwrap(),
+            "keep"
+        );
+        assert_eq!(i.product().exists(), !remove_product, "没把备份提升为成品");
+    }
+}
+
+/// 审查 2/F-1：一个装配正在跑（核对卡住，它的暂存在记录里）时再起一个：拿不到锁就停，不收拾、不删正在用的暂存。
+/// 对照：前一个结束后再起，照常发布。
+#[test]
+fn concurrent_assembly_is_refused_and_active_staging_kept() {
+    let i = Inputs::new("a");
+    let hang = i.root.join("check-hangs");
+    let marker = i.root.join("check-started");
+    let release = i.root.join("release");
+    write_executable(
+        &hang,
+        &format!(
+            "#!/bin/sh\ntouch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.05; done\nexit 1\n",
+            marker.display(),
+            release.display()
+        ),
+    );
+    let mut first = i.command().arg("--check").arg(&hang).spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !marker.exists() {
+        assert!(std::time::Instant::now() < deadline, "核对没开始");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let staging: Vec<String> = dist_entries(&i.dist)
+        .into_iter()
+        .filter(|n| n.starts_with(".staging-"))
+        .collect();
+    assert_eq!(staging.len(), 1, "{staging:?}");
+    let out = i.assemble();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("另一个装配正在用"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(i.dist.join(&staging[0]).exists(), "正在用的暂存没被删");
+    std::fs::write(&release, "").unwrap();
+    assert_eq!(first.wait().unwrap().code(), Some(1));
+    ok(&i.assemble());
 }

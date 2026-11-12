@@ -111,28 +111,71 @@ fn dest_free_refuses_existing_and_linked_parents() {
     ok(&sh(&d, r#"dest_free "$1/real/new""#));
 }
 
-/// 认领目录：不存在就建并打标记；带标记的认；空的真目录认并打标记；链接、有别人东西的目录不认。
+/// 认领受管根（审查 2/F-1）：不存在就建目录与记录；空的真目录建记录；带记录的认；链接、没有记录的非空目录（哪怕里面
+/// 有旧的 .iwork-owned 标记）不认，里面什么都不写。
 #[test]
-fn claim_dir_rules() {
+fn journal_root_rules() {
     let (_t, d) = tmp();
     ok(&sh(
         &d,
-        r#"claim_dir "$1/new"; [ -f "$1/new/.iwork-owned" ]"#,
+        r#"journal_root "$1/new"; [ -f "$1/new/.iwork-journal" ]"#,
     ));
-    ok(&sh(&d, r#"claim_dir "$1/new""#));
+    ok(&sh(&d, r#"journal_root "$1/new""#));
     std::fs::create_dir_all(d.join("empty")).unwrap();
     ok(&sh(
         &d,
-        r#"claim_dir "$1/empty"; [ -f "$1/empty/.iwork-owned" ]"#,
+        r#"journal_root "$1/empty"; [ -f "$1/empty/.iwork-journal" ]"#,
     ));
     std::fs::create_dir_all(d.join("foreign")).unwrap();
-    std::fs::write(d.join("foreign/x"), "x").unwrap();
-    assert!(!sh(&d, r#"claim_dir "$1/foreign""#).status.success());
-    std::os::unix::fs::symlink(d.join("new"), d.join("link")).unwrap();
-    assert!(!sh(&d, r#"claim_dir "$1/link""#).status.success());
+    std::fs::write(d.join("foreign/.iwork-owned"), "").unwrap();
+    assert!(!sh(&d, r#"journal_root "$1/foreign""#).status.success());
     assert!(
-        !d.join("foreign/.iwork-owned").exists(),
+        !d.join("foreign/.iwork-journal").exists(),
         "不认的目录里什么都没写"
+    );
+    std::os::unix::fs::symlink(d.join("new"), d.join("link")).unwrap();
+    assert!(!sh(&d, r#"journal_root "$1/link""#).status.success());
+}
+
+/// 记录认身份（设备号:inode），不认名字：同名的换了一个（删了重建）就不认；最后一条是 del 就不认；改名之前记下改名
+/// 之后的名字（身份不变），改名之后照认。
+#[test]
+fn journal_knows_by_identity_and_last_record() {
+    let (_t, d) = tmp();
+    let verdict = |script: &str| {
+        let out = sh(
+            &d,
+            &format!(r#"journal_root "$1/root"; {script} && echo known || echo unknown"#),
+        );
+        ok(&out).trim().to_owned()
+    };
+    assert_eq!(
+        verdict(r#"mkdir "$1/root/a"; journal_add "$1/root/a"; journal_knows "$1/root/a""#),
+        "known"
+    );
+    assert_eq!(
+        verdict(r#"rmdir "$1/root/a"; mkdir "$1/root/a"; journal_knows "$1/root/a""#),
+        "unknown",
+        "同名的换了一个"
+    );
+    assert_eq!(
+        verdict(
+            r#"mkdir "$1/root/b"; journal_add "$1/root/b"; journal_del "$1/root/b"; journal_knows "$1/root/b""#
+        ),
+        "unknown",
+        "最后一条是 del"
+    );
+    assert_eq!(
+        verdict(
+            r#"mkdir "$1/root/c"; journal_add "$1/root/c2" "$(_ident "$1/root/c")"; mv "$1/root/c" "$1/root/c2"; journal_knows "$1/root/c2""#
+        ),
+        "known",
+        "改名不改身份"
+    );
+    assert_eq!(
+        verdict(r#"mkdir "$1/root/never"; journal_knows "$1/root/never""#),
+        "unknown",
+        "没记过"
     );
 }
 

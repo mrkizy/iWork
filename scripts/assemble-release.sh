@@ -13,6 +13,8 @@
 #
 # 成品路径上只出现核对过的包（I6）：装配、核对都在 <dist>/.staging-<进程号>/ 里做，过了才改名到位：
 #   旧成品改名成 .old-<进程号> → 暂存的改名到位 → 删 .old-*。断在哪一步，下一次开头都能收拾（见 recover）。
+# 哪些是本工具的，只看 <dist>/.iwork-journal 里的记录（名字 + 设备号:inode，见 lib/owned-paths.sh）；每次改名之前先
+# 记下改名之后的样子。同一个 <dist> 同时只能有一个装配在跑（<dist>/.iwork-assemble.lock）；收拾残留也在锁里做。
 set -euo pipefail
 # 空数组用 ${a[@]+"${a[@]}"} 展开：macOS 自带的 bash 3.2 在 set -u 下把空数组的 "${a[@]}" 当成未定义
 
@@ -29,6 +31,7 @@ DAEMON_SIGN_ID=dev.iwork.daemon
 die() { echo "assemble-release: $2" >&2; exit "$1"; }
 usage() { die 2 "用法：$0 [--app <Tauri 的 .app>] --client <程序> --daemon <程序> --check <check-install> --dist <成品目录>（--app 只在 macOS 上要）"; }
 
+ARGS=("$@")
 APP="" CLIENT="" DAEMON="" CHECK="" DIST=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -65,30 +68,50 @@ else
   FORM=unsigned; NAME=iWork.app
 fi
 
-# 成品目录：不存在就新建；已有的必须是这个脚本建的（带归属标记）或空的真目录，链接、别人的目录一律不碰
-claim_dir "$DIST"
+# 成品目录：不存在就新建（连同记录）；已有的必须带本工具的记录，或是空的真目录；链接、别人的目录一律不碰
+journal_root "$DIST"
 DIST="$(canonical "$DIST")"
+JOURNAL_ROOT=$DIST
 OWNED=("$DIST")
 
-# 上一次断在半路留下的（只认带归属标记的目录里的东西）：没验完的暂存删掉；断在两次改名之间的，把旧成品改回去；
-# 新成品已到位的，删留底。不认识的东西一律停下，不删
+# 同一个 <dist> 一次只许一个装配：在锁里重新跑自己（锁拿不到就停，不等）。收拾残留在锁里，不会删到正在跑的暂存
+LOCK="$DIST/.iwork-assemble.lock"
+if [ "${IWORK_ASSEMBLE_LOCK_HELD:-}" != "$LOCK" ]; then
+  if _exists "$LOCK"; then [ -f "$LOCK" ] && [ ! -L "$LOCK" ] || die 1 "${LOCK} 不是普通文件，不用它"; fi
+  export IWORK_ASSEMBLE_LOCK_HELD="$LOCK"
+  rc=0
+  if command -v flock >/dev/null 2>&1; then
+    flock -n -E 75 "$LOCK" "$BASH" "$0" ${ARGS[@]+"${ARGS[@]}"} || rc=$?
+  else
+    lockf -t 0 "$LOCK" "$BASH" "$0" ${ARGS[@]+"${ARGS[@]}"} || rc=$?
+  fi
+  [ "$rc" = 75 ] && die 1 "另一个装配正在用 ${DIST}，这一次不做"
+  exit "$rc"
+fi
+
+# 上一次断在半路留下的：只动记录里有、身份也对得上的。没验完的暂存删掉；断在两次改名之间的，把旧成品改回去；
+# 新成品已到位的，删留底。同名却不在记录里的（别人放的备份、别的东西）一律不动，停下报错
 recover() {
   local entry f product old
   for entry in "$DIST"/.staging-*; do
     _exists "$entry" || continue
-    is_marked_dir "$entry" || die 1 "${entry} 不是装配建的暂存目录（没有归属标记，或是链接），不删"
-    own "$entry"; owned_rm "$entry"
+    journal_knows "$entry" || die 1 "${entry} 不在装配的记录里（不是装配建的，或已经被换过），不删；确认没用后手工处理"
+    owned_rm "$entry"; journal_del "$entry"
   done
   for f in unsigned signed linux; do
     _exists "$DIST/$f" || continue
-    claim_dir "$DIST/$f"
+    journal_knows "$DIST/$f" && real_dir "$DIST/$f" || die 1 "${DIST}/${f} 不在装配的记录里，不碰它"
     product="$DIST/$f/iWork.app"
     [ "$f" = linux ] && product="$DIST/$f/iwork"
     for old in "$DIST/$f"/.old-*; do
       _exists "$old" || continue
-      real_dir "$old" || die 1 "${old} 不是真目录（是链接或文件），不碰它"
-      own "$old"
-      if _exists "$product"; then owned_rm "$old"; else owned_mv "$old" "$product"; fi
+      journal_knows "$old" && real_dir "$old" || die 1 "${old} 不在装配的记录里（不是装配留的底），不碰它"
+      if _exists "$product"; then
+        owned_rm "$old"; journal_del "$old"
+      else
+        journal_add "$product" "$(_ident "$old")"
+        owned_mv "$old" "$product"; journal_del "$old"
+      fi
     done
   done
 }
@@ -96,9 +119,9 @@ recover
 
 STAGE="$DIST/.staging-$$"
 owned_mkdir "$STAGE"
-mark_owned_dir "$STAGE"
-# 失败、被中断：只删自己的暂存；成品路径没被动过。被 kill -9 时删不到，下一次开头的 recover 删
-trap 'owned_rm "$STAGE"' EXIT
+journal_add "$STAGE"
+# 失败、被中断：只删自己的暂存；成品路径没被动过。被 kill -9 时删不到，下一次开头的 recover 按记录删
+trap 'owned_rm "$STAGE"; journal_del "$STAGE"' EXIT
 
 codesign_args=()
 EXPECT_LEAF=()
@@ -155,16 +178,22 @@ if [ "$FORM" = signed ]; then
   codesign --verify --deep --strict "$PKG" || die 1 "整包验签不过，不发布"
 fi
 
-# 发布：两次改名。形态目录是这个脚本建的（带归属标记）；成品位置上原来的东西必须是真目录（上一次发布的成品）
-claim_dir "$DIST/$FORM"
+# 发布：两次改名。形态目录、成品位置上原来的东西都必须在记录里（上一次发布的成品）；每次改名之前先记下改名之后
+# 的样子（改名不改 inode），断在任何一步，recover 都按记录收拾
+if _exists "$DIST/$FORM"; then
+  journal_knows "$DIST/$FORM" && real_dir "$DIST/$FORM" || die 1 "${DIST}/${FORM} 不在装配的记录里，不碰它"
+else
+  owned_mkdir "$DIST/$FORM"; journal_add "$DIST/$FORM"
+fi
 PRODUCT="$DIST/$FORM/$NAME"
 OLD="$DIST/$FORM/.old-$$"
 own "$PKG"
 if _exists "$PRODUCT"; then
-  real_dir "$PRODUCT" || die 1 "${PRODUCT} 不是真目录（是链接或文件），不碰它"
-  own "$PRODUCT"
+  journal_knows "$PRODUCT" && real_dir "$PRODUCT" || die 1 "${PRODUCT} 不在装配的记录里（不是装配发布的），不碰它"
+  journal_add "$OLD" "$(_ident "$PRODUCT")"
   owned_mv "$PRODUCT" "$OLD"
 fi
+journal_add "$PRODUCT" "$(_ident "$PKG")"
 owned_mv "$PKG" "$PRODUCT"
-_exists "$OLD" && owned_rm "$OLD"
+if _exists "$OLD"; then owned_rm "$OLD"; journal_del "$OLD"; fi
 echo "assemble-release: 已发布 ${PRODUCT}"
