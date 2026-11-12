@@ -461,7 +461,7 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 | --- | --- | --- | --- | --- | --- |
 | 1 | 日常账号 | `python3 tools/t0/iwork-t0g.py --selftest` | 15 秒 | 0 | 最后一行 `selftest ok`；跑完家目录下没有 `iwork-t0g-*` 残留 |
 | 2 | 日常账号 | `python3 tools/t0/iwork-t0g.py --only G2 --quick` | 半小时左右 | 不超过 33：探查 1 + 选定配置（外层保护预检 5 + 普通 Bash 一行 11）+ 去掉 onFailure 的对照（预检 5 + read 行 11） | `外层保护 [...]` 那 2 行：哪几样保护在这台机器上成立。`G2 硬格子`、`G2 范围记录` 两行一定是 `INCONCLUSIVE`（`--quick` 不许进已验证表），正常 |
-| 3 | 日常账号 | `python3 tools/t0/iwork-t0g.py`（全量，不带 `--disposable-env`） | 半天 | 约 195（不带 `--corpus`），见下面的细账 | G1、G3、G4、G6、G7、G8、G9a～c 的结论；G2 的格子哪些因为外层保护没成立而没跑；G5、G9d 一定是 `INCONCLUSIVE`（要一次性环境），正常；G2 只在一次性环境跑的那些格子（沙箱外重试、工作目录外的读的故障格、补充格、「不问工具」记录行、出沙箱格对）和两行总结论也一定是 `INCONCLUSIVE`，正常 |
+| 3 | 日常账号 | `python3 tools/t0/iwork-t0g.py`（全量，不带 `--disposable-env`） | 半天 | 约 200（不带 `--corpus`），见下面的细账 | G1、G3、G4、G6、G7、G8、G9a～c 的结论；G2 的格子哪些因为外层保护没成立而没跑；G5、G9d 一定是 `INCONCLUSIVE`（要一次性环境），正常；G2 只在一次性环境跑的那些格子（沙箱外重试、工作目录外的读的故障格、补充格、「不问工具」记录行、出沙箱格对）和两行总结论也一定是 `INCONCLUSIVE`，正常 |
 | 4 | 一次性环境 | 见下文 R3 | — | — | **G2 的 PASS 只有这一步拿得到** |
 | 5 | 日常账号，人在旁边 | `python3 tools/t0/iwork-t0g.py --only G3 --long` | 30～45 分钟 | 13（探查 1 + 预检 5 + 六个取值 6 + 睡眠时钟 1） | 前面六个取值各睡 90 秒，要先跑完（十几分钟）才出提示；看到「看到这行后 30 秒内合盖」就合盖，睡满 5 分钟再打开；看 `G3 睡眠后命令没执行` 一行和它的墙钟用时。步 2 里外层保护的 Bash 两项没成立的话，这一步整组不跑（运行门），改到一次性环境里加 `--disposable-env` 跑 |
 | 6 | 日常账号 | 16.2 第 2 项（没有终端时的登录）：照方案里那一行命令跑 | 1 分钟 | 0（只起 `claude auth login`，用空的配置目录，不动现有登录） | 有没有打印登录网址、有没有自己开浏览器、有没有因为没终端报错退出 |
@@ -481,7 +481,7 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 | G2 | 日常账号约 105 | 候选配置 = `--modes` 里的每个模式（默认 `dontAsk`，方案 3.4a 写死）× 2：选定配置（带 `onFailure: "block"`）与去掉 onFailure 的对照。选定配置：预检 5、普通 Bash 一行 11，全 `PASS` 才往下跑；日常账号下能跑的是 bash 另 5 行、write、read、mcp 共 66 格，加「工作目录外的读」的允许格 1、只读命令的记录格 1、四个拒绝格、只读命令的失败格 1。对照：预检 5、read 行 11（结果只记 INFO，不计入总结论）。只在一次性环境跑的格子在日常账号下不起实例 |
 | G3 | 11 | 预检 5 + 六个 timeout 取值，每个 hook 睡 90 秒 |
 | G4 | 29 + 语料行数 | 基础 17（含 ①e′、②c′ 两格对照）、最小构建 3（`--skip-builds` 就没有）、⑥ 重试 5、⑨ 全开档 3、⑩ 写工作目录外 1；联网的四条另有沙箱外对照，不起实例 |
-| G5 | 4 + 7 | 环境行、记忆行 4 个日常账号也跑；仓库设置的三种写法与对照 7 个只在 `--disposable-env` 下跑 |
+| G5 | 11 + 7 | 环境行与记忆各行 11 个日常账号也跑（守卫预检没过的行不起）；仓库设置的三种写法与对照 7 个只在 `--disposable-env` 下跑 |
 | G6 | 10 | 思考强度 6、不存在的模型 1、换模型续接 2、换系统提示 1 |
 | G7 | 10 + 2 × `--repeat` | 常驻会话 4（含后台命令一格）、只发 initialize 2（G7c′）、换配置续接 4、杀进程续接每次 2（默认 `--repeat 3`） |
 | G8 | 8 | 工具清单 4、MCP 3、白名单里写了不存在的工具名 1（G8g） |
@@ -493,7 +493,11 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 - 语料：`cargo run -p iwork-core --example dump-credential-corpus > corpus.json`（现在 44 行，清单并集 36 个条目）；
 - 产品的永久禁用工具名单：`cargo run -p iwork-core --example dump-disabled-tools > disabled-tools.json`（现在 11 个：RemoteTrigger、CronCreate、CronDelete、CronList、ScheduleWakeup，加 P13 定的 DesignSync、PushNotification、SendMessage、Workflow、EnterWorktree、ExitWorktree）。名单从 T07 的工具登记表导出，和产品启动参数是同一个函数的结果，脚本里不另抄。
 
-**环境变量**（P14，产品负责人 2026-11-12 定：不筛选）：脚本起每个实例时环境原样继承，只设上 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`（覆盖继承来的值），不读任何变量的值。所以 **R2、R3 都要从普通终端起，不要从 Claude Code 里起**：Claude Code 会把用户 `settings.json` 的 `env` 块放进自己的环境，从它里面起的脚本和实例全带着（S0 第一轮就是这样，实例里多了用户的插件，量的不是产品配置，以 R2、R3 为准）。结果包的 `env-names.json` 记下脚本启动时 `CLAUDE*`、`ANTHROPIC*` 开头的变量名（只有名字，没有值），跑完看一眼：里面不该有 `CLAUDE_CODE_PLUGIN_DIRS`、`CLAUDE_CODE_SIMPLE`、`CLAUDE_CODE_SAFE_MODE`、`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`、`CLAUDE_CODE_MESSAGING_*` 这类，有就说明不是干净环境，交 supervisor 再定这次的结果算不算数。
+**环境变量**（P14，产品负责人 2026-11-12 定：不筛选；方案 16.1「交给脚本的」）：
+- 脚本起每个实例时环境原样继承，不删任何变量，只设上 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`（覆盖继承来的值）；每个实例的设置里都带 `autoMemoryDirectory`，把自动记忆改到本次根目录里的一个空目录。只有 G5 里写明「不设开关」「只改道」的格子不照这个做。
+- **R2、R3 都要从普通终端起，不要从 Claude Code 里起**：Claude Code 会把用户 `settings.json` 的 `env` 块放进自己的环境，从它里面起的实例会带上用户的插件（S0 第一轮就是这样，量的不是产品配置，以 R2、R3 为准）。脚本开头看一眼环境里有没有 `CLAUDE_CODE_PLUGIN_DIRS`（只看有没有，不读值），有就拒绝运行，`summary.txt` 里写一行「拒绝运行」和原因，换一个普通终端再跑。
+- 每个实例的 `system/init.plugins` 都过方案 3.5 那条核对（`@builtin` 之外的都报）。报了东西，`summary.txt` 里多一行「环境不干净」，那一格记 `INCONCLUSIVE`，不下别的结论；出现这种行就交 supervisor。
+- 结果包的 `env-names.json` 记下脚本启动时 `CLAUDE*`、`ANTHROPIC*` 开头的变量名（只有名字，没有值），供事后核对。
 
 **G4 两轮不逐格直接比**：第一轮的 `--modes` 默认是 `default,dontAsk`，G4 取第一个，跑在 `default` 下；R2 起默认是 `dontAsk`，G4 跑在 `dontAsk` 下。两轮之间某一格变了，先分清是权限模式换了、脚本改了，还是 CLI 的行为变了；t0-findings 里写 G4 结论时注明模式，产品只用 `dontAsk`，以 R2 的为准。
 
@@ -507,15 +511,15 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 | 4 | `python3 tools/t0/iwork-t0g.py --only G7` | 16 | `G7c'` 两行（只发 initialize 时 `current_permission_mode` 是 `dontAsk`；设置校验不过时的取值）；`G7e`、`G7f` 对前台命令的结论；后台命令一行 |
 | 5 | `python3 tools/t0/iwork-t0g.py --only G1` | 10 | `G1d`；`g1-Agent-stream.jsonl` 里子代理是不是后台跑、有没有第二个 `result`；`G1c`、`G1f` |
 | 6 | `python3 tools/t0/iwork-t0g.py --only G8` | 8 | `G8g`（白名单里写了不存在的工具名时 `init.tools` 只剩存在的）；`G8 MCP 阳性对照`、`G8f`、`G8e` |
-| 7 | `python3 tools/t0/iwork-t0g.py --only G5` | 4 | **先不跑**：G5 环境行、记忆行等方案第 3 版定了再改脚本（P14 之后环境行的测试格不再去掉插件变量，现在跑一定是 `FAIL`，说明不了问题）。改完再补跑 |
+| 7 | `python3 tools/t0/iwork-t0g.py --only G5` | 11 | 方案 16.1 的 G5 各行（日常账号下仓库设置那几行一定是 `INCONCLUSIVE`，正常）：`G5 环境行` `PASS`（带着插件变量时核对报得出测试插件，干净时不误报）；`G5 记忆读` `PASS`（`INCONCLUSIVE` 且说明里写 P15 的，是改道没生效或产品配置那一格没有结构化证据，交 supervisor）；`G5 守卫预检` 一行写着两个预检过没过：没过的那一行（记忆写、子代理记忆）记「守卫没证实」，不在日常账号起，到 R3 再跑；`G5 记忆写` `PASS`；`G5 子代理记忆` `PASS`，或者 `INFO`「这条路不存在」。任何一行 `FAIL` 回 architect（S6 那一组合入之前要这几行过）。**这几格会在 `~/.claude/` 下建自己的目录**：本次工作目录对应的 `projects/<…g5-work>/memory/`、`agent-memory/iwork-t0g-probe-<随机>/`，跑完连同这几个实例的会话记录一起删掉，只动这几个 |
 
-R2 合计约 109 个实例，加 5 个探查（G5 那一行补跑时再加 4 个和 1 个探查）。
+R2 合计约 120 个实例，加 6 个探查（每条命令 1 个）。
 
-**R3：一次性环境**（16.2 第 5 项，搭法见下一小节）。命令里带 G5，要等 G5 环境行、记忆行照方案第 3 版改完再跑。
+**R3：一次性环境**（16.2 第 5 项，搭法见下一小节）
 
 | 命令 | 约几个实例 | 看什么 |
 | --- | --- | --- |
-| `python3 tools/t0/iwork-t0g.py --only G2,G5,G9 --disposable-env --modes dontAsk --corpus corpus.json --disabled-tools disabled-tools.json` | G2 约 228：主矩阵 9 × 11 = 99、补充格 33、出沙箱格对 2 × 36 = 72、「不问工具」记录行 12 加它开头的探查 1（2.1.322 的工具清单去掉永久禁用的 11 个之后）、对照配置的 read 行 11；一次性环境不预检。G5 11（环境行、记忆行 4，仓库设置三种写法与对照 7），G9 2。合计约 241，加 1 个探查 | `G2 硬格子 [dontAsk+block]` 一行 `PASS`（硬格子 114 个加出沙箱的 M 个全过）；`G2 范围记录 [dontAsk+block]` 一行；`G2 [...] 出沙箱这一组` 一行的 M、「这条写法没测到组合的条目」与「做过扣除的条目」（各自那一行写了 CLI 自己的调起对照里几笔、出沙箱格里几笔，请看一眼；M = 0 时整组 `INCONCLUSIVE`，要先换「条目 → 只读写法」表里的写法再跑）；`不问工具：带着永久禁用名单启动后的工具清单` 一行；read 行三个记录格写的「有执行的痕迹」；对照配置 read 行失败格的痕迹（有痕迹说明 `block` 在起作用）；`G5 环境行`、`G5 记忆行`、`G5 A --setting-sources 空值` 三行 `PASS`；`G9d` 一行 `PASS` |
+| `python3 tools/t0/iwork-t0g.py --only G2,G5,G9 --disposable-env --modes dontAsk --corpus corpus.json --disabled-tools disabled-tools.json` | G2 约 228：主矩阵 9 × 11 = 99、补充格 33、出沙箱格对 2 × 36 = 72、「不问工具」记录行 12 加它开头的探查 1（2.1.322 的工具清单去掉永久禁用的 11 个之后）、对照配置的 read 行 11；一次性环境不预检。G5 18（环境行与记忆各行 11，仓库设置三种写法与对照 7），G9 2。合计约 248，加 1 个探查 | `G2 硬格子 [dontAsk+block]` 一行 `PASS`（硬格子 114 个加出沙箱的 M 个全过）；`G2 范围记录 [dontAsk+block]` 一行；`G2 [...] 出沙箱这一组` 一行的 M、「这条写法没测到组合的条目」与「做过扣除的条目」（各自那一行写了 CLI 自己的调起对照里几笔、出沙箱格里几笔，请看一眼；M = 0 时整组 `INCONCLUSIVE`，要先换「条目 → 只读写法」表里的写法再跑）；`不问工具：带着永久禁用名单启动后的工具清单` 一行；read 行三个记录格写的「有执行的痕迹」；对照配置 read 行失败格的痕迹（有痕迹说明 `block` 在起作用）；`G5 环境行`、`G5 记忆读`、`G5 记忆写` 三行 `PASS`，`G5 子代理记忆` `PASS` 或 `INFO`「这条路不存在」，`G5 A --setting-sources 空值` `PASS`；`G9d` 一行 `PASS` |
 
 **不带 `--disabled-tools`**：「不问工具」记录行整组记 `INCONCLUSIVE`（不知道会话里有哪些工具），不拿默认工具集顶替，`G2 范围记录` 一行到不了 `PASS`。
 
