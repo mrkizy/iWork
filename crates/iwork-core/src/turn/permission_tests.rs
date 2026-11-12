@@ -89,7 +89,7 @@ struct Bench {
 impl Bench {
     fn new() -> Self {
         let slot = Arc::new(TurnSlot::default());
-        let _cancels = slot.open(turn());
+        let _cancels = slot.open(turn(), RunTag(1));
         let decider = Arc::new(Scripted::default());
         let gate = Arc::new(PermissionGate {
             slot: slot.clone(),

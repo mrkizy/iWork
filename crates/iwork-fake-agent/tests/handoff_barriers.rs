@@ -20,7 +20,9 @@ use core_support::engine_fakes::MemStore;
 use core_support::history::FakeHistory;
 use core_support::judges::*;
 use iwork_agent_acp::AcpRuntime;
-use iwork_core::turn::{SessionLine, TurnCanceller, TurnEntry, TurnPlan, TurnPorts, TurnRunError};
+use iwork_core::turn::{
+    RunTag, SessionLine, TurnCanceller, TurnEntry, TurnPlan, TurnPorts, TurnRunError,
+};
 use iwork_domain::id::TurnId;
 use iwork_domain::turn::{InterruptReason, Turn, TurnState};
 use iwork_ports::agent::{
@@ -153,6 +155,7 @@ impl<J: Judge> W<J> {
         let canceller = line.canceller();
         let plan = TurnPlan {
             changes: None,
+            run: RunTag(1),
             entry: TurnEntry::New,
             turn,
             assistant_name: "小助手".into(),
@@ -360,7 +363,7 @@ async fn ask_before_boundary_is_rejected_on_stop<J: Judge>() {
         w.store.commit_entered.load(Ordering::SeqCst)
     })
     .await;
-    canceller.cancel(t);
+    canceller.cancel(t, RunTag(1));
     let released = Instant::now();
     commit_gate.notify_one();
     assert_eq!(task.await.unwrap().unwrap(), TurnState::Cancelled);
@@ -403,7 +406,7 @@ async fn stop_right_after_sender_registered<J: Judge>() {
             w.store.commit_entered.load(Ordering::SeqCst)
         })
         .await;
-        canceller.cancel(t);
+        canceller.cancel(t, RunTag(1));
         let released = Instant::now();
         commit_gate.notify_one();
         assert_eq!(task.await.unwrap().unwrap(), TurnState::Cancelled);
@@ -433,7 +436,7 @@ async fn stop_right_after_sender_registered<J: Judge>() {
         .await;
         let commit_gate = Arc::new(Notify::new());
         *w.store.before_commit.lock().unwrap() = Some(commit_gate.clone());
-        canceller.cancel(t);
+        canceller.cancel(t, RunTag(1));
         wait_until("编排停在提交取消上", || {
             w.store.commit_entered.load(Ordering::SeqCst)
         })

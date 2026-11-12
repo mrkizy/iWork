@@ -19,8 +19,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iwork_core::turn::{
-    REQUEST_HEADER, ResumeReason, ResumeRequest, SUMMARY_HEADER, SUMMARY_RECENT_LIMIT, SessionLine,
-    TREE_NOT_CLEARED, TURN_GONE_MESSAGE, TurnEntry, TurnPlan, TurnPorts, TurnRunError, resume_note,
+    REQUEST_HEADER, ResumeReason, ResumeRequest, RunTag, SUMMARY_HEADER, SUMMARY_RECENT_LIMIT,
+    SessionLine, TREE_NOT_CLEARED, TURN_GONE_MESSAGE, TurnEntry, TurnPlan, TurnPorts, TurnRunError,
+    resume_note,
 };
 use iwork_domain::action::ToolRef;
 use iwork_domain::approval::ApprovalState;
@@ -362,6 +363,7 @@ impl<J: Judge> W<J> {
     fn plan(&self, turn: Turn) -> TurnPlan {
         TurnPlan {
             changes: None,
+            run: RunTag(1),
             entry: TurnEntry::New,
             turn,
             assistant_name: "小助手".into(),

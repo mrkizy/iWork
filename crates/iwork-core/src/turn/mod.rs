@@ -9,8 +9,8 @@ mod scheduler;
 mod settle;
 
 pub use permission::{
-    Decided, PermissionDecider, PermissionGate, STUB_DENY_MESSAGE, StubDecider, TURN_GONE_MESSAGE,
-    VoidPlanError,
+    Decided, PermissionDecider, PermissionGate, RunTag, STUB_DENY_MESSAGE, StubDecider,
+    TURN_GONE_MESSAGE, VoidPlanError,
 };
 pub use resume_note::{ResumeReason, resume_note};
 pub use resume_summary::{SUMMARY_HEADER, SummaryLimits, resume_summary};

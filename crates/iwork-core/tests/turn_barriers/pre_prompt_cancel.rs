@@ -117,7 +117,7 @@ async fn cancel_at(wait: Wait) {
 
     let task = if let Wait::BeforeSlot = wait {
         // 交接表还没建：取消先记在 TurnSlot 上
-        canceller.cancel(t);
+        canceller.cancel(t, RunTag(1));
         w.spawn(line, w.plan(turn))
     } else {
         let task = w.spawn(line, w.plan(turn));
@@ -129,7 +129,7 @@ async fn cancel_at(wait: Wait) {
             Wait::BeforeSlot => unreachable!(),
         })
         .await;
-        canceller.cancel(t);
+        canceller.cancel(t, RunTag(1));
         gate.notify_one();
         task
     };
@@ -187,7 +187,7 @@ async fn cancelled_resume_before_start_commits_nothing() {
     let t = turn.id;
     let before = w.store.all().len();
     let line = w.line();
-    line.canceller().cancel(t);
+    line.canceller().cancel(t, RunTag(1));
     let task = w.spawn(line, w.resume_plan(turn));
     let (result, _) = join_without_prompt(&w, task, "续接").await;
     assert_eq!(
@@ -206,7 +206,7 @@ async fn early_cancel_for_another_turn_is_dropped() {
     let turn = queued_turn(1);
     let w = W::<Reference>::new(&turn).await;
     let line = w.line();
-    line.canceller().cancel(queued_turn(9).id);
+    line.canceller().cancel(queued_turn(9).id, RunTag(1));
     let task = w.spawn(line, w.plan(turn.clone()));
     wait_until("prompt", || !received(&w).is_empty()).await;
     w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
@@ -230,7 +230,7 @@ async fn cancel_just_before_and_after_pass_prompt() {
         w.state(t) == Some(TurnState::Running)
     })
     .await;
-    canceller.cancel(t);
+    canceller.cancel(t, RunTag(1));
     gate.notify_one();
     let (result, _) = join_without_prompt(&w, task, "取消在裁决之前").await;
     assert_eq!(result.unwrap(), TurnState::Cancelled);
@@ -250,11 +250,96 @@ async fn cancel_just_before_and_after_pass_prompt() {
         w.ctl.prompting.load(Ordering::SeqCst)
     })
     .await;
-    canceller.cancel(t);
+    canceller.cancel(t, RunTag(1));
     gate.notify_one();
     let (result, _) = task.await.unwrap();
     assert_eq!(result.unwrap(), TurnState::Cancelled);
     assert_eq!(received(&w), [1], "裁决先过：prompt 已交出");
     assert_eq!(w.ctl.wire(), ["session/cancel"]);
     assert_eq!(trail(&w.store, t), strings(&CANCELLED_AFTER_START));
+}
+
+// ---------- 早到的取消认趟（T10a 方案 2.4「早到的取消认趟」；7.2a 的 K16） ----------
+
+/// 已中断的回合第 `run` 趟续接的 plan。
+fn resume_run(w: &W<Reference>, turn: &Turn, run: u64) -> TurnPlan {
+    TurnPlan {
+        run: RunTag(run),
+        ..w.resume_plan(turn.clone())
+    }
+}
+
+/// 第 1 趟在交出 prompt 之前被取消、原样停在 Interrupted，交接表已撤。
+async fn first_run_cancelled(w: &Arc<W<Reference>>, turn: &Turn) -> Line<Reference> {
+    let line = w.line();
+    line.canceller().cancel(turn.id, RunTag(1));
+    let task = w.spawn(line, resume_run(w, turn, 1));
+    let (result, line) = join_without_prompt(w, task, "第 1 趟").await;
+    assert_eq!(
+        result.unwrap(),
+        TurnState::Interrupted {
+            reason: InterruptReason::Crash
+        }
+    );
+    line
+}
+
+/// 第 1 趟结束、表已撤之后才到一条给（回合，第 1 趟）的取消；同一个回合第 2 趟续接照常交出 prompt。
+#[tokio::test(flavor = "current_thread")]
+async fn late_cancel_for_previous_run_does_not_hit_next_run() {
+    let turn = queued_turn(1);
+    let w = W::<Reference>::new(&turn).await;
+    let turn = interrupted_turn(&w, turn);
+    let line = first_run_cancelled(&w, &turn).await;
+    // 宿主还没记下第 1 趟结束，这时发的取消晚到了
+    line.canceller().cancel(turn.id, RunTag(1));
+
+    let task = w.spawn(line, resume_run(&w, &turn, 2));
+    wait_until("第 2 趟交出 prompt", || !received(&w).is_empty()).await;
+    w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+    assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Completed);
+    assert_eq!(received(&w), [1], "第 2 趟收下了 prompt");
+}
+
+/// 正向：给（回合，第 2 趟）的取消在第 2 趟开表之前到 → 第 2 趟不交出 prompt。
+#[tokio::test(flavor = "current_thread")]
+async fn early_cancel_for_next_run_is_kept() {
+    let turn = queued_turn(1);
+    let w = W::<Reference>::new(&turn).await;
+    let turn = interrupted_turn(&w, turn);
+    let line = first_run_cancelled(&w, &turn).await;
+    line.canceller().cancel(turn.id, RunTag(2));
+
+    let task = w.spawn(line, resume_run(&w, &turn, 2));
+    let (result, _) = join_without_prompt(&w, task, "第 2 趟").await;
+    assert_eq!(
+        result.unwrap(),
+        TurnState::Interrupted {
+            reason: InterruptReason::Crash
+        }
+    );
+    assert_eq!(w.ctl.opens.load(Ordering::SeqCst), 0, "两趟都没开会话");
+}
+
+/// 正向：第 2 趟的表已经开着（停在开会话里）时来一条给第 1 趟的取消 → 不起作用，照常交出 prompt。
+#[tokio::test(flavor = "current_thread")]
+async fn cancel_for_previous_run_misses_open_table() {
+    let turn = queued_turn(1);
+    let w = W::<Reference>::new(&turn).await;
+    let turn = interrupted_turn(&w, turn);
+    let line = first_run_cancelled(&w, &turn).await;
+    let canceller = line.canceller();
+
+    let gate = Arc::new(Notify::new());
+    *w.ctl.open_gate.lock().unwrap() = Some(gate.clone());
+    let task = w.spawn(line, resume_run(&w, &turn, 2));
+    wait_until("第 2 趟停在开会话里", || {
+        w.ctl.opening.load(Ordering::SeqCst)
+    })
+    .await;
+    canceller.cancel(turn.id, RunTag(1));
+    gate.notify_one();
+    wait_until("第 2 趟交出 prompt", || !received(&w).is_empty()).await;
+    w.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
+    assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Completed);
 }

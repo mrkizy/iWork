@@ -237,7 +237,7 @@ async fn run_scenario(scenario: Scenario, order: Order, spin: u8) -> Result<(), 
                     yields(spin).await;
                     // 被拒了：回合在跑，照 A5 改成取消意图，宿主随后发取消信号
                     if !withdraw(&w.store, t).await {
-                        canceller.cancel(t);
+                        canceller.cancel(t, RunTag(1));
                     }
                     task
                 }

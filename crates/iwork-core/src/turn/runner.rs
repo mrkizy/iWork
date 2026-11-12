@@ -91,7 +91,7 @@ use iwork_ports::vcs::ChangeProbe;
 
 use super::binding::{Rebind, mismatch_reason, rebind};
 use super::permission::{
-    AcceptedAt, PermissionDecider, PermissionGate, Ticket, TurnSlot, VoidPlanError,
+    AcceptedAt, PermissionDecider, PermissionGate, RunTag, Ticket, TurnSlot, VoidPlanError,
 };
 use super::resume_summary::{SummaryLimits, resume_summary};
 use super::scheduler::{Input, Scheduler};
@@ -182,6 +182,8 @@ pub struct TurnPlan {
     pub blocks: Vec<ContentBlock>,
     /// 这一趟的改动探针（开始时的样子已经拍在里面）；没有就不出改动摘要（T10a 方案 D10）
     pub changes: Option<Arc<dyn ChangeProbe>>,
+    /// 这一趟的记号（会话线上的第几趟）：交接表按它认取消（T10a 方案 2.4「早到的取消认趟」）
+    pub run: RunTag,
 }
 
 // 探针是端口对象，不要求它能打印；只说有没有
@@ -195,6 +197,7 @@ impl std::fmt::Debug for TurnPlan {
             .field("spec", &self.spec)
             .field("blocks", &self.blocks)
             .field("changes", &self.changes.is_some())
+            .field("run", &self.run)
             .finish()
     }
 }
@@ -277,9 +280,10 @@ pub struct TurnCanceller {
 }
 
 impl TurnCanceller {
-    /// 请求取消。回合已经结束或换了就什么都不做。
-    pub fn cancel(&self, turn_id: TurnId) {
-        self.slot.cancel(turn_id);
+    /// 请求取消回合 `turn_id` 的第 `run` 趟。那一趟已经结束、或这条线上开着的是别的一趟，就什么都不做；
+    /// 那一趟还没开表，就记着，开表时带上（T10a 方案 D1a、2.4）。
+    pub fn cancel(&self, turn_id: TurnId, run: RunTag) {
+        self.slot.cancel(turn_id, run);
     }
 }
 
@@ -422,13 +426,14 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             spec,
             blocks,
             changes,
+            run: run_tag,
         } = plan;
         // 和回合状态对不上的在第一步里报表外转换
         let (first, request) = match entry {
             TurnEntry::New => (TurnTrigger::Started, None),
             TurnEntry::Resume { request } => (TurnTrigger::Resume, Some(request)),
         };
-        let mut cancels = self.slot.open(turn.id);
+        let mut cancels = self.slot.open(turn.id, run_tag);
         let slot = self.slot.clone();
         let _guard = SlotGuard(&slot);
         let decider = self.decider.clone();
