@@ -1,6 +1,4 @@
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use proptest::prelude::*;
 
@@ -262,6 +260,8 @@ fn write_status_does_not_follow_links() {
 #[cfg(unix)]
 #[test]
 fn write_is_atomic() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     let dir = tempfile::tempdir().unwrap();
     let a = sample_status(Phase::Ready);
     let b = sample_status(Phase::Exited {
