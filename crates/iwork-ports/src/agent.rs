@@ -8,7 +8,7 @@ use iwork_domain::action::ToolRef;
 use iwork_domain::common::{ArtifactRef, EffortLevel, ModelId, ModelSelection, Timestamp, Usage};
 use iwork_domain::event::{McpServerId, ToolCallId};
 use iwork_domain::runtime::QuotaWindow;
-use iwork_domain::session::{SessionConstraints, SessionToolSet};
+use iwork_domain::session::{SessionConstraints, SessionLostReason, SessionToolSet};
 use iwork_domain::turn::TurnKind;
 
 /// 运行时自报的能力。
@@ -246,6 +246,10 @@ pub enum AgentError {
     /// 这个运行时版本正在本机验证（T06 方案 10.1），过一会儿再试
     #[error("运行时 {version} 正在本机验证")]
     Verifying { version: String },
+    /// 续接时运行时自己的会话记录用不了，三类分得开（需求第 12 章 v1.78）。只在带着旧会话 id 开会话时有意义：
+    /// 编排据此用摘要新开一条会话线（T06 方案 5.2a），不靠原样重试解决
+    #[error("运行时的会话记录用不了，无法续接：{reason:?}")]
+    SessionLost { reason: SessionLostReason },
     #[error("与运行时通信出错：{message}")]
     Protocol { message: String },
     #[error("运行时进程意外退出：{message}")]

@@ -2,7 +2,7 @@
 # 发布构建里不存在 --dev-trust（AGENTS.md 安全不变量；T03 任务卡验收 2；方案 S3）。三步证据：
 #   ① feature 图：cargo metadata 的解析结果里，iwork-ipc / iwork-client-core / iwork-daemon / iwork-client
 #      在工作区默认构建下都没有开 `dev`（这是 feature 依赖图，不是字符串）；
-#   ② 产物：release 构建的 iwork-daemon（以及 --artifacts 给的打包产物）里 grep 不到 dev-trust；
+#   ② 产物：release 构建的 iwork-daemon（以及 --artifacts 给的打包产物）里 grep 不到 dev-trust 与 IWORK_DEV_；
 #      同一份源码开 dev 构建出来的必须 grep 得到（阳性对照，证明 grep 真能找到）；
 #   ③ 行为：release 的 iwork-daemon 带 --dev-trust 启动，退出码非 0、stderr 有「未知参数」、不留 socket。
 # ①、③ 才是证明，② 是冒烟。
@@ -50,26 +50,34 @@ echo "通过：iwork-ipc、iwork-client-core、iwork-daemon、iwork-client 都�
 EXE=""
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) EXE=".exe" ;; esac
 BIN="target/release/iwork-daemon${EXE}"
-count() { grep -a -c 'dev-trust' "$1" || true; }
-
+# 发布产物里不许出现的开发字样：开关本身，和后台的开发故障注入点（`IWORK_DEV_*` 环境变量，T04）
+PATTERNS=('dev-trust' 'IWORK_DEV_')
+count() { grep -a -c -- "$2" "$1" || true; }
 # ② 产物：先构建 dev 版做阳性对照，再构建 release（同一路径，后者覆盖前者）
 echo "== ② 产物字符串"
 cargo build --release --locked -p iwork-daemon --features dev >/dev/null 2>&1 \
   || { echo "check-no-dev-trust: dev 构建失败" >&2; exit 2; }
-dev_hits="$(count "$BIN")"
-[ "$dev_hits" -gt 0 ] || { echo "check-no-dev-trust: 阳性对照失败：dev 构建里也 grep 不到 dev-trust，grep 证明不了任何事" >&2; exit 2; }
+declare -a dev_hits
+for i in "${!PATTERNS[@]}"; do
+  dev_hits[$i]="$(count "$BIN" "${PATTERNS[$i]}")"
+  [ "${dev_hits[$i]}" -gt 0 ] || { echo "check-no-dev-trust: 阳性对照失败：dev 构建里也 grep 不到 ${PATTERNS[$i]}，grep 证明不了任何事" >&2; exit 2; }
+done
 cargo build --release --locked -p iwork-daemon >/dev/null 2>&1 \
   || { echo "check-no-dev-trust: release 构建失败" >&2; exit 2; }
-rel_hits="$(count "$BIN")"
-echo "dev 构建 ${dev_hits} 处（对照）；release 构建 ${rel_hits} 处"
-[ "$rel_hits" -eq 0 ] || { echo "check-no-dev-trust: release 的 iwork-daemon 里有 dev-trust" >&2; exit 1; }
+for i in "${!PATTERNS[@]}"; do
+  p="${PATTERNS[$i]}"
+  rel_hits="$(count "$BIN" "$p")"
+  echo "${p}：dev 构建 ${dev_hits[$i]} 处（对照）；release 构建 ${rel_hits} 处"
+  [ "$rel_hits" -eq 0 ] || { echo "check-no-dev-trust: release 的 iwork-daemon 里有 ${p}" >&2; exit 1; }
+done
 for f in ${ARTIFACTS[@]+"${ARTIFACTS[@]}"}; do
   [ -f "$f" ] || { echo "check-no-dev-trust: 找不到产物 ${f}" >&2; exit 2; }
-  n="$(count "$f")"
-  echo "${f}：${n} 处"
-  [ "$n" -eq 0 ] || { echo "check-no-dev-trust: 打包产物 ${f} 里有 dev-trust" >&2; exit 1; }
+  for p in "${PATTERNS[@]}"; do
+    n="$(count "$f" "$p")"
+    echo "${f}：${p} ${n} 处"
+    [ "$n" -eq 0 ] || { echo "check-no-dev-trust: 打包产物 ${f} 里有 ${p}" >&2; exit 1; }
+  done
 done
-
 # ③ 行为：发布进程收到 --dev-trust 拒绝启动、不留 socket。家目录与运行目录都指到临时目录。
 echo "== ③ 发布进程拒绝 --dev-trust"
 tmp="$(mktemp -d)"

@@ -277,6 +277,30 @@ impl<C: EventCodec> Drop for SqliteStore<C> {
     }
 }
 
+/// 把 `target` 以 `prefixes` 里任一前缀开头、停在 `Dispatched` 的条目改成 `to`。前缀为空时什么都不改。
+fn set_dispatched_by_prefix(
+    conn: &Connection,
+    now: Timestamp,
+    prefixes: &[String],
+    to: DeliveryState,
+) -> Result<u64, StorageError> {
+    if prefixes.is_empty() {
+        return Ok(0);
+    }
+    let cond = vec![PREFIX_MATCH; prefixes.len()].join(" OR ");
+    let sql = format!("UPDATE outbox SET state = ?, updated_at = ? WHERE state = ? AND ({cond})");
+    let mut args: Vec<rusqlite::types::Value> = vec![
+        to.to_text().to_owned().into(),
+        now.0.into(),
+        DeliveryState::Dispatched.to_text().to_owned().into(),
+    ];
+    args.extend(prefixes.iter().cloned().map(Into::into));
+    let n = conn
+        .execute(&sql, params_from_iter(args))
+        .map_err(sql_err)?;
+    Ok(n as u64)
+}
+
 /// 写连接与 PRAGMA（方案 2.3）。
 fn open_writer(dir: &DataDir, config: &StoreConfig) -> Result<Connection, StorageError> {
     let conn = Connection::open(dir.db_path()).map_err(sql_err)?;
@@ -388,39 +412,15 @@ impl<C: EventCodec + 'static> StoragePort for SqliteStore<C> {
     fn outbox_requeue_dispatched(
         &self,
         redeliver_prefixes: Vec<String>,
+        fail_prefixes: Vec<String>,
     ) -> impl Future<Output = Result<RequeueReport, StorageError>> + Send {
         self.writer.sql(move |conn, now: Timestamp| {
-            // 一个 savepoint 里两条 UPDATE：先把可重投的改回 queued，剩下停在 dispatched 的都标 failed
-            let requeued = if redeliver_prefixes.is_empty() {
-                0
-            } else {
-                let cond = vec![PREFIX_MATCH; redeliver_prefixes.len()].join(" OR ");
-                let sql = format!(
-                    "UPDATE outbox SET state = ?, updated_at = ? WHERE state = ? AND ({cond})"
-                );
-                let mut args: Vec<rusqlite::types::Value> = vec![
-                    DeliveryState::Queued.to_text().to_owned().into(),
-                    now.0.into(),
-                    DeliveryState::Dispatched.to_text().to_owned().into(),
-                ];
-                args.extend(redeliver_prefixes.iter().cloned().map(Into::into));
-                conn.execute(&sql, params_from_iter(args))
-                    .map_err(sql_err)?
-            };
-            let failed = conn
-                .execute(
-                    "UPDATE outbox SET state = ?1, updated_at = ?2 WHERE state = ?3",
-                    params![
-                        DeliveryState::Failed.to_text(),
-                        now.0,
-                        DeliveryState::Dispatched.to_text()
-                    ],
-                )
-                .map_err(sql_err)?;
-            Ok(RequeueReport {
-                requeued: requeued as u64,
-                failed: failed as u64,
-            })
+            // 一个 savepoint 里两条 UPDATE；两边都不沾的（不认识的去向）原样留在 dispatched
+            let requeued =
+                set_dispatched_by_prefix(conn, now, &redeliver_prefixes, DeliveryState::Queued)?;
+            let failed =
+                set_dispatched_by_prefix(conn, now, &fail_prefixes, DeliveryState::Failed)?;
+            Ok(RequeueReport { requeued, failed })
         })
     }
 

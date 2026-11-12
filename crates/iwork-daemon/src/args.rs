@@ -1,9 +1,10 @@
-//! 命令行参数（T03 第 7 步只解析，组合是 T04）。
+//! 命令行参数。
 //!
-//! `--dev-trust` 只在 `dev` feature 下被认识：发布构建里这一段代码不存在，参数解析器不认识它，
-//! 按未知参数拒绝启动（退出码 2），不绑定 socket（T03 方案 S3 第 ③ 步）。
+//! - `--service`：服务管理器（launchd / systemd）起的实例带它（T04 方案 2.2、2.12）。发布构建也认识。
+//! - `--dev-trust`：只在 `dev` feature 下被认识：发布构建里这一段代码不存在，参数解析器不认识它，
+//!   按未知参数拒绝启动，不绑定 socket（T03 方案 S3 第 ③ 步）。
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 
 use iwork_ipc::peer::TrustPolicy;
@@ -12,6 +13,8 @@ use iwork_ipc::peer::TrustPolicy;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonArgs {
     pub trust: TrustPolicy,
+    /// 服务管理器起的托管实例。
+    pub service: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,27 +32,34 @@ impl fmt::Display for ArgError {
     }
 }
 
+/// 托管实例的标志。plist 与 systemd 单元文件的模板里写的就是它。
+pub const SERVICE_FLAG: &str = "--service";
+
 #[cfg(feature = "dev")]
 const DEV_TRUST_FLAG: &str = "--dev-trust";
 
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<DaemonArgs, ArgError> {
     let mut out = DaemonArgs {
         trust: TrustPolicy::RequireSigner,
+        service: false,
     };
     for arg in args {
-        out.trust = trust_flag(arg)?;
+        let arg = arg.into_string().map_err(ArgError::NotUtf8)?;
+        match arg.as_str() {
+            SERVICE_FLAG => out.service = true,
+            #[cfg(feature = "dev")]
+            DEV_TRUST_FLAG => out.trust = TrustPolicy::DevTrust,
+            _ => return Err(ArgError::Unknown(arg)),
+        }
     }
     Ok(out)
 }
 
-/// 目前唯一认识的参数是开发开关；发布构建里任何参数都是未知参数。
-fn trust_flag(arg: OsString) -> Result<TrustPolicy, ArgError> {
-    let arg = arg.into_string().map_err(ArgError::NotUtf8)?;
-    match arg.as_str() {
-        #[cfg(feature = "dev")]
-        DEV_TRUST_FLAG => Ok(TrustPolicy::DevTrust),
-        _ => Err(ArgError::Unknown(arg)),
-    }
+/// 原始参数里有没有 `--service` 这个词。参数解析失败时还没有解析结果，「是不是托管实例」靠它定
+/// （方案 2.2「`Usage` 没有例外」）：不依赖解析成败，只看这一个词。
+pub fn is_service(raw: &[OsString]) -> bool {
+    raw.iter()
+        .any(|a| a.as_os_str() == OsStr::new(SERVICE_FLAG))
 }
 
 #[cfg(test)]
@@ -61,8 +71,15 @@ mod tests {
     }
 
     #[test]
-    fn no_args_requires_signer() {
-        assert_eq!(parse(args(&[])).unwrap().trust, TrustPolicy::RequireSigner);
+    fn no_args_requires_signer_and_is_not_service() {
+        let a = parse(args(&[])).unwrap();
+        assert_eq!(a.trust, TrustPolicy::RequireSigner);
+        assert!(!a.service);
+    }
+
+    #[test]
+    fn service_flag_is_known_in_every_build() {
+        assert!(parse(args(&["--service"])).unwrap().service);
     }
 
     #[test]
@@ -71,6 +88,27 @@ mod tests {
             parse(args(&["--foo"])),
             Err(ArgError::Unknown("--foo".into()))
         );
+    }
+
+    /// 解析失败与否，`is_service` 的答案只看有没有 `--service` 这个词。
+    #[test]
+    fn is_service_does_not_depend_on_parse() {
+        let cases: [(&[&str], bool); 6] = [
+            (&[], false),
+            (&["--service"], true),
+            (&["--service", "--bogus"], true),
+            (&["--bogus", "--service"], true),
+            (&["--bogus"], false),
+            // 只认整个词，前缀、拼接都不算
+            (&["--service=1", "--services"], false),
+        ];
+        for (raw, want) in cases {
+            let raw = args(raw);
+            assert_eq!(is_service(&raw), want, "{raw:?}");
+            if want && raw.len() > 1 {
+                assert!(parse(raw.clone()).is_err(), "对照：{raw:?} 解析应失败");
+            }
+        }
     }
 
     #[cfg(not(feature = "dev"))]

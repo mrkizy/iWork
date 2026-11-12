@@ -119,6 +119,7 @@ fn outbox_selector_agrees_with_sql() {
     }
 }
 
+/// 三种去向都覆盖：可重投的改回 queued、不能幂等的标 failed、不认识的原样留在 dispatched（T04 方案 2.11）。
 #[test]
 fn outbox_requeue_dispatched_by_prefix() {
     let env = Env::new();
@@ -140,11 +141,12 @@ fn outbox_requeue_dispatched_by_prefix() {
     block(store.outbox_mark(OutboxId(5), DeliveryState::AcceptedByRuntime)).unwrap();
 
     let report =
-        block(store.outbox_requeue_dispatched(vec!["runtime:".into(), "bridge:".into()])).unwrap();
+        block(store.outbox_requeue_dispatched(vec!["runtime:".into()], vec!["bridge:".into()]))
+            .unwrap();
     assert_eq!(
         report,
         RequeueReport {
-            requeued: 2,
+            requeued: 1,
             failed: 1
         }
     );
@@ -158,11 +160,15 @@ fn outbox_requeue_dispatched_by_prefix() {
         ("queued".into(), 0),
         "本来就是 queued：不动"
     );
-    assert_eq!(state_of(&env, 3), ("queued".into(), 1));
+    assert_eq!(
+        state_of(&env, 3),
+        ("failed".into(), 1),
+        "不能幂等：标 failed"
+    );
     assert_eq!(
         state_of(&env, 4),
-        ("failed".into(), 1),
-        "没有去向认领：标 failed"
+        ("dispatched".into(), 1),
+        "不认识的去向：原样留在 dispatched，交给认识它的版本收尾"
     );
     assert_eq!(
         state_of(&env, 5),
@@ -170,25 +176,35 @@ fn outbox_requeue_dispatched_by_prefix() {
         "已有结果的不动"
     );
 
-    // 幂等：再跑一次什么都不改
-    let again = block(store.outbox_requeue_dispatched(vec!["runtime:".into()])).unwrap();
+    // 幂等：再跑一次什么都不改；不认识的仍在 dispatched
+    let again =
+        block(store.outbox_requeue_dispatched(vec!["runtime:".into()], vec!["bridge:".into()]))
+            .unwrap();
     assert_eq!(again, RequeueReport::default());
+    assert_eq!(state_of(&env, 4).0, "dispatched");
+
+    // 换成认识它的配置：按那个配置收尾
+    let later = block(store.outbox_requeue_dispatched(vec!["mystery:".into()], vec![])).unwrap();
+    assert_eq!(
+        later,
+        RequeueReport {
+            requeued: 1,
+            failed: 0
+        }
+    );
+    assert_eq!(state_of(&env, 4), ("queued".into(), 1));
 }
 
+/// 两份清单都为空（没有登记任何去向）：什么都不改。
 #[test]
-fn outbox_requeue_dispatched_without_prefixes_fails_everything_in_flight() {
+fn outbox_requeue_dispatched_without_prefixes_leaves_everything() {
     let env = Env::new();
     let store = env.open();
     enqueue(&store, 1, &["runtime:1", "bridge:1"]);
     block(store.outbox_mark(OutboxId(1), DeliveryState::Dispatched)).unwrap();
     block(store.outbox_mark(OutboxId(2), DeliveryState::Dispatched)).unwrap();
-    let report = block(store.outbox_requeue_dispatched(vec![])).unwrap();
-    assert_eq!(
-        report,
-        RequeueReport {
-            requeued: 0,
-            failed: 2
-        }
-    );
-    assert_eq!(state_of(&env, 1).0, "failed");
+    let report = block(store.outbox_requeue_dispatched(vec![], vec![])).unwrap();
+    assert_eq!(report, RequeueReport::default());
+    assert_eq!(state_of(&env, 1).0, "dispatched");
+    assert_eq!(state_of(&env, 2).0, "dispatched");
 }

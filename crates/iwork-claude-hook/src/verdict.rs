@@ -71,6 +71,41 @@ pub fn expire(kind: HookKind) -> ! {
     }
 }
 
+/// PreToolUse 开工前确认 stdout 交得到调用方手里，交不到就以退出码 2 结束（方案 3.4a 第 3 条）。
+///
+/// 启动时 stdout 是关着的，Rust 运行时会把 1 号描述符换成 `/dev/null`（不然后面打开的 socket 会占到它）。
+/// 那样结论「写成功」了，CLI 却什么都没收到，以 0 退出就造出了「退出码 0、没有决定」。CLI 给 hook 的
+/// stdout 总是管道，不会是 `/dev/null`，所以把它当成交不出去。
+pub fn require_deliverable_stdout() {
+    if stdout_is_dev_null() {
+        block_via_stderr(Failure::Internal.reason());
+    }
+}
+
+#[cfg(unix)]
+fn stdout_is_dev_null() -> bool {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let Ok(null) = std::fs::metadata("/dev/null") else {
+        return false;
+    };
+    let Ok(out) = std::io::stdout().as_fd().try_clone_to_owned() else {
+        // 描述符都拿不到：写结论时同样会失败，交给那一步按写失败处理
+        return false;
+    };
+    match std::fs::File::from(out).metadata() {
+        Ok(m) => m.file_type().is_char_device() && m.rdev() == null.rdev(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn stdout_is_dev_null() -> bool {
+    // M1 不支持 Windows（AGENTS.md）；那里的标准句柄没有被换成 NUL 的这一步
+    false
+}
+
 /// 装 panic 钩子：任何线程 panic 都交一个拒绝、退出码 2。panic 的文字不输出（可能带任何东西）。
 /// 已被认领时只写 stderr，退出码 2 同样拦下调用。
 pub fn install_panic_hook() {

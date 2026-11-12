@@ -24,6 +24,7 @@ use crate::message::{Message, MessageBody, MessageStatus};
 use crate::project::{PathStatus, Project, ProjectSettings};
 use crate::rule::{RuleEntry, RuleLayer, RuleSetVersion, Verdict};
 use crate::runtime::{LocalConfigItem, QuotaWindow, Runtime};
+use crate::session::SessionLostReason;
 use crate::turn::{Turn, TurnState};
 use crate::user_action::{UserActionCard, UserActionState};
 
@@ -300,6 +301,15 @@ pub struct TurnModelReported {
 pub struct TurnSessionBound {
     pub turn_id: TurnId,
     pub runtime_session_id: String,
+    /// 续接失败、换了一条新会话时记下被换掉的那条（需求第 12 章 v1.78 的审计；T06 方案 5.2a）
+    pub replaced: Option<SessionReplaced>,
+}
+
+/// 被换掉的运行时会话：旧编号与原因。新编号就是所在 `TurnSessionBound` 的 `runtime_session_id`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionReplaced {
+    pub old_runtime_session_id: String,
+    pub reason: SessionLostReason,
 }
 
 /// 编排采纳了一条审批结果、即将交给运行时：「这条批准已经用掉」的唯一依据。允许和拒绝都算审批结果，

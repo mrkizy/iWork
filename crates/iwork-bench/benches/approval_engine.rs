@@ -158,8 +158,11 @@ impl StoragePort for Shared {
     async fn outbox_requeue_dispatched(
         &self,
         redeliver_prefixes: Vec<String>,
+        fail_prefixes: Vec<String>,
     ) -> Result<iwork_ports::store::RequeueReport, iwork_ports::store::StorageError> {
-        self.0.outbox_requeue_dispatched(redeliver_prefixes).await
+        self.0
+            .outbox_requeue_dispatched(redeliver_prefixes, fail_prefixes)
+            .await
     }
     async fn outbox_pending_where(
         &self,

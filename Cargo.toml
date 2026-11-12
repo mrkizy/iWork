@@ -49,6 +49,7 @@ sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_Diagnostics_ToolHelp"] }
 base64 = "0.22"
+getrandom = "0.3"
 # Bash 语法解析，只许 iwork-shell 用（T07 方案 3.3、ADR-T07-a）
 brush-parser = "0.4"
 tauri-build = "2.7"

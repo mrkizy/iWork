@@ -27,7 +27,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 - 协议：Protobuf，Rust 侧用 prost 生成，TypeScript 侧用 protobuf-es 生成；生成代码不手改、不入库（构建时生成）。
 - 存储：SQLite（rusqlite，WAL）。版本控制读操作用 gitoxide（`gix`），写操作调本机 `git`。
 
-工具链：Rust 版本由根目录 `rust-toolchain.toml` 固定（经 rustup 自动安装，不用系统自带或 Homebrew 的 rustc）；pnpm 版本由 `client/package.json` 的 `packageManager` 固定；脚本需要 bash 与 jq。CI 是 `.github/workflows/ci.yml`，三平台跑下面除基准外的全部检查。CI 的运行状态不登录也能查（`curl https://api.github.com/repos/mrkizy/iWork/actions/runs?branch=<分支>`），失败日志要登录 GitHub 后用 `gh run view <run-id> --log-failed` 看；Windows 行为本机验证不了，以 CI 为准，拿不到日志时交 supervisor 请产品负责人登录 `gh`，不要只凭推断改。Windows 上用 PowerShell 5.1 跑的 `.ps1` 脚本含中文时必须存成带 BOM 的 UTF-8，否则按 ANSI 读、整个脚本解析失败（T03 实测）。M1 不支持 Windows（T03）：只在 Windows CI 上冒出来的路径写法问题（`\\?\` 前缀、反斜杠、CRLF），在测试里统一写法，或把跟真实文件系统对拍的测试限定 `#[cfg(unix)]` 并注明原因；不为它改产品代码（T07 实测）。
+工具链：Rust 版本由根目录 `rust-toolchain.toml` 固定（经 rustup 自动安装，不用系统自带或 Homebrew 的 rustc）；pnpm 版本由 `client/package.json` 的 `packageManager` 固定；脚本需要 bash 与 jq。CI 是 `.github/workflows/ci.yml`，三平台跑下面除基准外的全部检查。CI 的运行状态不登录也能查（`curl https://api.github.com/repos/mrkizy/iWork/actions/runs?branch=<分支>`），失败日志要登录 GitHub 后用 `gh run view <run-id> --log-failed` 看；Windows 行为本机验证不了，以 CI 为准，拿不到日志时交 supervisor 请产品负责人登录 `gh`，不要只凭推断改。不登录的 GitHub API 每小时只有 60 次，多个 worker 同时用 curl 轮询会很快用光（2026-11-12 实测），轮询 CI 改用 `gh run view`（产品负责人已登录）。ubuntu job 卡在「Tauri 系统依赖（Linux）」、日志是 apt 的 `Temporary failure resolving` 时是 GitHub runner 的网络问题，只重跑这个 job（`gh run rerun <run-id> --failed`），不改代码。Windows 上用 PowerShell 5.1 跑的 `.ps1` 脚本含中文时必须存成带 BOM 的 UTF-8，否则按 ANSI 读、整个脚本解析失败（T03 实测）。M1 不支持 Windows（T03）：只在 Windows CI 上冒出来的路径写法问题（`\\?\` 前缀、反斜杠、CRLF），在测试里统一写法，或把跟真实文件系统对拍的测试限定 `#[cfg(unix)]` 并注明原因；不为它改产品代码（T07 实测）。
 
 命令（T01 建立后以此为准；改动须同步本节）：
 
@@ -50,8 +50,8 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
   - 调试客户端（dev feature）：`cargo run -p iwork-ipc --features dev --example ipc-tool -- hello`；`-- --endpoint <sock> serve` 起一个玩具后台自测
   - 对端身份探针（dev feature，平台实测用）：`cargo run -p iwork-ipc --features dev --example peer-probe -- --help`
 - 审批引擎交错性质测试完整一轮（T07 方案 6.10.13；默认 256 例随 `cargo test` 跑）：`PROPTEST_CASES=5000 lockf /tmp/iwork-heavy-test.lock cargo test -p iwork-core --test engine_interleavings --test engine_fold`；复现某个种子加 `PROPTEST_RNG_SEED=<种子>`
-- 审批对拍语料：`cargo run -p iwork-core --example dump-credential-corpus` 导出需凭据命令的匹配语料（JSON），供 T06 对固定版本的 Claude Code 实测回填；内置规则集快照更新用 `IWORK_UPDATE_SNAPSHOTS=1 cargo test -p iwork-core --test builtin_rules`（改内置条目必须同时升 `RULESET_VERSION`）
-- 重测试排队（产品负责人 2026-11-10 定：同一时间只跑一张卡的重测试）：`cargo test --workspace`、`cargo clippy --workspace`、崩溃注入、`PROPTEST_CASES` 调大的属性测试、fuzz、`cargo bench`、release 构建、docker 里的测试，一律套 `lockf /tmp/iwork-heavy-test.lock <命令>` 跑（macOS 自带 `lockf`，拿不到锁就排队等）；单个 crate 的少量定向测试不用套。临时验证副本里跑也一样套
+- 审批对拍语料：`cargo run -p iwork-core --example dump-credential-corpus` 导出需凭据命令的匹配语料（JSON），供 T06 对固定版本的 Claude Code 实测回填；内置规则集快照更新用 `IWORK_UPDATE_SNAPSHOTS=1 cargo test -p iwork-core --test builtin_rules`（改内置条目必须同时升 `RULESET_VERSION`）；成员会话永久禁用的工具名单（从登记表导出，T06 实测脚本的 `--disabled-tools` 用它）：`cargo run -p iwork-core --example dump-disabled-tools`
+- 重测试排队（产品负责人 2026-11-10 定：同一时间只跑一张卡的重测试）：`cargo test --workspace`、`cargo clippy --workspace`、崩溃注入、`PROPTEST_CASES` 调大的属性测试、fuzz、`cargo bench`、release 构建、docker 里的测试，一律套 `lockf /tmp/iwork-heavy-test.lock <命令>` 跑（macOS 自带 `lockf`，拿不到锁就排队等）。例外：`pnpm -C client e2e:webview` 和 `scripts/bench-approval-engine-ab.sh` 在内部自己套锁，外面再套就会自己等自己、把所有卡的重测试一起卡死（2026-11-12 实测，卡了十几分钟）；单个 crate 的少量定向测试不用套。临时验证副本里跑也一样套
 
 ## 架构约定
 
@@ -66,8 +66,8 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 ## 安全不变量（任何改动都不能破坏；违反即 blocking）
 
 - 不修改厂商 CLI，不禁用其登录方式；登录走厂商自己的流程。例外：删除对话、删除助手时，由适配层按 iWork 记录的会话编号删除对应的运行时会话记录文件（需求 v1.78；定位规则见 T06 方案 5.5：只删名字恰好是「编号.jsonl」的普通文件，不读内容、不碰别处），不动 CLI 的程序、设置与登录。**不读取、不保存、不转发任何凭据或 token。** `claude auth status` 只取 `loggedIn`、`authMethod`、`subscriptionType`、`loginExpiresAt`，邮箱等不落盘、不进日志。
-- iWork 的审批判定优先于厂商 CLI 自身的权限模式与放行规则，不能被它们放宽。
-- 成员会话与用户自己的厂商 CLI 全局配置隔离：不运行用户的 hook、不沿用用户的权限模式、不加载未经导入的 MCP、技能与插件（需求 8.4、FR20）。仓库内的 `.claude/settings.json`、`settings.local.json` 也一律不加载（v1.63），不得为了让仓库自带 hook 生效而放开。
+- iWork 的审批判定优先于厂商 CLI 自身的权限模式与放行规则，不能被它们放宽。例外只有一条（产品负责人 2026-11-12 定，T06 S0 实测，Claude Code 2.1.322）：PreToolUse hook 没给出决定（没被调用、正常退出却没写出决定）时，CLI 自己不问的动作（工作目录内的读，含 Read、Grep、Glob 与只读命令如 `cat`；起子代理）照 CLI 自己的规则执行，记为已知限制；CLI 要问的动作（其他命令、写文件、MCP、工作目录外的读）仍然不执行（不注入 hook 时已实测；hook 无输出或乱码时、子代理里、清单内只读命令出不出沙箱，待 T06 R3）；Read 读工作目录内指向目录外的文件链接也被拒，目录链接与经链接的搜索、只读命令还没测（2026-11-12 补测，T06 方案 3.4）。只读命令一项产品负责人另行确认接受（2026-11-12），最坏情况按沙箱算（待 R3 的底线格、沙箱外重试格证实；读得到就回产品负责人重定）。项目目录本身包住凭据目录或数据目录时（如把家目录加成项目），那一刻文件工具连系统底线也挡不住，产品负责人定记为已知限制、不在添加项目时拒绝（2026-11-12，T06 方案 P12）。配套三条写死：hook 失败一律拦（`onFailure: "block"`）、权限模式用 `dontAsk`、hook 程序只有写出完整决定才以 0 退出（T06 方案 3.4）。
+- 成员会话与用户自己的厂商 CLI 全局配置隔离：不运行用户的 hook、不沿用用户的权限模式、不加载未经导入的 MCP、技能与插件（需求 8.4、FR20）。仓库内的 `.claude/settings.json`、`settings.local.json` 也一律不加载（v1.63），不得为了让仓库自带 hook 生效而放开。Claude Code 的自动记忆一律关闭（`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`，实测不关会读进用户自己的记忆）。成员会话的环境变量原样继承后台的环境（产品负责人 2026-11-12 定，T06 方案 P14）：从终端或 Claude Code 里直接运行 iWork、或把带定制的变量设成全局时，用户的插件等定制会经环境带进会话，记为已知限制；会话里出现非内置、非 iWork 给的插件时停会话并停用这个运行时（T06 方案 3.1b）。
 - Claude Code 的 PreToolUse hook：连不上桥接一律 deny（失败即关闭）；**绝不让 hook 自然超时**（实测超时即放行），桥接必须在到时前主动中断回合并以拒绝返回。
 - 系统底线写死、不可配置、不可提权：读写用户凭据目录、读写 iWork 数据目录（只读区 `attachments/`、`imports/` 可读不可写；`artifacts/` 不可读）、写 `.git/` 内部（只拦直接写文件，git 命令照常）、删除关键路径、非流程产生的受保护分支变更（这一条是 M1 已知缺口，M1 不实现监控，见技术设计第 1 节，审查时不按缺失报 blocking）；由审批与沙箱两道闸同时执行，三档相同；需要凭据的程序走“沙箱外执行”。凭据目录与关键路径清单见需求第 9 章。安全设计原则（需求 v1.50、v1.69）：首版尽量完善且合理，只覆盖常见场景；不为堵一个缺口引入一串新机制；新增安全规则不得改动已有规则与求值流程；遇到安全缺口先找现有机制能否覆盖，但也不能硬套现有机制（合理且正确地利用现有机制），覆盖不了就记为已知限制，交产品负责人决定，不要自行加新组件。底线拦的是 Agent，不是用户：需要改动底线范围内的内容时生成“亲手执行”卡片（精确命令或补丁 + 理由），由用户点“执行”（iWork 以用户身份执行，审计记为用户）或复制自行执行；卡片不可记住，全开档也出现，不得做成 Agent 可以自己批准的通道；执行后 Agent 只得知是否执行与退出码，输出只给用户。判定在编排核心，用户确认在应用服务，执行与密钥存取在基础设施（`iwork-host`），适配层只转发不判断。用户附加的凭据文件提示后可附加，私钥一律拒绝。
 - 用户拒绝过的动作（按“动作类型 + 目标”识别，与工具无关），在本对话内、直到用户发出下一条消息之前不得以任何方式绕过：跨回合、中断后续接、换成员或运行时都自动拒绝（需求 AC05）。

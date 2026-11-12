@@ -1611,6 +1611,18 @@ pub fn ev_turn_session_bound() -> DomainEvent {
     ev(E::TurnSessionBound(TurnSessionBound {
         turn_id: s(TURN),
         runtime_session_id: s("sess-1"),
+        replaced: None,
+    }))
+}
+/// 续接失败、用摘要新开了会话（T06 方案 5.2a）：带被换掉的旧会话。
+pub fn ev_turn_session_bound_replaced() -> DomainEvent {
+    ev(E::TurnSessionBound(TurnSessionBound {
+        turn_id: s(TURN),
+        runtime_session_id: s("sess-2"),
+        replaced: Some(SessionReplaced {
+            old_runtime_session_id: s("sess-1"),
+            reason: SessionLostReason::Corrupt as i32,
+        }),
     }))
 }
 

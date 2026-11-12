@@ -36,10 +36,17 @@ fn read_stdin_capped() -> Result<Vec<u8>, Failure> {
     Ok(buf)
 }
 
-fn main() {
+// 返回 `!`：以 0 退出只能经 `verdict` 写完决定之后那一处（方案 3.4a 第 3 条）。哪天加了提前 `return`，
+// 这里就编译不过，而不是悄悄以 0 退出、没有决定
+fn main() -> ! {
     let started = Started::now();
     verdict::install_panic_hook();
-    let Some(kind) = parse_kind() else {
+    let kind = parse_kind();
+    // 不认识的子命令也按 PreToolUse 答拒绝，同样要交得到
+    if kind != Some(HookKind::SessionStart) {
+        verdict::require_deliverable_stdout();
+    }
+    let Some(kind) = kind else {
         verdict::finish(
             HookKind::PreToolUse,
             &Outcome::from_failure(Failure::BadArguments),

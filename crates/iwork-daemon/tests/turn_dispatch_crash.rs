@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use iwork_app::codec::ProtoEventCodec;
 use iwork_core::turn::{
-    Decided, PermissionDecider, SessionLine, TurnPlan, TurnPorts, VoidPlanError,
+    Decided, PermissionDecider, SessionLine, TurnEntry, TurnPlan, TurnPorts, VoidPlanError,
 };
 use iwork_domain::approval::VoidReason;
 use iwork_domain::common::{ModelId, ModelSelection, Timestamp, ToolGroups};
@@ -40,7 +40,9 @@ use iwork_ports::clock::{Clock, IdGenerator, MonotonicInstant, Timer};
 use iwork_ports::live::{LivePublisher, MessageDelta};
 use iwork_ports::read_model::{MessagePage, ReadModelPort};
 use iwork_ports::store::{CommitRequest, StoragePort};
-use iwork_store::{DataDir, ReadDefaults, SqliteProjector, SqliteStore, StoreConfig};
+use iwork_store::{
+    DataDir, ReadDefaults, SqliteProjector, SqliteReadModel, SqliteStore, StoreConfig,
+};
 
 const CHILD_ENV: &str = "IWORK_DISPATCH_CHILD";
 const MODE_ENV: &str = "IWORK_DISPATCH_MODE";
@@ -273,6 +275,7 @@ fn model() -> ModelSelection {
 
 fn plan(turn: Turn) -> TurnPlan {
     TurnPlan {
+        entry: TurnEntry::New,
         turn,
         assistant_name: "小助手".into(),
         context_project_id: None,
@@ -343,14 +346,7 @@ async fn seed(store: &Store, turn: u128, command: u128) {
 
 /// 读模型里的回合（对话视图带着它）。
 async fn read_turn(store: &Store, n: u128) -> Turn {
-    let view = store
-        .read_model(ReadDefaults {
-            global_settings: GlobalSettings {
-                playful_ui: true,
-                autostart: false,
-                projects_root: PathBuf::from("/projects"),
-            },
-        })
+    let view = read_model(store)
         .conversation(
             ConversationId::from_raw(id(CONVERSATION)),
             MessagePage {
@@ -364,6 +360,16 @@ async fn read_turn(store: &Store, n: u128) -> Turn {
         .into_iter()
         .find(|t| t.id == TurnId::from_raw(id(n)))
         .expect("回合在读模型里")
+}
+
+fn read_model(store: &Store) -> SqliteReadModel<ProtoEventCodec> {
+    store.read_model(ReadDefaults {
+        global_settings: GlobalSettings {
+            playful_ui: true,
+            autostart: false,
+            projects_root: PathBuf::from("/projects"),
+        },
+    })
 }
 
 /// 跑一个回合。`resume` 是会话线起步时已知的运行时会话 ID（后台服务重启后从回合上取回的）。
@@ -386,12 +392,14 @@ async fn run_on(
     ids_from: u64,
 ) -> TurnState {
     let ids = Ids(AtomicU64::new(ids_from));
+    let history = read_model(store);
     let ports = TurnPorts {
         store,
         clock: &FixedClock,
         ids: &ids,
         live: &NoLive,
         timer: &NoTimer,
+        history: &history,
     };
     line.run_turn(agent, ports, plan(turn))
         .await

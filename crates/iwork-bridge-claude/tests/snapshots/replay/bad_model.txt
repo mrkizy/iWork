@@ -1,0 +1,5 @@
+Control(ControlResponse { request_id: Some("init-1"), success: true, current_permission_mode: Some("dontAsk") })
+Report(Model { id: "claude-iwork-nonexistent", effort: "low" })
+Text("There's an issue with the selected model (claude-iwork-nonexistent). It may not exist or you may not have access to it. Run --model to pick a different model.")
+Report(Usage(Usage { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: Some(0.0) }))
+End(Error { code: "model_unavailable", reason: Some("retired") })

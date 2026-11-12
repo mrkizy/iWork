@@ -17,7 +17,7 @@ use iwork_domain::approval_mode::ProjectDefaultMode;
 use iwork_domain::assistant::Assistant;
 use iwork_domain::common::{Actor, ArtifactArea, ArtifactRef, Sha256, Timestamp};
 use iwork_domain::event::{DomainEvent, ProjectAdded};
-use iwork_domain::id::{CommandId, ConversationId, MessageId, ProjectId, RawUlid, Seq};
+use iwork_domain::id::{CommandId, ConversationId, MessageId, ProjectId, RawUlid, Seq, TurnId};
 use iwork_domain::project::{PathStatus, Project, ProjectSettings, VcsKind};
 use iwork_domain::rule::RuleEntry;
 use iwork_domain::runtime::{Runtime, RuntimeKind};
@@ -37,7 +37,7 @@ use iwork_ports::exec::{
 use iwork_ports::notify::{Notifier, NotifyError, SystemNotification};
 use iwork_ports::read_model::{
     ConversationSummary, ConversationView, MessagePage, PendingItem, ProjectSummary, ReadModelPort,
-    RuntimeQuota, Unsettled,
+    RuntimeQuota, SummarySource, Unsettled,
 };
 use iwork_ports::secret::{SecretError, SecretName, SecretStore, SecretValue};
 use iwork_ports::store::{
@@ -381,20 +381,22 @@ impl<C: EventCodec, P: Projector<Tx = InMemoryTables>> StoragePort for InMemoryS
     fn outbox_requeue_dispatched(
         &self,
         redeliver_prefixes: Vec<String>,
+        fail_prefixes: Vec<String>,
     ) -> impl Future<Output = Result<RequeueReport, StorageError>> + Send {
-        let redeliver = OutboxSelector::NoneOf(redeliver_prefixes);
+        // NoneOf 命中 = 不以其中任何前缀开头；两边都不沾的原样留在 Dispatched
+        let not_redeliver = OutboxSelector::NoneOf(redeliver_prefixes);
+        let not_fail = OutboxSelector::NoneOf(fail_prefixes);
         let mut report = RequeueReport::default();
         for item in &mut self.state.lock().unwrap().outbox {
             if item.state != DeliveryState::Dispatched {
                 continue;
             }
-            // NoneOf 命中 = 不以任何可重投前缀开头
-            if redeliver.matches(&item.target) {
-                item.state = DeliveryState::Failed;
-                report.failed += 1;
-            } else {
+            if !not_redeliver.matches(&item.target) {
                 item.state = DeliveryState::Queued;
                 report.requeued += 1;
+            } else if !not_fail.matches(&item.target) {
+                item.state = DeliveryState::Failed;
+                report.failed += 1;
             }
         }
         async move { Ok(report) }
@@ -748,6 +750,17 @@ impl ReadModelPort for FakeReadModel {
     }
     async fn unsettled(&self) -> Result<Unsettled, StorageError> {
         Ok(Unsettled::default())
+    }
+    async fn summary_source(
+        &self,
+        turn: TurnId,
+        _line: Option<ProjectId>,
+        _recent_limit: u32,
+    ) -> Result<SummarySource, StorageError> {
+        Err(StorageError::NotFound {
+            entity: "turn",
+            id: turn.to_string(),
+        })
     }
     async fn artifact_is_referenced(&self, _r: &ArtifactRef) -> Result<bool, StorageError> {
         Ok(false)
