@@ -9,8 +9,7 @@
 //! 另有固定的一格 `a4_fixed_withdraw_vs_dispatch`：撤回先落盘、编排的第一笔后到。去掉提交时校验，这一格
 //! 必红，不靠随机撞上。
 //!
-//! 提交时校验在假存储的参照投影里（T10a 步 1 加）。步 1 合入之前参照投影还不校验回合状态，这几条标 `ignore`：
-//! 那时它们必红，`--ignored` 跑一遍就是 K3 的红灯对照。
+//! 提交时校验在假存储的参照投影里（T10a 步 1 加，判断函数是 `iwork-domain` 的 `check_turn_committed`）。
 
 use super::*;
 
@@ -321,7 +320,6 @@ proptest! {
         std::env::var("PROPTEST_CASES").ok().and_then(|n| n.parse().ok()).unwrap_or(64)
     ))]
     #[test]
-    #[ignore = "等 T10a 步 1：假存储的参照投影还没有回合状态的提交时校验（A4）"]
     fn a4_interleavings(scenario in scenario(), order in order(), spin in 0u8..8) {
         let result = rt().block_on(run_scenario(scenario, order, spin));
         prop_assert!(result.is_ok(), "{:?}", result);
@@ -331,7 +329,6 @@ proptest! {
 /// 7.2a 的 K3：撤回先落盘、编排的第一笔（`Queued` → `Running`）后到。没有提交时校验时两笔都落盘，第二条的
 /// `from` 不等于前一条的 `to`。
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "等 T10a 步 1：假存储的参照投影还没有回合状态的提交时校验（A4）"]
 async fn a4_fixed_withdraw_vs_dispatch() {
     let result = run_scenario(Scenario::WithdrawVsDispatch, Order::DirectFirst, 0).await;
     assert_eq!(result, Ok(()));
