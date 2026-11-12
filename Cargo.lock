@@ -2859,14 +2859,20 @@ dependencies = [
 name = "iwork-bridge-claude"
 version = "0.1.0"
 dependencies = [
+ "agent-client-protocol",
  "base64 0.22.1",
+ "futures",
  "getrandom 0.3.4",
+ "iwork-agent-acp",
  "iwork-claude-hook",
+ "iwork-domain",
  "iwork-ipc",
+ "iwork-ports",
  "iwork-proto",
  "libc",
  "proptest",
  "prost",
+ "prost-types",
  "serde",
  "serde_json",
  "tempfile",

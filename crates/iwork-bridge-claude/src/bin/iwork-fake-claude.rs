@@ -36,7 +36,8 @@ enum Step {
         #[serde(default)]
         extra: serde_json::Map<String, Value>,
     },
-    /// 往 stdout 写一行
+    /// 往 stdout 写一行。字符串值恰好是 `$autoMemoryDirectory` 的，换成设置文件里的那个值（改道目录在桥接随机建的
+    /// 会话目录里，脚本事先不知道）
     Emit {
         line: Value,
     },
@@ -47,6 +48,13 @@ enum Step {
     /// 往 stdout 写一行合法 JSON，总长约 `bytes` 字节（造超长行；脚本放在环境变量里，放不下这么大的值）
     EmitBig {
         bytes: usize,
+    },
+    /// 照设置文件跑 PreToolUse hook 问一次（和真 CLI 一样：stdin 是 hook 输入），记下决定。允许时用改写后的输入
+    /// （有的话）「执行」：输入里有 `marker`（路径字符串）就建这个文件
+    Tool {
+        id: String,
+        name: String,
+        input: Value,
     },
     SleepMs {
         ms: u64,
@@ -158,7 +166,8 @@ impl Fake {
                 }));
                 self.log("answered_initialize", json!({}));
             }
-            Step::Emit { line } => {
+            Step::Emit { mut line } => {
+                self.fill_placeholders(&mut line);
                 self.out(&line);
                 self.log("emitted", json!({}));
             }
@@ -172,6 +181,7 @@ impl Fake {
                 self.out(&json!({ "type": "system", "subtype": "big", "pad": "x".repeat(bytes) }));
                 self.log("emitted", json!({ "bytes": bytes }));
             }
+            Step::Tool { id, name, input } => self.tool(&id, &name, input),
             Step::SleepMs { ms } => std::thread::sleep(Duration::from_millis(ms)),
             Step::Exit { code } => {
                 self.log("exit", json!({ "code": code }));
@@ -188,13 +198,76 @@ impl Fake {
 
     /// 设置文件里 SessionStart 的第一个 hook 命令。
     fn session_start_command(&self) -> String {
+        self.hook_command("SessionStart")
+    }
+
+    fn fill_placeholders(&self, v: &mut Value) {
+        match v {
+            Value::String(s) if s == "$autoMemoryDirectory" => {
+                let path = self.settings.as_ref().expect("参数里有 --settings");
+                let settings: Value =
+                    serde_json::from_slice(&std::fs::read(path).expect("设置文件读得到"))
+                        .expect("是 JSON");
+                *v = settings["autoMemoryDirectory"].clone();
+            }
+            Value::Array(a) => a.iter_mut().for_each(|x| self.fill_placeholders(x)),
+            Value::Object(o) => o.values_mut().for_each(|x| self.fill_placeholders(x)),
+            _ => {}
+        }
+    }
+
+    /// 设置文件里某个事件的第一个 hook 命令。
+    fn hook_command(&self, event: &str) -> String {
         let path = self.settings.as_ref().expect("参数里有 --settings");
         let settings: Value =
             serde_json::from_slice(&std::fs::read(path).expect("设置文件读得到")).expect("是 JSON");
-        settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        settings["hooks"][event][0]["hooks"][0]["command"]
             .as_str()
-            .expect("设置里有 SessionStart hook")
+            .unwrap_or_else(|| panic!("设置里有 {event} hook"))
             .to_owned()
+    }
+
+    /// 一次工具调用：问 hook，按决定「执行」。
+    fn tool(&self, id: &str, name: &str, input: Value) {
+        let stdin = json!({
+            "session_id": "fake",
+            "hook_event_name": "PreToolUse",
+            "tool_name": name,
+            "tool_input": input,
+            "tool_use_id": id,
+            "cwd": std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
+        });
+        let mut child = Command::new("sh")
+            .args(["-c", &self.hook_command("PreToolUse")])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("起得了 hook");
+        child
+            .stdin
+            .take()
+            .expect("stdin 是 piped")
+            .write_all(stdin.to_string().as_bytes())
+            .expect("hook 的 stdin 写得进去");
+        let out = child.wait_with_output().expect("等得到 hook");
+        let decided: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+        let d = &decided["hookSpecificOutput"];
+        let allow = d["permissionDecision"] == "allow";
+        let effective = d.get("updatedInput").cloned().unwrap_or(input);
+        if allow && let Some(marker) = effective.get("marker").and_then(Value::as_str) {
+            std::fs::write(marker, b"ran").expect("建得了标记文件");
+        }
+        self.log(
+            "tool",
+            json!({
+                "id": id,
+                "exit_code": out.status.code(),
+                "decision": d["permissionDecision"],
+                "reason": d["permissionDecisionReason"],
+                "effective_input": effective,
+            }),
+        );
     }
 }
 

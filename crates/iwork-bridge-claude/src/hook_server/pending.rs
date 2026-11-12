@@ -55,8 +55,9 @@ pub fn translate(answer: BackendAnswer) -> Response {
 /// [`Pending::answer`] 的结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
-    /// 这条答复就是交给 hook 的那一个
-    Delivered,
+    /// 这条答复就是交给 hook 的那一个。`allowed` 是翻译之后**实际**交出去的决定：后台选了允许、改写后的输入却
+    /// 解析不了时这里是 `false`（交给 hook 的是拒绝）。对账只认它（审查 S6-3 1/F-2）
+    Delivered { allowed: bool },
     /// 已经被别的触发回答过（hook 断了、兜底到时、回合结束），这条丢弃。`was_allow` 为真时后台已经当作交付了
     /// 一次允许而动作没执行：调用方按兜底处理（4.4 第 2 条）
     Late { was_allow: bool },
@@ -95,7 +96,7 @@ impl Pending {
         match self.take(id) {
             // 收的一端已经没了（连接任务刚好退出）：hook 拿不到这条答复，和迟到一样处理
             Some(tx) => match tx.send(response) {
-                Ok(()) => Delivery::Delivered,
+                Ok(()) => Delivery::Delivered { allowed: was_allow },
                 Err(_) => Delivery::Late { was_allow },
             },
             None => Delivery::Late { was_allow },
@@ -193,7 +194,7 @@ mod tests {
                     updated_input: None
                 }
             ),
-            Delivery::Delivered
+            Delivery::Delivered { allowed: true }
         );
         assert_eq!(rx.try_recv().unwrap(), Response::allow());
         assert!(!p.settle(id, Response::deny("兜底")));
@@ -221,6 +222,23 @@ mod tests {
             p.answer(id, BackendAnswer::Unrecognized),
             Delivery::Late { was_allow: false }
         );
+    }
+
+    /// 后台选了允许、改写后的输入解析不了：交给 hook 的是拒绝，`Delivered` 报的是拒绝（对账靠它）。
+    #[test]
+    fn delivered_reports_the_translated_decision() {
+        let p = Pending::default();
+        let (id, mut rx) = p.register();
+        assert_eq!(
+            p.answer(
+                id,
+                BackendAnswer::Allow {
+                    updated_input: Some("not json".into())
+                }
+            ),
+            Delivery::Delivered { allowed: false }
+        );
+        assert_eq!(rx.try_recv().unwrap().decision, Decision::Deny);
     }
 
     /// 收的一端已经没了：送不到，按迟到报。
@@ -256,7 +274,7 @@ mod tests {
                     BackendAnswer::Allow {
                         updated_input: None,
                     },
-                ) == Delivery::Delivered
+                ) == Delivery::Delivered { allowed: true }
             }
             Trigger::Backstop => p.settle(id, Response::deny("兜底")),
             Trigger::HookGone => p.settle(id, Response::deny("hook 断了")),

@@ -45,6 +45,12 @@ pub enum Out {
         content: String,
     },
     Report(Report),
+    /// CLI 输出了一个工具结果（回合内外都报，排在这一行别的输出之前）：只给对账用（4.7），不发给后台。回合之外
+    /// 的工具结果映射时会丢掉，对账不能跟着丢（审查 S6-3 1/F-3）
+    ToolResultSeen {
+        id: String,
+        failed: bool,
+    },
     /// 桥接自己发的控制请求的响应（由进程薄壳按 `request_id` 配对）
     Control(ControlResponse),
     /// 这一轮结束
@@ -163,6 +169,24 @@ impl StreamMapper {
         out
     }
 
+    /// hook 那边先到的工具调用（4.1：`tool_call` 由先到的一方发，按 id 去重）。这一轮没报过就返回要发的
+    /// [`Out::ToolCall`]，之后 CLI 输出里同一个 id 的 `tool_use` 不再报；回合之外返回 `None`。
+    pub fn note_tool_call(&mut self, id: &str, name: &str, raw_input: &Value) -> Option<Out> {
+        let turn = self.turn.as_mut()?;
+        turn.tool_calls
+            .insert(id.to_owned())
+            .then(|| Out::ToolCall {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                raw_input: raw_input.clone(),
+            })
+    }
+
+    /// 现在在不在一轮里。
+    pub fn in_turn(&self) -> bool {
+        self.turn.is_some()
+    }
+
     /// 一行输出。
     pub fn on_line(&mut self, line: &str) -> Result<Vec<Out>, Fatal> {
         let event = parse_line(line).map_err(Fatal::BadLine)?;
@@ -201,6 +225,16 @@ impl StreamMapper {
             CliEvent::ControlResponse(r) => out.push(Out::Control(r)),
             CliEvent::Unknown => out.push(Out::Diagnostic(Diagnostic::UnknownEvent)),
             CliEvent::OtherSystem | CliEvent::OtherStream => {}
+            CliEvent::User { ref tool_results } if !tool_results.is_empty() => {
+                out.extend(tool_results.iter().map(|r| Out::ToolResultSeen {
+                    id: r.tool_use_id.clone(),
+                    failed: r.is_error,
+                }));
+                match self.turn.as_mut() {
+                    None => out.push(Out::Diagnostic(Diagnostic::OutsideTurn)),
+                    Some(turn) => in_turn(turn, event, &mut out),
+                }
+            }
             CliEvent::TextDelta { .. }
             | CliEvent::ThinkingDelta { .. }
             | CliEvent::Assistant(_)
@@ -325,6 +359,33 @@ fn quota_report(info: RateLimitInfo) -> Out {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 4.1：`tool_call` 由先到的一方发，按 id 去重。hook 先到就由它报，之后 CLI 输出里的同一个调用不再报；
+    /// 回合之外不报。
+    #[test]
+    fn hook_first_tool_call_is_reported_once() {
+        let mut m = StreamMapper::new("low", facts::SessionExpect::default());
+        let input = serde_json::json!({"command": "ls"});
+        assert_eq!(m.note_tool_call("t1", "Bash", &input), None, "回合之外");
+        m.begin_turn();
+        assert!(matches!(
+            m.note_tool_call("t1", "Bash", &input),
+            Some(Out::ToolCall { ref id, .. }) if id == "t1"
+        ));
+        assert_eq!(
+            m.note_tool_call("t1", "Bash", &input),
+            None,
+            "同一个只报一次"
+        );
+        let line = serde_json::json!({ "type": "assistant", "message": { "id": "m1",
+            "content": [{ "type": "tool_use", "id": "t1", "name": "Bash", "input": input }] } })
+        .to_string();
+        let outs = m.on_line(&line).unwrap();
+        assert!(
+            !outs.iter().any(|o| matches!(o, Out::ToolCall { .. })),
+            "CLI 那边晚到的不再报：{outs:?}"
+        );
+    }
 
     #[test]
     fn long_tool_output_is_truncated_on_char_boundary() {

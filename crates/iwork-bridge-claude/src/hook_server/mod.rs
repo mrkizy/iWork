@@ -23,7 +23,9 @@
 //!
 //! M1 不支持 Windows（AGENTS.md）：命名管道这一半不在这里，整个模块只在 unix 上编译。
 
+pub mod input;
 pub mod pending;
+pub mod reconcile;
 
 use std::io;
 use std::path::Path;
@@ -429,7 +431,7 @@ mod tests {
                     updated_input: None
                 }
             ),
-            pending::Delivery::Delivered
+            pending::Delivery::Delivered { allowed: true }
         );
         assert!(matches!(
             hook_gone(&p, id, rx).await,

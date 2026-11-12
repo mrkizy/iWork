@@ -85,10 +85,18 @@ pub fn check_socket_len(socket: &Path) -> Result<(), DirError> {
     Ok(())
 }
 
-/// 一个建好的会话目录。删除要显式调 [`SessionDir::remove`]（被杀时留下的由 [`sweep`] 清）。
+/// 一个建好的会话目录，自己负责删：显式 [`SessionDir::remove`] 拿得到删除的结果；没调过就在离开作用域时删
+/// （开会话的 future 被丢掉、会话任务被丢掉、起任务失败，都只删这一次，审查 S6-3 1/F-4）。删不掉只记日志。
+/// 进程被杀时留下的由下一个桥接启动时的 [`sweep`] 清。
 #[derive(Debug)]
 pub struct SessionDir {
     path: PathBuf,
+    /// 还归它删：`remove` 之后为假
+    #[cfg_attr(
+        not(unix),
+        allow(dead_code, reason = "建与删只在 unix 上实现（M1 不支持 Windows）")
+    )]
+    owned: bool,
 }
 
 impl SessionDir {
@@ -213,7 +221,7 @@ mod imp {
                     Err(e) => return Err(DirError(format!("建不了 {}（{e}）", path.display()))),
                 }
                 check_private_dir(&path)?;
-                let dir = Self { path };
+                let dir = Self { path, owned: true };
                 write_new(
                     &dir.files().owner,
                     std::process::id().to_string().as_bytes(),
@@ -238,9 +246,20 @@ mod imp {
             write_new(&files.mcp, mcp)
         }
 
-        /// 正常退出：删掉自己的会话目录。
-        pub fn remove(self) -> io::Result<()> {
+        /// 正常退出：删掉自己的会话目录。不管成没成，之后离开作用域时都不再删。
+        pub fn remove(mut self) -> io::Result<()> {
+            self.owned = false;
             remove_known(&self.path)
+        }
+    }
+
+    impl Drop for SessionDir {
+        fn drop(&mut self) {
+            if self.owned
+                && let Err(e) = remove_known(&self.path)
+            {
+                tracing::warn!(error = %e, path = %self.path.display(), "删会话目录失败");
+            }
         }
     }
 

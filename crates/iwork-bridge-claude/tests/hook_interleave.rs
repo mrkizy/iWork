@@ -28,7 +28,7 @@ async fn eof_and_allow_ready_together_reports_undelivered_allow() {
                 updated_input: None
             }
         ),
-        Delivery::Delivered
+        Delivery::Delivered { allowed: true }
     );
     assert!(matches!(b.next_event().await, HookEvent::AllowUndelivered { id: got } if got == id));
 }
