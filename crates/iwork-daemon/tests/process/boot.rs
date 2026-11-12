@@ -97,17 +97,21 @@ fn usage_exits_2_when_not_managed() {
     assert!(sb.untouched());
 }
 
-/// 第 1 步取运行映像身份失败 → 10（托管报 0），不写状态文件。
+/// 第 1 步失败、程序在开发目录（两种包的形态都对不上，方案 2.2 L7）→ 「包没装齐」→ 14（托管也报 14），
+/// 不写状态文件。装齐的安装上同样失败得 10 的一格见 `install::identity_failure_on_settled_install_exits_zero`。
 #[test]
-fn identity_snapshot_failure_exits_10() {
+fn identity_failure_in_dev_dir_exits_14() {
     let sb = Sandbox::new();
     let env = [("IWORK_DEV_FAIL_AT", "identity")];
     let (status, err) = sb.run_to_exit(&[], &env);
-    assert_eq!(code(status), Some(10), "{err}");
-    assert!(err.contains("运行映像"), "{err}");
+    assert_eq!(code(status), Some(14), "{err}");
+    assert!(
+        err.contains("开发注入") && err.contains("包没装齐"),
+        "{err}"
+    );
     assert!(sb.untouched());
     let (status, _) = sb.run_to_exit(&["--service"], &env);
-    assert_eq!(code(status), Some(0));
+    assert_eq!(code(status), Some(14));
 }
 
 /// 一格的期望：逻辑码、状态文件里的阶段（不写为 `None`）。
@@ -122,9 +126,10 @@ struct Cell {
 #[test]
 fn every_step_failure_lands_in_table() {
     let cells = [
+        // 开发目录里：第 1 步失败一律是「包没装齐」→ 14（装齐的一格见 install 的两条 identity_failure_*）
         Cell {
             step: "identity",
-            logical: ExitCode::Unsupported,
+            logical: ExitCode::IdentityUnsettled,
             writes_status: false,
         },
         Cell {

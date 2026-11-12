@@ -76,3 +76,8 @@ iwork-fake-daemon = { path = "crates/iwork-fake-daemon" }
 # hook 每次工具调用都冷启动一次，体积与启动时间进基准（T06 方案 2.3、第 14 节）
 [profile.release.package.iwork-claude-hook]
 opt-level = "s"
+
+# 调试构建也优化 sha2：Linux 上运行映像与对端身份都是对整个可执行文件算 SHA-256，调试构建的后台约 150 MB，
+# 不优化时算一次约 7s（优化后约 0.5s），并行的真进程测试会一起超时（T04 组 3，CI 实测）。
+[profile.dev.package.sha2]
+opt-level = 3

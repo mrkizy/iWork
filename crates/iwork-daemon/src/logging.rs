@@ -364,8 +364,9 @@ fn open_private_append(path: &Path) -> io::Result<File> {
     opts.create(true).append(true);
     #[cfg(unix)]
     {
+        // 不跟随链接：不顺着别人放好的链接把日志追加到别处
         use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     opts.open(path)
 }
@@ -579,6 +580,21 @@ pub fn enabled(filter: &Targets, target: &str, level: Level) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 日志文件的位置上是指向别处的链接 → 打开失败，链接指向的文件不变。
+    #[cfg(unix)]
+    #[test]
+    fn log_file_symlink_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let victim = d.path().join("victim");
+        std::fs::write(&victim, "keep me").unwrap();
+        let log = d.path().join("daemon.log");
+        std::os::unix::fs::symlink(&victim, &log).unwrap();
+        assert!(open_private_append(&log).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+        // 对照：普通文件照常打开
+        assert!(open_private_append(&d.path().join("other.log")).is_ok());
+    }
 
     #[derive(Default)]
     struct Memory(Mutex<Vec<String>>);

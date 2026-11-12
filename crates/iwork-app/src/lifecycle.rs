@@ -1,4 +1,5 @@
-//! 后台服务生命周期命令的判定（T04 方案 2.8）。纯函数；执行停机归后台服务。
+//! 后台服务生命周期命令的受理（T04 方案 2.8、2.12）：完全退出的判定（纯函数，执行停机归后台服务）；
+//! 登录自启的受理（只提交意图，让系统跟上归后台服务的对齐任务）。
 
 /// 在跑的东西：持有进程的回合数、执行中的亲手执行卡片数。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -64,4 +65,50 @@ mod tests {
             }
         );
     }
+}
+
+/// 受理 `SetAutostart` 失败。
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum SetAutostartError {
+    /// 这台机器做不了登录自启（`PRECONDITION_FAILED`，带原因）。没提交任何东西。
+    #[error("{0}")]
+    Unsupported(String),
+    #[error(transparent)]
+    Storage(#[from] iwork_ports::store::StorageError),
+}
+
+/// 受理 `SetAutostart{enabled}`（T04 方案 2.12）：
+/// 1. `port.supported()`：不支持 → 报错，不提交（只读）；
+/// 2. 用命令自己的 `command_id` 提交 `GlobalSettingsChanged{autostart: Some(enabled)}`；
+/// 3. 到此为止，**不调 `port.set`**——让系统跟上已提交的设置是后台对齐任务的事。同一个 `command_id` 重发：
+///    存储返回上次的回执（`replayed`），不产生事件。
+pub async fn set_autostart<P, S>(
+    port: &P,
+    store: &S,
+    command_id: iwork_domain::id::CommandId,
+    actor: iwork_domain::common::Actor,
+    enabled: bool,
+) -> Result<iwork_ports::store::CommitReceipt, SetAutostartError>
+where
+    P: iwork_ports::autostart::AutostartPort,
+    S: iwork_ports::store::StoragePort,
+{
+    port.supported()
+        .map_err(|e| SetAutostartError::Unsupported(e.to_string()))?;
+    let receipt = store
+        .commit(iwork_ports::store::CommitRequest {
+            command_id,
+            actor,
+            events: vec![
+                iwork_domain::event::GlobalSettingsChanged {
+                    playful_ui: None,
+                    autostart: Some(enabled),
+                    projects_root: None,
+                }
+                .into(),
+            ],
+            outbox: vec![],
+        })
+        .await?;
+    Ok(receipt)
 }

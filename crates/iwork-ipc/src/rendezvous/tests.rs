@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use proptest::prelude::*;
 
@@ -101,6 +101,7 @@ fn relaunchable_by_code_table() {
         (ExitCode::EndpointRefused, NotWithThisProgram),
         (ExitCode::StoreRefused, NotWithThisProgram),
         (ExitCode::BindFailed, Yes),
+        (ExitCode::IdentityUnsettled, Yes),
         (ExitCode::Fatal, Yes),
         (ExitCode::RestartRequested, Yes),
     ];
@@ -113,7 +114,7 @@ fn relaunchable_by_code_table() {
 #[test]
 fn exit_code_numbers_match_table() {
     let numbers: Vec<u8> = ExitCode::ALL.iter().map(|c| c.code()).collect();
-    assert_eq!(numbers, [0, 2, 10, 11, 12, 13, 20, 21]);
+    assert_eq!(numbers, [0, 2, 10, 11, 12, 13, 14, 20, 21]);
 }
 
 fn any_reason() -> impl Strategy<Value = StopReason> {
@@ -218,6 +219,42 @@ fn unreadable_status_is_none() {
     assert!(read_status(dir.path()).is_some());
 }
 
+/// 临时文件的位置上已经有东西（别人放好的链接、同名文件）→ 新建失败，不顺着链接写，被指向的文件不变。
+#[cfg(unix)]
+#[test]
+fn temp_file_is_created_exclusively() {
+    let dir = tempfile::tempdir().unwrap();
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, "keep me").unwrap();
+    let planted = dir.path().join("planted");
+    std::os::unix::fs::symlink(&victim, &planted).unwrap();
+    assert!(create_new_private(&planted).is_err());
+    assert!(create_new_private(&victim).is_err());
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+    assert!(create_new_private(&dir.path().join("fresh")).is_ok());
+}
+
+/// 状态文件的位置上是指向别处的链接 → 改名替换掉链接本身，被指向的文件不变；不留临时文件。
+#[cfg(unix)]
+#[test]
+fn write_status_does_not_follow_links() {
+    let dir = tempfile::tempdir().unwrap();
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, "keep me").unwrap();
+    std::os::unix::fs::symlink(&victim, dir.path().join(STATUS_FILE)).unwrap();
+    let st = sample_status(Phase::Ready);
+    write_status(dir.path(), &st).unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+    let meta = std::fs::symlink_metadata(dir.path().join(STATUS_FILE)).unwrap();
+    assert!(meta.file_type().is_file());
+    assert_eq!(read_status(dir.path()), Some(st));
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names.len(), 2, "只有状态文件与 victim：{names:?}");
+}
+
 /// 一边反复写两份不同的状态，一边反复读：每次读到的都是两份之一，从不是半份或 `None`。
 #[test]
 fn write_is_atomic() {
@@ -230,27 +267,40 @@ fn write_is_atomic() {
     });
     write_status(dir.path(), &a).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
+    let writes = Arc::new(AtomicU32::new(0));
     let writer = {
-        let (dir, a, b, stop) = (dir.path().to_path_buf(), a.clone(), b.clone(), stop.clone());
+        let (dir, a, b, stop, writes) = (
+            dir.path().to_path_buf(),
+            a.clone(),
+            b.clone(),
+            stop.clone(),
+            writes.clone(),
+        );
         std::thread::spawn(move || {
-            let mut n = 0u32;
             while !stop.load(Ordering::Relaxed) {
+                let n = writes.load(Ordering::Relaxed);
                 write_status(&dir, if n.is_multiple_of(2) { &b } else { &a }).unwrap();
-                n += 1;
+                writes.store(n + 1, Ordering::Relaxed);
             }
-            n
         })
     };
-    let mut seen_b = 0;
-    for _ in 0..2000 {
+    // 按进度停，不按读的次数停：慢机器（Windows CI）上写线程可能在读完固定次数之前还没被调度到。
+    const MIN_WRITES: u32 = 200;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let (mut reads, mut seen_b) = (0usize, 0usize);
+    while reads < 2000 || writes.load(Ordering::Relaxed) < MIN_WRITES || seen_b == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "60s 内写了 {} 次、读了 {reads} 次、读到第二份 {seen_b} 次",
+            writes.load(Ordering::Relaxed)
+        );
         let got = read_status(dir.path()).expect("读到了半份或没有文件");
         assert!(got == a || got == b);
         seen_b += usize::from(got == b);
+        reads += 1;
     }
     stop.store(true, Ordering::Relaxed);
-    let writes = writer.join().unwrap();
-    assert!(writes > 1, "写线程没跑起来");
-    assert!(seen_b > 0, "从没读到第二份：测试没有真的在交错");
+    writer.join().unwrap();
 }
 
 #[test]

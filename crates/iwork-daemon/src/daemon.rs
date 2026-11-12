@@ -25,6 +25,7 @@ use crate::boot::{
 };
 use crate::dev;
 use crate::exit::{exited, process_status};
+use crate::handler::lifecycle::autostart_handler;
 use crate::handler::{DaemonHandler, Gate, NotWired};
 use crate::instance::{self, LockOutcome, StandbyAction};
 use crate::logging::{self, AuditSignal, LogGuard};
@@ -35,7 +36,9 @@ use crate::stop::{self, StopHooks, StopStep, StopSwitch};
 use crate::supervisor::{RestartPolicy, Supervisor, TaskSpec};
 use crate::tasks::outbox::{self, OutboxRoute};
 use crate::tasks::signals::{self, Signals};
-use crate::tasks::{maintenance, publish_check, sleep_watch, store_health};
+use crate::tasks::{
+    autostart_align, install_watch, maintenance, publish_check, sleep_watch, store_health,
+};
 use crate::time::{MonotonicIds, SystemClock};
 use crate::work::{NoWork, RunningWork};
 
@@ -132,6 +135,7 @@ pub fn run_identified(
         ..
     } = phase
     {
+        dev::pause_at(boot::PAUSE_BEFORE_UPGRADE_EXEC);
         let err = exec_self(&exe, &raw);
         eprintln!("iwork-daemon：自行重启时 exec 失败：{err}");
     }
@@ -227,9 +231,10 @@ fn fail(board: &StatusBoard, e: BootError) -> Phase {
     e.exit_phase()
 }
 
-/// 进入某一步：状态文件写 `Starting{step}`；开发构建可在这里注入失败。
+/// 进入某一步：状态文件写 `Starting{step}`；开发构建可在这里停住或注入失败。
 fn enter(board: &StatusBoard, step: Step) -> bool {
     board.set_phase(starting(step));
+    dev::pause_at(step.name());
     !dev::fail_at(step.name())
 }
 
@@ -406,6 +411,85 @@ async fn wait_stop_reason(supervisor: &mut Supervisor, stop: &StopSwitch) -> Sto
     }
 }
 
+type Autostart = iwork_host::autostart::Platform;
+
+/// 本机的自启实现：注册项里写本进程的程序路径。发布构建用系统的 `launchctl` / `systemctl`；开发构建只用
+/// `IWORK_DEV_AUTOSTART_TOOL` 给的替身，没给就什么都不做（组 3 审查 2/F-4：真进程测试、基准、演练脚本都是开发构建，
+/// 只隔离了 `HOME`，没隔离 launchd，用系统命令会动到本机用户真实的后台）。
+fn autostart_port(id: &Identity) -> Autostart {
+    let (tool, assume_supported) = autostart_tool(dev_autostart_tool());
+    iwork_host::autostart::for_current_user(iwork_host::autostart::AutostartConfig {
+        program: id.exe.clone(),
+        home: std::env::home_dir().unwrap_or_default(),
+        tool,
+        assume_supported,
+    })
+}
+
+#[cfg(feature = "dev")]
+fn dev_autostart_tool() -> Option<Option<std::ffi::OsString>> {
+    Some(std::env::var_os("IWORK_DEV_AUTOSTART_TOOL"))
+}
+
+#[cfg(not(feature = "dev"))]
+fn dev_autostart_tool() -> Option<Option<std::ffi::OsString>> {
+    None
+}
+
+/// 用哪个命令：发布构建（`None`）用系统的；开发构建（`Some`）有替身用替身（同时不检查 systemd 用户实例），
+/// 没有就禁用。
+fn autostart_tool(dev: Option<Option<std::ffi::OsString>>) -> (iwork_host::autostart::Tool, bool) {
+    use iwork_host::autostart::Tool;
+    match dev {
+        None => (Tool::System, false),
+        Some(Some(path)) => (Tool::Substitute(PathBuf::from(path)), true),
+        Some(None) => (Tool::Disabled, false),
+    }
+}
+
+/// 启动表第 9a 步。
+async fn unregister_if_disabled(port: &Autostart, store: &Arc<Store>) {
+    use iwork_ports::autostart::{AutostartPort, AutostartState};
+    use iwork_ports::read_model::ReadModelPort;
+    let intent = match store.read_model(boot::read_defaults()).settings().await {
+        Ok(s) => s.autostart,
+        Err(e) => {
+            tracing::warn!(error = %e, "读设置失败，跳过自启注销");
+            return;
+        }
+    };
+    if intent {
+        return;
+    }
+    match port.state().await {
+        Ok(AutostartState::Registered { .. } | AutostartState::Partial) => {
+            tracing::info!("自启已关而注册项还在（全部或一半）：注销（服务管理器会结束本进程）");
+            if let Err(e) = port.set(false).await {
+                tracing::warn!(error = %e, "注销自启失败，继续启动");
+            }
+        }
+        Ok(AutostartState::NotRegistered) => {}
+        Err(e) => tracing::warn!(error = %e, "查自启注册状态失败，继续启动"),
+    }
+}
+
+#[cfg(not(feature = "dev"))]
+fn install_timing() -> install_watch::Timing {
+    install_watch::Timing::REAL
+}
+
+/// 开发构建：`IWORK_DEV_INSTALL_FAST=<n>` 把安装检查的全部时长除以 n（真进程测试用；单测用暂停的时钟量真值）。
+#[cfg(feature = "dev")]
+fn install_timing() -> install_watch::Timing {
+    match std::env::var("IWORK_DEV_INSTALL_FAST")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        Some(div) => install_watch::Timing::scaled(div),
+        None => install_watch::Timing::REAL,
+    }
+}
+
 #[cfg(not(feature = "dev"))]
 fn outbox_routes() -> Vec<OutboxRoute> {
     Vec::new()
@@ -468,6 +552,7 @@ async fn serve_with<W: RunningWork>(
     if !enter(&board, Step::Server) {
         return fail(&board, boot::injected(Step::Server));
     }
+    let autostart = Arc::new(autostart_port(&id));
     let gate = Arc::new(Gate::default());
     let stop_switch = StopSwitch::new();
     let mut cfg = ServerConfig::new(VERSION);
@@ -475,7 +560,8 @@ async fn serve_with<W: RunningWork>(
     let (server, publisher) = Server::new(
         cfg,
         id.own.clone(),
-        DaemonHandler::new(gate.clone(), NotWired, work.clone(), stop_switch.clone()),
+        DaemonHandler::new(gate.clone(), NotWired, work.clone(), stop_switch.clone())
+            .with_autostart(autostart_handler(autostart.clone(), store.clone())),
         StoreSource::new(store.clone(), SnapshotNotWired),
     );
     let publishing = PublishState::new();
@@ -495,6 +581,13 @@ async fn serve_with<W: RunningWork>(
         if let Err(e) = p.start(&store).await {
             return fail(&board, boot::read_error(Step::Server, e));
         }
+    }
+
+    // 第 9a 步：托管实例 + 已提交的设置是关 → 查到自己还注册着就注销。注销会结束本进程——这正是要的：
+    // 这时还没 bind、没有客户端、没有回合在跑（方案 2.12）。失败只记 warn，继续启动
+    if args.service {
+        board.set_phase(starting(Step::AutostartOff));
+        unregister_if_disabled(autostart.as_ref(), &store).await;
     }
 
     // 第 10 步：绑定
@@ -572,6 +665,40 @@ async fn serve_with<W: RunningWork>(
             let (clock, woke) = (clock.clone(), woke.clone());
             move || sleep_watch::run(clock.clone(), woke.clone(), sleep_watch::INTERVAL)
         }),
+        TaskSpec::restartable("autostart-align", {
+            let read = Arc::new(store.read_model(boot::read_defaults()));
+            let (port, wake) = (autostart.clone(), publishing.autostart.clone());
+            let (managed, program) = (args.service, id.exe.clone());
+            move || {
+                autostart_align::run(
+                    port.clone(),
+                    read.clone(),
+                    managed,
+                    program.clone(),
+                    wake.clone(),
+                )
+            }
+        }),
+        TaskSpec::restartable("install-watch", {
+            let disk = Arc::new(install_watch::RealDisk {
+                daemon_path: id.exe.clone(),
+                running: id.running_image.clone(),
+                own: id.own.clone(),
+                forms: crate::install::forms(),
+            });
+            let started = tokio::time::Instant::from_std(id.started);
+            let (stop, woke, audit) = (stop_switch.clone(), woke.clone(), audit.clone());
+            move || {
+                install_watch::run(
+                    disk.clone(),
+                    install_timing(),
+                    started,
+                    stop.clone(),
+                    audit.subscribe(),
+                    woke.clone(),
+                )
+            }
+        }),
     ]);
     let mut supervisor = Supervisor::start(specs, RestartPolicy::default());
 
@@ -585,6 +712,7 @@ async fn serve_with<W: RunningWork>(
         interrupted,
         boot_ms = t0.elapsed().as_millis() as u64,
         since_start_ms = id.started.elapsed().as_millis() as u64,
+        image = %id.running_image,
         "后台服务就绪"
     );
 
@@ -620,6 +748,24 @@ fn bind(places: &Places) -> Result<LocalListener, BootError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2/F-4：开发构建没给替身 → 禁用（不跑任何命令）；给了 → 用替身；发布构建 → 系统命令。
+    #[test]
+    fn dev_build_never_uses_system_autostart_tool() {
+        use iwork_host::autostart::Tool;
+        assert_eq!(autostart_tool(Some(None)), (Tool::Disabled, false));
+        assert_eq!(
+            autostart_tool(Some(Some("/t/tool".into()))),
+            (Tool::Substitute(PathBuf::from("/t/tool")), true)
+        );
+        assert_eq!(autostart_tool(None), (Tool::System, false));
+        #[cfg(feature = "dev")]
+        assert_ne!(
+            dev_autostart_tool(),
+            None,
+            "开发构建走开发的那一列，不会落到系统命令"
+        );
+    }
     use crate::status::StatusIdentity;
     use iwork_ipc::rendezvous::ExeStamp;
     use iwork_ports::store::StorageError;

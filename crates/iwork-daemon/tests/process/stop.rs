@@ -216,7 +216,7 @@ fn service_mode_fatal_exits_nonzero() {
     // exec 失败：程序文件在升级时不见了
     let exe = sb.home.join("bin/iwork-daemon");
     std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
-    std::fs::copy(crate::support::DAEMON, &exe).unwrap();
+    crate::support::copy_exe(std::path::Path::new(crate::support::DAEMON), &exe);
     let spec = format!("{}:upgrade", trigger.display());
     let mut d = sb.spawn_exe(&exe, &["--service"], &[("IWORK_DEV_STOP_ON", &spec)]);
     sb.wait_ready(d.pid(), START);

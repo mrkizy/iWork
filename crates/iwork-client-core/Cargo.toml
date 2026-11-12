@@ -16,6 +16,9 @@ tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tracing.workspace = true
 ulid = { workspace = true, features = ["std"] }
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 iwork-fake-daemon.workspace = true
 proptest.workspace = true
@@ -25,3 +28,9 @@ tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "test-ut
 [features]
 # 只转发到 iwork-ipc/dev（DevTrust）；不是默认 feature。见 scripts/check-no-dev-trust.sh。
 dev = ["iwork-ipc/dev"]
+
+# 真进程：要 dev feature 构建的 iwork-daemon（先 cargo build -p iwork-daemon --features dev）
+[[test]]
+name = "launcher_process"
+path = "tests/launcher_process.rs"
+required-features = ["dev"]
