@@ -37,8 +37,10 @@ jobs:
         run: scripts/check-no-dev-trust.sh --graph-only
 
   test:
-    # ubuntu 最长一次约 33 分钟（run 43155137187：cargo test 25 分钟、release 构建 6 分钟；前端已拆到 frontend job）。
-    # 卡住时判超时并留下日志，不挂到默认的 6 小时
+    # 只放 Rust 的编译、clippy、测试与真进程用例；发布构建检查拆到 release-check，前端拆到 frontend，三个 job 并行。
+    # 实测（ubuntu）：cargo test 一步正常约 12 分钟（run 43210134953，测试执行合计 10 分钟），runner 慢时到过 25 分钟
+    # （run 43207337002：同一批测试慢 2–8 倍，代码没变）；拆分前整个 job 正常约 30 分钟，慢时撞上 40 分钟上限。
+    # 拆分后正常约 20 分钟，慢的那次按同样倍率约 33 分钟。上限不加：卡住时判超时并留下日志，不挂到默认的 6 小时
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -112,14 +114,6 @@ jobs:
       - name: 依赖方向检查自测（注入违规必须失败）
         run: scripts/check-deps.sh --selftest
 
-      # T03 验收 2：发布构建里没有 --dev-trust（feature 图、产物字符串含阳性对照、发布进程拒绝该参数）
-      #   打包步骤（tauri build）还没进 CI，先对 release 的客户端二进制做同样的 grep；打包进 CI 后把产物路径加到 --artifacts
-      - name: 发布构建没有 dev-trust
-        run: |
-          exe=""; [ "$RUNNER_OS" = "Windows" ] && exe=".exe"
-          cargo build --release --locked -p iwork-client
-          scripts/check-no-dev-trust.sh --artifacts "target/release/iwork-client${exe}"
-
       # T03 验收 1：以另一个系统用户连接被拒（两个方向）。只在 Linux 上做得到。
       - name: 另一用户连接被拒（Linux）
         if: runner.os == 'Linux'
@@ -134,11 +128,38 @@ jobs:
           IWORK_TEST_OTHER_USER=1 \
             cargo test -p iwork-bridge-claude --test hook_channel -- --ignored --exact other_user_rejected
 
-  # 前端：类型检查、vitest，以及 vitest 之前对着假后台逐个录场景（pnpm fixtures，每个十几秒，随场景增多变长）。
-  #   从 test 拆出来单独跑，和 Rust 测试并行，各有各的时限：场景加多了只拉长这一个 job，不再把 test 顶过时限
-  #   （run 43155137187：ubuntu 上 cargo test 25 分钟 + release 构建 6 分钟之后，前端测试跑到第 40 分钟被取消）。
-  #   录场景要编 iwork-client-core 的 example 和假后台，不编 Tauri 壳，所以 Linux 上不用装 WebKitGTK。
-  #   Windows 上假后台不监听（M1 不支持 Windows），录像那一步只打印跳过，vitest 里吃录像的用例也跳过。
+  # T03 验收 2：发布构建里没有 --dev-trust（feature 图、产物字符串含阳性对照、发布进程拒绝该参数）。
+  #   从 test 拆出来单独跑（release 构建约 6 分钟，和 test 并行；release 的编译缓存也不再挤占 test 的缓存）。
+  #   打包步骤（tauri build）还没进 CI，先对 release 的客户端二进制做同样的 grep；打包进 CI 后把产物路径加到 --artifacts
+  release-check:
+    # ubuntu 上 release 构建约 6 分钟（run 43210134953），无缓存冷编时更长；留足余量
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      # 编 iwork-client（Tauri 壳）在 Linux 上要 WebKitGTK 等系统库，清单同 test job
+      - name: Tauri 系统依赖（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: 发布构建没有 dev-trust
+        run: |
+          exe=""; [ "$RUNNER_OS" = "Windows" ] && exe=".exe"
+          cargo build --release --locked -p iwork-client
+          scripts/check-no-dev-trust.sh --artifacts "target/release/iwork-client${exe}"
+
+  # 前端：类型检查与 vitest。从 test 拆出来单独跑，和 Rust 测试并行，各有各的时限。
+  #   pnpm test 先 gen、再编译假后台录场景（fixtures）、再跑 vitest，所以这里要 rust-cache。
   frontend:
     # 最长一次（ubuntu，run 43156265818）前端测试 6.4 分钟，加上单独编译录像程序；留足余量
     timeout-minutes: 30
