@@ -8,6 +8,7 @@ import {
   builtPrograms,
   checkBuildArgs,
   isHelpOrVersion,
+  isTestBuild,
   staleBundleDir,
   tauriBuildArgs,
   withConfigLayers,
@@ -19,12 +20,17 @@ type Env = Readonly<Record<string, string | undefined>>;
 export type Plan = { kind: "passthrough"; args: string[] } | { kind: "release" };
 
 /**
- * dev、以及只问 Tauri 自己的帮助或版本：原样（叠上配置层）交给 tauri CLI。别的 build：发布构建。
+ * dev、测试构建（`--debug --no-bundle`，不出任何包）、以及只问 Tauri 自己的帮助或版本：原样（叠上配置层）交给
+ * tauri CLI。别的 build：发布构建。
  * build 先查禁用的参数与环境，再看是不是只问帮助：`build --features dev --help` 被拒，`-- --help` 是转给构建程序
  * 的参数（`--` 本身就被拒），不算帮助（审查 1/F-4）。
  */
 export function planCommand(args: readonly string[], env: Env): Plan {
   if (args[0] !== "build") {
+    return { kind: "passthrough", args: withConfigLayers(args, env) };
+  }
+  if (isTestBuild(args)) {
+    checkBuildArgs(args, env, "test");
     return { kind: "passthrough", args: withConfigLayers(args, env) };
   }
   checkBuildArgs(args, env);

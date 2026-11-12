@@ -90,20 +90,50 @@ const REFUSED_BUILD_FLAGS: readonly { long: string; short: string | null; why: s
   { long: "--features", short: "f", why: "能给客户端开 dev，打出带 --dev-trust 的「发布包」" },
 ];
 
+/** 一个参数是不是这个开关（长名、`长名=值`，或含这个字母的短参数串）。 */
+function isFlag(arg: string, flag: { long: string; short: string | null }): boolean {
+  const isLong = arg === flag.long || arg.startsWith(`${flag.long}=`);
+  const isShort = flag.short !== null && new RegExp(`^-[^-]*${flag.short}`).test(arg);
+  return isLong || isShort;
+}
+
+/** 测试构建放行的开关：出到 debug/、不出任何包，只给 e2e 这类测试编客户端。 */
+const TEST_BUILD_FLAGS = ["--debug", "--no-bundle", "--features"];
+
+/**
+ * 测试构建：`--debug` 与 `--no-bundle` 同时在（`--` 之前）。不出任何包，所以不编后台、不装配、不碰 dist/，原样交给
+ * tauri CLI；`--features` 照放。只有 `--debug` 会出一个带开发特性的 debug 包，容易被当成能发的包，照样拒
+ * （supervisor 2026-11-13 定）。
+ */
+export function isTestBuild(args: readonly string[]): boolean {
+  const own = args.includes("--") ? args.slice(0, args.indexOf("--")) : args;
+  const has = (long: string) => {
+    const flag = REFUSED_BUILD_FLAGS.find((f) => f.long === long);
+    return flag !== undefined && own.slice(1).some((a) => isFlag(a, flag));
+  };
+  return has("--debug") && has("--no-bundle");
+}
+
 // 会让打包器自己签名的环境变量：签名只许在装配步骤做（封印之后不能再往包里放后台）
 const REFUSED_BUILD_ENV = ["APPLE_SIGNING_IDENTITY", "APPLE_CERTIFICATE"];
 
-/** build 的参数与环境不被接受时抛错，错误信息写明原因。`--` 之后的参数原样转给构建程序，一律不收。 */
-export function checkBuildArgs(args: readonly string[], env: Readonly<Record<string, string | undefined>>): void {
+/**
+ * build 的参数与环境不被接受时抛错，错误信息写明原因。`--` 之后的参数原样转给构建程序，一律不收。
+ * 测试构建（见 isTestBuild）另外放行 TEST_BUILD_FLAGS。
+ */
+export function checkBuildArgs(
+  args: readonly string[],
+  env: Readonly<Record<string, string | undefined>>,
+  kind: "release" | "test" = "release",
+): void {
   const rest = args.slice(1);
   if (rest.includes("--")) {
     throw new Error("pnpm tauri build 不接受 -- 之后转给构建程序的参数：构建去向只由打包命令定。");
   }
   for (const arg of rest) {
     for (const flag of REFUSED_BUILD_FLAGS) {
-      const isLong = arg === flag.long || arg.startsWith(`${flag.long}=`);
-      const isShort = flag.short !== null && new RegExp(`^-[^-]*${flag.short}`).test(arg);
-      if (isLong || isShort) {
+      if (kind === "test" && TEST_BUILD_FLAGS.includes(flag.long)) continue;
+      if (isFlag(arg, flag)) {
         throw new Error(`pnpm tauri build 不接受 ${arg}：${flag.why}。`);
       }
     }

@@ -25,6 +25,52 @@ describe("走哪条路：只认 tauri 自己的 --help、--version，并且先�
   });
 });
 
+describe("测试构建：--debug 与 --no-bundle 同时在才算（不出任何包；supervisor 2026-11-13 定）", () => {
+  it("e2e:webview 的构建命令原样交给 tauri CLI（叠配置层），不走发布构建的六步", () => {
+    const plan = planCommand(["build", "--debug", "--no-bundle", "--features", "e2e"], {});
+    expect(plan.kind).toBe("passthrough");
+    if (plan.kind !== "passthrough") return;
+    expect(plan.args[0]).toBe("build");
+    expect(plan.args.filter((a) => a !== "--config" && !a.endsWith(".conf.json"))).toEqual([
+      "build",
+      "--debug",
+      "--no-bundle",
+      "--features",
+      "e2e",
+    ]);
+    expect(plan.args.find((a) => a.endsWith("tauri.build.conf.json")), "叠了发布层配置").toBeDefined();
+  });
+
+  it("短参数 -d 同样算", () => {
+    expect(planCommand(["build", "-d", "--no-bundle"], {}).kind).toBe("passthrough");
+  });
+
+  it.each([
+    [["build", "--debug"]],
+    [["build", "--debug", "--features", "e2e"]],
+    [["build", "--no-bundle"]],
+    [["build", "--no-bundle", "--features", "dev"]],
+    [["build", "--debug", "--no-bundle", "--target", "x86_64-apple-darwin"]],
+    [["build", "--debug", "--no-bundle", "--bundles", "app"]],
+    [["build", "--debug", "--no-bundle", "--", "--no-default-features"]],
+    [["build", "--features", "dev", "--", "--debug", "--no-bundle"]],
+  ])("%j 被拒", (args) => {
+    expect(() => planCommand(args, {})).toThrow(/不接受/);
+  });
+
+  it("测试构建照样不接受让打包器签名的环境变量", () => {
+    expect(() => planCommand(["build", "--debug", "--no-bundle"], { APPLE_SIGNING_IDENTITY: "x" })).toThrow(
+      /APPLE_SIGNING_IDENTITY/,
+    );
+  });
+
+  it("测试构建的参数进不了发布构建的六步（releaseBuild 自己再查一遍）", async () => {
+    const { deps, assembled } = world(new Map());
+    await expect(releaseBuild(["build", "--debug", "--no-bundle"], {}, "linux", deps)).rejects.toThrow(/不接受/);
+    expect(assembled).toEqual([]);
+  });
+});
+
 const REPO = "/repo";
 const TAURI_CWD = "/repo/client/src-tauri";
 
