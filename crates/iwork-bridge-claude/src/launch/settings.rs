@@ -30,7 +30,13 @@ pub const SELECTED: SelectedConfig = SelectedConfig {
 };
 
 /// 生成的设置文件。
-pub fn settings_json(constraints: &Constraints, hook_program: &str, memory_dir: &Path) -> Value {
+/// `hook_timeout`：PreToolUse hook 的 timeout，和算期限用的是同一个值（产品里是 [`HOOK_TIMEOUT_SECS`]）。
+pub fn settings_json(
+    constraints: &Constraints,
+    hook_program: &str,
+    memory_dir: &Path,
+    hook_timeout: std::time::Duration,
+) -> Value {
     let hook = shell_quote(hook_program);
     json!({
         // 3.1a：自动记忆的目录改到会话目录里的空目录（开关另由环境变量 CLAUDE_CODE_DISABLE_AUTO_MEMORY 给）。
@@ -46,7 +52,7 @@ pub fn settings_json(constraints: &Constraints, hook_program: &str, memory_dir: 
             "PreToolUse": [{ "matcher": "*", "hooks": [{
                 "type": "command",
                 "command": format!("{hook} pre-tool-use"),
-                "timeout": HOOK_TIMEOUT_SECS,
+                "timeout": hook_timeout.as_secs(),
                 "onFailure": SELECTED.on_failure,
             }]}],
             "SessionStart": [{ "hooks": [{

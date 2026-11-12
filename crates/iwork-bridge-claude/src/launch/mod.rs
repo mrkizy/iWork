@@ -37,6 +37,9 @@ pub struct Channel {
     pub bridge_pid: u32,
     /// hook 自己的期限（`deadlines().hook`）
     pub hook_deadline: Duration,
+    /// PreToolUse hook 的 timeout：写进设置文件，三个期限也由它算（同一个值，审查 S6-4 1/F-2）。产品里是
+    /// `HOOK_TIMEOUT_SECS`，故障注入时可以调短
+    pub hook_timeout: Duration,
 }
 
 /// ACP 请求给的、`SessionSetup` 之外的东西。
@@ -95,7 +98,12 @@ pub fn build_launch(
                 (ENV_DEADLINE, channel.hook_deadline.as_secs().to_string()),
             ],
         ),
-        settings: settings::settings_json(&setup.constraints, &env.hook_program, &files.memory),
+        settings: settings::settings_json(
+            &setup.constraints,
+            &env.hook_program,
+            &files.memory,
+            channel.hook_timeout,
+        ),
         mcp: settings::mcp_json(),
     })
 }

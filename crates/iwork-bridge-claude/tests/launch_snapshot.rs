@@ -127,6 +127,7 @@ fn plan(setup: &Setup, start: Start) -> LaunchPlan {
             token_hex: "ab".repeat(32),
             bridge_pid: 4242,
             hook_deadline: Duration::from_secs(7185),
+            hook_timeout: Duration::from_secs(HOOK_TIMEOUT_SECS),
         },
     )
     .unwrap()
@@ -379,6 +380,7 @@ fn relative_cwd_is_refused() {
             token_hex: String::new(),
             bridge_pid: 1,
             hook_deadline: Duration::from_secs(1),
+            hook_timeout: Duration::from_secs(HOOK_TIMEOUT_SECS),
         },
     )
     .unwrap_err();

@@ -335,6 +335,10 @@ fn main() {
         .position(|a| a == "--settings")
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from);
+    // 设置文件随会话目录一起删，测试要看它就从这里看
+    if let Some(path) = &settings {
+        let _ = std::fs::copy(path, record.join("settings.json"));
+    }
     let mut fake = Fake {
         record,
         settings,

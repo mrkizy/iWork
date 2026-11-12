@@ -47,6 +47,15 @@ async fn backstop_fires_when_backend_never_answers() {
         Some(Duration::from_secs(4)),
         "等待上限 = deadlines(10s).daemon"
     );
+    // 设置文件里 hook 的 timeout 与算期限用的是同一个值（审查 1/F-2）
+    let settings: Value = serde_json::from_str(
+        &std::fs::read_to_string(rig.record.path().join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        settings["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"],
+        10
+    );
     let started = Instant::now();
     let updates = turn(&s, "跑一下").await.unwrap();
     let took = started.elapsed();

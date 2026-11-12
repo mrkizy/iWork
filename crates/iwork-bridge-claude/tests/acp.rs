@@ -880,3 +880,23 @@ async fn hook_after_cancel_is_denied_without_asking() {
     assert!(!marker.exists());
     assert!(answers.seen.lock().unwrap().is_empty(), "没交给后台");
 }
+
+/// 审查 S6-4 1/F-2 的对照：不开故障注入时，设置文件里 hook 的 timeout 是产品值 7200，报给后台的等待上限是
+/// 由它算出来的 7080 秒。
+#[tokio::test(flavor = "multi_thread")]
+async fn product_hook_timeout_reaches_settings_and_wait_limit() {
+    let rig = Rig::new(script(vec![]));
+    let s = rig.open(rig.spec(), allow_all()).await.unwrap();
+    let settings: Value = serde_json::from_str(
+        &std::fs::read_to_string(rig.record.path().join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        settings["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"],
+        7200
+    );
+    assert_eq!(
+        s.permission_wait_limit(),
+        Some(std::time::Duration::from_secs(7080))
+    );
+}
