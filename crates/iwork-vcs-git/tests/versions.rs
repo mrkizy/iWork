@@ -5,10 +5,10 @@
 #[allow(dead_code, reason = "共用的夹具，这里只用一部分")]
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use common::{Fixture, write};
-use iwork_ports::vcs::{DiffRange, PathKind, PathVersion, RepoRoot, VcsProvider};
+use iwork_ports::vcs::{PathKind, PathVersion, RepoRoot, VcsProvider};
 use sha2::{Digest, Sha256};
 
 fn digest(bytes: &[u8]) -> [u8; 32] {
@@ -20,6 +20,7 @@ fn paths(names: &[&str]) -> Vec<PathBuf> {
 }
 
 /// 这次运行独有的标记：外面那个文件的内容只有它，读到了就能认出来。
+#[cfg(unix)]
 fn marker() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -90,7 +91,9 @@ async fn parent_dir_swapped_for_symlink_is_absent_and_not_read() {
 #[cfg(unix)]
 #[tokio::test]
 async fn worktree_versions_match_diff_equality() {
+    use iwork_ports::vcs::DiffRange;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
     let f = Fixture::new();
     let repo = f.repo_with_commit(
         "eq",
