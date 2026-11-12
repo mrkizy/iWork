@@ -186,6 +186,81 @@ S0 合计 PASS 506、FAIL 46、INCONCLUSIVE 217、INFO 19。FAIL 里 34 个是 G
 
 **运行前后核对**：家目录下原有 1 项，没变。登记之外的调用 86 次，都被探针拒了。
 
+#### R2（2026-11-12 13:51–14:10，Claude Code 2.1.322，日常账号，普通终端起，模型 `claude-haiku-5-5`；六个结果包 `…135202-09df2e`（G2 先行五格）、`…140247-6b03d0`（G4）、`…140747-55cf18`（G7）、`…140921-65e950`（G1）、`…141011-8ff1ae`（G8）、`…141030-50150f`（G5），109 个实例）
+
+只收有结构化证据的。分析全文在 architect 的报告 `r2-analysis.md`；据此改的方案见 T06 方案 21 节「R2 的结果落进方案」。
+
+**环境**：六个包的环境变量名记录里只有 `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`，没有插件变量。109 个实例里有 `init` 的 107 个（另两个只发 `initialize`）。`init.plugins` 全是 `@builtin`（G5 阳性格多一个测试插件）：105 个实例是 4 个，G2 包的隔离探查那一次是 5 个，多一个 `cc-plugin-easel`。上文 S0 那一轮是从带着用户插件的环境里跑的，两轮不一样的地方以这一轮为准。
+
+**先看这一条：哪些格子没带产品设置。** 脚本的权限模式和沙箱都只从设置文件来。`init` 报 `default` 的格子，设置文件里没有权限模式、也没有沙箱（只有 hook 与记忆改道），**命令不在沙箱里跑**。
+
+| 包 | `init` 报的权限模式（有 `init` 的实例数） | 说明 |
+| --- | --- | --- |
+| G2 先行五格 | `dontAsk` 5，`default` 1（隔离探查） | 五格带了设置；沙箱用的是矩阵那一套外层保护，不是产品原样（T06 方案 3.4） |
+| G4 | `dontAsk` 65，`default` 1（隔离探查） | 带了，沙箱照产品的翻译表 |
+| G7 | `default` 8（含隔离探查），`dontAsk` 4（`g7-cfg-*`） | **常驻会话、中断、后台命令、续接各格没带产品设置**；两格只发 `initialize`，没有 `init` |
+| G1 | `default` 11（含隔离探查） | **全部没带产品设置** |
+| G8 | `default` 9（含隔离探查） | **全部没带产品设置** |
+| G5 | `dontAsk` 2，`default` 1（隔离探查） | 环境行两格 |
+
+所以**下面 G7 的进程事实、G1 的子代理事实、G8 的工具清单都是没开沙箱、权限模式 `default` 下量的**。工具清单后来在带产品设置的格子里见到的也是同样的 24 个（R2 补测）；进程关系在产品设置下还没量。
+
+**G2 先行五格**（硬格子，全 PASS）
+
+| 格子 | 结果 |
+| --- | --- |
+| Read 读工作目录外，hook 答允许 | 执行了，恰好一次调用，结果是文件内容 |
+| Grep、Glob、只读命令（`cat` 工作目录内的文件）、子代理工具，hook 答拒绝 | 四格都没执行：工具结果是 `PreToolUse:<工具> hook error`，`result.permission_denials` 里有这一条 |
+
+**G4 沙箱**（`dontAsk`）
+
+- PASS：①a–①d、①f–①h、②（HTTPS 通）、⑤、⑦a、⑨a–⑨d。全开档下假凭据目录仍然读不到、写不了，不发起沙箱外重试。
+- **⑩ 文件工具写工作目录外，hook 答允许 → 写得进**。
+- 四条 FAIL，都是 CLI 的真实行为：
+
+| 项 | 命令报了什么 | 对照 |
+| --- | --- | --- |
+| ①e 读只读区 | `cat: …/cred/readonly/ok.txt: Operation not permitted`，退出码 1 | ①e′ 去掉 `sandbox.credentials.files`：读到内容，退出码 0。`credentials.files` 的 `deny` 盖住了 `allowRead` |
+| ②b `nc` 连 TCP 22 | `nc: getaddrinfo: nodename nor servname provided, or not known` | 沙箱外对照退出码 0。不认代理的程序在沙箱里连域名都解析不了 |
+| ②c 绑本机端口 | `bind(('127.0.0.1',0))` 报 `PermissionError: Operation not permitted` | ②c′ 加 `sandbox.network.allowLocalBinding: true`：退出码 0 |
+| ⑦b `gh auth status` | 输出没进包，只留摘要：270 字节，没提 TLS、连接、没登录 | 沙箱外对照退出码 0。原因不明 |
+
+- ⑥ 被挡后请求沙箱外重试：5 次里模型发起了 1 次（输入带 `dangerouslyDisableSandbox: true`，探针拒了）。
+- **④ `excludedCommands` 对拍**：语料 44 行，脚本测成 34 行，违例 0（CLI 判在沙箱外的 16 行，iWork 的规则也都判在沙箱外）。另有 4 行调起记录里有结果、脚本没认出来（`ls -la` 被用户 shell 的别名跑成 `ls -G -la`；`{ git pull; }`；`if true; then git pull; fi`；裸重定向 `> a.txt` 被 zsh 补成 `cat`），都在沙箱内。iWork 判「说不清」而 CLI 实测在沙箱内的 6 行：`git -c core.sshCommand=x pull`、`git -C sub pull`、`git --no-pager fetch`、`docker --context x push img`、`git pull > log.txt`、`git pull > log && git push`。`git pull 2>&1` 在沙箱外。没测成的 6 行：1 行模型改了命令，5 行命令里有带路径的词、替身顶替不了。
+- **调起记录的祖先链**（39 个调起记录文件）：CLI 自己调的程序是它的直接子进程，374 笔（`git` 338、`npm root -g` 33、`gh pr view` 3），都在沙箱外；Bash 工具的命令隔着一层 shell，沙箱外的 20 笔直接父进程是 `zsh` 18、`gh` 2；**沙箱内的 26 笔祖先链全是「?」**，只拿得到直接父进程号。
+- 命令是在带着用户 shell 别名的环境里执行的（上面 `ls` 那一行）。
+
+**G7 流式输入、中断、进程**（除 `g7-cfg-*` 外没带产品设置）
+
+- **前台 Bash 命令不在 CLI 的进程组里**：`sleep` 的进程组号等于它父 shell 的进程号，不是 CLI 的；调用的输入里没有 `run_in_background`。脚本是从 CLI 的进程号顺着父进程号找到它的。
+- **`interrupt` 控制请求停得掉前台命令**：这一轮立刻以 `error_during_execution`、`terminal_reason=aborted_tools` 结束，`sleep` 没了，后面的 `touch` 没执行，同一进程接了下一轮。
+- **后台 Bash 命令**同样自成进程组；`interrupt` 停不掉它（5 秒后还活着）；关掉输入后 CLI 30 秒内自己退出，那之后它也没了（这是 CLI 空闲、只有后台命令时量的）。
+- **hook 进程自成进程组**：CLI 的进程组被 SIGKILL 之后 hook 进程还活着，3 次都是。
+- **G7c′**：只发 `initialize`、不发用户消息，20 秒内有响应，`current_permission_mode` 是 `dontAsk`。给一份校验不过的设置文件时，取值是 `default`，会话还活着，流里没有 SessionStart 的 hook 事件。响应里另有 `pid`、`hook_on_failure_supported: true`。
+- G7a、G7a′、G7b′、G7b″、G7h、G7j PASS；G7i 续接后原样重发 3 次结果相同；G7g 换模型前后 `assistant` 报的模型从 haiku 变成 sonnet。
+
+**G1 工具与 hook 输入**（没带产品设置）
+
+- G1a、G1b、G1c、G1e、G1f PASS；G1f 有 9 个探针运行有效，没有哪个工具结果没过 hook。
+- **`init.tools` 是 24 个，没有 `ToolSearch`**：`Task`、`Bash`、`CronCreate`、`CronDelete`、`CronList`、`DesignSync`、`Edit`、`EnterWorktree`、`ExitWorktree`、`ListAgents`、`Monitor`、`NotebookEdit`、`PushNotification`、`Read`、`RemoteTrigger`、`ReportFindings`、`ScheduleWakeup`、`SendMessage`、`Skill`、`TaskStop`、`WebFetch`、`WebSearch`、`Workflow`、`Write`。有 `init` 的 107 个实例（含 3 个带 MCP 的）没有一个出现 `ToolSearch`；S0 的 25 个里有它。
+- **G1d 子代理里的工具调用进 hook**：子代理发的 Bash 调用到了探针，hook 输入带子代理 id，流里那条调用带 `parent_tool_use_id`。
+- **子代理默认在后台跑**：模型调子代理工具时输入里没有 `run_in_background`，CLI 报 `is_backgrounded: true`，工具结果当场返回「Async agent launched successfully」；子代理跑完后 CLI 自己又起一轮。一个 prompt 出了两个 `system/init`、两个 `result`（这一格是 `-p` 一次性运行，第一个 `result` 排在第二个 `init` 之后；常驻的流式输入下的次序见 R2 补测 n1）。
+- **子代理工具的名字**：`init.tools` 与 `result.permission_denials` 里是 `Task`，模型发的 `tool_use` 与 hook 输入里是 `Agent`。
+
+**G8 工具开关**（没带产品设置）
+
+- G8a–G8d、G8f PASS，MCP 阳性对照成立。
+- **G8e**：`--tools Read` 时 `init.tools` 是 `Read` 加 MCP 工具，MCP 工具调用成功。白名单不影响 MCP 工具。
+- **G8g**：`--tools` 里写了不存在的工具名不报错，退出码 0，`init.tools` 只剩 `Read`。
+
+**G5**
+
+- 环境行 PASS：带着指向测试插件的 `CLAUDE_CODE_PLUGIN_DIRS` 时 `init.plugins` 里有它，干净时没有。
+- **记忆开关在 `init` 里看得出来**：设了 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` 的 105 个实例，`init` 里没有 `memory_paths` 这个键；没设的 2 个有，值是 `{"auto": "~/.claude/projects/<编码后的工作目录>/memory/"}`。
+- **CLI 给工作目录编码时把 `/` 和 `_` 都换成 `-`**（根目录 `iwork-t0g-34_8u6x0` 对应 `…-iwork-t0g-34-8u6x0-g5-work`）。记忆读、记忆写、子代理记忆三行这一轮因此没测成（脚本拿原样的目录名去比）；重跑结果见 R2 补测。
+
+**这一轮没量到的**（补测量了前三样）：前台命令跑着时硬杀 CLI 的进程组，命令的去向；只关输入、发 SIGTERM 时 CLI 收不收拾前台命令；`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` 的效果；⑦b 失败的原因；⑧c（`npm install` 真实依赖，被 `--skip-builds` 跳过）。
+
 #### R2 补测（2026-11-12 下午，Claude Code 2.1.322，日常账号，普通终端起，模型 `claude-haiku-5-5`；四个结果包 `…153126-79f269`、`…161127-fe1169`、`…161240-a5754c`、`…161328-5de10e`，26 个实例加 4 个探查）
 
 只收有结构化证据的。分析全文在 architect 的报告 `r2x-analysis.md`；据此定的 D2、D5、P3、P15 见 T06 方案 18 节（D5：M1 关掉后台任务、Monitor 进永久禁用名单，方向是 M2 开放；产品负责人 2026-11-12）。
