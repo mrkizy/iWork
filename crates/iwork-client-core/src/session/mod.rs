@@ -649,8 +649,10 @@ impl<D: Dialer> Session<D> {
                 conversation_id,
                 first,
                 last,
+                by_user,
             } => {
-                self.store.set_window(&conversation_id, first, last);
+                self.store
+                    .set_window(&conversation_id, first, last, by_user);
             }
             Local::LoadOlder(_) => self.want_older = true,
             Local::JumpToLatest(cid) => {

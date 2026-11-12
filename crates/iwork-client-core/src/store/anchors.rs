@@ -25,6 +25,18 @@ pub fn current_anchor(window: &[pb::Anchor], first_visible_seq: u64) -> Option<&
     window.get(n.saturating_sub(1)).or_else(|| window.first())
 }
 
+/// 这份窗口能不能确定阅读位置那一处：阅读位置在窗口第一处之前而前面还有，或在最后一处之后而后面还有，
+/// 那一处就在窗口外面，确定不了（翻看换来的窗口常常这样）。
+fn covers(w: &pb::ListAnchorsResult, reading: u64) -> bool {
+    match (w.anchors.first(), w.anchors.last()) {
+        (Some(first), Some(last)) => {
+            !(reading < first.created_seq && w.has_before
+                || reading > last.created_seq && w.has_after)
+        }
+        _ => !(w.has_before || w.has_after),
+    }
+}
+
 /// 等着跳的那一处（目标不在时间线里，正在取以它为中心的一段）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingJump {
@@ -46,7 +58,10 @@ pub struct Anchors {
     pub center: u64,
     /// 要以哪里为中心重取（0 = 最新）：当前位置出了窗口、翻看到边缘、相对跳转越界、走了快照。
     pub want_center: Option<u64>,
-    /// 当前位置（锚点的 key）。
+    /// 真实阅读位置：网页可见区域第一行的 seq。只随用户看的地方变，不随锚点窗口变（审查 4/F-7）。
+    pub reading: Option<u64>,
+    /// 当前位置（锚点的 key）：阅读位置之上最近的一处。只在窗口覆盖得到阅读位置时算；翻看换来的窗口
+    /// 覆盖不到时保留原值，不拿浏览中心附近的某一处顶替。
     pub current: Option<String>,
     pub pending_jump: Option<PendingJump>,
     /// 相对跳转等窗口重取后再落（目标越过了窗口而那一侧还有）。
@@ -116,28 +131,40 @@ impl Anchors {
         e
     }
 
-    /// 网页报了新的可见窗口（第一行的 seq，用户滚动了）：重算当前位置；位置出了已取的窗口、那一侧还有，
-    /// 就以它为中心重取。
+    /// 网页报了新的可见窗口（第一行的 seq）：阅读位置变了。重算当前位置；位置出了已取的窗口、那一侧还有，
+    /// 就以它为中心重取，取到之前当前位置不确定（`None`）。
     pub fn on_visible(&mut self, first_visible_seq: u64) -> AnchorEffect {
+        let moved = self.reading != Some(first_visible_seq);
+        self.reading = Some(first_visible_seq);
         let Some(w) = &self.window else {
             return AnchorEffect::default();
         };
-        let items = w.anchors.as_slice();
-        let outside = match (items.first(), items.last()) {
-            (Some(first), _) if first_visible_seq < first.created_seq && w.has_before => true,
-            (_, Some(last)) if first_visible_seq > last.created_seq && w.has_after => true,
-            (None, _) => w.has_before || w.has_after,
-            _ => false,
-        };
-        if outside {
+        if !covers(w, first_visible_seq) {
             self.want_center = Some(first_visible_seq);
+            if moved && self.current.is_some() {
+                self.current = None;
+                return AnchorEffect {
+                    cursor_dirty: true,
+                    ..Default::default()
+                };
+            }
+            return AnchorEffect::default();
         }
         self.recompute_current(first_visible_seq)
     }
 
     /// 只重算当前位置，不重取（锚点窗口刚换过：翻看出来的窗口可以不包含当前位置，不能又把它拉回去）。
+    /// 窗口覆盖不到阅读位置时当前位置不动。
     pub fn recompute_current(&mut self, first_visible_seq: u64) -> AnchorEffect {
+        self.reading = Some(first_visible_seq);
         let mut e = AnchorEffect::default();
+        if !self
+            .window
+            .as_ref()
+            .is_some_and(|w| covers(w, first_visible_seq))
+        {
+            return e;
+        }
         let current = current_anchor(self.items(), first_visible_seq).map(key_of);
         if current != self.current {
             self.current = current;
@@ -177,13 +204,21 @@ impl Anchors {
 
     /// 相对当前位置跳一处。目标在窗口里 → 返回它的 key（调用方照 [`Anchors::jump`] 跳）；
     /// 越过了窗口而那一侧还有 → 先以当前位置为中心重取，等窗口到了再落；到头了什么都不做。
+    /// 当前位置不在这份窗口里（翻看换来的窗口）→ 围绕真实阅读位置重取再落（审查 4/F-7）。
     pub fn relative_target(&mut self, delta: i32) -> Option<String> {
         let w = self.window.as_ref()?;
         let items = &w.anchors;
-        let at = self
+        let Some(at) = self
             .current
             .as_deref()
-            .and_then(|c| items.iter().position(|a| key_of(a) == c))?;
+            .and_then(|c| items.iter().position(|a| key_of(a) == c))
+        else {
+            if let Some(reading) = self.reading {
+                self.pending_relative = Some(delta);
+                self.want_center = Some(reading);
+            }
+            return None;
+        };
         let target = i64::try_from(at).ok()? + i64::from(delta);
         if let Some(a) = usize::try_from(target).ok().and_then(|t| items.get(t)) {
             return Some(key_of(a));
@@ -196,18 +231,34 @@ impl Anchors {
         None
     }
 
-    /// 以锚点为中心的那一段到了、时间线已经重建：落到目标行（`row` 是等着的那一处现在对应的行），
-    /// 或者（目标已经不在）只显示这一段、不高亮。
-    pub fn landed(&mut self, row: Option<String>) -> AnchorEffect {
-        if self.pending_jump.take().is_none() {
+    /// 以 `center` 为中心的那一段到了、时间线已经重建：等着的正是它，就落到目标行（`row` 是那一处现在对应的行），
+    /// 或者（目标已经不在）只显示这一段、不高亮。等着的是别的（或没有在等），什么都不做（审查 4/F-5）。
+    pub fn landed(&mut self, center: u64, row: Option<String>) -> AnchorEffect {
+        if self
+            .pending_jump
+            .as_ref()
+            .is_none_or(|j| j.anchor.created_seq != center)
+        {
             return AnchorEffect::default();
         }
+        self.pending_jump = None;
         let mut e = match row {
             Some(row) => self.emit_scroll(row),
             None => AnchorEffect::default(),
         };
         e.anchors_dirty = true;
         e
+    }
+
+    /// 用户自己滚动了：等着的跳转（居中加载、等窗口的相对跳转）都作废（审查 4/F-6）。
+    pub fn cancel_waiting(&mut self) -> AnchorEffect {
+        let had_jump = self.pending_jump.take().is_some();
+        self.pending_relative = None;
+        AnchorEffect {
+            // 加载提示（AnchorsView.jump_loading）随之收掉
+            anchors_dirty: had_jump,
+            ..Default::default()
+        }
     }
 
     /// 时间线因为快照重建成了最新页（打开对话、重连走了快照、Q9）：不再跳，锚点按最新位置重取。
@@ -300,7 +351,11 @@ mod tests {
         assert_eq!(t.want_center, None, "对照：位置在窗口里不重取");
         t.window_arrived(300, window(&[300, 400], true, false), Some(150));
         assert_eq!(t.want_center, None, "后来的窗口（翻看来的）不拉回去");
-        assert_eq!(t.current.as_deref(), Some("300"), "位置照常重算");
+        assert_eq!(
+            t.current.as_deref(),
+            Some("100"),
+            "翻看来的窗口覆盖不到阅读位置（150 在它前面、前面还有）：当前位置不动（审查 4/F-7）"
+        );
     }
 
     #[test]
@@ -345,11 +400,17 @@ mod tests {
         let mut s = Anchors::default();
         s.replace_window(0, window(&[10], false, false));
         s.jump(a(10), None);
-        let e = s.landed(None);
+        assert_eq!(
+            s.landed(99, None),
+            AnchorEffect::default(),
+            "别的跳转的结果不消费这一次"
+        );
+        assert!(s.pending_jump.is_some());
+        let e = s.landed(10, None);
         assert!(!e.scroll_dirty, "目标不在：不滚动、不高亮");
         assert_eq!(s.pending_jump, None);
         s.jump(a(10), None);
-        assert!(s.landed(Some("m10".into())).scroll_dirty);
+        assert!(s.landed(10, Some("m10".into())).scroll_dirty);
     }
 
     #[test]

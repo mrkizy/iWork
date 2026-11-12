@@ -417,16 +417,23 @@ impl Store {
         self.dirty.views.extend(ViewKey::ALL);
     }
 
-    pub fn set_window(&mut self, conversation_id: &str, first: i64, last: i64) {
-        if self
+    /// 网页报可见范围。`by_user`：这次变化来自用户自己滚动，等待中的锚点跳转（居中加载、等窗口的相对跳转）
+    /// 一并作废，迟到的结果不再把用户拉回去（方案 2.9「跳转」第 3 条，审查 4/F-6）。
+    pub fn set_window(&mut self, conversation_id: &str, first: i64, last: i64, by_user: bool) {
+        let Some(t) = self
             .open
-            .as_ref()
-            .is_some_and(|t| t.conversation_id == conversation_id)
-        {
-            self.window = Some((first.min(last), first.max(last)));
-            self.dirty.mark(ViewKey::Conversation);
-            self.anchors_follow_window();
+            .as_mut()
+            .filter(|t| t.conversation_id == conversation_id)
+        else {
+            return;
+        };
+        if by_user {
+            let e = t.anchors.cancel_waiting();
+            self.dirty.conversation(TimelineChange::from_anchor(e));
         }
+        self.window = Some((first.min(last), first.max(last)));
+        self.dirty.mark(ViewKey::Conversation);
+        self.anchors_follow_window();
     }
 
     /// 可见窗口第一行的 seq（锚点的当前位置按它算，Q17）。没声明窗口时按最新一行。
@@ -958,9 +965,11 @@ impl Store {
                 }
             }
             (_, K::ListProjects(l)) => {
-                // 项目名进了分隔线与「已切到项目」说明的文字（derive::row::project_name）。
+                // 项目名进了分隔线与「已切到项目」说明的文字（derive::row::project_name），也进了草稿那一类
+                // 待处理项的标题（锚点信息卡读它）。
                 if self.summary.projects != l.projects {
                     self.mark_rows(|r| matches!(r, Row::Divider { .. } | Row::Note { .. }));
+                    self.mark_anchor_texts();
                 }
                 self.summary.projects = l.projects;
                 self.mark_summary_views();
@@ -980,6 +989,10 @@ impl Store {
                 self.mark_summary_views();
             }
             (_, K::ListPendingItems(l)) => {
+                // 等你处理那一处的说明用这张表里的标题（derive::anchors::item）：表变了锚点要重画（审查 4/F-9）
+                if self.summary.pending != l.items {
+                    self.mark_anchor_texts();
+                }
                 self.summary.pending = l.items;
                 self.pending_replaced = true;
                 self.mark_summary_views();
@@ -993,7 +1006,7 @@ impl Store {
                     None => PageMode::Snapshot,
                     Some(QueryPurpose::OlderPage { .. }) => PageMode::Older,
                     Some(QueryPurpose::NewerPage { .. }) => PageMode::Newer,
-                    Some(QueryPurpose::AroundPage { .. }) => PageMode::Around,
+                    Some(QueryPurpose::AroundPage { seq, .. }) => PageMode::Around { center: *seq },
                     Some(_) => PageMode::LiveLatest,
                 };
                 if let Some(QueryPurpose::NewerPage { after, .. }) = p
@@ -1039,19 +1052,24 @@ impl Store {
                         PageMode::Snapshot => {
                             c.merge(TimelineChange::from_anchor(t.anchors.reset_to_latest()));
                         }
-                        PageMode::Around => {
-                            let row = t
+                        // 只有等着的正是这一次跳转时才落点（审查 4/F-5）：过时的结果（先跳 A 再跳 B 时 A 的、
+                        // 用户滚动作废了的）照常进时间线，但不消费当前的等待、不发滚动、不挪窗口
+                        PageMode::Around { center } => {
+                            if let Some(j) = t
                                 .anchors
                                 .pending_jump
                                 .as_ref()
-                                .and_then(|j| t.anchor_row(&j.anchor));
-                            // 旧窗口指着重建前的位置。落到目标行：窗口先放在它上面，帧才带上它前后的行
-                            // （网页要先有这一行才滚得过去）；网页滚到以后会报新的窗口。目标不在就从这一段的末尾看
-                            self.window = row
-                                .as_deref()
-                                .and_then(|r| t.key_of(r))
-                                .map(|k| (k.ordinal(), k.ordinal()));
-                            c.merge(TimelineChange::from_anchor(t.anchors.landed(row)));
+                                .filter(|j| j.anchor.created_seq == center)
+                            {
+                                let row = t.anchor_row(&j.anchor);
+                                // 旧窗口指着重建前的位置。落到目标行：窗口先放在它上面，帧才带上它前后的行
+                                // （网页要先有这一行才滚得过去）；网页滚到以后会报新的窗口。目标不在就从这一段的末尾看
+                                self.window = row
+                                    .as_deref()
+                                    .and_then(|r| t.key_of(r))
+                                    .map(|k| (k.ordinal(), k.ordinal()));
+                                c.merge(TimelineChange::from_anchor(t.anchors.landed(center, row)));
+                            }
                         }
                         _ => {}
                     }
@@ -1148,6 +1166,20 @@ impl Store {
         self.dirty.mark(ViewKey::Conversation);
         self.dirty.conversation.header = true;
         self.dirty.mark(ViewKey::Home);
+    }
+
+    /// 锚点信息卡的文字读了摘要表（待处理标题、项目名）：这些表一变，打开着的锚点列表整份重发。
+    fn mark_anchor_texts(&mut self) {
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|t| t.anchors.window.is_some())
+        {
+            self.dirty.conversation(TimelineChange {
+                anchors: true,
+                ..TimelineChange::default()
+            });
+        }
     }
 
     fn mark_summary_views(&mut self) {

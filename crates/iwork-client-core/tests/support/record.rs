@@ -178,6 +178,7 @@ async fn client_act(
                         conversation_id: focus.into(),
                         first_ordinal: oldest,
                         last_ordinal: oldest + 3,
+                        by_user: false,
                     })),
                 })
                 .await;

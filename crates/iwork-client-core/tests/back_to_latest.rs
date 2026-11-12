@@ -60,7 +60,7 @@ fn notice(s: &Store) -> Option<String> {
 fn reading_old_messages_goes_back_to_latest_with_notice() {
     let mut s = with_rows();
     let oldest = s.open.as_ref().unwrap().identities()[0].0.ordinal();
-    s.set_window(CID, oldest, oldest);
+    s.set_window(CID, oldest, oldest, false);
     reconnect_snapshot(&mut s);
     assert_eq!(notice(&s).as_deref(), Some("已重新连接，回到最新"));
     assert_eq!(s.window, None, "旧窗口清掉，下一帧从最新一页开始");
@@ -73,7 +73,7 @@ fn reading_old_messages_goes_back_to_latest_with_notice() {
 fn at_latest_rebuild_has_no_notice() {
     let mut s = with_rows();
     let newest = newest_ordinal(&s);
-    s.set_window(CID, newest - 4, newest);
+    s.set_window(CID, newest - 4, newest, false);
     reconnect_snapshot(&mut s);
     assert_eq!(notice(&s), None);
     assert!(!s.take_back_to_latest_started());

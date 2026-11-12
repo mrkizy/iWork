@@ -65,6 +65,7 @@ async fn window(app: &App, conv: &str, first: i64, last: i64) {
             conversation_id: conv.into(),
             first_ordinal: first,
             last_ordinal: last,
+            by_user: false,
         }),
     )
     .await;
@@ -611,4 +612,338 @@ async fn jump_target_gone_shows_segment_without_highlight() {
     assert!(!web.state.rows.contains_key("m-al060-u"));
     assert_eq!(web.state.scroll_to, before, "目标不在：不滚动、不高亮");
     assert!(!web.state.window.unwrap().at_tail, "停在那一段，不接着最新");
+}
+
+/// 居中加载那一段不接着最新，也要守 5000 行（这里调成 12 行）上限（审查 4/F-8）：每条消息后面跟一串工具行，
+/// 一段 50 条消息的居中结果远超上限。留下目标附近连续的一段，两端都标成还能翻回去。
+#[test]
+fn around_page_obeys_timeline_cap() {
+    use iwork_client_core::store::{ScopeKind, Store, Visible};
+    const CAP: usize = 12;
+    let mut s = Store::with_timeline_cap(CAP);
+    s.register_subscription(CONV, ScopeKind::Conversation(CID.into()));
+    s.set_visible(Visible {
+        conversation_id: Some(CID.into()),
+        ..Default::default()
+    });
+    s.apply(support::snapshot(
+        CONV,
+        1000,
+        vec![support::page(1000, vec![user_msg("latest", 999)], true)],
+    ));
+    // 10 条消息，每条后面 4 个工具行：seq 100、101..104、110、111..114……
+    let mut messages = Vec::new();
+    let mut tool_calls = Vec::new();
+    for i in 0..10u64 {
+        let base = 100 + i * 10;
+        messages.push(user_msg(&format!("m{i}"), base));
+        for j in 1..=4 {
+            tool_calls.push(pb::ToolCall {
+                turn_id: format!("t{i}"),
+                tool_call_id: format!("tc{i}-{j}"),
+                tool_name: "Bash".into(),
+                created_seq: base + j,
+                ..Default::default()
+            });
+        }
+    }
+    let center = 150; // m5
+    let result = pb::QueryResult {
+        seq: 1000,
+        kind: Some(pb::query_result::Kind::GetConversation(
+            pb::GetConversationResult {
+                conversation: Some(support::conversation(CID, "", 0)),
+                messages,
+                tool_calls,
+                has_more: true,
+                has_newer: true,
+                ..Default::default()
+            },
+        )),
+    };
+    s.apply(support::view_result(
+        QueryPurpose::AroundPage {
+            conversation_id: CID.into(),
+            seq: center,
+        },
+        result,
+    ));
+    let tl = s.open.as_ref().unwrap();
+    let ids = support::row_ids(&s);
+    assert!(ids.len() <= CAP, "{} 行超过上限 {CAP}：{ids:?}", ids.len());
+    assert!(ids.contains(&"m5".to_owned()), "目标留着：{ids:?}");
+    // 留下的是连续的一段：按 seq 排好后，原段里夹在首尾之间的行一个不缺
+    let seqs: Vec<u64> = tl.identities().iter().map(|(k, _)| k.seq).collect();
+    let (lo, hi) = (seqs[0], *seqs.last().unwrap());
+    let expected = (lo..=hi)
+        .filter(|q| (100..200).contains(q) && (q % 10) <= 4)
+        .count();
+    assert_eq!(seqs.len(), expected, "中间没有洞：{seqs:?}");
+    assert!(lo <= center && center <= hi);
+    assert!(tl.has_older, "丢了旧的一端，还能往上翻");
+    assert!(!tl.at_tail, "丢了新的一端（本来也不接着最新），往下翻取回");
+}
+
+// ---------- 审查第 4 轮：跳转与阅读位置 ----------
+
+fn user_anchor(seq: u64) -> pb::Anchor {
+    pb::Anchor {
+        created_seq: seq,
+        at: None,
+        kind: Some(pb::anchor::Kind::UserMessage(pb::UserMessageAnchor {
+            message_id: format!("u{seq}"),
+            excerpt: format!("第 {seq} 处"),
+        })),
+    }
+}
+
+fn anchors_arrive(
+    s: &mut iwork_client_core::store::Store,
+    center: u64,
+    seqs: &[u64],
+    (before, after): (bool, bool),
+) {
+    s.apply(support::view_result(
+        QueryPurpose::Anchors {
+            conversation_id: CID.into(),
+            center,
+            round: None,
+        },
+        pb::QueryResult {
+            seq: 500,
+            kind: Some(pb::query_result::Kind::ListAnchors(pb::ListAnchorsResult {
+                anchors: seqs.iter().map(|q| user_anchor(*q)).collect(),
+                has_before: before,
+                has_after: after,
+                ..Default::default()
+            })),
+        },
+    ));
+}
+
+fn around_arrives(s: &mut iwork_client_core::store::Store, seq: u64) {
+    let mut page = support::page(500, vec![user_msg(&format!("u{seq}"), seq)], true);
+    if let Some(pb::query_result::Kind::GetConversation(g)) = page.kind.as_mut() {
+        g.has_newer = true;
+    }
+    s.apply(support::view_result(
+        QueryPurpose::AroundPage {
+            conversation_id: CID.into(),
+            seq,
+        },
+        page,
+    ));
+}
+
+fn pending_seq(s: &iwork_client_core::store::Store) -> Option<u64> {
+    s.open
+        .as_ref()?
+        .anchors
+        .pending_jump
+        .as_ref()
+        .map(|j| j.anchor.created_seq)
+}
+
+fn scroll_row(s: &iwork_client_core::store::Store) -> Option<String> {
+    s.open
+        .as_ref()?
+        .anchors
+        .scroll
+        .as_ref()
+        .map(|x| x.row_key.clone())
+}
+
+/// 先跳 A、再跳 B（都没加载），A 的居中结果先到：它不能消费 B 的等待，也不能发滚动；B 的到了才落到 B（4/F-5）。
+#[test]
+fn old_around_reply_must_not_consume_new_jump() {
+    let mut s = store_with_open();
+    anchors_arrive(&mut s, 0, &[3, 5], (false, false));
+    s.jump_to_anchor(CID, "3");
+    s.jump_to_anchor(CID, "5");
+    assert_eq!(pending_seq(&s), Some(5), "对照：等的是 B");
+    around_arrives(&mut s, 3);
+    assert_eq!(pending_seq(&s), Some(5), "A 的结果过时，B 还在等");
+    assert_eq!(scroll_row(&s), None, "过时的结果不滚动");
+    around_arrives(&mut s, 5);
+    assert_eq!(pending_seq(&s), None);
+    assert_eq!(scroll_row(&s).as_deref(), Some("u5"), "B 的结果到了落到 B");
+}
+
+/// 等居中结果期间用户自己滚动：等着的跳转作废，结果迟到也不再把用户拉回去；跳转带来的回报不算（4/F-6）。
+#[test]
+fn user_scroll_cancels_pending_jump() {
+    let mut s = store_with_open();
+    anchors_arrive(&mut s, 0, &[3, 5], (false, false));
+    s.jump_to_anchor(CID, "3");
+    s.set_window(CID, 0, 10, false);
+    assert_eq!(pending_seq(&s), Some(3), "对照：不是用户滚动的回报不取消");
+    s.set_window(CID, 0, 20, true);
+    assert_eq!(pending_seq(&s), None, "用户滚动了，作废");
+    around_arrives(&mut s, 3);
+    assert_eq!(scroll_row(&s), None, "迟到的结果不滚动");
+}
+
+/// 用户滚动也作废在等窗口的相对跳转（4/F-6 同类）。
+#[test]
+fn user_scroll_cancels_pending_relative() {
+    let mut s = store_with_open();
+    s.apply(support::snapshot(
+        CONV,
+        100,
+        vec![support::page(100, vec![user_msg("u10", 10)], true)],
+    ));
+    anchors_arrive(&mut s, 0, &[10], (true, false));
+    s.jump_relative(CID, -1);
+    assert_eq!(
+        s.open.as_ref().unwrap().anchors.pending_relative,
+        Some(-1),
+        "对照：越过窗口前端，等重取"
+    );
+    s.set_window(CID, 21, 21, true);
+    assert_eq!(s.open.as_ref().unwrap().anchors.pending_relative, None);
+}
+
+/// 翻看换来的窗口不改真实阅读位置：当前位置还是用户正在看的那一处，⌥↑ 按真实位置跳（4/F-7）。
+#[test]
+fn browse_window_must_not_move_actual_current_anchor() {
+    let mut s = store_with_open();
+    s.apply(support::snapshot(
+        CONV,
+        100,
+        vec![support::page(
+            100,
+            [10, 20, 30]
+                .iter()
+                .map(|q| user_msg(&format!("u{q}"), *q))
+                .collect(),
+            true,
+        )],
+    ));
+    anchors_arrive(&mut s, 0, &[10, 20, 30], (true, false));
+    // 可见第一行是 u20（ordinal = seq*2+1）
+    s.set_window(CID, 41, 61, true);
+    let current =
+        |s: &iwork_client_core::store::Store| s.open.as_ref().unwrap().anchors.current.clone();
+    assert_eq!(current(&s).as_deref(), Some("20"));
+    // 翻看到很早的地方，换来一份不含阅读位置的窗口
+    s.anchor_browse(CID, "10");
+    anchors_arrive(&mut s, 2, &[1, 2, 3], (true, true));
+    assert_eq!(current(&s).as_deref(), Some("20"), "只是预览，阅读位置不动");
+    // ⌥↑：前一处是 10，不在这份窗口里 → 围绕真实位置重取，窗口到了再落
+    s.jump_relative(CID, -1);
+    let a = &s.open.as_ref().unwrap().anchors;
+    assert_eq!(a.pending_relative, Some(-1));
+    assert_eq!(a.want_center, Some(20), "围绕真实位置重取，不围绕浏览中心");
+    anchors_arrive(&mut s, 20, &[10, 20, 30], (true, false));
+    assert_eq!(
+        scroll_row(&s).as_deref(),
+        Some("u10"),
+        "落到真实位置的前一处"
+    );
+}
+
+/// 锚点窗口先到（等你处理那一处的说明还空着），「待你处理」表后到、中间网页取过一帧：表一到，信息卡上的
+/// 说明要跟着补上，不能停在空的（审查 4/F-9）。
+#[test]
+fn pending_replacement_updates_anchor_preview() {
+    use iwork_client_core::frame::{FRAME_INTERVAL, FrameEngine, Pull};
+    use iwork_client_core::store::Connection;
+    use support::web::Web;
+    let ctx = iwork_client_core::derive::Ctx {
+        now: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_762_100_000),
+    };
+    let mut s = store_with_open();
+    s.set_connection(Connection::Live);
+    s.apply(support::view_result(
+        QueryPurpose::Anchors {
+            conversation_id: CID.into(),
+            center: 0,
+            round: None,
+        },
+        pb::QueryResult {
+            seq: 50,
+            kind: Some(pb::query_result::Kind::ListAnchors(pb::ListAnchorsResult {
+                anchors: vec![pb::Anchor {
+                    created_seq: 40,
+                    at: None,
+                    kind: Some(pb::anchor::Kind::Waiting(pb::WaitingAnchor {
+                        pending_item_id: "ap1".into(),
+                    })),
+                }],
+                waiting_count: 1,
+                ..Default::default()
+            })),
+        },
+    ));
+    let mut e = FrameEngine::new(1 << 20);
+    let mut w = Web::new(e.attach(&mut s));
+    let mut t = Instant::now();
+    let mut drain = |s: &mut iwork_client_core::store::Store, w: &mut Web| {
+        t += FRAME_INTERVAL;
+        while let Pull::Chunk(c) = e.pull(s, w.epoch, w.applied, t, ctx) {
+            w.accept(&c);
+        }
+    };
+    drain(&mut s, &mut w);
+    let preview = |w: &Web| w.state.anchors.as_ref().map(|a| a.items[0].preview.clone());
+    assert_eq!(
+        preview(&w).as_deref(),
+        Some(""),
+        "对照：表还没到，说明是空的"
+    );
+    s.apply(support::snapshot(
+        support::PENDING,
+        60,
+        vec![pb::QueryResult {
+            seq: 60,
+            kind: Some(pb::query_result::Kind::ListPendingItems(
+                pb::ListPendingItemsResult {
+                    items: vec![pb::PendingItem {
+                        item: Some(pb::pending_item::Item::Approval(pb::Approval {
+                            id: "ap1".into(),
+                            conversation_id: CID.into(),
+                            action: Some(f::command_action("rm -rf build")),
+                            ..Default::default()
+                        })),
+                    }],
+                },
+            )),
+        }],
+    ));
+    drain(&mut s, &mut w);
+    assert_eq!(preview(&w).as_deref(), Some("审批：rm -rf build"));
+}
+
+/// 相对跳转在等以某处为中心的窗口，这时到的是另一个中心的窗口（摘要重查轮带回的旧中心、更早的请求）：
+/// 按这份窗口重新判断一次，前一处还在窗口外就接着等，不会落到别处；对的那份到了再落（4/F-5 的同类检查。
+/// 锚点是全局的事实，哪份窗口里有前一处，落点都一样，所以不需要按中心过滤）。
+#[test]
+fn stale_anchor_window_must_not_consume_pending_relative() {
+    let mut s = store_with_open();
+    s.apply(support::snapshot(
+        CONV,
+        100,
+        vec![support::page(
+            100,
+            [10, 20]
+                .iter()
+                .map(|q| user_msg(&format!("u{q}"), *q))
+                .collect(),
+            true,
+        )],
+    ));
+    anchors_arrive(&mut s, 0, &[20], (true, false));
+    s.set_window(CID, 41, 41, true);
+    s.jump_relative(CID, -1);
+    let want = s.open.as_ref().unwrap().anchors.want_center;
+    assert_eq!(want, Some(20), "对照：以当前位置为中心重取");
+    anchors_arrive(&mut s, 0, &[20], (true, false));
+    assert_eq!(
+        s.open.as_ref().unwrap().anchors.pending_relative,
+        Some(-1),
+        "中心不对的窗口判断不了，接着等"
+    );
+    assert_eq!(scroll_row(&s), None);
+    anchors_arrive(&mut s, 20, &[10, 20], (false, false));
+    assert_eq!(scroll_row(&s).as_deref(), Some("u10"));
 }

@@ -901,6 +901,9 @@ message SetVisibleRows {
   string conversation_id = 1;
   sint64 first_ordinal = 2;
   sint64 last_ordinal = 3;
+  // 这次范围变化来自用户自己的滚动（滚轮、触摸、按键、拖滚动条），不是跳转、新消息贴底这类程序滚动。
+  // 用户滚动会作废等待中的锚点跳转（T09 方案 2.9「跳转」第 3 条）。
+  bool by_user = 4;
 }
 
 message LoadOlder {

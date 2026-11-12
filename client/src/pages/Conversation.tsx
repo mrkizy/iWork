@@ -80,8 +80,11 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
               renderRow={(k) => (
                 <Show when={conv()?.rows[k]}>{(r) => <RowView row={r()} />}</Show>
               )}
-              onVisible={(first, last) =>
-                void host.act({ case: "setVisibleRows", value: { conversationId: props.id, firstOrdinal: first, lastOrdinal: last } })
+              onVisible={(first, last, byUser) =>
+                void host.act({
+                  case: "setVisibleRows",
+                  value: { conversationId: props.id, firstOrdinal: first, lastOrdinal: last, byUser },
+                })
               }
               onReachOldest={() => void host.act({ case: "loadOlder", value: { conversationId: props.id } })}
             />

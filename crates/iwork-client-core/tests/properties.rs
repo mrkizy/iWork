@@ -114,7 +114,7 @@ proptest! {
                 Op::Settings(on) => {
                     s.apply(persisted(seq, &[SIDEBAR], E::GlobalSettingsChanged(pb::GlobalSettingsChanged { playful_ui: Some(on), ..Default::default() })));
                 }
-                Op::Window(first) => s.set_window(CID, first, first + 40),
+                Op::Window(first) => s.set_window(CID, first, first + 40, false),
                 Op::Pull { lose } => {
                     t += FRAME_INTERVAL;
                     if let Pull::Chunk(c) = e.pull(&mut s, w.epoch, w.applied, t, ctx()) {
@@ -205,7 +205,7 @@ fn window_moves_remove_rows() {
     assert_eq!(w.state.rows.len(), 60, "没声明窗口时给最新 60 行");
     // 窗口移到最前：发前面的行，删掉离开窗口的。
     let first = s.open.as_ref().unwrap().identities()[0].0.ordinal();
-    s.set_window(CID, first, first + 20);
+    s.set_window(CID, first, first + 20, false);
     drain(&mut s, &mut e, &mut w, t + FRAME_INTERVAL);
     assert_eq!(w.state.rows.len(), 11 + 30, "窗口 11 行 + 后面多带 30 行");
     assert!(w.state.rows.contains_key("m0"));
@@ -432,6 +432,7 @@ mod live {
                 conversation_id: "c-basic".into(),
                 first_ordinal: i64::MIN,
                 last_ordinal: i64::MIN + 1,
+                by_user: false,
             })),
         })
         .await;
@@ -443,6 +444,7 @@ mod live {
                 conversation_id: "c-basic".into(),
                 first_ordinal: i64::MIN,
                 last_ordinal: i64::MAX,
+                by_user: false,
             })),
         })
         .await;

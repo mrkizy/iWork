@@ -19,7 +19,9 @@ export interface VirtualRowsProps {
   atTail: boolean;
   hasOlder: boolean;
   renderRow: (key: string) => JSX.Element;
-  onVisible: (first: bigint, last: bigint) => void;
+  /** 可见行变了。`byUser`：这次变化来自用户自己滚动（滚轮、触摸、按键、拖滚动条），不是跳转、贴底这类程序滚动；
+   *  Rust 据此作废等待中的锚点跳转（方案 2.9「跳转」第 3 条）。 */
+  onVisible: (first: bigint, last: bigint, byUser: boolean) => void;
   onReachOldest: () => void;
   /** 变了就回到底部（时间线 reset：打开对话、重建、回到最新）。 */
   resetToken?: number;
@@ -44,6 +46,8 @@ export function VirtualRows(props: VirtualRowsProps) {
   let frame = 0;
   let scrolledToken: bigint | undefined;
   let overflow: boolean | undefined;
+  // 上一次报告以来有没有用户自己的滚动输入。程序改 scrollTop 也会触发 scroll 事件，所以看输入事件，不看 scroll
+  let userInput = false;
   const [highlight, setHighlight] = createSignal<string>();
   let highlightTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -69,8 +73,9 @@ export function VirtualRows(props: VirtualRowsProps) {
     const range = visibleOrdinals(boxes(), box.scrollTop, box.clientHeight);
     if (range && (reported === undefined || range[0] !== reported[0] || range[1] !== reported[1])) {
       reported = range;
-      props.onVisible(range[0], range[1]);
+      props.onVisible(range[0], range[1], userInput);
     }
+    userInput = false;
     const oldest = props.keys[0];
     if (props.hasOlder && props.firstIndex === 0 && oldest !== undefined && box.scrollTop < box.clientHeight) {
       const o = props.ordinalOf(oldest);
@@ -79,6 +84,18 @@ export function VirtualRows(props: VirtualRowsProps) {
         props.onReachOldest();
       }
     }
+  };
+
+  const onUserInput = () => {
+    userInput = true;
+  };
+  const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
+  const onKey = (e: KeyboardEvent) => {
+    if (SCROLL_KEYS.has(e.key)) userInput = true;
+  };
+  // 只算点在容器本身上（滚动条）；点行里的按钮不是滚动
+  const onPointer = (e: PointerEvent) => {
+    if (e.target === box) userInput = true;
   };
 
   const onScroll = () => {
@@ -158,7 +175,17 @@ export function VirtualRows(props: VirtualRowsProps) {
   const unsent = () => unsentAround(props.firstIndex, props.keys.length, props.total);
 
   return (
-    <div ref={box} class={`iw-vrows${props.class ? ` ${props.class}` : ""}`} onScroll={onScroll} role="log" aria-live="polite">
+    <div
+      ref={box}
+      class={`iw-vrows${props.class ? ` ${props.class}` : ""}`}
+      onScroll={onScroll}
+      onWheel={onUserInput}
+      onTouchMove={onUserInput}
+      onKeyDown={onKey}
+      onPointerDown={onPointer}
+      role="log"
+      aria-live="polite"
+    >
       <div class="iw-vrows__spacer" style={{ height: `${unsent().above * avg()}px` }} />
       <For each={props.keys}>
         {(key) => (

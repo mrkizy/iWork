@@ -320,6 +320,7 @@ async fn older_page_in_flight_survives_disconnect() {
             conversation_id: "c-long".into(),
             first_ordinal: i64::MIN,
             last_ordinal: i64::MIN + 1,
+            by_user: false,
         }),
     )
     .await;
@@ -345,6 +346,7 @@ async fn jump_to_latest_in_flight_survives_disconnect() {
             conversation_id: "c-long".into(),
             first_ordinal: i64::MIN,
             last_ordinal: i64::MIN + 1,
+            by_user: false,
         }),
     )
     .await;
@@ -358,6 +360,7 @@ async fn jump_to_latest_in_flight_survives_disconnect() {
             conversation_id: "c-long".into(),
             first_ordinal: i64::MAX - 1,
             last_ordinal: i64::MAX,
+            by_user: false,
         }),
     )
     .await;

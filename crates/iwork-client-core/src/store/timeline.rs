@@ -204,7 +204,8 @@ pub enum PageMode {
     /// 带 after_message_id 的翻页结果：往后接；接到最新（has_newer 为假）就回到 at_tail（T09 方案 G11）。
     Newer,
     /// 带 around_seq 的居中一段：和已加载的行不保证接得上，整个重建成这一段（跳到没加载的锚点）。
-    Around,
+    /// `center` 是那个 around_seq：超过上限时保留它附近连续的一段。
+    Around { center: u64 },
 }
 
 impl Timeline {
@@ -759,7 +760,7 @@ impl Timeline {
             self.conversation = Some(conv.clone());
         }
         let rebuild = match mode {
-            PageMode::Snapshot | PageMode::Around => true,
+            PageMode::Snapshot | PageMode::Around { .. } => true,
             PageMode::LiveLatest => !self.at_tail,
             PageMode::Older | PageMode::Newer => false,
         };
@@ -787,7 +788,7 @@ impl Timeline {
                     self.new_below = 0;
                 }
             }
-            PageMode::Around => {
+            PageMode::Around { .. } => {
                 self.has_older = page.has_more;
                 self.at_tail = !page.has_newer;
                 self.new_below = 0;
@@ -811,6 +812,8 @@ impl Timeline {
         match mode {
             PageMode::Older => self.enforce_cap(),
             PageMode::Newer => c.merge(self.drop_oldest_over_cap()),
+            // 居中那一段不接着最新，trim_oldest 管不到它（审查 4/F-8）：两端都可能超，按离目标远近裁
+            PageMode::Around { center } => self.trim_around(center),
             _ => c.merge(self.trim_oldest()),
         }
         c
@@ -1011,6 +1014,24 @@ impl Timeline {
             };
             self.remove_key(key, false);
             self.at_tail = false;
+        }
+    }
+
+    /// 居中一段超过上限：每次丢离 `center` 远的那一端，留下目标附近连续的一段。丢了旧的一端标成还能往上翻，
+    /// 丢了新的一端标成不接着最新（往下翻取回）。整段是重建出来的，网页随 reset 整份重画，不用逐行通知删除。
+    fn trim_around(&mut self, center: u64) {
+        while self.rows.len() > self.cap {
+            let (Some(&old), Some(&new)) = (self.rows.keys().next(), self.rows.keys().next_back())
+            else {
+                break;
+            };
+            if center.saturating_sub(old.seq) >= new.seq.saturating_sub(center) {
+                self.remove_key(old, true);
+                self.has_older = true;
+            } else {
+                self.remove_key(new, false);
+                self.at_tail = false;
+            }
         }
     }
 
