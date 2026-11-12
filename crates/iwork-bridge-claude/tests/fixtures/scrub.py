@@ -60,15 +60,6 @@ def redact_event(o):
     return o
 
 
-def redact_line(line):
-    """解析得了：删账号键、收起环境字段后重新序列化。解析不了：带账号类键名就整行换成占位，否则原样。"""
-    try:
-        o = json.loads(line)
-    except ValueError:
-        return REDACTED_LINE if ACCOUNT_KEY_TEXT.search(line) else line
-    return json.dumps(redact_event(o), ensure_ascii=False, separators=(",", ":"))
-
-
 def _secrets(extra):
     """要换掉的本机串：(原文, 占位)，长的先换。"""
     home = os.path.expanduser("~")
@@ -113,21 +104,67 @@ class _Ids:
         return self.map[key]
 
 
+def _clean_text(text, pairs, ids):
+    """一段文字里的本机串、临时路径、邮箱、`@`、各种 id 换成占位。只对**解码后的**字符串用：在 JSON 原文上
+    替换会把转义（结束引号前的反斜杠）一起吞掉，弄坏 JSON（S5 审查 2/F-1）。"""
+    for raw, repl in pairs:
+        text = text.replace(raw, repl)
+    text = TEMP_PATH_RE.sub("<tmp>", text)
+    text = EMAIL_RE.sub("<email>", text)
+    text = text.replace("@", " at ")
+    text = UUID_RE.sub(ids.uuid, text)
+    text = ID_RE.sub(ids.ident, text)
+    return text
+
+
+def _clean_value(v, clean):
+    """键和字符串值都过一遍 `clean`，别的原样。"""
+    if isinstance(v, dict):
+        return {clean(k): _clean_value(x, clean) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_clean_value(x, clean) for x in v]
+    if isinstance(v, str):
+        return clean(v)
+    return v
+
+
 def scrub_lines(lines, extra_secrets=()):
+    """能解析的行：删账号键、收起环境字段，在解码后的键和字符串值上换占位，再序列化。
+    解析不了的行：带账号类键名就整行换成占位，否则按纯文字换占位。"""
     pairs = _secrets(extra_secrets)
     ids = _Ids()
+
+    def clean(text):
+        return _clean_text(text, pairs, ids)
+
     out = []
     for line in lines:
-        text = redact_line(line.rstrip("\n"))
-        for raw, repl in pairs:
-            text = text.replace(raw, repl)
-        text = TEMP_PATH_RE.sub("<tmp>", text)
-        text = EMAIL_RE.sub("<email>", text)
-        text = text.replace("@", " at ")
-        text = UUID_RE.sub(ids.uuid, text)
-        text = ID_RE.sub(ids.ident, text)
+        raw = line.rstrip("\n")
+        try:
+            o = json.loads(raw)
+        except ValueError:
+            text = REDACTED_LINE if ACCOUNT_KEY_TEXT.search(raw) else clean(raw)
+        else:
+            text = json.dumps(_clean_value(redact_event(o), clean), ensure_ascii=False, separators=(",", ":"))
         out.append(text + "\n")
     return out
+
+
+def broken_json(before, after):
+    """原来能解析、脱敏后解析不了的行号（从 1 数）。落盘前必须为空。"""
+    broken = []
+    for i, (b, a) in enumerate(zip(before, after), 1):
+        try:
+            json.loads(b)
+        except ValueError:
+            continue
+        try:
+            json.loads(a)
+        except ValueError:
+            broken.append(i)
+    if len(before) != len(after):
+        broken.append(-1)
+    return broken
 
 
 def _needles():
@@ -172,6 +209,41 @@ def leak_paths(lines):
     return found
 
 
+def _properties(cases=500, seed=20261112):
+    """两条性质（固定种子的随机生成）：① 合法 JSON 脱敏后仍然合法；② 不含任何占位对象（本机串、临时根、邮箱、
+    `@`、UUID、id、账号键、环境字段）的文本，脱敏前后完全一样。返回（弄坏的例子，变了的例子）。"""
+    import random
+    rnd = random.Random(seed)
+    alphabet = 'ab xyz/\\"\'\n\t{}[]:,é漢\u2028-_.0'
+    temp_bits = ["/tmp/a b/c", "/private/tmp/q\"r", "/var/folders/x/T/y"]
+
+    def text(with_paths):
+        t = "".join(rnd.choice(alphabet) for _ in range(rnd.randint(0, 12)))
+        if with_paths and rnd.random() < 0.5:
+            t += rnd.choice(temp_bits) + rnd.choice(['"', "'", " ", "", "\\"])
+        return t
+
+    def value(depth, with_paths):
+        r = rnd.random()
+        if depth > 3 or r < 0.4:
+            return rnd.choice([text(with_paths), rnd.randint(-5, 5), None, True, 1.5])
+        if r < 0.7:
+            return [value(depth + 1, with_paths) for _ in range(rnd.randint(0, 3))]
+        return {text(with_paths): value(depth + 1, with_paths) for _ in range(rnd.randint(0, 3))}
+
+    broken, changed = [], []
+    for _ in range(cases):
+        doc = value(0, True)
+        line = json.dumps(doc, ensure_ascii=False)
+        if broken_json([line], scrub_lines([line])):
+            broken.append(line)
+        plain = value(0, False)
+        flat = json.dumps(plain, ensure_ascii=False)
+        if json.loads(scrub_lines([flat])[0]) != plain:
+            changed.append(flat)
+    return broken[:3], changed[:3]
+
+
 def selftest():
     user, home = getpass.getuser(), os.path.expanduser("~")
     dash = "-" + home.strip("/").replace("/", "-") + "-proj"
@@ -197,6 +269,11 @@ def selftest():
                     "text": "mail me at someone@example.org or @here"}),
     ]
     out = scrub_lines(raw, extra_secrets=["/tmp/iwork-rec-x"])
+    one = lambda o: json.loads(scrub_lines([json.dumps(o)])[0])  # noqa: E731
+    quoted = one({"type": "user", "message": {"content": 'saved to "/private/tmp/claude-501/out.txt" ok'}})
+    keyed = one({"/private/tmp/x/y.txt": 1, "plain": "x"})
+    escaped = one({"t": 'a\\b\n\t"c" é \u2028', "w": "C:\\dir\\f.txt"})
+    prop_broken, prop_changed = _properties()
     o1, o2, o4b, o5, o6 = (json.loads(out[i]) for i in (0, 1, 4, 5, 6))
     checks = [
         ("account 键删掉（不分大小写）", "Account" not in o1["response"]["response"]),
@@ -211,6 +288,12 @@ def selftest():
         ("对照：不是临时根的路径不动", scrub_lines(['{"p":"/usr/tmp-like/x"}'])[0].strip() == '{"p":"/usr/tmp-like/x"}'),
         ("反例：没脱敏的临时路径查得出", any("临时路径" in f for f in leak_paths([raw[4]]))),
         ("幂等：再过一遍不变", scrub_lines(out) == out),
+        ("带引号的临时路径：JSON 仍然合法、只换路径", quoted == {"type": "user", "message": {"content": 'saved to "<tmp>" ok'}}),
+        ("键里的临时路径换掉", keyed == {"<tmp>": 1, "plain": "x"}),
+        ("转义字符原样", escaped == {"t": 'a\\b\n\t"c" é \u2028', "w": "C:\\dir\\f.txt"}),
+        ("broken_json 查得出弄坏的行（反例）", broken_json(['{"a":1}', "x"], ['{"a":', "y"]) == [1]),
+        ("性质：合法 JSON 脱敏后仍然合法", not prop_broken),
+        ("性质：路径以外的文本不变", not prop_changed),
         ("工具调用 id 配对不变", o5["message"]["content"][0]["id"] == o6["tool_use_id"] == "toolu_iwork0001"),
         ("同一个 uuid 大小写不同也是同一个占位", o2["session_id"] == o6["session_id"]),
         ("邮箱与 @ 都没了", "@" not in out[6] and "<email>" in out[6]),

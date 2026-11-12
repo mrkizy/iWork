@@ -298,6 +298,13 @@ def main():
         if os.path.exists(os.path.join(tmp, "work", "iwork-sample-denied")):
             sys.exit("被拒的命令执行了：录制环境不对，样本不入库")
         cleaned = {name: scrub.scrub_lines(lines, extra_secrets=[tmp]) for name, lines in recorded.items()}
+        # 原来能解析的行，脱敏后必须仍然能解析（S5 审查 2/F-1）：不能就整个不写
+        broken = {name: scrub.broken_json(recorded[name], lines) for name, lines in cleaned.items()}
+        if any(broken.values()):
+            for name, rows in broken.items():
+                if rows:
+                    print(f"脱敏后 JSON 坏了 {name}：第 {rows} 行")
+            sys.exit("脱敏弄坏了 JSON，不写文件")
         leaks = {name: scrub.leak_paths(lines) for name, lines in cleaned.items()}
         if any(leaks.values()):
             # 只打印键路径与种类，不打印值
