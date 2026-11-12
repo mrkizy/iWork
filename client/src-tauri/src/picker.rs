@@ -1,7 +1,7 @@
 //! 系统文件选择框（回形针、「重新定位」；T09 组 2b）。网页只说要选什么，路径在这里拿到，交回 client-core，
 //! 由它发 `UploadAttachment` 或 `RelocateProject`、后台校验。网页拿不到文件能力（方案 R7）。
 //!
-//! 选择框在主线程上建（AppKit / GTK 都要求），建好后在别的任务里等用户选完，主线程不被占住。
+//! 选择框在主线程上建并弹出（AppKit / GTK 都要求），建好后在别的任务里等用户选完，主线程不被占住。
 //! 写法照 tauri-plugin-dialog 的桌面实现。
 
 use iwork_client_core::{App, PickKind, ShellEvent};
@@ -9,6 +9,9 @@ use rfd::{AsyncFileDialog, FileHandle};
 use tauri::{AppHandle, Manager};
 
 use crate::MAIN;
+
+/// 已经在主线程上弹出来的选择框，等用户选完。
+type Picking = std::pin::Pin<Box<dyn std::future::Future<Output = Vec<FileHandle>> + Send>>;
 
 /// 弹框，用户选完（或取消）后一定回一次 `ShellEvent::Picked`：client-core 靠它收掉「开着的选择框」。
 pub fn open(handle: &AppHandle, core: App, kind: PickKind) {
@@ -20,10 +23,16 @@ pub fn open(handle: &AppHandle, core: App, kind: PickKind) {
         if let Some(w) = main.get_webview_window(MAIN) {
             dialog = dialog.set_parent(&w);
         }
-        let picking = async move {
-            match kind {
-                PickKind::Files => dialog.pick_files().await.unwrap_or_default(),
-                PickKind::Folder => dialog.pick_folder().await.into_iter().collect(),
+        // pick_* 必须在这里（主线程上）当场调用：rfd 构造原生面板时就读 NSView.window、NSApplication。
+        // 放进 async 块会拖到第一次 poll，那时已经在后台线程上（审查 4/F-4）。
+        let picking: Picking = match kind {
+            PickKind::Files => {
+                let f = dialog.pick_files();
+                Box::pin(async move { f.await.unwrap_or_default() })
+            }
+            PickKind::Folder => {
+                let f = dialog.pick_folder();
+                Box::pin(async move { f.await.into_iter().collect() })
             }
         };
         let _ = tx.send(picking);
