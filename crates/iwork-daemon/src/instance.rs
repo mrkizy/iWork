@@ -167,6 +167,26 @@ mod tests {
         (t, a, b)
     }
 
+    /// 放掉锁之后反复试拿，直到拿到（最多 10s）。`flock` 挂在「打开的文件」上：同一测试进程里别的测试正在起子进程时，
+    /// 子进程在 exec 之前复制着锁文件的句柄（锁文件都带 `O_CLOEXEC`，exec 时才关），这段时间里锁还被那份副本拿着
+    /// （`forked_copy_keeps_lock_until_it_closes` 确定性地复现了这一点）。所以「放掉之后马上就拿得到」在多线程的
+    /// 测试进程里不成立，只能断言「很快拿得到」。
+    fn acquire_eventually(a: &Path, b: &Path, pid: u32) -> InstanceLock {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match acquire(a, b, &info(pid)).unwrap() {
+                LockOutcome::Acquired(l) => return l,
+                LockOutcome::HeldByOther(_) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "放掉之后 10s 内没拿到锁"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
     // 读持锁中的锁文件内容：Windows 的 LockFileEx 是强制锁，持锁时别的句柄读不了；M1 不支持 Windows（T03）
     #[cfg(unix)]
     #[test]
@@ -179,10 +199,80 @@ mod tests {
             other => panic!("{other:?}"),
         }
         drop(first);
+        acquire_eventually(&a, &b, 9);
+    }
+
+    /// 锁文件的句柄都带 `FD_CLOEXEC`：后台起的子进程（成员 CLI、桥接、git）exec 之后不再握着单实例锁。
+    #[cfg(unix)]
+    #[test]
+    fn lock_files_are_close_on_exec() {
+        use std::os::fd::AsRawFd;
+        let (_t, a, b) = dirs();
+        let LockOutcome::Acquired(lock) = acquire(&a, &b, &info(1)).unwrap() else {
+            panic!("拿不到锁");
+        };
+        assert_eq!(lock._files.len(), 2);
+        for f in &lock._files {
+            // SAFETY：只读 fd 标志
+            let flags = unsafe { libc::fcntl(f.as_raw_fd(), libc::F_GETFD) };
+            assert!(
+                flags >= 0 && flags & libc::FD_CLOEXEC != 0,
+                "锁文件句柄没带 FD_CLOEXEC"
+            );
+        }
+    }
+
+    /// 确定性复现 4ea1efca 那次偶发：fork 出一个不 exec 的子进程（相当于别的线程起子进程、还没走到 exec 的那一刻），
+    /// 它复制着锁文件的句柄 → 本进程放掉锁之后，锁还被副本拿着；子进程退出、副本关掉，锁才放开。
+    #[cfg(unix)]
+    #[test]
+    fn forked_copy_keeps_lock_until_it_closes() {
+        let (_t, a, b) = dirs();
+        let first = acquire(&a, &b, &info(1)).unwrap();
+        // SAFETY：子进程只调 async-signal-safe 的 pause 与 _exit
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0, "fork 失败");
+        if child == 0 {
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        drop(first);
+        let held = acquire(&a, &b, &info(2)).unwrap();
+        // SAFETY：只对自己 fork 的子进程发信号、收尸
+        unsafe {
+            libc::kill(child, libc::SIGKILL);
+            libc::waitpid(child, std::ptr::null_mut(), 0);
+        }
+        assert!(
+            matches!(held, LockOutcome::HeldByOther(_)),
+            "子进程握着副本时锁不该放开：{held:?}"
+        );
         assert!(matches!(
-            acquire(&a, &b, &info(9)).unwrap(),
+            acquire(&a, &b, &info(3)).unwrap(),
             LockOutcome::Acquired(_)
         ));
+    }
+
+    /// 已经 exec 完的子进程不握锁：锁文件句柄随 `O_CLOEXEC` 在 exec 时关掉，放掉之后马上拿得到。
+    /// （`Command::spawn` 返回时 exec 已经成功。）
+    #[cfg(unix)]
+    #[test]
+    fn execed_child_does_not_keep_lock() {
+        let (_t, a, b) = dirs();
+        let first = acquire(&a, &b, &info(1)).unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        drop(first);
+        // 本测试自己的子进程（睡 30s）已 exec：它不握锁。同一测试进程里别的测试正好 fork 出的副本会在它们 exec 时
+        // 关掉，所以拿不到时再等一会儿；要是自己的子进程握着锁（句柄没带 CLOEXEC），10s 内一直拿不到，测试失败
+        if let LockOutcome::HeldByOther(_) = acquire(&a, &b, &info(2)).unwrap() {
+            acquire_eventually(&a, &b, 3);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     // 读持锁中的锁文件内容：Windows 的 LockFileEx 是强制锁，持锁时别的句柄读不了；M1 不支持 Windows（T03）
@@ -219,9 +309,13 @@ mod tests {
             acquire(&a, &b, &info(1)).unwrap(),
             LockOutcome::HeldByOther(_)
         ));
-        // 数据目录那一把是空的
+        // 数据目录那一把是空的（同 `acquire_eventually`：别的测试 fork 时的副本可能晚一点才关）
         let probe = open_lock_file(&a.join(LOCK_FILE)).unwrap();
-        probe.try_lock().expect("第一把应已放开");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while probe.try_lock().is_err() {
+            assert!(std::time::Instant::now() < deadline, "第一把应已放开");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
