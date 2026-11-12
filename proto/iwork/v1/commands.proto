@@ -76,6 +76,8 @@ message Command {
     SetAutostart set_autostart = 161;
     ShutdownDaemon shutdown_daemon = 162;
     // 163 预留给 T04「升级重启」若需要命令；用到时再定义。
+    // 桌面客户端报「用户现在看得到什么」（T09 方案 2.8）。
+    ReportPresence report_presence = 164;
   }
 }
 
@@ -327,6 +329,18 @@ message SetPlayfulUi {
 
 message SetAutostart {
   bool enabled = 1;
+}
+
+// 桌面客户端报「用户现在看得到什么」，供后台决定要不要发系统通知（T09 方案 2.8）。
+// 不产生事件、不落库、不进幂等记录（与 ShutdownDaemon 一样是不产生事件的命令）；这条连接断开即视为没人在看。
+// 只受理 DESKTOP 连接。值变了才发，每次重新连上后发一次当前值；不重发旧值。
+message ReportPresence {
+  // 窗口在前台、没有最小化；窗口关着时为假。
+  bool window_focused = 1;
+  // 主区域正显示且已加载完的对话；不在对话页时不设。
+  optional string viewing_conversation_id = 2;
+  // 主区域正显示「待你处理」页。
+  bool viewing_pending_list = 3;
 }
 
 // 完全退出 iWork（设计 4）。cancel_running = false 且有进行中的回合时由客户端先确认。

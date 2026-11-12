@@ -63,15 +63,14 @@ pub enum Local {
     HomeMode(pb::ApprovalMode),
 }
 
-/// 壳要做的副作用（通知、打开外链）。
+/// 壳要做的副作用（Dock 角标与跳动、打开外链、退出）。系统通知由后台发（T09 方案 2.8），客户端不发。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     OpenExternal(String),
-    Notify {
-        title: String,
-        body: String,
-        conversation_id: Option<String>,
-    },
+    /// Dock 角标：「待你处理」徽标的文字（超过 99 写「99+」）；`None` 清掉角标。只在 macOS 上落地。
+    SetBadge(Option<String>),
+    /// 出现了新的待处理项：让 Dock 图标跳一次（Q15：Informational）。系统只在应用不在前台时跳。
+    RequestAttention,
     /// 用户确认了「完全退出 iWork」：壳结束进程。
     Exit,
 }

@@ -62,6 +62,8 @@ pub struct Tables {
     pub last_message_by_assistant: HashMap<String, (String, String)>,
     /// 制品内容（sha256 → 字节），ReadArtifact 用。场景经 `mutate_tables` 放进来。
     pub artifacts: BTreeMap<String, Bytes>,
+    /// 用户最近点过的那条系统通知（GetOpenTarget）；测试经 `FakeDaemon::set_open_target` 设。token 0 表示没有。
+    pub open_target: pb::GetOpenTargetResult,
 }
 
 pub fn tool_call_key(turn_id: &str, tool_call_id: &str) -> String {
@@ -591,6 +593,7 @@ impl Tables {
             Q::GetRuntimeStatus(_) => R::GetRuntimeStatus(pb::GetRuntimeStatusResult {
                 runtimes: self.runtimes.values().cloned().collect(),
             }),
+            Q::GetOpenTarget(_) => R::GetOpenTarget(self.open_target.clone()),
             Q::ListModels(_) => R::ListModels(pb::ListModelsResult {
                 models: vec![
                     pb::ModelOption {

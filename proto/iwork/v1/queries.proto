@@ -28,6 +28,8 @@ message Query {
     ReadArtifact read_artifact = 22;
     // 消息锚点：以某个位置为中心按窗口取（T09 方案 2.9、G10）。
     ListAnchors list_anchors = 23;
+    // 被系统通知叫到前台时跳到哪（T09 方案 2.8）：附带查询，结果不进视图。
+    GetOpenTarget get_open_target = 24;
   }
 }
 
@@ -49,7 +51,21 @@ message QueryResult {
     GetSettingsResult get_settings = 21;
     ArtifactChunk read_artifact = 22;
     ListAnchorsResult list_anchors = 23;
+    GetOpenTargetResult get_open_target = 24;
   }
+}
+
+// 用户最近点过的那条系统通知指向哪（T09 方案 2.8）。后台只记用户确实点过的那一项；拿不到「点了哪一项」时不记。
+message GetOpenTarget {}
+
+message GetOpenTargetResult {
+  // 每记下一个新目标加一；0 表示没有。
+  uint64 token = 1;
+  string pending_item_id = 2;
+  // AGENTS.md 草稿这类没有对话归属的项不设。
+  optional string conversation_id = 3;
+  // 用户点这条通知的时刻。
+  google.protobuf.Timestamp at = 4;
 }
 
 // 键集分页：十万条历史（设计 5.3 索引）。三种取页方式至多设一个（同时设两个以上回 INVALID_ARGUMENT），

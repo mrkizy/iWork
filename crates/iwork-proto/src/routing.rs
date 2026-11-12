@@ -66,7 +66,9 @@ pub fn query_lane(kind: &QueryKind) -> QueryLane {
         | QueryKind::ListSecurityLists(_)
         | QueryKind::GetSettings(_)
         | QueryKind::ListAnchors(_) => QueryLane::ViewQuery,
-        QueryKind::ReadArtifact(_) | QueryKind::ListModels(_) => QueryLane::SideQuery,
+        QueryKind::ReadArtifact(_) | QueryKind::ListModels(_) | QueryKind::GetOpenTarget(_) => {
+            QueryLane::SideQuery
+        }
     }
 }
 
@@ -101,6 +103,11 @@ mod tests {
         assert_eq!(
             query_lane(&QueryKind::ListModels(pb::ListModels::default())),
             QueryLane::SideQuery
+        );
+        assert_eq!(
+            query_lane(&QueryKind::GetOpenTarget(pb::GetOpenTarget::default())),
+            QueryLane::SideQuery,
+            "叫到前台时跳哪：结果不进视图"
         );
         assert_eq!(
             query_lane(&QueryKind::ListAnchors(pb::ListAnchors::default())),

@@ -50,6 +50,8 @@ message NavigatePatch {
   string row_key = 3;
   // 这次跳转是首页「新建对话并发出首条消息」的收尾：网页清掉这个项目首页的草稿。
   optional string started_project_id = 4;
+  // 打开「待你处理」页（被系统通知叫到前台、那一项没有对话归属时；T09 方案 2.8）。此时 conversation_id 为空。
+  bool pending_list = 5;
 }
 
 // ---------- 通用小件 ----------

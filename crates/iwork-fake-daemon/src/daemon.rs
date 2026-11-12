@@ -38,6 +38,8 @@ struct Shared {
     failing_queries: Mutex<Option<QueryFilter>>,
     /// 只给测试用：命中的命令一律拒绝（模拟后台不受理）。
     failing_commands: Mutex<Option<CommandFilter>>,
+    /// 收到的 ReportPresence（按到达顺序）。不产生事件、不进幂等记录，只给测试读。
+    presence: Mutex<Vec<pb::ReportPresence>>,
     /// 重连时最多重放多少个 seq，再多给快照（ipc `ServerConfig::replay_limit`）；下一次重启监听时生效。
     replay_limit: std::sync::atomic::AtomicU64,
 }
@@ -229,6 +231,14 @@ impl RequestHandler for Handler {
                     details: Default::default(),
                 })
             }
+            // 报在看哪：不产生事件、不进幂等记录（T09 方案 2.8），受理即可
+            Some(Body::Command(pb::Command {
+                kind: Some(pb::command::Kind::ReportPresence(p)),
+                ..
+            })) => {
+                self.0.presence.lock().expect("在看哪表锁中毒").push(p);
+                Out::Accepted(pb::CommandAccepted::default())
+            }
             Some(Body::Command(c)) => match self.0.command(c) {
                 Ok(a) => Out::Accepted(a),
                 Err(e) => Out::Error(e),
@@ -360,6 +370,7 @@ impl FakeDaemon {
             pace: std::sync::atomic::AtomicU32::new(1),
             failing_queries: Mutex::new(None),
             failing_commands: Mutex::new(None),
+            presence: Mutex::new(Vec::new()),
             replay_limit: std::sync::atomic::AtomicU64::new(
                 ServerConfig::new("iwork-fake-daemon").replay_limit,
             ),
@@ -424,6 +435,41 @@ impl FakeDaemon {
             .failing_commands
             .lock()
             .expect("命令故障表锁中毒") = f;
+    }
+
+    /// 只给测试用：收到的全部 ReportPresence（按到达顺序）。
+    pub fn presence_reports(&self) -> Vec<pb::ReportPresence> {
+        self.shared.presence.lock().expect("在看哪表锁中毒").clone()
+    }
+
+    /// 只给测试用：记下「用户点了这条系统通知」，token 加一、时刻取现在。
+    pub fn set_open_target(&self, pending_item_id: &str, conversation_id: Option<&str>) {
+        self.set_open_target_at(
+            pending_item_id,
+            conversation_id,
+            std::time::SystemTime::now(),
+        );
+    }
+
+    /// 同上，指定点击时刻（测过期用）。
+    pub fn set_open_target_at(
+        &self,
+        pending_item_id: &str,
+        conversation_id: Option<&str>,
+        at: std::time::SystemTime,
+    ) {
+        let since = at.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        self.mutate_tables(|t| {
+            t.open_target = pb::GetOpenTargetResult {
+                token: t.open_target.token + 1,
+                pending_item_id: pending_item_id.into(),
+                conversation_id: conversation_id.map(Into::into),
+                at: Some(prost_types::Timestamp {
+                    seconds: i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
+                    nanos: i32::try_from(since.subsec_nanos()).unwrap_or(0),
+                }),
+            };
+        });
     }
 
     /// 只给测试用：到现在为止的全部持久事件（按 seq）。

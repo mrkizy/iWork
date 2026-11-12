@@ -6,12 +6,15 @@
 //! - 断了 → 立即重拨，之后按 `Backoff` 退避；在飞视图查询表整张清空，每种用途从状态里重新算「还要再发」。
 //! - 网页取帧是一次长等待：没有可交的就挂着，状态变了或到了 16ms 再试。
 
+mod attention;
 pub mod dial;
 mod models;
+mod presence;
 pub mod reconnect;
+mod reminders;
 mod start;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -68,8 +71,8 @@ pub enum ShellEvent {
     Focused(bool),
     /// 文件拖进窗口：Rust 侧拿到的绝对路径，附到当前可见的对话。
     Dropped(Vec<String>),
-    /// 点了系统通知：跳到那个对话（拿不到对话 id 时为 None，跳到最近一条待处理项）。
-    NotificationClicked(Option<String>),
+    /// 窗口开着还是关了（macOS 关窗不退进程，点 Dock 图标重新开窗；方案 2.8）。
+    WindowOpen(bool),
     /// 菜单「完全退出 iWork」：先让网页弹确认框。
     QuitRequested,
 }
@@ -95,6 +98,11 @@ enum Internal {
     },
     /// 拖入的附件处理完：错误说明或成功（None）。
     AttachDone(Option<String>),
+    /// 被叫到前台时要跳到哪（GetOpenTarget，见 reminders 模块）；没问到为 None。
+    OpenTarget {
+        epoch: u64,
+        result: Option<pb::GetOpenTargetResult>,
+    },
     /// 模型清单的附带查询回来了（见 models 模块）。错误为 None 表示连接断了，不算失败。
     ModelsLoaded {
         epoch: u64,
@@ -129,6 +137,8 @@ pub struct Stats {
     pub loop_turns: u64,
     /// 发出的视图查询条数。
     pub view_queries: u64,
+    /// 发出的 ReportPresence 条数。
+    pub presence_reports: u64,
 }
 
 pub struct Session<D: Dialer> {
@@ -155,8 +165,19 @@ pub struct Session<D: Dialer> {
     want_older: bool,
     want_tail: bool,
     list_append: bool,
-    pending_known: Option<BTreeSet<String>>,
-    notified: BTreeSet<String>,
+    /// Dock 角标与跳动（方案 2.8）。
+    attention: attention::Attention,
+    /// 窗口开着（macOS 关窗不退进程；方案 2.8）。
+    window_open: bool,
+    /// 这条连接上最后报过的在看哪；连上后为 None（先发一次当前值）。
+    presence_sent: Option<presence::Presence>,
+    /// 延后要报的在看哪与到期时刻（到来延后报）。
+    presence_due: Option<(Instant, presence::Presence)>,
+    /// 该问一次 GetOpenTarget 了（窗口获得焦点、启动后第一次连上）。
+    open_target_wanted: bool,
+    open_target_in_flight: bool,
+    /// 处理过的最大 token（只记在内存里）。
+    open_target_seen: u64,
     stats: Stats,
     stats_tx: Option<tokio::sync::watch::Sender<Stats>>,
     /// 每条连接一个代次：内部任务的结果带着它，断线重连后迟到的旧结果对得上号才处理（审查 1/F-9）。
@@ -225,8 +246,13 @@ impl<D: Dialer> Session<D> {
             want_older: false,
             want_tail: false,
             list_append: false,
-            pending_known: None,
-            notified: BTreeSet::new(),
+            attention: attention::Attention::default(),
+            window_open: true,
+            presence_sent: None,
+            presence_due: None,
+            open_target_wanted: false,
+            open_target_in_flight: false,
+            open_target_seen: 0,
             stats: Stats::default(),
             stats_tx: None,
             conn_epoch: 0,
@@ -314,6 +340,7 @@ impl<D: Dialer> Session<D> {
                 (None, Some(_)) => None,
             });
             take(self.mark_read_due());
+            take(self.presence_due.as_ref().map(|d| d.0).filter(|t| *t > now));
             // 退避到期只表示「可以再发」，要不要发由 service 用同一个 now 判过了；没发就是用不着，
             // 只登记还没到期的，免得过期的退避项让主循环空转。
             for (until, _) in self.query_backoff.values() {
@@ -393,6 +420,8 @@ impl<D: Dialer> Session<D> {
                 }
             }
             self.wanted_queries();
+            self.serve_presence(now);
+            self.ask_open_target();
             self.want_models(now);
             self.advance_start();
             self.mark_read(now);
@@ -480,7 +509,19 @@ impl<D: Dialer> Session<D> {
 
     fn on_shell(&mut self, e: ShellEvent) {
         match e {
-            ShellEvent::Focused(f) => self.store.set_focused(f),
+            ShellEvent::Focused(f) => {
+                self.store.set_focused(f);
+                // 被系统通知叫到前台：问一次要跳到哪（方案 2.8）
+                if f {
+                    self.open_target_wanted = true;
+                }
+            }
+            ShellEvent::WindowOpen(open) => {
+                self.window_open = open;
+                if !open {
+                    self.store.set_focused(false);
+                }
+            }
             ShellEvent::Dropped(paths) => {
                 let Some(cid) = self.store.visible.conversation_id.clone() else {
                     return;
@@ -501,25 +542,8 @@ impl<D: Dialer> Session<D> {
                     }
                 });
             }
-            ShellEvent::NotificationClicked(conv) => {
-                let target = conv
-                    .map(|c| (c, String::new()))
-                    .or_else(|| self.latest_pending_target());
-                if let Some((c, row)) = target {
-                    self.store.request_navigate(c, row);
-                }
-            }
             ShellEvent::QuitRequested => self.store.set_quit_requested(true),
         }
-    }
-
-    /// 最近一条有对话的待处理项：(对话, 行)。
-    fn latest_pending_target(&self) -> Option<(String, String)> {
-        self.store.summary.pending.iter().rev().find_map(|p| {
-            let c = crate::derive::pending_conversation(p)?.to_owned();
-            let row = crate::derive::pending::item_id(p)?.to_owned();
-            Some((c, row))
-        })
     }
 
     fn on_intent(&mut self, intent: pb::UiIntent, tx: oneshot::Sender<pb::IntentAck>) {
@@ -858,6 +882,7 @@ impl<D: Dialer> Session<D> {
                 runtime_id,
                 result,
             } => self.on_models(epoch, &runtime_id, result),
+            Internal::OpenTarget { epoch, result } => self.on_open_target(epoch, result),
             Internal::QueryFailed { epoch, request_id } => {
                 if epoch != self.conn_epoch {
                     // 旧连接上的查询：那条连接关闭时在飞表已整张清空，这里对不上号，不能删新连接的同号项。
@@ -1266,6 +1291,10 @@ impl<D: Dialer> Session<D> {
     fn drop_connection(&mut self, why: &str) {
         tracing::info!(target: "iwork_client", why, "与后台服务的连接断了");
         self.client = None;
+        // 在看哪是连接级状态：断了就算没人在看，重新连上后发一次当前值；不重发旧值
+        self.presence_sent = None;
+        self.presence_due = None;
+        self.open_target_in_flight = false;
         self.incoming = None;
         self.queries.clear();
         // 查询退避属于出错的那条连接：新连接从头来（审查 2/F-3）。
@@ -1281,8 +1310,8 @@ impl<D: Dialer> Session<D> {
                 return;
             }
         };
-        let (applied, from_refresh) = match item {
-            IncomingItem::Event(e) => (self.store.apply(Item::Event(e)), false),
+        let applied = match item {
+            IncomingItem::Event(e) => self.store.apply(Item::Event(e)),
             IncomingItem::ViewResult { request_id, result } => {
                 let Some(purpose) = self.queries.remove(&request_id) else {
                     tracing::warn!(target: "iwork_client", request_id, "查询结果没有登记的用途，丢掉");
@@ -1292,23 +1321,10 @@ impl<D: Dialer> Session<D> {
                     self.want_older = false;
                 }
                 self.query_succeeded(purpose_kind(&purpose));
-                let refresh = matches!(
-                    purpose,
-                    QueryPurpose::Summary {
-                        table: SummaryTable::Pending,
-                        ..
-                    }
-                );
-                (
-                    self.store.apply(Item::ViewResult { purpose, result }),
-                    refresh,
-                )
+                self.store.apply(Item::ViewResult { purpose, result })
             }
             IncomingItem::Subscribed { subscribed, .. } => {
-                let a = self.store.apply(Item::Subscribed(subscribed));
-                // 快照带来的待处理项不发通知：只记为已知。
-                self.pending_known = Some(self.pending_ids());
-                (a, false)
+                self.store.apply(Item::Subscribed(subscribed))
             }
             IncomingItem::ServerError(e) => {
                 tracing::warn!(target: "iwork_client", code = e.code, message = %e.message, "后台服务主动报错");
@@ -1319,8 +1335,9 @@ impl<D: Dialer> Session<D> {
                 return;
             }
         };
-        if from_refresh {
-            self.notify_new_pending();
+        // 待处理表整份换过（摘要重查的那一条、快照）：更新 Dock 角标与跳动
+        if self.store.take_pending_replaced() {
+            self.pending_replaced();
         }
         if applied.had_seq {
             self.backoff = Backoff::new();
@@ -1330,6 +1347,10 @@ impl<D: Dialer> Session<D> {
         for f in applied.follow_ups {
             match f {
                 FollowUp::AllReady => {
+                    // 启动后第一次连上：问一次是不是被系统通知叫起来的（方案 2.8）
+                    if !self.ever_live {
+                        self.open_target_wanted = true;
+                    }
                     self.ever_live = true;
                     self.store.set_connection(Connection::Live);
                 }
@@ -1349,43 +1370,6 @@ impl<D: Dialer> Session<D> {
                     );
                 }
             }
-        }
-    }
-
-    fn pending_ids(&self) -> BTreeSet<String> {
-        self.store
-            .summary
-            .pending
-            .iter()
-            .filter_map(|p| crate::derive::pending::item_id(p).map(str::to_owned))
-            .collect()
-    }
-
-    /// 系统通知（D6）：摘要重查后待处理表比上一次多出的项，窗口不在前台或那个对话不可见时发；每个 id 一次。
-    fn notify_new_pending(&mut self) {
-        let now_ids = self.pending_ids();
-        let Some(known) = self.pending_known.replace(now_ids.clone()) else {
-            return;
-        };
-        for item in &self.store.summary.pending {
-            let Some(id) = crate::derive::pending::item_id(item) else {
-                continue;
-            };
-            if known.contains(id) || self.notified.contains(id) {
-                continue;
-            }
-            let conv = crate::derive::pending_conversation(item).map(str::to_owned);
-            let looking =
-                self.store.focused && conv.is_some() && conv == self.store.visible.conversation_id;
-            if looking {
-                continue;
-            }
-            self.notified.insert(id.to_owned());
-            let _ = self.effects.send(Effect::Notify {
-                title: "iWork 需要你处理".into(),
-                body: crate::derive::pending::item_title(&self.store, item),
-                conversation_id: conv,
-            });
         }
     }
 

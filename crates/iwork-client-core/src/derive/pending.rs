@@ -54,7 +54,7 @@ pub fn item_title(store: &Store, item: &pb::PendingItem) -> String {
 }
 
 /// 待处理项在时间线上的行身份（与 `store::timeline::Row::identity` 同一套写法）。
-fn row_key(item: &pb::PendingItem) -> Option<String> {
+pub fn row_key(item: &pb::PendingItem) -> Option<String> {
     match item.item.as_ref()? {
         pb::pending_item::Item::Approval(a) => Some(a.id.clone()),
         pb::pending_item::Item::UserAction(c) => Some(c.id.clone()),

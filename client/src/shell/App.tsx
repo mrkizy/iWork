@@ -44,7 +44,9 @@ export function App(props: { host: Host; toasts: Component; initialRoute?: Route
     if (n === undefined || n.seq <= navigated()) return;
     setNavigated(n.seq);
     if (n.startedProjectId !== undefined) setDraft(HOME_DRAFT + n.startedProjectId, "");
-    router.go({ page: "conversation", id: n.conversationId, rowKey: n.rowKey || undefined });
+    // 被系统通知叫到前台、那一项没有对话归属：打开「待你处理」页（方案 2.8）
+    if (n.pendingList) router.go({ page: "pending" });
+    else router.go({ page: "conversation", id: n.conversationId, rowKey: n.rowKey || undefined });
   });
 
   createEffect(() => applyPlayful(host.view.settings?.playfulUi ?? true));

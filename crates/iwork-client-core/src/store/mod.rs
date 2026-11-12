@@ -302,6 +302,8 @@ pub struct Store {
     pub character_overrides: crate::derive::avatar::CharacterOverrides,
     /// 有视图查询失败、在退避中：连接条上显示一行（审查 1/F-5）。
     pub query_failing: bool,
+    /// 待处理表刚被整份替换过（摘要重查或快照）：会话层取走后更新 Dock 角标与跳动（方案 2.8）。
+    pending_replaced: bool,
     pub dirty: DirtySet,
 }
 
@@ -553,6 +555,7 @@ impl Store {
             conversation_id,
             row_key,
             started_project_id: started,
+            pending_list: false,
         });
         self.dirty.mark(ViewKey::Navigate);
     }
@@ -592,6 +595,42 @@ impl Store {
                 if let Some(s) = self.home.start.as_mut() {
                     s.conversation_id = Some(conversation_id);
                 }
+            }
+        }
+    }
+
+    /// 待处理表刚被整份替换过：返回真一次。
+    pub fn take_pending_replaced(&mut self) -> bool {
+        std::mem::take(&mut self.pending_replaced)
+    }
+
+    /// 被系统通知叫到前台、点「待你处理」列表的一项：跳到它所在对话的那一行（行身份与列表项同一个函数算）；
+    /// 已经不在待处理表里时跳到对话最新处；没有对话归属的打开「待你处理」页。
+    pub fn open_pending_item(&mut self, item_id: &str, conversation_id: Option<&str>) {
+        let item = self
+            .summary
+            .pending
+            .iter()
+            .find(|p| crate::derive::pending::item_id(p) == Some(item_id));
+        let conversation = item
+            .and_then(crate::derive::pending_conversation)
+            .or(conversation_id)
+            .map(str::to_owned);
+        match conversation {
+            Some(c) => {
+                let row = item
+                    .and_then(crate::derive::pending::row_key)
+                    .unwrap_or_default();
+                self.navigate_to(c, row, None);
+            }
+            None => {
+                let seq = self.navigate.as_ref().map_or(1, |n| n.seq + 1);
+                self.navigate = Some(pb::NavigatePatch {
+                    seq,
+                    pending_list: true,
+                    ..Default::default()
+                });
+                self.dirty.mark(ViewKey::Navigate);
             }
         }
     }
@@ -933,6 +972,7 @@ impl Store {
             }
             (_, K::ListPendingItems(l)) => {
                 self.summary.pending = l.items;
+                self.pending_replaced = true;
                 self.mark_summary_views();
                 if let Some(t) = self.open.as_mut() {
                     let c = t.sync_resume_cards(self.summary.resume_cards());
@@ -1083,7 +1123,14 @@ impl Store {
             (_, K::ListAnchors(_)) => {
                 tracing::warn!(target: "iwork_client", "锚点结果的用途对不上，丢掉");
             }
-            (_, K::ListSecurityLists(_) | K::ReadArtifact(_) | K::ListModels(_)) => {}
+            // 附带查询：结果在回包里，不经这里（会话层直接处理）
+            (
+                _,
+                K::ListSecurityLists(_)
+                | K::ReadArtifact(_)
+                | K::ListModels(_)
+                | K::GetOpenTarget(_),
+            ) => {}
         }
         if let (Some(QueryPurpose::Summary { round, table: want }), Some(got)) = (purpose, table)
             && *want == got
