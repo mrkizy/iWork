@@ -506,6 +506,225 @@ fn identity_failure_on_settled_install_exits_zero() {
     assert!(sb.untouched());
 }
 
+/// S7g（1/F-8）：升级 `exec` 的那一瞬间接手的新进程，冷却从它自己的启动算起。三个入口共用的后半段：
+/// 新进程 X 走完第 1 步、停在起任务之前（`IWORK_DEV_PAUSE_AT=tasks`）时把磁盘换成装齐的 C 版，再放它走 →
+/// X 的安装检查一上来就判「要重启」，但自己启动不到冷却时间（加速后 3s）不动，到点才重启成 C。
+/// （不在第 1 步里换：macOS 上程序文件在第 1 步期间被换，取身份就失败，那是 S11f 的情形。）
+mod cooldown {
+    use super::*;
+    use crate::support::{rt, spawn_in};
+    use std::sync::{Arc, Mutex};
+
+    /// 加速后的冷却（30s / 10）。
+    const COOLDOWN_MS: u64 = 3000;
+    const PAUSE_TASKS: (&str, &str) = ("IWORK_DEV_PAUSE_AT", "tasks");
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    /// 日志里含 `needle` 的各行的时刻（毫秒）。
+    fn log_times(sb: &Sandbox, needle: &str) -> Vec<u64> {
+        log_text(sb)
+            .lines()
+            .filter(|l| l.contains(needle))
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()?["ts"].as_u64())
+            .collect()
+    }
+
+    fn wait_for(what: &str, limit: Duration, f: impl Fn() -> bool) {
+        let deadline = Instant::now() + limit;
+        while !f() {
+            assert!(Instant::now() < deadline, "{limit:?} 内没等到：{what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// 起 A 版的 D：升级 `exec` 之前停住，`resume_d` 出现才往下走。顺带把 B、C 两版先造好（换版本时只剩拷贝）。
+    fn start_d(sb: &Sandbox, inst: &Install, resume_d: &Path) -> Daemon {
+        for tag in ["B", "C"] {
+            inst.build("iwork-daemon", tag);
+            inst.build("iwork-client", tag);
+        }
+        let d = sb.spawn_exe(
+            &inst.daemon(),
+            &[],
+            &[
+                FAST,
+                ("IWORK_DEV_PAUSE_AT", "upgrade-exec"),
+                ("IWORK_DEV_RESUME_FILE", resume_d.to_str().unwrap()),
+            ],
+        );
+        sb.wait_ready(d.pid(), START);
+        d
+    }
+
+    /// 装齐 B → D 冷却到点后判重启、走完停机、放开锁，停在 `exec` 之前。返回 D 放锁前最后一行日志的时刻：
+    /// 接手的新进程一定是这之后才启动的。
+    fn upgrade_until_before_exec(sb: &Sandbox, inst: &Install, d: &Daemon) -> u64 {
+        inst.put_all("B");
+        d.wait_stderr("IWORK-PAUSED upgrade-exec", RESTART);
+        *log_times(sb, "后台服务退出").last().expect("D 的退出日志")
+    }
+
+    /// X 的环境：停在起任务之前，`resume_x` 出现才往下走。
+    fn x_env(resume_x: &Path) -> Vec<(String, String)> {
+        vec![
+            (FAST.0.into(), FAST.1.into()),
+            (PAUSE_TASKS.0.into(), PAUSE_TASKS.1.into()),
+            (
+                "IWORK_DEV_RESUME_FILE".into(),
+                resume_x.display().to_string(),
+            ),
+        ]
+    }
+
+    fn as_refs(env: &[(String, String)]) -> Vec<(&str, &str)> {
+        env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
+    }
+
+    /// 后半段：X 停在起任务之前时换成 C、放它走；断言 X 在冷却期内判过「要重启」而没动，到它启动（不早于 `t0`）
+    /// 之后至少冷却时长才重启成 C。
+    fn assert_cooldown_holds(
+        sb: &Sandbox,
+        inst: &Install,
+        x_stderr: impl Fn() -> String,
+        resume_x: &Path,
+        t0: u64,
+    ) {
+        wait_for("X 停在起任务之前", START, || {
+            x_stderr().contains("IWORK-PAUSED tasks")
+        });
+        inst.put_all("C");
+        std::fs::write(resume_x, b"").unwrap();
+        let resumed_at = now_ms();
+        // 没有冷却的话，放它走之后马上就重启；要和「冷却到点」分得开，放它走的时刻得明显早于 t0 + 冷却
+        assert!(
+            resumed_at < t0 + COOLDOWN_MS - 1000,
+            "X 起到放行用了 {}ms，区分不出有没有冷却",
+            resumed_at - t0
+        );
+        let c = inst.image("C");
+        wait_for("X 重启成 C", RESTART, || readies(sb).last() == Some(&c));
+        let held = log_times(sb, "本进程启动不到冷却时间")
+            .into_iter()
+            .filter(|t| *t >= t0)
+            .count();
+        assert!(held > 0, "X 判过「要重启」而因冷却没动");
+        let restart = log_times(sb, "磁盘上装齐了另一版，自行重启")
+            .into_iter()
+            .filter(|t| *t >= t0)
+            .min()
+            .expect("X 的升级重启");
+        assert!(
+            restart >= t0 + COOLDOWN_MS,
+            "X 启动后不到 {}ms 就升级重启了，冷却 {COOLDOWN_MS}ms",
+            restart - t0
+        );
+    }
+
+    /// 等锁的托管实例 S 在 D 放开锁的瞬间接班（`exec` 磁盘上的 B）→ S 启动后的冷却期内不升级重启。
+    #[test]
+    fn cooldown_holds_when_standby_wins_lock() {
+        let _slot = Slot::take();
+        let sb = Sandbox::new();
+        let inst = installed(&sb, "A");
+        let (resume_d, resume_s) = (sb.home.join("resume-d"), sb.home.join("resume-s"));
+        let d = start_d(&sb, &inst, &resume_d);
+        let env = x_env(&resume_s);
+        let s = sb.spawn_exe(&inst.daemon(), &["--service"], &as_refs(&env));
+        s.wait_stderr("等锁接班", START);
+        let t0 = upgrade_until_before_exec(&sb, &inst, &d);
+        assert_cooldown_holds(&sb, &inst, || s.stderr(), &resume_s, t0);
+    }
+
+    /// 拉起实现：在沙箱里起后台（带上测试要的环境变量），留下进程句柄。
+    struct SpawnInSandbox {
+        home: PathBuf,
+        env: Vec<(String, String)>,
+        spawned: Arc<Mutex<Vec<Daemon>>>,
+    }
+
+    impl iwork_client_core::launcher::Spawn for SpawnInSandbox {
+        fn spawn(&self, exe: &Path, args: &[&str]) -> std::io::Result<()> {
+            let d = spawn_in(&self.home, exe, args, &as_refs(&self.env));
+            self.spawned.lock().unwrap().push(d);
+            Ok(())
+        }
+    }
+
+    /// 客户端（`Launcher`）在 D 放开锁的瞬间连不上、照状态文件（`Exited{Upgrade}` → 再拉有用）拉起一个 X
+    /// → X 启动后的冷却期内不升级重启。
+    #[test]
+    fn cooldown_holds_when_client_launch_wins_lock() {
+        use iwork_client_core::launcher::{IpcConnect, LaunchConfig, LaunchError, Launcher};
+        let _slot = Slot::take();
+        let sb = Sandbox::new();
+        let inst = installed(&sb, "A");
+        let (resume_d, resume_x) = (sb.home.join("resume-d"), sb.home.join("resume-x"));
+        let d = start_d(&sb, &inst, &resume_d);
+        let t0 = upgrade_until_before_exec(&sb, &inst, &d);
+        let spawned = Arc::new(Mutex::new(Vec::new()));
+        let ep = iwork_ipc::LocalEndpoint::in_run_dir(&sb.run_dir()).unwrap();
+        let mut cfg =
+            iwork_ipc::client::ClientConfig::new(iwork_proto::pb::ClientKind::Desktop, "t");
+        cfg.trust = iwork_ipc::peer::TrustPolicy::DevTrust;
+        let mut launcher = Launcher::new(
+            IpcConnect {
+                endpoint: ep.endpoint().clone(),
+                own: iwork_ipc::peer::SelfIdentity::detect().unwrap(),
+                cfg,
+            },
+            SpawnInSandbox {
+                home: sb.home.clone(),
+                env: x_env(&resume_x),
+                spawned: spawned.clone(),
+            },
+            LaunchConfig {
+                daemon_exe: inst.daemon(),
+                budget: Duration::from_secs(1),
+                run_dir: Some(sb.run_dir()),
+                endpoint: Ok(sb.run_dir().join("d.sock")),
+                args: vec![],
+            },
+        );
+        // X 停在起任务之前、还没绑 socket：这次调用连不上（到预算返回）；要的只是它拉起了一个
+        let r = rt().block_on(launcher.connect_or_launch());
+        assert!(matches!(r, Err(LaunchError::NotReady(_))), "{:?}", r.err());
+        assert_eq!(spawned.lock().unwrap().len(), 1, "客户端拉起了一个");
+        let x_stderr = || spawned.lock().unwrap()[0].stderr();
+        assert_cooldown_holds(&sb, &inst, x_stderr, &resume_x, t0);
+    }
+
+    /// D 的升级 `exec` 失败、以 21 退出 → 拉起方（这里扮服务管理器，带 `--service`）另起一个 X
+    /// → X 启动后的冷却期内不升级重启。
+    #[test]
+    fn cooldown_holds_after_exec_failure_relaunch() {
+        use std::os::unix::fs::PermissionsExt;
+        let _slot = Slot::take();
+        let sb = Sandbox::new();
+        let inst = installed(&sb, "A");
+        let (resume_d, resume_x) = (sb.home.join("resume-d"), sb.home.join("resume-x"));
+        let mut d = start_d(&sb, &inst, &resume_d);
+        upgrade_until_before_exec(&sb, &inst, &d);
+        // 让 exec 失败：程序文件暂时不可执行
+        let perm = |mode| {
+            std::fs::set_permissions(inst.daemon(), std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        perm(0o644);
+        std::fs::write(&resume_d, b"").unwrap();
+        assert_eq!(code(d.wait_exit(START)), Some(21), "{}", d.stderr());
+        perm(0o755);
+        let t0 = now_ms();
+        let env = x_env(&resume_x);
+        let x = sb.spawn_exe(&inst.daemon(), &["--service"], &as_refs(&env));
+        assert_cooldown_holds(&sb, &inst, || x.stderr(), &resume_x, t0);
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod bundle {
     //! 两种包形态之间的升级（S7b、S7c、S7d、S7e）。整包签名用 ad-hoc 整包签名造封印：对安装检查来说和证书签名

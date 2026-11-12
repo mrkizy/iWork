@@ -37,6 +37,9 @@ pub type Store = SqliteStore<ProtoEventCodec>;
 /// 开发构建的暂停点：状态已写定、锁还没放（见 [`dev`]）。
 pub const PAUSE_BEFORE_EXIT: &str = "before-exit";
 
+/// 开发构建的暂停点：升级停机走完、锁已放开，原地 `exec` 之前（S7g：别的进程在这个瞬间接手）。
+pub const PAUSE_BEFORE_UPGRADE_EXEC: &str = "upgrade-exec";
+
 /// M1 在 Windows 上启动即拒绝时的说明（方案 2.15）。
 pub const WINDOWS_UNSUPPORTED: &str =
     "M1 暂不支持 Windows：对端映像校验未通过实测（t0-findings 6.4）";

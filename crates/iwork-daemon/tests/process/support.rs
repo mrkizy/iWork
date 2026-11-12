@@ -96,24 +96,7 @@ impl Sandbox {
 
     /// 后台的命令行：家目录指进来，`XDG_*`、`IWORK_DATA_DIR` 清掉。
     pub fn command(&self, exe: &Path, args: &[&str]) -> Command {
-        let mut c = Command::new(exe);
-        c.arg("--dev-trust").args(args);
-        c.env("HOME", &self.home);
-        for k in [
-            "XDG_RUNTIME_DIR",
-            "XDG_DATA_HOME",
-            "XDG_CONFIG_HOME",
-            "IWORK_DATA_DIR",
-            "IWORK_DEV_FAIL_AT",
-            "IWORK_DEV_PAUSE_AT",
-            "IWORK_LOG",
-        ] {
-            c.env_remove(k);
-        }
-        c.stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        c
+        daemon_command(&self.home, exe, args)
     }
 
     pub fn spawn(&self, args: &[&str], env: &[(&str, &str)]) -> Daemon {
@@ -121,25 +104,55 @@ impl Sandbox {
     }
 
     pub fn spawn_exe(&self, exe: &Path, args: &[&str], env: &[(&str, &str)]) -> Daemon {
-        let mut c = self.command(exe, args);
-        for (k, v) in env {
-            c.env(k, v);
-        }
-        let mut child = c.spawn().expect("起后台");
-        let lines = Arc::new(Mutex::new(Vec::new()));
-        let stderr = child.stderr.take().unwrap();
-        let sink = lines.clone();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                sink.lock().unwrap().push(line);
-            }
-        });
-        Daemon {
-            child: Some(child),
-            stderr: lines,
-        }
+        spawn_in(&self.home, exe, args, env)
     }
+}
 
+/// [`Sandbox::command`] 的本体（不借 `Sandbox`，给要 `'static` 的地方用，如 `Launcher` 的拉起实现）。
+pub fn daemon_command(home: &Path, exe: &Path, args: &[&str]) -> Command {
+    let mut c = Command::new(exe);
+    c.arg("--dev-trust").args(args);
+    c.env("HOME", home);
+    for k in [
+        "XDG_RUNTIME_DIR",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "IWORK_DATA_DIR",
+        "IWORK_DEV_FAIL_AT",
+        "IWORK_DEV_PAUSE_AT",
+        "IWORK_DEV_RESUME_FILE",
+        "IWORK_LOG",
+    ] {
+        c.env_remove(k);
+    }
+    c.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    c
+}
+
+/// [`Sandbox::spawn_exe`] 的本体。
+pub fn spawn_in(home: &Path, exe: &Path, args: &[&str], env: &[(&str, &str)]) -> Daemon {
+    let mut c = daemon_command(home, exe, args);
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    let mut child = c.spawn().expect("起后台");
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let stderr = child.stderr.take().unwrap();
+    let sink = lines.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            sink.lock().unwrap().push(line);
+        }
+    });
+    Daemon {
+        child: Some(child),
+        stderr: lines,
+    }
+}
+
+impl Sandbox {
     /// 起一次、等它自己退出（启动失败一类的用例）。
     pub fn run_to_exit(&self, args: &[&str], env: &[(&str, &str)]) -> (ExitStatus, String) {
         let mut d = self.spawn(args, env);

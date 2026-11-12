@@ -135,6 +135,7 @@ pub fn run_identified(
         ..
     } = phase
     {
+        dev::pause_at(boot::PAUSE_BEFORE_UPGRADE_EXEC);
         let err = exec_self(&exe, &raw);
         eprintln!("iwork-daemon：自行重启时 exec 失败：{err}");
     }
@@ -230,9 +231,10 @@ fn fail(board: &StatusBoard, e: BootError) -> Phase {
     e.exit_phase()
 }
 
-/// 进入某一步：状态文件写 `Starting{step}`；开发构建可在这里注入失败。
+/// 进入某一步：状态文件写 `Starting{step}`；开发构建可在这里停住或注入失败。
 fn enter(board: &StatusBoard, step: Step) -> bool {
     board.set_phase(starting(step));
+    dev::pause_at(step.name());
     !dev::fail_at(step.name())
 }
 
