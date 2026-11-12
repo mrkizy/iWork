@@ -40,6 +40,14 @@ enum Step {
     Emit {
         line: Value,
     },
+    /// 往 stdout 原样写一行文字（造坏行）
+    EmitRaw {
+        text: String,
+    },
+    /// 往 stdout 写一行合法 JSON，总长约 `bytes` 字节（造超长行；脚本放在环境变量里，放不下这么大的值）
+    EmitBig {
+        bytes: usize,
+    },
     SleepMs {
         ms: u64,
     },
@@ -153,6 +161,16 @@ impl Fake {
             Step::Emit { line } => {
                 self.out(&line);
                 self.log("emitted", json!({}));
+            }
+            Step::EmitRaw { text } => {
+                let mut stdout = std::io::stdout().lock();
+                writeln!(stdout, "{text}").expect("stdout 写得出去");
+                stdout.flush().expect("stdout 刷得出去");
+                self.log("emitted", json!({}));
+            }
+            Step::EmitBig { bytes } => {
+                self.out(&json!({ "type": "system", "subtype": "big", "pad": "x".repeat(bytes) }));
+                self.log("emitted", json!({ "bytes": bytes }));
             }
             Step::SleepMs { ms } => std::thread::sleep(Duration::from_millis(ms)),
             Step::Exit { code } => {

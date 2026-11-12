@@ -8,13 +8,15 @@
 //! | `canary_missing_blocks_session`、`canary_required_on_resume` | 同名 |
 //! | `initialize_response_account_never_logged` | 在 startup_log.rs（要装全局日志订阅者） |
 //!
-//! 另有：CLI 拿到的环境就是计划里那一份、开会话期间 CLI 退出、hook 程序不在、失败不留会话目录。
+//! 另有：CLI 拿到的环境就是计划里那一份、开会话期间 CLI 退出、hook 程序不在、失败不留会话目录；
+//! 审查 1：坏行与超长行（F-1）、对不上的控制响应不留原文（F-2）、开会话被取消也不留会话目录与 CLI（F-3）。
 #![cfg(unix)]
 
 mod support;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use iwork_bridge_claude::cli::events::{LineError, MAX_LINE_BYTES};
 use iwork_bridge_claude::cli::facts::IsolationBroken;
 use iwork_bridge_claude::cli::input::{InputBlock, user_line};
 use iwork_bridge_claude::launch::Start;
@@ -257,4 +259,119 @@ async fn missing_hook_program_fails_before_starting_cli() {
     assert!(err.to_string().contains("no-such-hook"), "{err}");
     assert!(w.log().is_empty(), "CLI 没起");
     assert_eq!(w.session_dirs(), 0);
+}
+
+/// 审查 1/F-1：开会话期间 CLI 吐出不合协议的行（不是 JSON、不是对象），两个阶段都要失败，不能吞掉。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bad_line_while_opening_fails() {
+    // 等报到时
+    let w = World::new(json!([
+        { "step": "emit_raw", "text": "not json" },
+        { "step": "session_start" },
+        { "step": "read_line" },
+        { "step": "answer_initialize", "mode": "dontAsk" },
+        { "step": "wait_stdin_eof" },
+    ]));
+    let err = w.open().await.err().expect("失败");
+    assert!(
+        matches!(err, OpenError::BadLine(LineError::NotJson)),
+        "{err:?}"
+    );
+    assert_eq!(err.code(), "cli_exited");
+    assert_eq!(w.session_dirs(), 0);
+
+    // 等 initialize 响应时；前面先来一千多行合法的（超过留给映射的上限）也一样
+    let mut steps = vec![
+        json!({ "step": "session_start" }),
+        json!({ "step": "read_line" }),
+    ];
+    for _ in 0..1001 {
+        steps.push(json!({ "step": "emit", "line": { "type": "system", "subtype": "noise" } }));
+    }
+    steps.push(json!({ "step": "emit_raw", "text": "[1,2,3]" }));
+    steps.push(json!({ "step": "answer_initialize", "mode": "dontAsk" }));
+    steps.push(json!({ "step": "wait_stdin_eof" }));
+    let w = World::new(Value::Array(steps));
+    let err = w.open().await.err().expect("失败");
+    assert!(
+        matches!(err, OpenError::BadLine(LineError::NotJson)),
+        "{err:?}"
+    );
+}
+
+/// 审查 1/F-1：超过 8 MiB 的一行，读到上限就停、开会话失败，不把整行读进来。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversize_line_while_opening_fails() {
+    let w = World::new(json!([
+        { "step": "session_start" },
+        { "step": "read_line" },
+        { "step": "emit_big", "bytes": 9 * 1024 * 1024 },
+        { "step": "answer_initialize", "mode": "dontAsk" },
+        { "step": "wait_stdin_eof" },
+    ]));
+    let err = w.open().await.err().expect("失败");
+    assert!(
+        matches!(err, OpenError::BadLine(LineError::TooLong { bytes }) if bytes <= MAX_LINE_BYTES + 64 * 1024),
+        "读到上限附近就停：{err:?}"
+    );
+}
+
+/// 审查 1/F-2：对不上编号的控制响应（里面带 account）不留原文，也不进留给映射的行。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unmatched_control_response_is_not_kept() {
+    let email = "t06-unmatched@example.invalid";
+    let w = World::new(json!([
+        { "step": "session_start" },
+        { "step": "emit", "line": { "type": "control_response", "response": {
+            "subtype": "success", "request_id": "someone-else",
+            "response": { "account": { "email": email } } } } },
+        { "step": "read_line" },
+        { "step": "emit", "line": { "type": "control_response", "response": {
+            "subtype": "success", "request_id": "another",
+            "response": { "account": { "email": email } } } } },
+        { "step": "answer_initialize", "mode": "dontAsk" },
+        { "step": "wait_stdin_eof" },
+    ]));
+    let mut s = w.open().await.expect("开会话成功");
+    assert!(
+        s.early_lines
+            .iter()
+            .all(|l| !l.contains(email) && !l.contains("control_response")),
+        "{:?}",
+        s.early_lines
+    );
+    s.cli.kill().await.unwrap();
+    s.dir.remove().unwrap();
+}
+
+/// 审查 1/F-3：开会话的 future 被丢掉（调用方超时、ACP 请求被取消），会话目录照样删掉、CLI 照样结束。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_open_leaves_nothing() {
+    let mut w = World::new(json!([{ "step": "wait_stdin_eof" }]));
+    w.startup_limit = Duration::from_secs(60);
+    let pid = {
+        let opening = w.open();
+        tokio::pin!(opening);
+        // 等假 CLI 起来、会话目录建好，再丢掉开会话的 future
+        let started = tokio::select! {
+            _ = &mut opening => panic!("报到不来，开会话不该结束"),
+            v = w.wait_log(|v| v["kind"] == "started") => v,
+        };
+        assert_eq!(w.session_dirs(), 1);
+        started["pid"].as_u64().unwrap() as i32
+    };
+    for _ in 0..100 {
+        // SAFETY: 信号 0 只探测这个进程号在不在，不发真信号
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        if !alive && w.session_dirs() == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // SAFETY: 同上
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    panic!(
+        "5 秒后还有残留：会话目录 {} 个，CLI 还在：{alive}",
+        w.session_dirs()
+    );
 }

@@ -3,6 +3,8 @@
 //!
 //! - 环境：先清空，再原样设上 `LaunchPlan.env`（3.1a：桥接的环境加五个变量，P14 不筛选）。不从桥接自己的环境里
 //!   再继承任何东西，CLI 看到的就是计划里那一份。
+//! - stdout：按行读，一行最长 [`MAX_LINE_BYTES`]（events.rs 的同一个上限）。超了就停在上限附近报错，不把整行
+//!   读进内存；之后这条输出流不再可信，调用方按致命处理。
 //! - stderr：不进日志（里面可能有用户的内容），只留最后 [`STDERR_TAIL_BYTES`] 字节，回合结局判不出来时给诊断用。
 //! - 结束进程树的做法归 S6-5（方案 5.4a）；这里只提供「杀掉 CLI 自己并等它退出」，开会话失败时用（那时还没有
 //!   任何工具调用，没有它起的命令要清）。
@@ -12,10 +14,19 @@ use std::io;
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
+use crate::cli::events::{LineError, MAX_LINE_BYTES};
 use crate::launch::LaunchPlan;
+
+/// 读一行出错。
+#[derive(Debug)]
+pub enum ReadError {
+    Io(io::Error),
+    /// 超长、不是 UTF-8：输出不合协议
+    Line(LineError),
+}
 
 /// stderr 留多少字节（最后的部分）。
 pub const STDERR_TAIL_BYTES: usize = 8 * 1024;
@@ -24,7 +35,9 @@ pub const STDERR_TAIL_BYTES: usize = 8 * 1024;
 pub struct CliProcess {
     child: Child,
     stdin: ChildStdin,
-    stdout: Lines<BufReader<ChildStdout>>,
+    stdout: BufReader<ChildStdout>,
+    /// 还没读到换行的半行（放在这里而不是局部变量：`next_line` 被取消时不丢已读的字节）
+    partial: Vec<u8>,
     stderr_tail: Arc<Mutex<VecDeque<u8>>>,
 }
 
@@ -43,7 +56,7 @@ impl CliProcess {
             .kill_on_drop(true)
             .spawn()?;
         let stdin = child.stdin.take().expect("stdin 是 piped");
-        let stdout = BufReader::new(child.stdout.take().expect("stdout 是 piped")).lines();
+        let stdout = BufReader::new(child.stdout.take().expect("stdout 是 piped"));
         let mut stderr = child.stderr.take().expect("stderr 是 piped");
         let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_BYTES)));
         let tail = Arc::clone(&stderr_tail);
@@ -61,6 +74,7 @@ impl CliProcess {
             child,
             stdin,
             stdout,
+            partial: Vec::new(),
             stderr_tail,
         })
     }
@@ -77,9 +91,32 @@ impl CliProcess {
         self.stdin.flush().await
     }
 
-    /// 读下一行；CLI 关了 stdout 返回 `None`。取消安全（可以放进 `select!`）。
-    pub async fn next_line(&mut self) -> io::Result<Option<String>> {
-        self.stdout.next_line().await
+    /// 读下一行（不含换行符）；CLI 关了 stdout 返回 `None`（最后没换行的半行照样当一行返回）。
+    /// 取消安全（可以放进 `select!`）：已经读进来的字节留在 `partial` 里。
+    pub async fn next_line(&mut self) -> Result<Option<String>, ReadError> {
+        loop {
+            let buf = self.stdout.fill_buf().await.map_err(ReadError::Io)?;
+            if buf.is_empty() {
+                if self.partial.is_empty() {
+                    return Ok(None);
+                }
+                return finish(std::mem::take(&mut self.partial)).map(Some);
+            }
+            let (take, newline) = match buf.iter().position(|b| *b == b'\n') {
+                Some(i) => (i, true),
+                None => (buf.len(), false),
+            };
+            // 先看长度再拷：超长的那一段不进内存
+            let len = self.partial.len() + take;
+            if len > MAX_LINE_BYTES {
+                return Err(ReadError::Line(LineError::TooLong { bytes: len }));
+            }
+            self.partial.extend_from_slice(&buf[..take]);
+            self.stdout.consume(take + usize::from(newline));
+            if newline {
+                return finish(std::mem::take(&mut self.partial)).map(Some);
+            }
+        }
     }
 
     /// 等 CLI 退出。取消安全。
@@ -99,6 +136,14 @@ impl CliProcess {
     }
 }
 
+/// 一行的字节 → 文字：去掉行尾的 `\r`，不是 UTF-8 的按坏行处理。
+fn finish(mut line: Vec<u8>) -> Result<String, ReadError> {
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    String::from_utf8(line).map_err(|_| ReadError::Line(LineError::NotJson))
+}
+
 /// 追加到尾部缓冲，超过 [`STDERR_TAIL_BYTES`] 就从前面丢。
 fn keep_tail(tail: &mut VecDeque<u8>, bytes: &[u8]) {
     tail.extend(bytes);
@@ -109,6 +154,16 @@ fn keep_tail(tail: &mut VecDeque<u8>, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_bytes_to_text() {
+        assert_eq!(finish(b"{}\r".to_vec()).unwrap(), "{}");
+        assert_eq!(finish(b"{}".to_vec()).unwrap(), "{}");
+        assert!(matches!(
+            finish(vec![0xff, 0xfe]),
+            Err(ReadError::Line(LineError::NotJson))
+        ));
+    }
 
     #[test]
     fn tail_keeps_only_the_last_bytes() {

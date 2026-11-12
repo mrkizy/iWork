@@ -9,9 +9,12 @@
 //!    不是选定配置的 `dontAsk`、没有这个键、等不到 → `isolation_broken`（设置文件被整个忽略时 CLI 报 `default`）。
 //! 5. 这两步都过了才返回；第一条用户消息由调用方之后再发。
 //!
-//! 哪一步失败都杀掉 CLI、停掉 hook 通道、删掉会话目录，不留东西。开会话期间 CLI 吐的别的行（`system` 事件等）
-//! 原样留在 [`OpenSession::early_lines`]，由调用方交给映射；`initialize` 响应只取权限模式这一个键，别的内容
-//! （里面有 `account`）不留、不进日志。
+//! 哪一步失败都杀掉 CLI、停掉 hook 通道、删掉会话目录，不留东西；开会话的 future 被丢掉（调用方超时、请求被
+//! 取消）也一样：会话目录由作用域守卫管，成功时才交出去，CLI 带 `kill_on_drop`，hook 通道丢掉即停。
+//!
+//! 开会话期间 CLI 的每一行都先解析：不合协议（不是 JSON 对象、超过 8 MiB）就失败，和映射里一样不信任这条输出
+//! （`cli_exited`）。合协议的别的行（`system` 事件等）原样留在 [`OpenSession::early_lines`]，由调用方交给映射；
+//! 控制响应一律不留原文（里面可能有 `account`）：`initialize` 的只取权限模式这一个键，对不上编号的只记编号。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -20,10 +23,10 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::Instant;
 
-use crate::cli::events::{self, CliEvent};
+use crate::cli::events::{self, CliEvent, ControlResponse, LineError};
 use crate::cli::facts::IsolationBroken;
 use crate::cli::input::control_request_line;
-use crate::cli::process::CliProcess;
+use crate::cli::process::{CliProcess, ReadError};
 use crate::deadlines::deadlines;
 use crate::hook_server::pending::{BackendAnswer, Pending};
 use crate::hook_server::{HookEvent, HookServer, Serving, Token};
@@ -89,6 +92,8 @@ pub enum OpenError {
     },
     /// 权限模式不是选定配置的，或拿不到（3.5）
     IsolationBroken(IsolationBroken),
+    /// CLI 输出了不合协议的行（不是 JSON 对象、超长）：不信任它的输出
+    BadLine(LineError),
 }
 
 impl OpenError {
@@ -96,7 +101,7 @@ impl OpenError {
         match self {
             Self::ChannelFailed(_) => "channel_failed",
             Self::SetupInvalid(_) => "setup_invalid",
-            Self::Spawn(_) | Self::CliExited { .. } => "cli_exited",
+            Self::Spawn(_) | Self::CliExited { .. } | Self::BadLine(_) => "cli_exited",
             Self::HookInactive => "hook_inactive",
             Self::IsolationBroken(_) => "isolation_broken",
         }
@@ -112,6 +117,7 @@ impl std::fmt::Display for OpenError {
             Self::HookInactive => f.write_str("CLI 没在时限内向审批通道报到"),
             Self::CliExited { code } => write!(f, "开会话期间 CLI 退出了（退出码 {code:?}）"),
             Self::IsolationBroken(e) => write!(f, "隔离失效：{e:?}"),
+            Self::BadLine(e) => write!(f, "CLI 的输出不合协议：{e:?}"),
         }
     }
 }
@@ -127,13 +133,30 @@ pub async fn open(req: OpenRequest<'_>) -> Result<OpenSession, OpenError> {
     }
     check_hook_program(&req.bridge.hook_program)?;
     let dir = SessionDir::create(req.data_dir).map_err(|e| OpenError::ChannelFailed(e.0))?;
-    match open_in(&dir, &req).await {
-        Ok(parts) => Ok(parts.into_session(dir)),
-        Err(e) => {
-            if let Err(rm) = dir.remove() {
-                tracing::warn!(error = %rm, "开会话失败后删会话目录也失败了");
-            }
-            Err(e)
+    let mut guard = DirGuard(Some(dir));
+    let parts = open_in(guard.dir(), &req).await?;
+    Ok(parts.into_session(guard.hand_over()))
+}
+
+/// 会话目录的作用域守卫：没交出去之前离开作用域（出错返回、future 被丢掉）就删掉。
+struct DirGuard(Option<SessionDir>);
+
+impl DirGuard {
+    fn dir(&self) -> &SessionDir {
+        self.0.as_ref().expect("交出去之前一直在")
+    }
+
+    fn hand_over(&mut self) -> SessionDir {
+        self.0.take().expect("只交一次")
+    }
+}
+
+impl Drop for DirGuard {
+    fn drop(&mut self) {
+        if let Some(dir) = self.0.take()
+            && let Err(e) = dir.remove()
+        {
+            tracing::warn!(error = %e, "开会话没成，删会话目录也失败了");
         }
     }
 }
@@ -254,8 +277,11 @@ async fn handshake(
                 None => return Err(OpenError::ChannelFailed("hook 通道提前停了".into())),
             },
             line = cli.next_line() => match line {
-                Ok(Some(l)) => early.keep(l),
-                Ok(None) | Err(_) => return Err(exited(cli).await),
+                Ok(Some(l)) => {
+                    let _ = take_line(l, early)?;
+                }
+                Ok(None) | Err(ReadError::Io(_)) => return Err(exited(cli).await),
+                Err(ReadError::Line(e)) => return Err(OpenError::BadLine(e)),
             },
             _ = tokio::time::sleep_until(until) => {
                 tracing::warn!("CLI 没在时限内报到");
@@ -271,12 +297,15 @@ async fn handshake(
     let response = loop {
         tokio::select! {
             line = cli.next_line() => match line {
-                Ok(Some(l)) => match events::parse_line(&l) {
-                    Ok(CliEvent::ControlResponse(r))
-                        if r.request_id.as_deref() == Some(INITIALIZE_REQUEST_ID) => break Some(r),
-                    _ => early.keep(l),
-                },
-                Ok(None) | Err(_) => return Err(exited(cli).await),
+                Ok(Some(l)) => {
+                    if let Some(r) = take_line(l, early)?
+                        && r.request_id.as_deref() == Some(INITIALIZE_REQUEST_ID)
+                    {
+                        break Some(r);
+                    }
+                }
+                Ok(None) | Err(ReadError::Io(_)) => return Err(exited(cli).await),
+                Err(ReadError::Line(e)) => return Err(OpenError::BadLine(e)),
             },
             ev = hook_events.recv() => match ev {
                 Some(other) => refuse_early(pending, other),
@@ -295,6 +324,23 @@ async fn handshake(
         ));
     }
     Ok(())
+}
+
+/// 开会话期间读到的一行：先解析，不合协议就失败。控制响应只把解析出的字段交回（原文不留，里面可能有
+/// `account`）；对不上编号的由调用方丢掉，这里记一笔编号。别的行留给映射。
+fn take_line(line: String, early: &mut Early) -> Result<Option<ControlResponse>, OpenError> {
+    match events::parse_line(&line).map_err(OpenError::BadLine)? {
+        CliEvent::ControlResponse(r) => {
+            if r.request_id.as_deref() != Some(INITIALIZE_REQUEST_ID) {
+                tracing::warn!(request_id = ?r.request_id, "开会话期间来了对不上编号的控制响应，丢掉");
+            }
+            Ok(Some(r))
+        }
+        _ => {
+            early.keep(line);
+            Ok(None)
+        }
+    }
 }
 
 /// 开会话期间 hook 通道上来的别的事：工具调用答拒绝（还没发过用户消息，不该有），别的只记一笔。
