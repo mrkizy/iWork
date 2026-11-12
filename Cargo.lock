@@ -2932,6 +2932,7 @@ dependencies = [
  "futures",
  "iwork-agent-acp",
  "iwork-app",
+ "iwork-client-core",
  "iwork-core",
  "iwork-domain",
  "iwork-host",

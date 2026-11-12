@@ -37,9 +37,22 @@ dunce.workspace = true
 rusqlite.workspace = true
 libc.workspace = true
 pollster.workspace = true
+# 不开 client-core 的 dev：开了会把 dev 带进工作区的 feature 图（check-no-dev-trust.sh 守着）
+iwork-client-core.workspace = true
 
 # 真进程测试：测试进程不是受信映像，后台要带 --dev-trust（只在 dev feature 下存在）
 [[test]]
 name = "process"
 path = "tests/process/main.rs"
+required-features = ["dev"]
+
+# 生命周期基准（方案第 6 节）：起真的后台，要 dev（后台带 --dev-trust）
+[[bench]]
+name = "lifecycle"
+harness = false
+required-features = ["dev"]
+
+# 演练脚本用的生命周期命令工具（只在 dev 下编译）
+[[example]]
+name = "lifecycle-tool"
 required-features = ["dev"]
