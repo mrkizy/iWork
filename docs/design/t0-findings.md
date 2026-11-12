@@ -433,6 +433,7 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 
 - **会花订阅额度**。每次 `claude -p` 起一个实例就是一次真实的模型请求。下面每一步都写了大约起几个实例。数法：脚本给每个实例留一份 `<用例名>-stream.jsonl`（G7h 被杀掉的那几个不留），结果包里数这类文件就是这一步实际起了几个。
 - **`iwork-t0g.py` 只动自己建的目录**：`~/iwork-t0g-<随机>/`，跑完自己删；结果包是 `~/iwork-t0g-results-<时间>-<随机>.tar.gz`，不覆盖已有文件。两处例外：`~/.npmrc` 被写进沙箱的禁读名单（不读内容）；G4 ⑧ 的最小构建会写 `~/.npm`、`~/.cargo` 这些工具链缓存，不想动就加 `--skip-builds`。G4 的四条联网用例另由脚本自己在沙箱外各跑一次当对照，**默认会跑**：`curl https://example.com`、`nc github.com 22`、绑定并连接一个本机端口、`gh auth status`（会带着本机的 `gh` 登录去问 GitHub），只记退出码、输出丢弃，不写任何文件。不想让它们跑就加 `--no-host-control`，这时那四行对照记一行 INFO「跳过」，沙箱里那四条失败时就分不清是不是沙箱造成的。
+- **结果包里有本机登录名**：hook 探针记下的输入路径（`/Users/<登录名>/…`）和 `system/init` 里横线编码的路径（`-Users-<登录名>-`）都带着它，脚本不脱敏（产品负责人 2026-11-12 定不改，脚本审查 1/F-7）。结果包只留在本机；要外传先自己处理。
 - **结果包里没有账号信息**（2026-11-12 起）：`initialize` 控制请求的响应带登录账号，脚本收到就删掉，存下的流和 `summary.txt` 里都没有（G7c 一行只记键名和模型列表）。结果包新带一个 `obs/` 目录，是命令自己写下的输出与退出码、命令替身的调起记录；`gh auth status` 的输出可能有账号名，只留退出码和几项特征（`g4-7b.out.withheld.json`）。**2026-11-12 之前跑出的结果包**（S0 第一轮那份）`g7-live-stream.jsonl` 里有账号全文、`summary.txt` 的 G7c 一行有前 800 个字符，不要外传，要留档先删掉这两处。
 - **另外三个老脚本会清空并重写固定目录**：`~/iwork-t0-results/`、`~/iwork-t0b-results/`、`~/iwork-t0f-results/` 和同名的 `.tar.gz`。跑之前看一眼，有要留的先挪走。
 - **登录状态只留四个字段**：`iwork-t0.sh`、`iwork-t0c.py`、`iwork-t0f.py` 落盘前只留 `claude auth status` 的 `loggedIn`、`authMethod`、`subscriptionType`、`loginExpiresAt`，不是 JSON 时只记字节数；`codex login status` 只记退出码与字节数（AGENTS.md 安全不变量：邮箱等不落盘）。`iwork-t0.sh` 因此要 `jq`。

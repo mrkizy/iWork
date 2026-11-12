@@ -192,6 +192,17 @@ enum TurnKind {
   TURN_KIND_SYSTEM_AGENTS_MD_DRAFT = 3;
 }
 
+// 续接时运行时自己的会话记录为什么用不了（需求第 12 章 v1.78；T06 方案 5.2a）。
+enum SessionLostReason {
+  SESSION_LOST_REASON_UNSPECIFIED = 0;
+  // 记录不在了（被运行时自动清理或被用户清掉）。
+  SESSION_LOST_REASON_NOT_FOUND = 1;
+  // 记录在，运行时读不了。
+  SESSION_LOST_REASON_CORRUPT = 2;
+  // 记录是别的版本写的，这个版本不认。
+  SESSION_LOST_REASON_INCOMPATIBLE = 3;
+}
+
 // 一次工具调用（ToolCallStarted / ToolCallFinished 折叠而成；T09 方案 G2）。重开对话后工具活动行由它重建。
 message ToolCall {
   string turn_id = 1;

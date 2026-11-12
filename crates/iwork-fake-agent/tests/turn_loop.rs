@@ -3,11 +3,18 @@
 
 mod support;
 
+#[path = "../../iwork-core/tests/support/history.rs"]
+#[allow(dead_code, reason = "这里只用默认值")]
+mod history;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use history::FakeHistory;
 use iwork_agent_acp::AcpRuntime;
-use iwork_core::turn::{STUB_DENY_MESSAGE, SessionLine, StubDecider, TurnPlan, TurnPorts};
+use iwork_core::turn::{
+    STUB_DENY_MESSAGE, SessionLine, StubDecider, TurnEntry, TurnPlan, TurnPorts,
+};
 use iwork_domain::turn::TurnState;
 use serde_json::json;
 use support::*;
@@ -39,6 +46,7 @@ struct Harness {
     ids: CountingIds,
     live: Deltas,
     timer: TokioTimer,
+    history: FakeHistory,
 }
 
 impl Harness {
@@ -49,21 +57,26 @@ impl Harness {
             ids: CountingIds::default(),
             live: Deltas::default(),
             timer: TokioTimer,
+            history: FakeHistory::default(),
         }
     }
 
-    fn ports(&self) -> TurnPorts<'_, MemStore, RealClock, CountingIds, Deltas, TokioTimer> {
+    fn ports(
+        &self,
+    ) -> TurnPorts<'_, MemStore, RealClock, CountingIds, Deltas, TokioTimer, FakeHistory> {
         TurnPorts {
             store: &self.store,
             clock: &self.clock,
             ids: &self.ids,
             live: &self.live,
             timer: &self.timer,
+            history: &self.history,
         }
     }
 
     fn plan(&self, cwd: &std::path::Path, prompt: &str) -> TurnPlan {
         TurnPlan {
+            entry: TurnEntry::New,
             turn: queued_turn(&self.ids),
             assistant_name: "小助手".into(),
             context_project_id: None,

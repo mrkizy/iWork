@@ -158,6 +158,7 @@ sample_types! {
         b::ev_approval_evaluated_rule_paths,
         b::ev_approval_evaluated_grant,
         b::ev_approval_delivered,
+        b::ev_turn_session_bound_replaced,
     ],
 }
 

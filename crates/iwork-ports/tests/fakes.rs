@@ -17,7 +17,7 @@ use iwork_domain::approval_mode::ProjectDefaultMode;
 use iwork_domain::assistant::Assistant;
 use iwork_domain::common::{Actor, ArtifactArea, ArtifactRef, Sha256, Timestamp};
 use iwork_domain::event::{DomainEvent, ProjectAdded};
-use iwork_domain::id::{CommandId, ConversationId, MessageId, ProjectId, RawUlid, Seq};
+use iwork_domain::id::{CommandId, ConversationId, MessageId, ProjectId, RawUlid, Seq, TurnId};
 use iwork_domain::project::{PathStatus, Project, ProjectSettings, VcsKind};
 use iwork_domain::rule::RuleEntry;
 use iwork_domain::runtime::{Runtime, RuntimeKind};
@@ -37,7 +37,7 @@ use iwork_ports::exec::{
 use iwork_ports::notify::{Notifier, NotifyError, SystemNotification};
 use iwork_ports::read_model::{
     ConversationSummary, ConversationView, MessagePage, PendingItem, ProjectSummary, ReadModelPort,
-    RuntimeQuota, Unsettled,
+    RuntimeQuota, SummarySource, Unsettled,
 };
 use iwork_ports::secret::{SecretError, SecretName, SecretStore, SecretValue};
 use iwork_ports::store::{
@@ -750,6 +750,17 @@ impl ReadModelPort for FakeReadModel {
     }
     async fn unsettled(&self) -> Result<Unsettled, StorageError> {
         Ok(Unsettled::default())
+    }
+    async fn summary_source(
+        &self,
+        turn: TurnId,
+        _line: Option<ProjectId>,
+        _recent_limit: u32,
+    ) -> Result<SummarySource, StorageError> {
+        Err(StorageError::NotFound {
+            entity: "turn",
+            id: turn.to_string(),
+        })
     }
     async fn artifact_is_referenced(&self, _r: &ArtifactRef) -> Result<bool, StorageError> {
         Ok(false)
