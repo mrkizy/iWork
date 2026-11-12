@@ -159,7 +159,7 @@ S0 合计 PASS 506、FAIL 46、INCONCLUSIVE 217、INFO 19。FAIL 里 34 个是 G
 | a、a′ | 同一进程多轮，每轮一个 `result`；`--include-partial-messages` 有 `stream_event` |
 | `system/init` 的时机 | 第一条输入之后才出；**每轮开头都有一个**；`set_model` 之后也再出一个 |
 | b′、b″ | SessionStart hook 在第一条输入之前触发，新会话与 `--resume` 都是 |
-| c `initialize` | 响应里有 `models`（14 项，含 `default`、`opus`、`fable`、`sonnet`、`haiku` 等别名与若干具体 ID）、`current_permission_mode`、`hook_on_failure_supported` 等键；**另有 `account` 键，不得保存**（S0 的结果包里 `g7-live-stream.jsonl` 存了这条响应的全文，这份包不要外传；脚本修正里已改成落盘前删掉，分支 `cao/b57765cc` 在审）。S0 只看了键名：`current_permission_mode` 的取值、只发 `initialize` 不发用户消息时有没有响应，待 R2（方案 3.5 的 G7c′） |
+| c `initialize` | 响应里有 `models`（14 项，含 `default`、`opus`、`fable`、`sonnet`、`haiku` 等别名与若干具体 ID）、`current_permission_mode`、`hook_on_failure_supported` 等键；**另有 `account` 键，不得保存**（S0 的结果包里 `g7-live-stream.jsonl` 存了这条响应的全文，这份包不要外传；脚本已改成落盘前删掉，2026-11-12 合入 main `655449e`）。S0 只看了键名：`current_permission_mode` 的取值、只发 `initialize` 不发用户消息时有没有响应，待 R2（方案 3.5 的 G7c′） |
 | d 用量与额度 | `result` 键含 `usage`、`modelUsage`、`total_cost_usd`、`permission_denials`、`terminal_reason`、`api_error_status`、`stop_reason`、`num_turns` 等。`rate_limit_event.rate_limit_info`：`utilization` 是 0–1 的小数（0.63），`resetsAt` 是秒级时间戳，另有 `rateLimitType`（`seven_day`）、`status`（`allowed_warning`）、`unifiedWindows` |
 | f interrupt | `control_request{subtype:"interrupt"}` 立刻生效：`control_response` success，流里一条 user 文本 `[Request interrupted by user]`，`result` 为 `subtype=error_during_execution`、`is_error=true`、`terminal_reason=aborted_streaming`；同一进程能接下一轮。对正在跑的前台命令没测到；**后台命令不会被它停掉** |
 | g `set_model` | 生效；流里多一条 `user` 事件，`message.content` 是字符串（`<local-command-stdout>…`），不是内容块数组 |
