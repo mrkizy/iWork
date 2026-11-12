@@ -24,6 +24,17 @@ use super::{
 
 type R<T> = Result<T, ConvertError>;
 
+/// 存储里读出的事件 → 推给客户端的 `PersistedEvent`（seq、时间、主体与事件本身）。
+/// 实时发布（提交观察者）与历史补发都用它，两条路得到的字节相同。
+pub fn persisted_event_to_proto(e: &iwork_ports::store::StoredEvent) -> R<pb::PersistedEvent> {
+    Ok(pb::PersistedEvent {
+        seq: e.seq.0,
+        at: Some(timestamp_to_proto(e.at)),
+        actor: e.actor.0.clone(),
+        event: Some(event_to_proto(&e.event)?),
+    })
+}
+
 /// domain 事件 → proto 事件。只在路径不是合法 UTF-8、或实体的状态装不进 proto 消息时失败。
 pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
     let e = match event {

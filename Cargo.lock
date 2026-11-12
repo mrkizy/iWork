@@ -2928,6 +2928,7 @@ name = "iwork-daemon"
 version = "0.1.0"
 dependencies = [
  "dunce",
+ "futures",
  "iwork-agent-acp",
  "iwork-app",
  "iwork-core",
@@ -2938,8 +2939,16 @@ dependencies = [
  "iwork-proto",
  "iwork-store",
  "iwork-vcs-git",
+ "libc",
+ "pollster",
+ "rusqlite",
+ "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
 ]
 
 [[package]]

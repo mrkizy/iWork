@@ -22,7 +22,7 @@ use iwork_domain::common::{Sha256, Timestamp};
 use iwork_domain::id::IdParseError;
 use iwork_proto::pb;
 
-pub use event::{event_from_proto, event_to_proto};
+pub use event::{event_from_proto, event_to_proto, persisted_event_to_proto};
 pub use model::*;
 
 /// 转换失败。`kind` 是 proto 消息名，`field` 是字段名。

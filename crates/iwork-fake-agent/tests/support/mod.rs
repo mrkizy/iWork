@@ -290,6 +290,7 @@ impl StoragePort for MemStore {
     async fn outbox_requeue_dispatched(
         &self,
         _redeliver_prefixes: Vec<String>,
+        _fail_prefixes: Vec<String>,
     ) -> Result<iwork_ports::store::RequeueReport, StorageError> {
         unimplemented!("回合编排不读 outbox")
     }
