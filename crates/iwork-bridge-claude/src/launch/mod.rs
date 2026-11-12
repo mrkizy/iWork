@@ -2,6 +2,7 @@
 //! 桥接拿到什么约束就翻译什么，不另算一份（T07 6.9）；快照测试锁住它的产物（`tests/launch_snapshot.rs`）。
 
 pub mod args;
+pub mod env;
 pub mod session_dir;
 pub mod settings;
 
@@ -11,6 +12,7 @@ use std::time::Duration;
 use iwork_claude_hook::client::{ENV_BRIDGE_PID, ENV_DEADLINE, ENV_SOCK, ENV_TOKEN};
 use serde_json::Value;
 
+use self::env::{DISABLE_AUTO_MEMORY, LaunchEnv};
 use crate::setup::{Setup, SetupInvalid};
 
 /// 桥接这个进程的事实，和会话无关。
@@ -21,6 +23,8 @@ pub struct BridgeEnv {
     /// hook 程序的绝对路径（桥接所在目录下的 `iwork-claude-hook`）。要写进设置文件的 shell 命令，
     /// 所以是字符串：不是 UTF-8 的路径在建 `BridgeEnv` 时就拒了
     pub hook_program: String,
+    /// 桥接自己的环境：原样交给 CLI（3.1a，P14 不筛选）。`Debug` 只列变量名
+    pub inherited: LaunchEnv,
 }
 
 /// 这条会话的 hook 通道：会话目录与交给 hook 的四个环境变量的值。
@@ -59,8 +63,8 @@ pub struct LaunchPlan {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
-    /// 在继承桥接自己的环境之上再加的这几个（3.1 末段）
-    pub env: Vec<(&'static str, String)>,
+    /// CLI 的完整环境：桥接的环境原样，再设上关自动记忆与 hook 通道的五个（3.1a）
+    pub env: LaunchEnv,
     pub settings: Value,
     pub mcp: Value,
 }
@@ -80,13 +84,17 @@ pub fn build_launch(
         program: env.cli.clone(),
         args: args::cli_args(setup, opening, &files),
         cwd: opening.cwd.clone(),
-        env: vec![
-            (ENV_SOCK, files.socket.display().to_string()),
-            (ENV_TOKEN, channel.token_hex.clone()),
-            (ENV_BRIDGE_PID, channel.bridge_pid.to_string()),
-            (ENV_DEADLINE, channel.hook_deadline.as_secs().to_string()),
-        ],
-        settings: settings::settings_json(&setup.constraints, &env.hook_program),
+        env: env::launch_env(
+            &env.inherited,
+            &[
+                (DISABLE_AUTO_MEMORY, "1".to_owned()),
+                (ENV_SOCK, files.socket.display().to_string()),
+                (ENV_TOKEN, channel.token_hex.clone()),
+                (ENV_BRIDGE_PID, channel.bridge_pid.to_string()),
+                (ENV_DEADLINE, channel.hook_deadline.as_secs().to_string()),
+            ],
+        ),
+        settings: settings::settings_json(&setup.constraints, &env.hook_program, &files.memory),
         mcp: settings::mcp_json(),
     })
 }

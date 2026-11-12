@@ -115,9 +115,10 @@ pub struct StreamMapper {
 }
 
 impl StreamMapper {
-    pub fn new(effort: &'static str) -> Self {
+    /// `expect`：这次给出去的插件目录与记忆目录，每个 `init` 拿它核对会话内容（3.5）。
+    pub fn new(effort: &'static str, expect: facts::SessionExpect) -> Self {
         Self {
-            facts: Facts::default(),
+            facts: Facts::new(expect),
             effort,
             turn: None,
             usage_fallback_noted: false,

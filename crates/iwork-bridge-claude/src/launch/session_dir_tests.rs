@@ -194,3 +194,30 @@ fn create_refuses_linked_middle_segment() {
         "外部没被写进任何东西"
     );
 }
+
+/// 自动记忆改道的 `m/`（3.1a、3.3）：建成 0700 的空目录；CLI 往里写了东西也随会话目录一起删；
+/// 被换成链接时不删（链接指向的东西更不碰）。
+#[test]
+fn memory_dir_is_created_and_removed_with_session() {
+    let d = data();
+    let dir = SessionDir::create(d.path()).unwrap();
+    let m = dir.files().memory;
+    assert_eq!(fs::metadata(&m).unwrap().mode() & 0o777, 0o700);
+    assert_eq!(fs::read_dir(&m).unwrap().count(), 0, "空的");
+    fs::create_dir(m.join("x")).unwrap();
+    fs::write(m.join("x").join("MEMORY.md"), b"cli wrote this").unwrap();
+    let path = dir.path().to_owned();
+    dir.remove().unwrap();
+    assert!(!path.exists());
+
+    let d = data();
+    let outside = tempfile::tempdir().unwrap();
+    let sentinel = outside.path().join("keep");
+    fs::write(&sentinel, b"x").unwrap();
+    let dir = SessionDir::create(d.path()).unwrap();
+    let m = dir.files().memory;
+    fs::remove_dir(&m).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &m).unwrap();
+    assert!(dir.remove().is_err(), "m 是链接：不删");
+    assert!(sentinel.exists());
+}

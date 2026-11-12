@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use iwork_bridge_claude::cli::errors::TurnEnd;
 use iwork_bridge_claude::cli::events::Usage;
-use iwork_bridge_claude::cli::facts::IsolationBroken;
+use iwork_bridge_claude::cli::facts::{IsolationBroken, SessionExpect};
 use iwork_bridge_claude::cli::map::{Fatal, Out, QuotaWindow, Report, StreamMapper};
 use serde_json::Value;
 
@@ -24,7 +24,21 @@ const SAMPLES: [&str; 6] = [
     "interrupt_set_model",
 ];
 
+/// 脱敏把 `init.plugins` 收成了 `{"iwork_fixture_count":N}`（路径里有用户名）。录制那台机器上 8 个插件都是
+/// `@builtin` 或 `@inline`（S0 只看键名与后缀的统计），这里换成一个自带插件，让回放过会话内容核对；
+/// 收起来的原样不换时核对不过（`collapsed_plugins_fail_the_content_check`）。
+const COLLAPSED_PLUGINS: &str = "\"plugins\":{\"iwork_fixture_count\":8}";
+const BUILTIN_PLUGINS: &str =
+    "\"plugins\":[{\"name\":\"fixture\",\"path\":\"fixture\",\"source\":\"fixture@builtin\"}]";
+
 fn fixture(name: &str) -> Vec<String> {
+    raw_fixture(name)
+        .into_iter()
+        .map(|l| l.replace(COLLAPSED_PLUGINS, BUILTIN_PLUGINS))
+        .collect()
+}
+
+fn raw_fixture(name: &str) -> Vec<String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(format!("tests/fixtures/{VERSION}/{name}.jsonl"));
     std::fs::read_to_string(&path)
@@ -35,13 +49,21 @@ fn fixture(name: &str) -> Vec<String> {
         .collect()
 }
 
+/// 样本里 `memory_paths` 也被收起来了（没有 `auto` 键），按「没有」算过。
+fn expect() -> SessionExpect {
+    SessionExpect {
+        plugin_dirs: vec![],
+        memory_dir: "/data/s/abc/m".into(),
+    }
+}
+
 /// 回放一份样本，返回全部输出与第一条致命错误（有的话就停在那里）。
 fn replay(lines: &[String], cancel_first_turn: bool) -> (Vec<Out>, Option<Fatal>) {
     let results_total = lines
         .iter()
         .filter(|l| l.contains("\"type\":\"result\""))
         .count();
-    let mut m = StreamMapper::new("low");
+    let mut m = StreamMapper::new("low", expect());
     let mut out = m.begin_turn();
     if cancel_first_turn {
         m.request_cancel();
@@ -276,7 +298,7 @@ fn interrupt_then_next_turn() {
 #[test]
 fn resume_completes_and_records_session() {
     let lines = fixture("resume");
-    let mut m = StreamMapper::new("low");
+    let mut m = StreamMapper::new("low", expect());
     m.begin_turn();
     let mut all = Vec::new();
     for l in &lines {
@@ -308,8 +330,41 @@ fn settings_ignored_is_detected() {
     let (_, fatal) = replay(&lines, false);
     assert_eq!(
         fatal,
-        Some(Fatal::Isolation(IsolationBroken {
+        Some(Fatal::Isolation(IsolationBroken::PermissionMode {
             reported: Some("default".into())
+        }))
+    );
+}
+
+/// 会话内容核对接在每个 init 上（3.5）：脱敏收起来的 `plugins` 不是数组，核对不了，第一个 init 就致命。
+#[test]
+fn collapsed_plugins_fail_the_content_check() {
+    let lines = raw_fixture("text_multiturn");
+    assert!(lines.iter().any(|l| l.contains(COLLAPSED_PLUGINS)), "对照");
+    let (_, fatal) = replay(&lines, false);
+    assert_eq!(
+        fatal,
+        Some(Fatal::Isolation(IsolationBroken::PluginsUnreadable))
+    );
+}
+
+/// 真样本里多出一个用户自己的插件（经环境带进来的那种）：isolation_broken，只报名字。
+#[test]
+fn foreign_plugin_in_real_init_is_detected() {
+    let lines: Vec<String> = raw_fixture("text_multiturn")
+        .into_iter()
+        .map(|l| {
+            l.replace(
+                COLLAPSED_PLUGINS,
+                "\"plugins\":[{\"name\":\"mine\",\"path\":\"/home/u/.claude/plugins/mine\",\"source\":\"mine@inline\"}]",
+            )
+        })
+        .collect();
+    let (_, fatal) = replay(&lines, false);
+    assert_eq!(
+        fatal,
+        Some(Fatal::Isolation(IsolationBroken::UnexpectedPlugin {
+            name: "mine".into()
         }))
     );
 }
