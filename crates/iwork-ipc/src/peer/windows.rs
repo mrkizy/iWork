@@ -67,6 +67,13 @@ pub(crate) fn running_image_id() -> Result<ImageId, PeerError> {
     }
 }
 
+/// 磁盘上一个程序文件的签名者。映像绑定没有被实测证明（N2），M1 不支持 Windows：总是 `Unavailable`。
+pub(crate) fn file_signer(path: &Path) -> SignerIdentity {
+    SignerIdentity::Unavailable {
+        reason: format!("M1 不支持 Windows：不取 {} 的签名者", path.display()),
+    }
+}
+
 /// 按 pid 取对端身份。进程打不开、令牌读不到 → `Err`；映像身份取不到 → `signer = Unavailable`。
 pub(crate) fn identify_process(pid: u32) -> Result<PeerIdentity, PeerError> {
     // SAFETY: OpenProcess 没有指针参数；失败返回空句柄，下面检查。
