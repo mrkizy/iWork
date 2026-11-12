@@ -84,7 +84,8 @@ fn main_window<'a, M: Manager<tauri::Wry>>(m: &'a M) -> WebviewWindowBuilder<'a,
     WebviewWindowBuilder::new(m, MAIN, WebviewUrl::App("index.html".into()))
         .title("iWork")
         .inner_size(1440.0, 900.0)
-        .min_inner_size(1024.0, 640.0)
+        // 最小宽度 = tokens.css 的 --window-min-w（ui-m1 2a 第 12b 条，client/tests/window-min-width.test.ts 对拍）
+        .min_inner_size(880.0, 640.0)
         .on_navigation(|url| {
             let ok = is_app_origin(url);
             if !ok {

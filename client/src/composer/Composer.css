@@ -69,9 +69,13 @@
 }
 .iw-composer__spacer {
   flex: 1;
+  min-width: 0;
 }
+/* 药丸防换行（ui-m1 2a 第 12b 条，审查 7/F-1）：一律不换行、默认不被压缩；只有运行时与模型药丸可以收窄，
+   最宽约 240px，超出用省略号收尾（自填的模型 ID 可能很长，只靠 nowrap 会把发送按钮挤出框外），悬停给完整文字 */
 .iw-pill {
   display: inline-flex;
+  flex: none;
   align-items: center;
   gap: 5px;
   height: 28px;
@@ -81,7 +85,18 @@
   background: transparent;
   color: var(--tx2);
   font-size: var(--fs-sm2);
+  white-space: nowrap;
   cursor: pointer;
+}
+.iw-pill--model {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 240px;
+}
+.iw-pill__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .iw-pill:hover:not(:disabled),
 .iw-pill[aria-expanded="true"] {
@@ -107,6 +122,7 @@
 }
 .iw-send {
   display: inline-flex;
+  flex: none;
   align-items: center;
   justify-content: center;
   width: 36px;

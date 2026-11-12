@@ -171,12 +171,14 @@ export function Composer(props: ComposerProps) {
               <>
                 <button
                   type="button"
-                  class="iw-pill"
+                  class="iw-pill iw-pill--model"
                   aria-haspopup="menu"
                   aria-expanded={menu()?.kind === "model"}
+                  data-tip={view().runtimeModelLabel}
+                  data-tip-side="top"
                   onClick={(e) => setMenu({ kind: "model", at: anchorAbove(e.currentTarget) })}
                 >
-                  {view().runtimeModelLabel}
+                  <span class="iw-pill__text">{view().runtimeModelLabel}</span>
                   <Icon name="chevronDown" size={12} />
                 </button>
                 <Show when={view().approvalMode}>
