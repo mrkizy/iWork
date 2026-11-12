@@ -72,6 +72,16 @@
 - T04 组 3：reviewer `5166257f` 第 2 轮初步看到 F-1 没修全（已有注册项更新失败：macOS bootout 失败、Linux daemon-reload 失败后下一轮早退），托管实例 set(true) 自 bootout 也成立；等它记账。
 - AGENTS.md 加了「加删素材后清 .vitest-cache」（`9dcac56`）。
 
+**17:15 进展（这一段比上面两段新，冲突以这里为准）**：
+- 产品负责人今天下午定的（都已进需求附录 B）：T10e 开第 4 轮、补丁卡片拆到 T10h（e4e002c）、卡片任务与宿主 panic 一律 Fatal、安全清单先定稿；T10f 切开只做 A（能列出、不能导入）、撤回定为重启即撤回（3b5adc0）；联网口径按实测写进第 9 章（df56bd5）；**D2 = b″**（e4085e6）。**D5 未定**：产品负责人担心关后台任务后对话变成队列，已问 architect `47737e78` 回合中途发消息在 M1 怎么处理（设计 + 实测），答复后转产品负责人。
+- T10e：义务表（0a，bd9ffb3）第 4 轮 4 条（4/F-1、4/F-3 blocking，4/F-2、4/F-4 important）交 `da37bce2` 改表，改完 reviewer `8036b426` 同轮 --append 审表，表过了再写正文。安全清单单独审（任务 `2026-11-12-m1-t10e-lists`）：第 2 版 3423f23，1/F-1、1/F-2 已关，新 2/F-1 important（会话启动后受保护路径改成链接，审批旧快照漏保护，K2/S11/U2 保证说过头），交 `da37bce2`；可能要产品负责人接受已知限制。P3「不认代理的程序由用户加进需凭据命令清单」就是 T10e 2.6 的增删命令，提示文案「全开档不受沙箱保护；带管道/重定向的写法会留在沙箱里失败」要转设计窗口。
+- T10f：第 4 轮只审 A（013fc40），reviewer `9a5980a0`。3/F-1～F-3、2/F-3、1/F-5 已按范围关 not_worth；1/F-8（仓库技能 hooks/allowed-tools，改动前就有）仍在用户队列。技术设计第 1 节与 9.5、T10.md 已同步（f600c72）。设计窗口三问待转：「还没启用」列表怎么摆、要不要写「M1 只能查看」、设置页摘要写什么。
+- T04 组 3：第 2 轮 4 条 blocking（2/F-1 更新失败误判已对齐、2/F-2 托管实例自 bootout、2/F-3 超时后同步诊断、2/F-4 测试没隔离真实 launchd——本机没有 com.iwork.daemon，未出事）；1/F-2/3/5/8/9 已关；2/F-2 的设计已写进 T04 方案 2.12（95efaed：托管实例只重写文件不重载）。`e5b90212` 修，第 3 轮是最后一轮；变异清单（22 项，21 杀 1 等价）第 3 轮派活时转 reviewer `5166257f`。1/F-6 结果已补（可接受），1/F-7 仍卡打包。
+- T06 S6-1：第 1 轮 2 条 blocking 已修（ec59609、34615cb），reviewer `6114386d` 第 2 轮在审。cold_start 基准：负载 3–4 倍核数，A/B 差距小于噪声，正式数挪到 mac120（S9）。CI 43180045901 Ubuntu 偶发已重跑。
+- 脚本：script4 已合 main（92453d5）；script5（87e702a）第 1 轮 3 条（1/F-1 硬链接、1/F-3 甲第二种形状 blocking，1/F-2 提示末行 important），另加 k/b/n/工具清单几格改带产品沙箱设置、加一格带产品设置重记 k3/k4。`b57765cc` 修，`ad7b3f77` 审。过了合 main，请产品负责人跑 `--only R2X --part skill`（周额度 15:25 时已 86%，提醒他）。
+- T09：`b20e49db` 在做步 5c（43034ce 的行级游标）。
+- 本机 launchd 现状：无 com.iwork.daemon；有 N1 留下的 com.iwork.t04probe 禁用覆盖记录，没动过。
+
 **R2 补测已跑（产品负责人，2026-11-12 15:27–16:13）**：D2：SIGKILL CLI 进程组后前台命令照样跑完（k1），只关输入 CLI 不退（k2），**SIGTERM 时 CLI 自己收拾前台命令并退出（k3）**；D5：设 `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` 后子代理在前台跑、`run_in_background` 被拒后模型改前台重发（b1/b2），不设时子代理后台跑、2 个 init 2 个 result（n1）；D4 ①c′①d′ PASS；net：经隧道连 github:22 读到问候，带 allowLocalBinding 能连本机监听、不带连不上；`--tools`/`--disallowedTools` 认 Task 和 Agent 两个名字；G5 记忆写 PASS、记忆读 INCONCLUSIVE（脚本没跟上 b543196 放宽的甲）、子代理记忆守卫预检没过（改 R3）。**等 architect 报告后问产品负责人 D2、D5、P3 远端连接、P15**。
 
 **等产品负责人的**：T10d PD 8 条（已发表格，推荐全按推荐）；T10e、T10f 的问题等审完整理；D2/D5/P3/P15 等分析；仓库 CLAUDE.md 在 `--setting-sources ""` 下不加载（等 `--part skill` 的 L1/L2）；要真机试：选择框「取消后再弹」与「重新定位」入口、Option 切「完全退出」、侧栏拖动（做好后）。
