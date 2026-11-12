@@ -3,17 +3,20 @@
 // - 整体视图模型脏了就整份发：替换；
 // - 对话：reset 或换了对话先清空行；removed_ids 删行；rows 按 key 整行替换或新增；appends 追加流式文字
 //   （消息行追加到正文，工具行追加到输出：两种行都有流式增量，MessageDelta / ToolOutputDelta）；
-//   标题栏、输入框、窗口信息、整页说明每次随 patch 整份给；
+//   标题栏、输入框、窗口信息、整页说明每次随 patch 整份给；锚点列表与当前位置变了才给（没给就保留上一份），
+//   滚动指令只记最新一条（网页按 token 去重）；
 // - 跳转请求只记最新一条，由路由层按 seq 去重。
 import { createStore, produce, reconcile, type SetStoreFunction } from "solid-js/store";
 import type {
   AddProjectView,
+  AnchorsView,
   AssistantProfileView,
   ComposerView,
   ConnectionView,
   ConversationHeader,
   ConversationListView,
   ConversationPatch,
+  ScrollTo,
   HomeView,
   NavigatePatch,
   PendingView,
@@ -31,6 +34,10 @@ export interface ConversationState {
   composer?: ComposerView;
   window?: WindowInfo;
   blockingNotice?: string;
+  /** 消息锚点（方案 2.9）：列表、当前位置、最近一次滚动指令。 */
+  anchors?: AnchorsView;
+  anchorKey?: string;
+  scrollTo?: ScrollTo;
   rows: Record<string, RowView>;
   /** 行 key 按 ordinal 排好的顺序；只在行增删时重算。 */
   order: string[];
@@ -175,6 +182,9 @@ function applyConversation(
       c.composer = p.composer;
       c.window = p.window;
       c.blockingNotice = p.blockingNotice;
+      if (p.anchors !== undefined) c.anchors = p.anchors;
+      if (p.anchorCursor !== undefined) c.anchorKey = p.anchorCursor.currentKey;
+      if (p.scrollTo !== undefined) c.scrollTo = p.scrollTo;
       if (reorder) c.order = sortedKeys(c.rows);
     }),
   );

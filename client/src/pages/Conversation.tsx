@@ -1,6 +1,8 @@
 // 对话页（画布 04、10、15）：标题栏（标题、本对话用量）、提示条、时间线（虚拟行）、回到最新、输入框。
 // 还没有消息的对话显示和首页一样的「要做点什么？」。整页说明（如「数据不完整」）设了就不显示行。
-import { Show } from "solid-js";
+// 消息锚点（2a 第 11 条）：左边距的滚轮，内容超出一屏才显示；⌥↑ / ⌥↓ 不经滚轮直接逐处跳。
+import { createSignal, onCleanup, onMount, Show } from "solid-js";
+import { AnchorRail } from "../anchor/AnchorRail";
 import { Composer } from "../composer/Composer";
 import { BlockAction } from "../gen/iwork/v1/view_pb";
 import { useHost } from "../host";
@@ -17,6 +19,22 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
   const header = () => conv()?.header;
   const win = () => conv()?.window;
   const empty = () => (conv()?.order.length ?? 0) === 0 && !win()?.hasOlder;
+  const [overflow, setOverflow] = createSignal(false);
+  const anchors = () => conv()?.anchors;
+  const scrollTo = () => {
+    const s = conv()?.scrollTo;
+    return s && { rowKey: s.rowKey, token: s.token, highlightMs: s.highlightMs };
+  };
+  // ⌥↑ / ⌥↓：焦点在输入框里时是系统的光标移动，不抢
+  const onKey = (e: KeyboardEvent) => {
+    if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+    const t = e.target as HTMLElement | null;
+    if (t && (t.isContentEditable || t.tagName === "TEXTAREA" || t.tagName === "INPUT")) return;
+    e.preventDefault();
+    void host.act({ case: "jumpRelative", value: { conversationId: props.id, delta: e.key === "ArrowUp" ? -1 : 1 } });
+  };
+  onMount(() => document.addEventListener("keydown", onKey));
+  onCleanup(() => document.removeEventListener("keydown", onKey));
   return (
     <div class="iw-conv-page">
       <div class="iw-conv-header">
@@ -57,6 +75,8 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
               atTail={win()?.atTail ?? true}
               hasOlder={win()?.hasOlder ?? false}
               resetToken={conv()?.resets ?? 0}
+              scrollTo={scrollTo()}
+              onOverflow={setOverflow}
               renderRow={(k) => (
                 <Show when={conv()?.rows[k]}>{(r) => <RowView row={r()} />}</Show>
               )}
@@ -65,6 +85,16 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
               }
               onReachOldest={() => void host.act({ case: "loadOlder", value: { conversationId: props.id } })}
             />
+            <Show when={overflow() && (anchors()?.items.length ?? 0) > 0 && anchors()}>
+              {(a) => (
+                <AnchorRail
+                  anchors={a()}
+                  currentKey={conv()?.anchorKey}
+                  onJump={(key) => void host.act({ case: "jumpToAnchor", value: { conversationId: props.id, key } })}
+                  onBrowse={(key) => void host.act({ case: "anchorBrowse", value: { conversationId: props.id, key } })}
+                />
+              )}
+            </Show>
             <Show when={(win()?.newBelow ?? 0) > 0}>
               <Button
                 class="iw-jump"

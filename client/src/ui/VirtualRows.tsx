@@ -2,6 +2,8 @@
 // 只挂 Rust 发来的窗口行，窗口外用占位高度；滚动时报可见行的 ordinal（每帧最多一次，变了才报）；
 // 行增删时按锚点行保持位置；停在底部且时间线接着最新时贴底；顶到最旧一行时请求往前翻页。
 // 高度缓存以 ordinal 为键（稳定行号，重建前后不变）。
+// 跳转（消息锚点）：Rust 给一次性的滚动指令，同一个 token 只滚一次，滚到那一行居中并高亮一段时间（网页计时）；
+// 那一行还没随帧到达时等它到了再滚。另报告内容有没有超出一屏（锚点组件只在超出时显示，布局事实网页自己量）。
 import { createEffect, createSignal, For, on, onCleanup, onMount, type JSX } from "solid-js";
 import { averageHeight, isAtBottom, unsentAround, visibleOrdinals, type RowBox } from "./virtual";
 import "./VirtualRows.css";
@@ -21,6 +23,10 @@ export interface VirtualRowsProps {
   onReachOldest: () => void;
   /** 变了就回到底部（时间线 reset：打开对话、重建、回到最新）。 */
   resetToken?: number;
+  /** 一次性的滚动指令（消息锚点跳转）：token 没见过才滚。 */
+  scrollTo?: { rowKey: string; token: bigint; highlightMs: number };
+  /** 内容是否超出一屏（变了才报）。 */
+  onOverflow?: (overflow: boolean) => void;
   estimate?: number;
   class?: string;
 }
@@ -36,6 +42,10 @@ export function VirtualRows(props: VirtualRowsProps) {
   let reported: [bigint, bigint] | undefined;
   let askedOlderAt: bigint | undefined;
   let frame = 0;
+  let scrolledToken: bigint | undefined;
+  let overflow: boolean | undefined;
+  const [highlight, setHighlight] = createSignal<string>();
+  let highlightTimer: ReturnType<typeof setTimeout> | undefined;
 
   const rowEls = () => [...box.querySelectorAll<HTMLElement>("[data-vrow]")];
 
@@ -50,6 +60,12 @@ export function VirtualRows(props: VirtualRowsProps) {
 
   const report = () => {
     frame = 0;
+    const unsentRows = unsent();
+    const now = box.scrollHeight > box.clientHeight + 1 || unsentRows.above + unsentRows.below > 0;
+    if (now !== overflow) {
+      overflow = now;
+      props.onOverflow?.(now);
+    }
     const range = visibleOrdinals(boxes(), box.scrollTop, box.clientHeight);
     if (range && (reported === undefined || range[0] !== reported[0] || range[1] !== reported[1])) {
       reported = range;
@@ -113,12 +129,29 @@ export function VirtualRows(props: VirtualRowsProps) {
     ),
   );
 
+  // 滚动指令：行到了才滚（行随后面的帧到达时 keys 变，这里重跑）
+  createEffect(() => {
+    const s = props.scrollTo;
+    void props.keys;
+    if (s === undefined || s.token === scrolledToken) return;
+    const el = box.querySelector<HTMLElement>(`[data-vrow][data-key="${CSS.escape(s.rowKey)}"]`);
+    if (el === null) return;
+    scrolledToken = s.token;
+    box.scrollTop = el.offsetTop - Math.max(0, (box.clientHeight - el.offsetHeight) / 2);
+    remember();
+    setHighlight(s.rowKey);
+    clearTimeout(highlightTimer);
+    highlightTimer = setTimeout(() => setHighlight(undefined), s.highlightMs);
+    if (frame === 0) frame = requestAnimationFrame(report);
+  });
+
   onMount(() => {
     box.scrollTop = box.scrollHeight;
     frame = requestAnimationFrame(report);
   });
   onCleanup(() => {
     measure.disconnect();
+    clearTimeout(highlightTimer);
     if (frame !== 0) cancelAnimationFrame(frame);
   });
 
@@ -132,6 +165,7 @@ export function VirtualRows(props: VirtualRowsProps) {
           <div
             data-vrow=""
             data-key={key}
+            classList={{ "iw-vrow--highlight": highlight() === key }}
             data-ordinal={String(props.ordinalOf(key))}
             ref={(el) => {
               measure.observe(el);

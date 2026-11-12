@@ -80,6 +80,21 @@ describe.skipIf(noFixtures)("侧栏", () => {
   });
 });
 
+describe.skipIf(noFixtures)("消息锚点的键盘", () => {
+  it("⌥↑ / ⌥↓ 直接发相对跳转，不展开滚轮；焦点在输入框里时不抢", () => {
+    const { acts } = renderScenario("anchors-basic");
+    fireEvent.keyDown(document.body, { key: "ArrowUp", altKey: true });
+    fireEvent.keyDown(document.body, { key: "ArrowDown", altKey: true });
+    expect(userActs(acts)).toEqual([
+      expect.objectContaining({ case: "jumpRelative", value: expect.objectContaining({ delta: -1 }) }),
+      expect.objectContaining({ case: "jumpRelative", value: expect.objectContaining({ delta: 1 }) }),
+    ]);
+    expect(document.querySelector(".iw-anchor--open")).toBeNull();
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "消息" }), { key: "ArrowUp", altKey: true });
+    expect(userActs(acts)).toHaveLength(2);
+  });
+});
+
 describe.skipIf(noFixtures)("首页草稿只在发出后清（审查 2a 2/F-7）", () => {
   const navigate = (seq: bigint, startedProjectId?: string) =>
     create(ViewPatchSchema, {
