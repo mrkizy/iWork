@@ -131,7 +131,10 @@ export function VirtualRows(props: VirtualRowsProps) {
         stick = true;
         anchor = undefined;
         askedOlderAt = undefined;
+        // Rust 重建时作废了它记的窗口（6/F-3）：去重缓存跟着失效，布局后重报一次，首尾行和 reset 前一样也报（审查 7/F-3）
+        reported = undefined;
         box.scrollTop = box.scrollHeight;
+        if (frame === 0) frame = requestAnimationFrame(report);
       },
       { defer: true },
     ),
