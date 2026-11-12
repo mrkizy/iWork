@@ -432,7 +432,8 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 ### 先说清楚几件事
 
 - **会花订阅额度**。每次 `claude -p` 起一个实例就是一次真实的模型请求。下面每一步都写了大约起几个实例。数法：脚本给每个实例留一份 `<用例名>-stream.jsonl`（G7h 被杀掉的那几个不留），结果包里数这类文件就是这一步实际起了几个。
-- **`iwork-t0g.py` 只动自己建的目录**：`~/iwork-t0g-<随机>/`，跑完自己删；结果包是 `~/iwork-t0g-results-<时间>-<随机>.tar.gz`，不覆盖已有文件。两处例外：`~/.npmrc` 被写进沙箱的禁读名单（不读内容）；G4 ⑧ 的最小构建会写 `~/.npm`、`~/.cargo` 这些工具链缓存，不想动就加 `--skip-builds`。
+- **`iwork-t0g.py` 只动自己建的目录**：`~/iwork-t0g-<随机>/`，跑完自己删；结果包是 `~/iwork-t0g-results-<时间>-<随机>.tar.gz`，不覆盖已有文件。两处例外：`~/.npmrc` 被写进沙箱的禁读名单（不读内容）；G4 ⑧ 的最小构建会写 `~/.npm`、`~/.cargo` 这些工具链缓存，不想动就加 `--skip-builds`。G4 的四条联网用例（HTTPS、TCP 22、本机端口、`gh auth status`）另由脚本自己在沙箱外各跑一次当对照，只记退出码、输出丢弃，不写任何文件。
+- **结果包里没有账号信息**（2026-11-12 起）：`initialize` 控制请求的响应带登录账号，脚本收到就删掉，存下的流和 `summary.txt` 里都没有（G7c 一行只记键名和模型列表）。结果包新带一个 `obs/` 目录，是命令自己写下的输出与退出码、命令替身的调起记录；`gh auth status` 的输出可能有账号名，只留退出码和几项特征（`g4-7b.out.withheld.json`）。**2026-11-12 之前跑出的结果包**（S0 第一轮那份）`g7-live-stream.jsonl` 里有账号全文、`summary.txt` 的 G7c 一行有前 800 个字符，不要外传，要留档先删掉这两处。
 - **另外三个老脚本会清空并重写固定目录**：`~/iwork-t0-results/`、`~/iwork-t0b-results/`、`~/iwork-t0f-results/` 和同名的 `.tar.gz`。跑之前看一眼，有要留的先挪走。
 - **登录状态只留四个字段**：`iwork-t0.sh`、`iwork-t0c.py`、`iwork-t0f.py` 落盘前只留 `claude auth status` 的 `loggedIn`、`authMethod`、`subscriptionType`、`loginExpiresAt`，不是 JSON 时只记字节数；`codex login status` 只记退出码与字节数（AGENTS.md 安全不变量：邮箱等不落盘）。`iwork-t0.sh` 因此要 `jq`。
 - **G2、G3、G5、G9d 的设置按产品设置写**（方案 3.2）：`disableAllHooks: false`、`permissions.disableBypassPermissionsMode: "disable"`、PreToolUse hook `timeout: 7200`（只有「超时后才拒绝 / 允许」两格是 5 秒，那是被测的东西；G3 测的就是各种 timeout 取值）、SessionStart 报到 hook（`timeout: 30`）。外层保护的预检与故障格子用同一份设置，只差被测的 hook。有意和产品不同的三处：`sandbox.allowUnsandboxedCommands` 写 `false`（外层保护：故障格子里坏掉的 hook 拦不住沙箱外重试；产品手动、自动档是 `true`）；不写 `sandbox.network.allowedDomains`（`["*"]` 本身要 G4 ② 实测，写进去万一校验不过，`-p` 模式会把整个设置文件静默忽略）；不写 `sandbox.credentials.envVars`（G9b 单独测）。文件系统的禁读名单用外层保护那一套，比产品的底线清单宽。
@@ -445,7 +446,7 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 | 日常账号已经登录 Claude Code（`claude` 能正常回话） | 所有组都要 |
 | `python3`（3.9 以上，只用标准库）；macOS 上要有 `lsof`（系统自带） | 脚本本身；进程清理靠 `lsof` 找工作目录在根目录里的进程，找不到就不开跑 |
 | `cargo`、`npm`、`curl`、`nc`、`gh` 在 `PATH` 上 | G4 的 ②、⑦、⑧；没有的那几行会是 `FAIL`（命令自己退出码非零），记下就行，不影响别的行 |
-| G4 ④ 的语料 `--corpus corpus.json` | 来自 `cargo run -p iwork-core --example dump-credential-corpus > corpus.json`。**main 上现在还没有这个 example**（T07 交付），没有就不加 `--corpus`，G4 ④ 记 `INCONCLUSIVE`（等 T07 合入再单独补跑 `--only G4 --corpus ...`） |
+| G4 ④ 的语料 `--corpus corpus.json` | 来自 `cargo run -p iwork-core --example dump-credential-corpus > corpus.json`（T07 交付，已合入）。不加 `--corpus` 时 G4 ④ 记 `INCONCLUSIVE` |
 | 一次性环境（临时 macOS 用户或虚拟机） | G2 的故障格子、G5、G9d 的完整结论只在那里拿得到，见第 4 步 |
 | 一台 Linux（能临时改名 `bwrap`） | 16.2 第 3 项 |
 | 一块能合盖的 MacBook，人在旁边 | 16.2 第 1 项 |
@@ -477,12 +478,28 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 | G1 | 10 | 9 种工具探针各 1，cd 之后的 cwd 1 |
 | G2 | 8 × 5 = 40 次预检，加格子 | 候选配置 = `--modes` 里的模式（默认 `default,dontAsk`）× 4 种（`+block`、`+block+prompts-none`、`+block+denyInsteadOfPrompting`、不设 onFailure 的对照）= 8 个。每个先跑普通 Bash 一行 11 格，11 格全 `PASS` 才跑剩下的 77 格（含排在最后的「沙箱外重试」11 格；每个留下的候选因此比原来多 11 次短调用）。日常账号下外层保护没成立的格子不起实例，「沙箱外重试」11 格在日常账号下一律不起实例 |
 | G3 | 11 | 预检 5 + 六个 timeout 取值，每个 hook 睡 90 秒 |
-| G4 | 26 + 语料行数 | 基础 15、最小构建 3（`--skip-builds` 就没有）、⑥ 重试 5、⑨ 全开档 3 |
+| G4 | 28 + 语料行数 | 基础 17（含 ①e′、②c′ 两格对照）、最小构建 3（`--skip-builds` 就没有）、⑥ 重试 5、⑨ 全开档 3；联网的四条另有沙箱外对照，不起实例 |
 | G5 | 7 | 只在 `--disposable-env` 下跑 |
 | G6 | 10 | 思考强度 6、不存在的模型 1、换模型续接 2、换系统提示 1 |
-| G7 | 7 + 2 × `--repeat` | 常驻会话 3、换配置续接 4、杀进程续接每次 2（默认 `--repeat 3`） |
+| G7 | 8 + 2 × `--repeat` | 常驻会话 4（含后台命令一格）、换配置续接 4、杀进程续接每次 2（默认 `--repeat 3`） |
 | G8 | 7 | 工具清单 4、MCP 3 |
 | G9 | 1～2 | G9d 只在 `--disposable-env` 下跑 |
+
+### S0 第一轮之后的重测（2026-11-12，脚本按 S0 分析第 8 节 S-1～S-10 改过）
+
+第一轮里一部分 FAIL 和没测成是脚本的问题，改完后在日常账号下重测这几组。每条命令开头都另有 1 个探查实例（下表没算）。D1（读类的硬前提）定之前**不要**跑运行说明步 4 的 G2，见 S0 分析第 7 节 R3。
+
+| 序 | 命令 | 约几个实例 | 看什么 |
+| --- | --- | --- | --- |
+| 1 | `python3 tools/t0/iwork-t0g.py --selftest` | 0 | 最后一行 `selftest ok` |
+| 2 | `python3 tools/t0/iwork-t0g.py --only G7` | 14 | `G7e`、`G7f` 对**前台**命令的结论（目标命令换成 `/bin/sleep 61; …`，后台跑的调用不算）；新的一行「G7 后台命令：进程组、interrupt 与 CLI 退出之后」；「进程组」行里脱组的是谁 |
+| 3 | `python3 tools/t0/iwork-t0g.py --only G1` | 10 | `G1d` 子代理进不进 hook（子代理工具认 `Agent`、`Task` 两个名字）；`g1-Agent-stream.jsonl` 里子代理是不是后台跑、有没有第二个 `result`；`G1c`；`G1f`（CLI 自己判了失败的结果单独计数，说明里写着几个） |
+| 4 | `python3 tools/t0/iwork-t0g.py --only G8` | 7 | `G8 MCP 阳性对照`、`G8f`、`G8e`（MCP 用例放行了 `ToolSearch`） |
+| 5 | `cargo run -p iwork-core --example dump-credential-corpus > corpus.json && python3 tools/t0/iwork-t0g.py --only G4 --skip-builds --corpus corpus.json` | 25 + 语料行数（现在 44） | `①e′`（去掉 `credentials.files` 后只读区读不读得到）；`②c′`（`allowLocalBinding` 管不管用）；四条「沙箱外对照」的退出码；`⑥` 的计数（同一条命令加 `dangerouslyDisableSandbox` 的重试不再算成第二次目标调用）；`④` 全部行重新实测（替身只认参数与这一行命令对得上、且这一行的 Bash 调用有证据的调起；我们判沙箱内、判不确定的那些行第一轮一行都没测成）；结果包 `obs/` 下四条 FAIL 的命令自己报了什么 |
+
+合计约 56 + 语料行数，加每条命令 1 个探查。
+
+**第一轮 ④ 的结果不回填 T07**：第一轮 `g4-corpus-filled.json` 里记成「实测 outside」的 17 行不可信（审查复核：替身的调起没有和命令对上，有一行命令根本没跑也记成了实测）。T07 `credential_corpus` 第四列只用上面第 5 条重测的结果。
 
 ### 一次性环境怎么搭（16.2 第 5 项）
 
@@ -505,10 +522,10 @@ macOS 上：`sudo sysadminctl -addUser t0gtmp -password -`（按提示输密码�
 | 「外层保护没验证过（[...]），这个格子不在这台机器上跑」 | 运行门没过：日常账号下这几样保护不成立，故障格子不许跑。去一次性环境加 `--disposable-env` 跑（步 4）。同时把 `外层保护 [...]` 那几行原样记下来：产品里的本机验证就靠这几样 |
 | 「只在一次性环境……里加 --disposable-env 跑」 | G5、G9d 在日常账号下本来就不跑，去步 4 |
 | G2「bash-沙箱外重试」那 11 格「外层保护没验证过（['unsandboxed']）」 | 这一种没有预检，日常账号下本来就不跑，去步 4。G2 总行因此在日常账号下恒为 `INCONCLUSIVE` |
-| 「缺正面证据：……」「运行无效（没有 init、超时或退出码不对）」「没有归属对得上的目标调用，或不止一次」「目标调用没有按 id 对上的结果」「探针没有在这次调用上被调起的记录」 | 这次运行本身不算数：模型没按要求发调用、发了两次、超时，或 CLI 没起来。先看这个用例的 `<名>-stream.jsonl` 和 `<名>-stderr.txt`；偶发的（模型没照做、网络抖）就用 `--only <组>` 单独重跑这一组；每次都这样的，交 supervisor |
+| 「缺正面证据：……」「运行无效（没有 init、超时或退出码不对）」「没有归属对得上的目标调用」「目标调用不止一次（N 次）」「有一次目标调用没有按 id 对上的结果」「有一次目标调用探针没有被调起的记录」 | 这次运行本身不算数：模型没按要求发调用、超时，或 CLI 没起来。「没执行 / 被拦下」这类格子允许模型重发，只要每一次都有结果、都是报错、探针每一次都有记录（2026-11-12 起）；要读回值的格子（G1b、G6 读回、G9a 等）仍要恰好一次，重发了就是「不止一次」。先看这个用例的 `<名>-stream.jsonl` 和 `<名>-stderr.txt`；偶发的（模型没照做、网络抖）就用 `--only <组>` 单独重跑这一组；每次都这样的，交 supervisor |
 | 「权限模式没生效：init 报 ...」 | 设置文件没被 CLI 收下（`-p` 模式下设置文件校验不过会被整个静默忽略）。看 `<名>-stderr.txt` 有没有设置校验的告警，交 supervisor，别重跑 |
 | 对照没成立（`G5 阳性对照`、`G8 MCP 阳性对照`、G9b 对照变量看不到、外层保护里要成功的那一笔没成功） | 测的办法在这台机器上不灵，负向结论说明不了问题。看对照那次的 stream 和 stderr，交 supervisor |
-| G4 ④「没给 --corpus」或「语料读不了」 | 等 T07 的 `dump-credential-corpus` 合入，再 `--only G4 --corpus corpus.json` 补跑 |
+| G4 ④「没给 --corpus」或「语料读不了」 | 用 `cargo run -p iwork-core --example dump-credential-corpus > corpus.json` 生成语料，再 `--only G4 --skip-builds --corpus corpus.json` 补跑 |
 | 「登记之外的调用（探针一律拒绝）」一行次数很多 | 这行是 `INFO`，不算结论；但次数多说明模型老跑偏，相应用例容易变成没测成。看各用例目录 `hook-calls.jsonl` 里带 `refused` 的行。偶发就重跑那一组 |
 | 「脚本自己出错：...」 | 脚本的错，交 developer，附上这一行和结果包 |
 
