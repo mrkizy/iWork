@@ -28,6 +28,9 @@ pub struct Setup {
     /// 启动时就不提供的工具名（核心算好，桥接原样转交，不认识任何工具名）
     pub disabled_tools: Vec<String>,
     pub plugin_dirs: Vec<PathBuf>,
+    /// 内置工具白名单（方案第 9 节，P11 的 d）：只有表外的 CLI 版本才有，由适配器填，桥接原样拼成 `--tools`，
+    /// 同样不认识任何工具名。`None` = 不限制；有就一定不空（空的在校验时拒了）
+    pub builtin_tool_allowlist: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,21 +121,32 @@ pub fn validate(setup: pb::SessionSetup) -> Result<Setup, SetupInvalid> {
         tool_set,
         disabled_tools,
         plugin_dirs,
+        builtin_tool_allowlist,
     } = setup;
     Ok(Setup {
         model: model_from(model.ok_or(invalid("model"))?)?,
         constraints: constraints_from(constraints.ok_or(invalid("constraints"))?)?,
         tools: tools_from(tool_set.ok_or(invalid("tool_set"))?)?,
-        disabled_tools: disabled_tools
-            .into_iter()
-            .map(|t| {
-                // 逗号分隔进 --disallowedTools：名字里带逗号或空白会拆错
-                let ok = !t.is_empty() && !t.contains(',') && !t.chars().any(char::is_whitespace);
-                ok.then_some(t).ok_or(invalid("disabled_tools"))
-            })
-            .collect::<Result<_, _>>()?,
+        disabled_tools: tool_names(disabled_tools, "disabled_tools")?,
         plugin_dirs: absolute_all(plugin_dirs, "plugin_dirs")?,
+        builtin_tool_allowlist: match builtin_tool_allowlist {
+            None => None,
+            // 空白名单只可能是注册表数据错了：不能悄悄变成「一个工具都不给」
+            Some(list) if list.tools.is_empty() => return Err(invalid("builtin_tool_allowlist")),
+            Some(list) => Some(tool_names(list.tools, "builtin_tool_allowlist")?),
+        },
     })
+}
+
+/// 工具名清单：逗号分隔进 `--disallowedTools` / `--tools`，名字空、带逗号或空白都会拆错。
+fn tool_names(names: Vec<String>, field: &'static str) -> Result<Vec<String>, SetupInvalid> {
+    names
+        .into_iter()
+        .map(|t| {
+            let ok = !t.is_empty() && !t.contains(',') && !t.chars().any(char::is_whitespace);
+            ok.then_some(t).ok_or(invalid(field))
+        })
+        .collect()
 }
 
 fn model_from(m: pb::ModelSelection) -> Result<Model, SetupInvalid> {
