@@ -265,7 +265,7 @@ S0 合计 PASS 506、FAIL 46、INCONCLUSIVE 217、INFO 19。FAIL 里 34 个是 G
 
 只收有结构化证据的。分析全文在 architect 的报告 `r2x-analysis.md`；据此定的 D2、D5、P3、P15 见 T06 方案 18 节（D5：M1 关掉后台任务、Monitor 进永久禁用名单，方向是 M2 开放；产品负责人 2026-11-12）。
 
-**先看这一条：哪些格子是在什么设置下量的。** 脚本的权限模式和沙箱都只从设置文件来。下表「没带产品设置」的格子，设置文件里只有 hook 和记忆改道：`init` 报的权限模式是 `default`，**命令不在沙箱里跑**。R2 的 G7 各格（上文「G7 流式输入、中断、续接、进程」里 R2 那一轮的进程事实）也是这样。所以**下面的进程关系与信号行为都是没开沙箱时的**；产品里命令在沙箱里跑，CLI 到命令之间可能多一层，SIGTERM 时 CLI 收不收拾沙箱里的命令没量过。脚本已改成这几格带产品设置（main `af0b6a5`），k3 待重跑。
+**先看这一条：哪些格子是在什么设置下量的。** 脚本的权限模式和沙箱都只从设置文件来。下表「没带产品设置」的格子，设置文件里只有 hook 和记忆改道：`init` 报的权限模式是 `default`，**命令不在沙箱里跑**。R2 的 G7 各格（上文「G7 流式输入、中断、续接、进程」里 R2 那一轮的进程事实）也是这样。所以**下面的进程关系与信号行为都是没开沙箱时的**；产品里命令在沙箱里跑，CLI 到命令之间可能多一层，SIGTERM 时 CLI 收不收拾沙箱里的命令没量过。脚本已改成这几格带产品设置（main `af0b6a5`）；k3 带产品设置重跑过了，结果相同（见本节末「`--part skill` 与 k3 重跑」）。
 
 | 格子 | 设置 |
 | --- | --- |
@@ -336,6 +336,47 @@ S0 合计 PASS 506、FAIL 46、INCONCLUSIVE 217、INFO 19。FAIL 里 34 个是 G
 **没量到的**：产品设置下的进程关系与 SIGTERM 的效果；SIGTERM 时后台命令的去向；SIGTERM 之后这条会话能不能续接；关输入后命令跑完 CLI 退不退；子代理的 `memory` 字段在记忆开关下的效果；回合中途发第二条用户消息时 CLI 怎么处理（评估报告里设计了格子，没跑）。
 
 **运行前后核对**：三个包 PASS。`…161328-5de10e` 报 FAIL：变化的 52 项全在另一个 `~/iwork-t0g-<随机>/` 根目录下，是同一时间有人跑 `--selftest` 留下的（文件名只出自脚本的 selftest 函数），原有的 10 个结果包与 `~/.npmrc` 没变，四格联网的结论不受影响。脚本已改：selftest 与实测互斥（main `af0b6a5`）。
+
+#### `--part skill` 与 k3 重跑（2026-11-12 17:51–18:00，Claude Code 2.1.322，日常账号，普通终端起，`claude-haiku-5-5`；结果包 `…175237-8720d6`（skill）、`…180013-52d68a`（k3），8 个实例加 2 个探查）
+
+只收有结构化证据的。分析全文在 architect 的报告 `r2y-analysis.md`。**各格 `init` 报的权限模式都是 `dontAsk`**（设置文件带了权限模式与沙箱）。
+
+**k3 重跑**（前台命令 `/bin/sleep 61; touch <哨兵>` 跑着时给 CLI 发 SIGTERM；设置是 `dontAsk` 加产品那样的沙箱）
+
+- 进程关系和没开沙箱时一样：命令的 shell 的父进程是 CLI，会话号 = 进程组号 = 它自己的进程号；`sleep` 的父进程是 shell，组号、会话号跟 shell；hook 进程的父进程是 CLI，进程组号是它自己。
+- SIGTERM 后 5 秒内 `sleep` 没了，那次调用的工具结果是 `Exit code 137`；CLI 30 秒内退出，不出 `result`。
+- **沙箱在这一格里没有直接证据**：没有哪个动作被沙箱挡下来，结果包里没有设置文件。间接的：设置文件生效了（权限模式是它给的），同一份设置里有 `sandbox.enabled: true` 与 `failIfUnavailable: true`，命令的输入里没有 `dangerouslyDisableSandbox`。
+- k1、k2 没在产品设置下重跑。
+
+**仓库里的 CLAUDE.md、技能、子代理、命令**（同一个工作目录里各放一个，CLAUDE.md 带暗号）
+
+| 格 | 参数 | `init` | 问暗号 |
+| --- | --- | --- | --- |
+| L1 | 产品参数（`--setting-sources ""`） | `skills`、`slash_commands`、`agents` 里都没有仓库的那几个（`agents` 只有 5 个内置的） | 答 `NONE`，没调工具 |
+| L2 | `--setting-sources project` | 三样都在 | 没调工具就答出了暗号 |
+
+- **AGENTS.md 没测**：这两格放的是 CLAUDE.md。每个实例的 `init.plugins` 里都有内置插件 `cc-plugin-agents-md`，它做什么没量。
+
+**技能正文里的内联命令**（技能做成测试插件、经 `--plugin-dir` 给；用斜杠命令调起，不经 Skill 工具；探针对一切调用答拒绝）
+
+| 格 | 设置 | 结果 |
+| --- | --- | --- |
+| K3b | 技能带 `allowed-tools: Bash(touch:*)`，正文里有内联的 `touch <标记>` | **标记出现了，探针的 PreToolUse 一次都没被调用**；流里没有 `tool_use`；交给模型的技能内容里那一处是 `(Bash completed with no output)` |
+| K3c | 同上，`--settings` 里加 `disableSkillShellExecution: true` | 标记没出现；那一处是 `[shell command execution disabled by policy]` |
+
+- 没量：不带 `allowed-tools` 时的内联命令；只读的内联命令；内联命令在不在沙箱里跑。
+
+**技能的 `allowed-tools` 与插件的 hook**
+
+| 格 | 设置 | 结果 |
+| --- | --- | --- |
+| K2c 预检 | 同样的沙箱，好的探针 | 工作区内写得进；工作区外写不进（`Operation not permitted`）、读不到 |
+| K2c | 插件技能带 `allowed-tools: Bash`；探针对目标命令不表态（退出码 0、不输出）；`--tools Bash` | **`touch <标记>` 执行了**，标记出现。S0 的矩阵里同样的不表态、没有这种技能时它不执行（对照不是同一次运行里的） |
+| H1 | 插件自带的 PreToolUse hook 答允许，iWork 的探针答拒绝 | 没执行：工具结果是 `PreToolUse:Bash hook error`，`result.permission_denials` 有这一条；插件的 hook 被调用过并答了允许 |
+
+- 没量：探针不表态而插件 hook 答允许时的结果；插件 hook 改写工具输入的情形；内置技能自带的放行名单（2.1.322 的程序里有这类字样，没对到具体技能）。
+
+**运行前后核对**：两个包都 PASS。登记之外的调用 0 次。
 
 ### 2.3 不采用的接法：claude-agent-acp
 
