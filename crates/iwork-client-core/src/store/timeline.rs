@@ -898,7 +898,9 @@ impl Timeline {
                 self.new_below = 0;
             }
             PageMode::Snapshot | PageMode::LiveLatest => {
-                if rebuild {
+                // 合并进来的最新页从对话开头一直带到最新（has_more=false）：已加载范围连到了开头，旧的一端到头了。
+                // 之后裁剪真丢了旧端，`fit` 会再把它置回 true
+                if rebuild || !page.has_more {
                     self.has_older = page.has_more;
                 }
                 self.at_tail = true;

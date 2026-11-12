@@ -45,12 +45,16 @@ impl World {
     }
 
     fn get(&self, g: pb::GetConversation) -> pb::QueryResult {
+        self.get_in(CID, g)
+    }
+
+    fn get_in(&self, conversation_id: &str, g: pb::GetConversation) -> pb::QueryResult {
         self.t
             .query(
                 self.head,
                 &pb::Query {
                     kind: Some(pb::query::Kind::GetConversation(pb::GetConversation {
-                        conversation_id: CID.into(),
+                        conversation_id: conversation_id.into(),
                         ..g
                     })),
                 },
@@ -61,9 +65,19 @@ impl World {
     /// 一个回合：用户问一句，排队、运行，`tools` 次工具调用（第 `approval_at` 次后面夹一个审批），助手答一句，结束。
     /// 返回审批的 seq。
     fn long_turn(&mut self, n: &str, tools: usize, approval_at: Option<usize>) -> Option<u64> {
+        self.long_turn_in(CID, n, tools, approval_at)
+    }
+
+    fn long_turn_in(
+        &mut self,
+        conv: &str,
+        n: &str,
+        tools: usize,
+        approval_at: Option<usize>,
+    ) -> Option<u64> {
         let turn = format!("t-{n}");
-        self.push(f::user_message(&format!("q-{n}"), CID, "跑一遍"));
-        self.push(f::turn_queued(&turn, CID, f::IWORK));
+        self.push(f::user_message(&format!("q-{n}"), conv, "跑一遍"));
+        self.push(f::turn_queued(&turn, conv, f::IWORK));
         self.push(f::turn_state(&turn, T::Queued, T::Running, None));
         let mut approval = None;
         for i in 0..tools {
@@ -76,7 +90,7 @@ impl World {
             if approval_at == Some(i) {
                 approval = Some(self.push(f::approval(
                     &format!("ap-{n}"),
-                    CID,
+                    conv,
                     &turn,
                     f::command_action("rm -rf build"),
                     pb::ApprovalKind::Ask,
@@ -86,7 +100,7 @@ impl World {
         }
         self.push(f::assistant_message(
             &format!("a-{n}"),
-            CID,
+            conv,
             &turn,
             f::IWORK,
             "好了",
@@ -1408,4 +1422,721 @@ fn late_other_conversation_latest_keeps_window() {
     late_other_conversation_page_keeps_window(|| QueryPurpose::LatestPage {
         conversation_id: "previous-conversation".into(),
     });
+}
+
+// ---------- 随机交错（第 8 轮）：两个对话、迟到的结果、重连、窗口上报 ----------
+
+/// 随机交错（T09 2b 第 8 轮）：把实时事件（各类持久事件，含派生行触发）、往前 / 往后翻页、居中跳转、回到最新、
+/// 断线重连与订阅快照、切换对话及另一对话迟到的结果（居中、最新页、行级翻页、快照、实时事件）、网页窗口上报（含
+/// 首尾不变的重报）、待处理表更新任意混合，每一步之后查全部不变量，最后往两端翻到头、拼回全集。
+///
+/// 照会话层的做法模拟：查询发出时定下用途与参数（游标、中心），送达时才向假后台要结果（真后台也是收到才算；本地
+/// 操作可以插在发出与送达之间，事件不会跑到结果后面）。断线丢掉在途的查询，重新订阅拿快照；切换对话退订旧的、
+/// 用新编号订阅新的。网页侧「reset 后重报窗口」由 ConversationReset.test.tsx 单独盖住，这里只按操作上报。
+mod interleave {
+    use super::*;
+    use proptest::prelude::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    const A: &str = CID;
+    const B: &str = "c2";
+
+    fn tag(conv: &str) -> &'static str {
+        if conv == A { "A." } else { "B." }
+    }
+    fn other(conv: &'static str) -> &'static str {
+        if conv == A { B } else { A }
+    }
+
+    /// 在途的一件事：送达时才算结果。
+    #[derive(Debug, Clone)]
+    enum Sent {
+        Snapshot {
+            sub: u32,
+        },
+        Older(PageCursor),
+        Newer(PageCursor),
+        Around(u64),
+        /// 最新页。`back`：回到最新（会话层只在不接着最新时发，结果整条重建成最新页）；否则是检查点跟进（随时会发，
+        /// 结果照常合并、按窗口裁）。`reports`：发出时网页报过几次窗口，送达前又报了（用户又滚走了）就不要求接着最新。
+        Latest {
+            back: bool,
+            reports: usize,
+        },
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        /// 实时事件：`other` 为真时发给没打开的那个对话（用它旧的订阅号，模拟退订后迟到的事件）。
+        Live {
+            other: bool,
+            kind: u8,
+        },
+        Older,
+        Newer,
+        Around(usize),
+        Latest,
+        Checkpoint,
+        /// 送达在途的第 n 件（取模）：乱序、迟到都由它产生。
+        Deliver(usize),
+        DeliverAll,
+        Reconnect,
+        Switch,
+        Window(usize, bool),
+        /// 网页按上一次的首尾原样再报一次。
+        Rereport,
+        Pending(bool),
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            4 => (any::<bool>(), 0u8..6).prop_map(|(other, kind)| Op::Live { other, kind }),
+            3 => Just(Op::Older),
+            3 => Just(Op::Newer),
+            2 => any::<usize>().prop_map(Op::Around),
+            1 => Just(Op::Latest),
+            1 => Just(Op::Checkpoint),
+            5 => any::<usize>().prop_map(Op::Deliver),
+            1 => Just(Op::DeliverAll),
+            1 => Just(Op::Reconnect),
+            1 => Just(Op::Switch),
+            3 => (any::<usize>(), any::<bool>()).prop_map(|(i, u)| Op::Window(i, u)),
+            1 => Just(Op::Rereport),
+            1 => any::<bool>().prop_map(Op::Pending),
+        ]
+    }
+
+    struct H {
+        w: World,
+        s: Store,
+        cap: usize,
+        open: &'static str,
+        /// 每个对话最近一次用的订阅号（退订以后迟到的事件还带着它）。
+        sub: BTreeMap<&'static str, u32>,
+        next_sub: u32,
+        queue: Vec<(&'static str, Sent)>,
+        last_report: Option<(i64, i64)>,
+        reports: usize,
+        /// 每个对话正在跑的回合。
+        live_turn: BTreeMap<&'static str, String>,
+        card: Option<pb::ResumeCard>,
+        /// A 里中断回合的位置（继续卡片的 created_seq）。
+        interrupted_at: u64,
+        n: usize,
+    }
+
+    impl H {
+        fn new(cap: usize, gaps: &[u64]) -> Self {
+            let mut w = World::new();
+            w.push(f::project_conversation(B, support::PID));
+            // 两个对话的内容交错写进同一条事件日志：各自的 seq 都是稀疏的
+            for (i, gap) in gaps.iter().enumerate() {
+                w.long_turn_in(A, &format!("A.{i}"), 30, Some(12));
+                w.long_turn_in(B, &format!("B.{i}"), 20, Some(5));
+                w.head += gap;
+            }
+            // A 里一个中断的回合（继续卡片指着它）
+            w.push(f::user_message("q-A.int", A, "跑一半"));
+            w.push(f::turn_queued("t-A.int", A, f::IWORK));
+            w.push(f::turn_state("t-A.int", T::Queued, T::Running, None));
+            let interrupted_at = w.push(f::turn_state("t-A.int", T::Running, T::Interrupted, None));
+            let mut live_turn = BTreeMap::new();
+            for conv in [A, B] {
+                let turn = format!("t-{}live0", tag(conv));
+                w.push(f::user_message(
+                    &format!("q-{}live0", tag(conv)),
+                    conv,
+                    "再来",
+                ));
+                w.push(f::turn_queued(&turn, conv, f::IWORK));
+                w.push(f::turn_state(&turn, T::Queued, T::Running, None));
+                live_turn.insert(conv, turn);
+            }
+            let mut s = Store::with_timeline_cap(cap);
+            s.register_subscription(support::PENDING, ScopeKind::Pending);
+            let mut h = H {
+                w,
+                s,
+                cap,
+                open: A,
+                sub: BTreeMap::new(),
+                next_sub: 10,
+                queue: Vec::new(),
+                last_report: None,
+                reports: 0,
+                live_turn,
+                card: None,
+                interrupted_at,
+                n: 0,
+            };
+            h.subscribe(A);
+            h.deliver_all();
+            h
+        }
+
+        fn subscribe(&mut self, conv: &'static str) {
+            self.s.set_visible(Visible {
+                conversation_id: Some(conv.into()),
+                ..Default::default()
+            });
+            let id = self.next_sub;
+            self.next_sub += 1;
+            self.s
+                .register_subscription(id, ScopeKind::Conversation(conv.into()));
+            self.sub.insert(conv, id);
+            self.open = conv;
+            self.last_report = None;
+            self.queue.push((conv, Sent::Snapshot { sub: id }));
+        }
+
+        fn timeline(&self) -> Option<&Timeline> {
+            self.s.open.as_ref().filter(|t| !t.identities().is_empty())
+        }
+
+        /// 不设上限、同样的待处理表时一次全取的行（对照）。
+        fn full(&self, conv: &str) -> Vec<(RowKey, String)> {
+            let mut s = Store::with_timeline_cap(100_000);
+            s.register_subscription(support::PENDING, ScopeKind::Pending);
+            s.register_subscription(1, ScopeKind::Conversation(conv.into()));
+            s.set_visible(Visible {
+                conversation_id: Some(conv.into()),
+                ..Default::default()
+            });
+            let page = self.w.get_in(
+                conv,
+                pb::GetConversation {
+                    limit: 100_000,
+                    ..Default::default()
+                },
+            );
+            s.apply(support::snapshot(1, self.w.head, vec![page]));
+            s.apply(pending_with(self.card.clone()));
+            s.open.as_ref().unwrap().identities()
+        }
+
+        fn live(&mut self, to_other: bool, kind: u8) {
+            let conv = if to_other {
+                other(self.open)
+            } else {
+                self.open
+            };
+            self.n += 1;
+            let n = self.n;
+            let p = tag(conv);
+            let turn = self.live_turn[conv].clone();
+            let events = match kind {
+                0 => vec![f::user_message(&format!("q-{p}l{n}"), conv, "又一句")],
+                1 => vec![f::tool_started(&turn, &format!("{p}l{n}"), "Bash", "ls")],
+                2 => vec![f::approval(
+                    &format!("ap-{p}l{n}"),
+                    conv,
+                    &turn,
+                    f::command_action("rm -rf build"),
+                    pb::ApprovalKind::Ask,
+                    &[],
+                )],
+                3 => {
+                    // 换模型再开一个用新模型的回合：派生出模型切换行
+                    let model = if n.is_multiple_of(2) {
+                        "fake-small"
+                    } else {
+                        "fake-large"
+                    };
+                    let next = format!("t-{p}m{n}");
+                    let events = vec![
+                        f::turn_finished(&turn, T::Completed, false, None),
+                        f::model_changed(conv, model),
+                        f::with_model(f::turn_queued(&next, conv, f::IWORK), model),
+                        f::turn_state(&next, T::Queued, T::Running, None),
+                        f::tool_started(&next, &format!("{p}m{n}-c"), "Bash", "ls"),
+                    ];
+                    self.live_turn.insert(conv, next);
+                    events
+                }
+                4 => {
+                    // 回合结束（回合结束行），接着开下一个
+                    let next = format!("t-{p}r{n}");
+                    let events = vec![
+                        f::turn_finished(&turn, T::Completed, false, None),
+                        f::user_message(&format!("q-{p}r{n}"), conv, "下一轮"),
+                        f::turn_queued(&next, conv, f::IWORK),
+                        f::turn_state(&next, T::Queued, T::Running, None),
+                    ];
+                    self.live_turn.insert(conv, next);
+                    events
+                }
+                _ => vec![
+                    f::assistant_message(&format!("a-{p}l{n}"), conv, &turn, f::IWORK, "好"),
+                    f::message_completed(conv, &format!("a-{p}l{n}"), "好了"),
+                ],
+            };
+            for e in events {
+                let seq = self.w.push(e.clone());
+                // 打开着的对话按当前订阅号收；另一个对话的事件带着它退订前的订阅号迟到（从没订阅过就不发）
+                if let Some(&sub) = self.sub.get(conv) {
+                    self.s
+                        .apply(support::persisted(seq, &[sub], e.event.unwrap()));
+                }
+            }
+        }
+
+        fn issue_older(&mut self) {
+            if let Some(c) = self
+                .timeline()
+                .filter(|t| t.has_older)
+                .and_then(Timeline::older_cursor)
+            {
+                self.queue.push((self.open, Sent::Older(c)));
+            }
+        }
+
+        fn issue_newer(&mut self) {
+            if let Some(c) = self
+                .timeline()
+                .filter(|t| !t.at_tail)
+                .and_then(Timeline::newer_cursor)
+            {
+                self.queue.push((self.open, Sent::Newer(c)));
+            }
+        }
+
+        fn issue_around(&mut self, i: usize) {
+            let all = self.full(self.open);
+            let seq = all[i % all.len()].0.seq;
+            self.queue.push((self.open, Sent::Around(seq)));
+        }
+
+        fn result(&self, conv: &str, sent: &Sent) -> Item {
+            let get = |g| self.w.get_in(conv, g);
+            let view = |purpose, g| Item::ViewResult {
+                purpose,
+                result: Box::new(get(g)),
+            };
+            match sent {
+                Sent::Snapshot { sub } => support::snapshot(
+                    *sub,
+                    self.w.head,
+                    vec![get(pb::GetConversation {
+                        limit: PAGE_SIZE,
+                        ..Default::default()
+                    })],
+                ),
+                Sent::Older(c) => view(
+                    QueryPurpose::OlderPage {
+                        conversation_id: conv.into(),
+                        before: c.clone(),
+                    },
+                    match c {
+                        PageCursor::Message(id) => pb::GetConversation {
+                            before_message_id: Some(id.clone()),
+                            limit: PAGE_SIZE,
+                            ..Default::default()
+                        },
+                        PageCursor::Seq(seq) => pb::GetConversation {
+                            before_seq: Some(*seq),
+                            limit: ROW_PAGE,
+                            ..Default::default()
+                        },
+                    },
+                ),
+                Sent::Newer(c) => view(
+                    QueryPurpose::NewerPage {
+                        conversation_id: conv.into(),
+                        after: c.clone(),
+                    },
+                    match c {
+                        PageCursor::Message(id) => pb::GetConversation {
+                            after_message_id: Some(id.clone()),
+                            limit: PAGE_SIZE,
+                            ..Default::default()
+                        },
+                        PageCursor::Seq(seq) => pb::GetConversation {
+                            after_seq: Some(*seq),
+                            limit: ROW_PAGE,
+                            ..Default::default()
+                        },
+                    },
+                ),
+                Sent::Around(seq) => view(
+                    QueryPurpose::AroundPage {
+                        conversation_id: conv.into(),
+                        seq: *seq,
+                    },
+                    pb::GetConversation {
+                        around_seq: Some(*seq),
+                        limit: 50,
+                        ..Default::default()
+                    },
+                ),
+                Sent::Latest { .. } => view(
+                    QueryPurpose::LatestPage {
+                        conversation_id: conv.into(),
+                    },
+                    pb::GetConversation {
+                        limit: PAGE_SIZE,
+                        ..Default::default()
+                    },
+                ),
+            }
+        }
+
+        /// 送达一件在途的事，并查和这件事有关的不变量。
+        fn deliver(&mut self, i: usize) -> Result<(), TestCaseError> {
+            if self.queue.is_empty() {
+                return Ok(());
+            }
+            let (conv, sent) = self.queue.remove(i % self.queue.len());
+            let item = self.result(conv, &sent);
+            // 快照只认还登记着的订阅号（退订了的、断线前的会话层已经不认）
+            let current = match &sent {
+                Sent::Snapshot { sub } => self.sub.get(conv) == Some(sub) && conv == self.open,
+                _ => conv == self.open,
+            };
+            let before = (
+                self.s.window,
+                keys_of(&self.s),
+                self.s.back_to_latest.clone(),
+            );
+            let was_tail = self.s.open.as_ref().is_some_and(|t| t.at_tail);
+            self.s.apply(item);
+            if !current {
+                // 别的对话（或作废的订阅）的结果迟到：不合并，也不动当前对话的窗口与回到最新
+                prop_assert_eq!(
+                    (
+                        self.s.window,
+                        keys_of(&self.s),
+                        self.s.back_to_latest.clone()
+                    ),
+                    before,
+                    "{:?} 的 {:?} 迟到，动了当前对话（{}）",
+                    conv,
+                    sent,
+                    self.open
+                );
+                return Ok(());
+            }
+            let Some(t) = self.timeline() else {
+                return Ok(());
+            };
+            match sent {
+                Sent::Snapshot { .. } => {
+                    prop_assert!(t.at_tail, "快照之后没接着最新：{:?}", t.identities());
+                }
+                Sent::Latest {
+                    back: true,
+                    reports,
+                } if !was_tail && reports == self.reports => {
+                    prop_assert!(t.at_tail, "回到最新之后没接着最新：{:?}", t.identities());
+                }
+                Sent::Around(center) => {
+                    prop_assert!(
+                        t.identities().iter().any(|(k, _)| k.seq == center),
+                        "居中加载的锚组 {} 被裁掉了：{:?}",
+                        center,
+                        t.identities()
+                    );
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+
+        fn deliver_all(&mut self) {
+            while !self.queue.is_empty() {
+                let _ = self.deliver(0);
+            }
+        }
+
+        fn window(&mut self, i: usize, by_user: bool) {
+            let ids = match self.timeline() {
+                Some(t) => t.identities(),
+                None => return,
+            };
+            let o = ids[i % ids.len()].0.ordinal();
+            self.report(o, o + 6, by_user);
+        }
+
+        fn report(&mut self, first: i64, last: i64, by_user: bool) {
+            self.s.set_window(self.open, first, last, by_user);
+            self.last_report = Some((first, last));
+            self.reports += 1;
+        }
+
+        /// 每一步之后都成立的。
+        fn check(&self, op: &Op) -> Result<(), TestCaseError> {
+            let Some(t) = self.s.open.as_ref() else {
+                return Ok(());
+            };
+            prop_assert_eq!(t.conversation_id.as_str(), self.open);
+            prop_assert!(
+                t.len() <= self.cap,
+                "{:?} 之后 {} 行，超过上限 {}",
+                op,
+                t.len(),
+                self.cap
+            );
+            let foreign = tag(other(self.open));
+            let leaked: Vec<_> = t
+                .identities()
+                .into_iter()
+                .filter(|(_, id)| id.contains(foreign))
+                .collect();
+            prop_assert!(
+                leaked.is_empty(),
+                "{:?} 之后串进了另一个对话的行：{:?}",
+                op,
+                leaked
+            );
+            Ok(())
+        }
+
+        /// 最后：在途的都送达，往前翻到头、再往后翻到头（网页一直贴着要翻的那一端，会话层发翻页的条件），每一步
+        /// 最外一行严格前进；一路见过的行拼起来等于全集，不重不漏。
+        fn page_through(&mut self) -> Result<(), TestCaseError> {
+            self.deliver_all();
+            let full = self.full(self.open);
+            let mut seen: BTreeMap<RowKey, String> = keys_of(&self.s).into_iter().collect();
+            let mut steps = 0;
+            for older_side in [true, false] {
+                loop {
+                    let ids = keys_of(&self.s);
+                    let (first, last) = (ids[0].0.ordinal(), ids[ids.len() - 1].0.ordinal());
+                    if older_side {
+                        self.report(first, first + 4, false);
+                        self.issue_older();
+                    } else {
+                        self.report(last - 4, last, false);
+                        self.issue_newer();
+                    }
+                    if self.queue.is_empty() {
+                        break;
+                    }
+                    let edge = |ids: &[(RowKey, String)]| {
+                        if older_side {
+                            ids[0].0.seq
+                        } else {
+                            ids[ids.len() - 1].0.seq
+                        }
+                    };
+                    let before = edge(&ids);
+                    self.deliver(0)?;
+
+                    let after = edge(&keys_of(&self.s));
+                    let advanced = if older_side {
+                        after < before
+                    } else {
+                        after > before
+                    };
+                    prop_assert!(
+                        advanced,
+                        "翻页第 {} 步没前进：{} → {}",
+                        steps,
+                        before,
+                        after
+                    );
+                    prop_assert!(self.s.open.as_ref().unwrap().len() <= self.cap);
+                    seen.extend(keys_of(&self.s));
+                    steps += 1;
+                    prop_assert!(steps <= 2 * full.len() + 4, "翻不到头");
+                }
+            }
+            let t = self.s.open.as_ref().unwrap();
+            prop_assert!(!t.has_older || t.at_tail, "停下时没到头");
+            prop_assert!(t.at_tail, "往后翻完没接回最新");
+            // 当次说明（note:）只随实时事件出现、重新取页不再带出（和 properties.rs 的 keys_without_notes 同一口径）。
+            // 两个回合之间有模型当次说明时不贴模型切换行（方案 2.2，`model_switch_row`）：实时看到的是说明，一次全取
+            // 看到的是切换行，两者算同一处。本测试里换模型事件紧挨在新回合排队之前，说明的 seq = 切换行的 seq − 1。
+            let notes: BTreeSet<u64> = seen
+                .iter()
+                .filter(|(_, id)| id.starts_with("note:"))
+                .map(|(k, _)| k.seq)
+                .collect();
+            let seen: Vec<_> = seen
+                .into_iter()
+                .filter(|(_, id)| !id.starts_with("note:"))
+                .collect();
+            let full: Vec<_> = full
+                .into_iter()
+                .filter(|(k, id)| {
+                    !(id.starts_with("model:") && notes.contains(&(k.seq - 1)))
+                        || seen.iter().any(|(_, s)| s == id)
+                })
+                .collect();
+            if seen != full {
+                let a: BTreeSet<_> = seen.iter().collect();
+                let b: BTreeSet<_> = full.iter().collect();
+                prop_assert!(
+                    false,
+                    "拼出来的不等于全集：多了 {:?}，少了 {:?}",
+                    a.difference(&b).collect::<Vec<_>>(),
+                    b.difference(&a).collect::<Vec<_>>()
+                );
+            }
+            Ok(())
+        }
+    }
+
+    fn keys_of(s: &Store) -> Vec<(RowKey, String)> {
+        s.open
+            .as_ref()
+            .map(Timeline::identities)
+            .unwrap_or_default()
+    }
+
+    fn run(cap: usize, gaps: Vec<u64>, ops: Vec<Op>) -> Result<(), TestCaseError> {
+        let mut h = H::new(cap, &gaps);
+        for op in &ops {
+            match op.clone() {
+                Op::Live { other, kind } => h.live(other, kind),
+                Op::Older => h.issue_older(),
+                Op::Newer => h.issue_newer(),
+                Op::Around(i) => h.issue_around(i),
+                Op::Latest => {
+                    if h.timeline().is_some_and(|t| !t.at_tail) {
+                        let sent = Sent::Latest {
+                            back: true,
+                            reports: h.reports,
+                        };
+                        h.queue.push((h.open, sent));
+                    }
+                }
+                Op::Checkpoint => {
+                    let sent = Sent::Latest {
+                        back: false,
+                        reports: h.reports,
+                    };
+                    h.queue.push((h.open, sent));
+                }
+                Op::Deliver(i) => h.deliver(i)?,
+                Op::DeliverAll => {
+                    while !h.queue.is_empty() {
+                        h.deliver(0)?;
+                        h.check(op)?;
+                    }
+                }
+                Op::Reconnect => {
+                    // 断线：在途的查询丢了；重新订阅（同一个编号），拿新快照
+                    h.queue.clear();
+                    h.s.resubscribing();
+                    let sub = h.sub[h.open];
+                    h.queue.push((h.open, Sent::Snapshot { sub }));
+                }
+                Op::Switch => {
+                    let old = h.open;
+                    h.s.unregister_subscription(h.sub[old]);
+                    h.subscribe(other(old));
+                }
+                Op::Window(i, by_user) => h.window(i, by_user),
+                Op::Rereport => {
+                    if let Some((first, last)) = h.last_report {
+                        h.report(first, last, false);
+                    }
+                }
+                Op::Pending(with) => {
+                    h.card = with.then(|| pb::ResumeCard {
+                        turn_id: "t-A.int".into(),
+                        conversation_id: A.into(),
+                        reason: pb::InterruptReason::Crash as i32,
+                        created_seq: h.interrupted_at,
+                    });
+                    h.s.apply(pending_with(h.card.clone()));
+                }
+            }
+            h.check(op)?;
+        }
+        h.page_through()
+    }
+
+    // 缩出来的反例（在旧版本上跑时撞出的），固定下来。
+    fn pinned(cap: usize, ops: Vec<Op>) {
+        if let Err(e) = run(cap, vec![0], ops) {
+            panic!("{e}");
+        }
+    }
+    use Op::*;
+    const fn user(other: bool) -> Op {
+        Live { other, kind: 0 }
+    }
+
+    /// 检查点最新页从对话开头一直带到最新（has_more=false）、按窗口合并进来：旧的一端已经到头，往前翻不该再发一次
+    /// 空查询（has_older 留着旧值时会发，第一步不前进）。
+    #[test]
+    fn pinned_checkpoint_page_reaching_start_clears_has_older() {
+        pinned(34, vec![Checkpoint, Window(10411622911427216448, false)]);
+    }
+
+    /// fefcce0：一条实时用户消息之后往前翻，第一步没前进（6/F 一类）。
+    #[test]
+    fn pinned_fefcce0_paging_stalls() {
+        pinned(4, vec![user(false)]);
+    }
+
+    /// fefcce0：网页窗口在旧处、实时消息挤掉新的一端，回到最新的重建没回到最新（6/F-3）。
+    #[test]
+    fn pinned_fefcce0_back_to_latest_keeps_old_window() {
+        pinned(
+            7,
+            vec![
+                Window(3609487704107818428, false),
+                user(false),
+                Latest,
+                Deliver(0),
+            ],
+        );
+    }
+
+    /// a469cff：A 的居中加载在途时切到 B，B 报了窗口，A 的结果迟到（7/F-4）。
+    #[test]
+    fn pinned_a469cff_late_around_from_previous_conversation() {
+        pinned(
+            31,
+            vec![
+                user(false),
+                user(false),
+                Deliver(801907787347),
+                Around(1485811311852449722),
+                Switch,
+                user(false),
+                Window(13143954130666040881, true),
+                Deliver(11223925740640785348),
+            ],
+        );
+    }
+
+    /// 换模型以后往两端翻完：实时看到的当次说明和一次全取看到的模型切换行算同一处（比对口径，不是产品缺陷）。
+    #[test]
+    fn pinned_model_note_matches_switch_row() {
+        pinned(
+            39,
+            vec![
+                user(true),
+                user(true),
+                user(false),
+                Live {
+                    other: false,
+                    kind: 3,
+                },
+                user(false),
+                user(false),
+            ],
+        );
+    }
+
+    proptest! {
+        // 默认 64 例随 cargo test 跑；完整一轮 `PROPTEST_CASES=2000 lockf /tmp/iwork-heavy-test.lock cargo test -p
+        // iwork-client-core --test row_cap interleave`
+        #![proptest_config(ProptestConfig {
+            cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(64),
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn interleaved_ops_keep_invariants(
+            cap in 4usize..60,
+            gaps in proptest::collection::vec(0u64..5_000, 1..4),
+            ops in proptest::collection::vec(op(), 1..80),
+        ) {
+            run(cap, gaps, ops)?;
+        }
+    }
 }
