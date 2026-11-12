@@ -189,16 +189,37 @@ pub fn decide(
                     })));
             }
         }
-        _ => {
-            return Err(pb::Error {
-                code: pb::ErrorCode::Unavailable.into(),
-                message: "假后台未实现".into(),
-                retryable: false,
-                details: [("fake".to_owned(), "unimplemented".to_owned())].into(),
-            });
+        // 本机文件附件：只认路径来源（粘贴的分片上传假后台不做）。不读文件，大小记 0；凭据、私钥判定归真后台。
+        C::UploadAttachment(x) => {
+            let Some(pb::upload_attachment::Source::LocalPath(_)) = &x.source else {
+                return Err(unimplemented());
+            };
+            let conv = active_conversation(tables, &x.conversation_id)?;
+            d.events
+                .push(fixtures::attachment(&fresh("att"), &conv.id, &x.name, 0));
         }
+        // 重新定位：真后台要读新位置的 project.toml、项目 ID 一致才关联（技术设计 8.2）；假后台只认项目在不在。
+        C::RelocateProject(x) => {
+            if !tables.projects.contains_key(&x.project_id) {
+                return Err(not_found("project_id", &x.project_id));
+            }
+            d.events.push(ev(E::ProjectRelocated(pb::ProjectRelocated {
+                project_id: x.project_id.clone(),
+                new_path: x.new_path.clone(),
+            })));
+        }
+        _ => return Err(unimplemented()),
     }
     Ok(d)
+}
+
+fn unimplemented() -> pb::Error {
+    pb::Error {
+        code: pb::ErrorCode::Unavailable.into(),
+        message: "假后台未实现".into(),
+        retryable: false,
+        details: [("fake".to_owned(), "unimplemented".to_owned())].into(),
+    }
 }
 
 /// 删除对话（技术设计 9.0）：先进「删除中」、作废待定审批与卡片；有结果未知的卡片就停在删除中。

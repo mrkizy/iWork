@@ -60,6 +60,8 @@ pub enum ClientAct {
     ReadOldest,
     /// 拖入一个超过 20MB 的文件（输入框上方出现原因）。
     DropOversized,
+    /// 文件拖进窗口、还没松开（对话区出现「松开以添加」虚线框）。
+    DragHover,
 }
 
 impl Scenario {
@@ -414,6 +416,15 @@ pub const REGISTRY: &[Scenario] = &[
         focus: Some("c-attach"),
         characters: &[],
         client: &[ClientAct::DropOversized],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "drop-overlay",
+        about: "文件拖进窗口、还没松开：整块对话区的虚线框「松开以添加」",
+        build: drop_overlay,
+        focus: Some("c-drop"),
+        characters: &[],
+        client: &[ClientAct::DragHover],
         timeline_cap: None,
     },
     Scenario {
@@ -1427,6 +1438,14 @@ fn attachments_tray() -> Vec<Step> {
     s.push(Step::OpenHere);
     s.push(a(f::attachment("att-1", c, "设计稿.png", 345_678)));
     s.push(a(f::attachment("att-2", c, "接口说明.pdf", 2_345_678)));
+    s
+}
+
+fn drop_overlay() -> Vec<Step> {
+    let c = "c-drop";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(history(c, "drop-", 2));
     s
 }
 

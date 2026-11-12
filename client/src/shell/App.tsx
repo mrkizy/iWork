@@ -83,7 +83,7 @@ export function App(props: { host: Host; toasts: Component; initialRoute?: Route
             <ConnectionBar />
             <Switch fallback={<div class="iw-placeholder">这一页在下一组实现</div>}>
               <Match when={home(p.router.route())}>
-                <HomePage />
+                <HomePage openRuntimeDetails={() => p.router.go({ page: "settings" })} />
               </Match>
               <Match when={conversation(p.router.route())}>{(r) => (
                   <ConversationPage id={r().id} rowKey={r().rowKey} openRuntimeDetails={() => p.router.go({ page: "settings" })} />

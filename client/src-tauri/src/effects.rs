@@ -1,4 +1,4 @@
-//! 壳的副作用：选端点、Dock 角标与跳动、打开外链、「iWork」菜单的两种退出、退出。
+//! 壳的副作用：选端点、Dock 角标与跳动、打开外链、系统文件选择框、「iWork」菜单的两种退出、退出。
 //! 系统通知由后台发（T09 方案 2.8），客户端不发。
 
 use iwork_client_core::{App, DirectDialer, Effect, ShellEvent};
@@ -7,7 +7,7 @@ use iwork_ipc::peer::SelfIdentity;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Manager};
 
-use crate::dock;
+use crate::{MAIN, dock};
 use tokio::sync::mpsc;
 
 /// 「退出 iWork」：只退客户端（Cmd+Q），后台照常运行（Q16）。
@@ -54,6 +54,7 @@ pub fn spawn(handle: AppHandle, core: App, mut effects: mpsc::UnboundedReceiver<
                     }
                 }
                 Effect::OpenExternal(url) => open_external(&url),
+                Effect::PickPaths(kind) => crate::picker::open(&handle, core.clone(), kind),
                 Effect::Exit => handle.exit(0),
             }
         }
@@ -97,7 +98,7 @@ fn install_menu(handle: &AppHandle, core: App) -> tauri::Result<()> {
         } else if event.id() == QUIT_FULLY_ID {
             // 确认框由网页按 ConnectionView.quit_requested 画；确认后经 QuitIntent 回来。
             core.shell(ShellEvent::QuitRequested);
-            if let Some(w) = app.get_webview_window("main") {
+            if let Some(w) = app.get_webview_window(MAIN) {
                 let _ = w.set_focus();
             }
         }

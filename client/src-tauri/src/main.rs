@@ -1,4 +1,4 @@
-//! iWork 客户端的 Tauri 壳：起窗口、把三个命令转给 `iwork-client-core`、把效果（Dock 角标与跳动、外链、退出）
+//! iWork 客户端的 Tauri 壳：起窗口、把三个命令转给 `iwork-client-core`、把效果（Dock 角标与跳动、外链、选择框、退出）
 //! 落到系统上。连接、界面状态、帧合并等逻辑全部在 `iwork-client-core`，这里不放业务判断。
 //!
 //! macOS 上关窗只关窗口、进程留在 Dock（角标与跳动照常，方案 2.8）；点 Dock 图标重新开窗，新窗口 attach 后
@@ -12,6 +12,7 @@ mod dock;
 #[cfg(feature = "e2e")]
 mod e2e;
 mod effects;
+mod picker;
 
 use std::sync::Arc;
 
@@ -22,7 +23,7 @@ use tauri::webview::NewWindowResponse;
 use tauri::{Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 /// 主窗口的标识：capability 只放行它（capabilities/main.json）。
-const MAIN: &str = "main";
+pub(crate) const MAIN: &str = "main";
 
 struct Bridge {
     app: App,
@@ -161,13 +162,21 @@ fn main() {
                 WindowEvent::Destroyed if window.label() == MAIN => {
                     bridge.app.shell(ShellEvent::WindowOpen(false));
                 }
-                WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
-                    let paths = paths
-                        .iter()
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .collect();
-                    bridge.app.shell(ShellEvent::Dropped(paths));
-                }
+                // 拖文件进来：拖动中给对话区画虚线框，松开把路径附到当前对话（ui-m1.md 第 2 节第 6 条）
+                WindowEvent::DragDrop(drag) => match drag {
+                    tauri::DragDropEvent::Enter { .. } => {
+                        bridge.app.shell(ShellEvent::Dragging(true));
+                    }
+                    tauri::DragDropEvent::Leave => bridge.app.shell(ShellEvent::Dragging(false)),
+                    tauri::DragDropEvent::Drop { paths, .. } => {
+                        let paths = paths
+                            .iter()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .collect();
+                        bridge.app.shell(ShellEvent::Dropped(paths));
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         })

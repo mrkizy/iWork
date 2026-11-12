@@ -14,9 +14,6 @@ import { sendIntent, type ComposerTarget } from "./target";
 import "./Composer.css";
 import "../rows/rows.css";
 
-/** 回形针要系统的文件选择框（只传路径，设计 3.7），M1 还没接。 */
-const PICKER_PENDING = "选择文件要接系统的文件选择框，还没接；可以拖入或粘贴";
-
 export interface ComposerProps {
   target: ComposerTarget;
   composer?: ComposerView;
@@ -25,8 +22,10 @@ export interface ComposerProps {
   /** 首页：上一次没能发出去的原因（草稿还在）。 */
   startError?: string;
   draftKey: string;
-  /** 输入框上方那一行的出口（「查看详情」「重新定位」）；返回假表示这个出口现在用不了，按钮置灰。 */
-  blockAction?: (a: BlockAction) => (() => void) | undefined;
+  /** 这个输入框对着的项目：「重新定位」出口用它（私聊为空）。 */
+  projectId?: string;
+  /** 「查看详情」出口：去设置 › 运行时。没给就不画这个按钮。 */
+  openRuntimeDetails?: () => void;
 }
 
 export function Composer(props: ComposerProps) {
@@ -42,7 +41,19 @@ export function Composer(props: ComposerProps) {
   };
 
   const c = () => props.composer;
-  const exit = () => props.blockAction?.(c()?.blockAction ?? BlockAction.UNSPECIFIED);
+  // 输入框上方那一行的出口：哪一个由 Rust 给（ComposerView.blockAction），这里只接到对应的动作
+  const exit = (): (() => void) | undefined => {
+    switch (c()?.blockAction) {
+      case BlockAction.OPEN_RUNTIME_DETAILS:
+        return props.openRuntimeDetails;
+      case BlockAction.RELOCATE_PROJECT: {
+        const projectId = props.projectId;
+        return projectId ? () => void host.act({ case: "pickProjectLocation", value: { projectId } }) : undefined;
+      }
+      default:
+        return undefined;
+    }
+  };
   const canSend = () => text().trim() !== "" && (c()?.canSend ?? false) && !props.starting;
   const send = async () => {
     if (!canSend()) return;
@@ -59,6 +70,11 @@ export function Composer(props: ComposerProps) {
   const stop = () => {
     const t = c()?.runningTurnId;
     if (t) void host.act({ case: "cancelTurn", value: { turnId: t } });
+  };
+  // 回形针：系统的文件选择框由 Rust 弹，路径不经网页（设计 3.7）。点不了时 Rust 给原因
+  const pickFiles = () => {
+    const t = props.target;
+    if (t.kind === "conversation") void host.act({ case: "pickAttachments", value: { conversationId: t.id } });
   };
   const onPaste = async (e: ClipboardEvent) => {
     const files = [...(e.clipboardData?.files ?? [])];
@@ -82,16 +98,10 @@ export function Composer(props: ComposerProps) {
               <Spinner />
             </Show>
             <span>{reason()}</span>
-            <Show when={c()?.blockActionLabel}>
-              {(label) => (
-                <button
-                  type="button"
-                  class="iw-btn iw-btn--link"
-                  disabled={exit() === undefined}
-                  data-tip={exit() === undefined ? "需要系统的文件夹选择框，还没接" : undefined}
-                  onClick={() => exit()?.()}
-                >
-                  {label()}
+            <Show when={c()?.blockActionLabel ? exit() : undefined}>
+              {(go) => (
+                <button type="button" class="iw-btn iw-btn--link" onClick={() => go()()}>
+                  {c()?.blockActionLabel}
                 </button>
               )}
             </Show>
@@ -145,7 +155,15 @@ export function Composer(props: ComposerProps) {
           }}
         />
         <div class="iw-composer__bar">
-          <button type="button" class="iw-pill" disabled aria-label="添加附件" data-tip={PICKER_PENDING} data-tip-side="top">
+          <button
+            type="button"
+            class="iw-pill"
+            aria-label="添加附件"
+            disabled={c()?.attachUnavailable !== undefined}
+            data-tip={c()?.attachUnavailable}
+            data-tip-side="top"
+            onClick={pickFiles}
+          >
             <Icon name="paperclip" />
           </button>
           <Show when={c()}>

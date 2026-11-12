@@ -18,8 +18,10 @@ pub enum Action {
     Command(Cmd),
     /// 交给壳做的事。
     Effect(Effect),
-    /// 附件：路径或粘贴数据，由 attach 模块处理。
-    Attach(pb::ui_intent::Kind),
+    /// 粘贴的附件数据，由 attach 模块处理。本机文件不经网页（见 [`Pick`]）。
+    AttachPasted(pb::AttachPasted),
+    /// 要用户在系统选择框里选路径：壳弹框，选好后会话按 [`Pick`] 发命令。
+    Pick(Pick),
     /// 本地就能判定不受理（回 `IntentAck.error`）。
     Reject(pb::IntentError),
     /// 首页：新建对话并发出首条消息（会话层 session::start 一步步推进）。
@@ -63,7 +65,34 @@ pub enum Local {
     HomeMode(pb::ApprovalMode),
 }
 
-/// 壳要做的副作用（Dock 角标与跳动、打开外链、退出）。系统通知由后台发（T09 方案 2.8），客户端不发。
+/// 选好路径以后做什么。路径只来自系统选择框（壳经 `ShellEvent::Picked` 交回），网页拿不到也给不了（R7）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pick {
+    /// 回形针：选中的文件附到这个对话。
+    Attachments { conversation_id: String },
+    /// 「重新定位」：选中的文件夹交给后台，由它核对 project.toml（技术设计 8.2）。
+    ProjectLocation { project_id: String },
+}
+
+impl Pick {
+    pub fn kind(&self) -> PickKind {
+        match self {
+            Pick::Attachments { .. } => PickKind::Files,
+            Pick::ProjectLocation { .. } => PickKind::Folder,
+        }
+    }
+}
+
+/// 壳弹哪种选择框。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickKind {
+    /// 选一个或多个文件。
+    Files,
+    /// 选一个文件夹。
+    Folder,
+}
+
+/// 壳要做的副作用（Dock 角标与跳动、打开外链、选择框、退出）。系统通知由后台发（T09 方案 2.8），客户端不发。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     OpenExternal(String),
@@ -71,6 +100,8 @@ pub enum Effect {
     SetBadge(Option<String>),
     /// 出现了新的待处理项：让 Dock 图标跳一次（Q15：Informational）。系统只在应用不在前台时跳。
     RequestAttention,
+    /// 弹系统的选择框；壳做完一定回一次 `ShellEvent::Picked`（取消或弹不出来时路径为空）。
+    PickPaths(PickKind),
     /// 用户确认了「完全退出 iWork」：壳结束进程。
     Exit,
 }
@@ -242,7 +273,10 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
             }))
         }
 
-        k @ (I::AttachPaths(_) | I::AttachPasted(_)) => Action::Attach(k),
+        I::AttachPasted(x) => Action::AttachPasted(x),
+        I::PickAttachments(x) => Action::Pick(Pick::Attachments {
+            conversation_id: x.conversation_id,
+        }),
 
         I::AddProject(x) => Action::Command(Cmd::AddProject(pb::AddProject { path: x.path })),
         I::PinProject(x) => Action::Command(Cmd::PinProject(pb::PinProject {
@@ -252,10 +286,9 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
         I::RemoveProject(x) => Action::Command(Cmd::RemoveProject(pb::RemoveProject {
             project_id: x.project_id,
         })),
-        I::RelocateProject(x) => Action::Command(Cmd::RelocateProject(pb::RelocateProject {
+        I::PickProjectLocation(x) => Action::Pick(Pick::ProjectLocation {
             project_id: x.project_id,
-            new_path: x.new_path,
-        })),
+        }),
 
         I::CreateAssistant(x) => Action::Command(Cmd::CreateAssistant(pb::CreateAssistant {
             config: Some(assistant_config(x)),

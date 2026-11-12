@@ -112,6 +112,7 @@ pub fn header(store: &Store, tl: &Timeline) -> pb::ConversationHeader {
             .then(|| text::BACK_TO_LATEST.to_owned()),
         is_dm,
         project_id,
+        drop_hint: store.dragging.then(|| text::DROP_TO_ATTACH.to_owned()),
     }
 }
 
@@ -144,6 +145,7 @@ pub fn composer(store: &Store, tl: &Timeline) -> pb::ComposerView {
             runtime_locked: !tl.turns.is_empty(),
             running_turn_id: tl.running_turn().map(|t| t.id.as_str()),
             tray: tray(tl),
+            attachable: true,
         },
     )
 }
@@ -186,6 +188,8 @@ pub fn home_composer(store: &Store, project_id: &str) -> pb::ComposerView {
             runtime_locked: false,
             running_turn_id: None,
             tray: Vec::new(),
+            // 附件挂在对话上，首页还没有对话
+            attachable: false,
         },
     )
 }
@@ -202,6 +206,8 @@ struct ComposerInput<'a> {
     runtime_locked: bool,
     running_turn_id: Option<&'a str>,
     tray: Vec<pb::AttachmentChip>,
+    /// 有对话可挂附件（首页没有）。
+    attachable: bool,
 }
 
 fn composer_view(store: &Store, input: ComposerInput<'_>) -> pb::ComposerView {
@@ -285,8 +291,23 @@ fn composer_view(store: &Store, input: ComposerInput<'_>) -> pb::ComposerView {
         )),
         approval_mode: Some(input.approval),
         attach_error: store.attach_error.clone(),
+        attach_unavailable: attach_unavailable(live, input.attachable, input.deleting)
+            .map(str::to_owned),
         tray: input.tray,
         placeholder: text::composer_placeholder(config.map_or("", |c| c.name.as_str())),
+    }
+}
+
+/// 回形针点不了的原因：先看有没有对话，再看连接、删除中。
+fn attach_unavailable(live: bool, attachable: bool, deleting: bool) -> Option<&'static str> {
+    if !attachable {
+        Some(text::ATTACH_AFTER_FIRST_MESSAGE)
+    } else if !live {
+        Some(text::OFFLINE_TRY_LATER)
+    } else if deleting {
+        Some(text::COMPOSER_DELETING)
+    } else {
+        None
     }
 }
 

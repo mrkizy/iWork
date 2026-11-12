@@ -18,10 +18,28 @@
   font-weight: 700;
 }
 .iw-conv-page {
+  position: relative;
   display: flex;
   flex: 1;
   flex-direction: column;
   min-height: 0;
+}
+/* 拖文件进窗口：整块对话区的虚线框「松开以添加」（ui-m1.md 第 2 节第 6 条；虚线框样式同画布 07 的路径框）。
+   拖放由系统窗口接，DOM 收不到事件，这一层只画、不接鼠标。 */
+.iw-drop {
+  position: absolute;
+  inset: 12px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 2px dashed var(--line);
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--surf2) 92%, transparent);
+  color: var(--tx2);
+  font-size: var(--fs-md);
+  pointer-events: none;
 }
 .iw-conv-header {
   display: flex;

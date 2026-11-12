@@ -276,6 +276,8 @@ pub struct Store {
     pub quit_requested: bool,
     /// 上一次添加附件被拒的原因（拖入时没有回包可带，放在输入框上方）。
     pub attach_error: Option<String>,
+    /// 正在往窗口里拖文件（壳的 DragDrop Enter / Leave，松开时清掉）。
+    pub dragging: bool,
     /// 最近一次跳转请求（点击系统通知、新建对话后）。
     pub navigate: Option<pb::NavigatePatch>,
     /// 首页：选过的模型与档位、正在进行的「新建并发出」（见 home 模块）。
@@ -535,6 +537,13 @@ impl Store {
     pub fn set_quit_requested(&mut self, on: bool) {
         self.quit_requested = on;
         self.dirty.mark(ViewKey::Connection);
+    }
+
+    pub fn set_dragging(&mut self, on: bool) {
+        if self.dragging != on {
+            self.dragging = on;
+            self.mark_header();
+        }
     }
 
     pub fn set_attach_error(&mut self, e: Option<String>) {

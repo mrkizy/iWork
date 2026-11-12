@@ -276,6 +276,8 @@ message ConversationHeader {
   optional string notice = 7;
   bool is_dm = 8;
   string project_id = 9;
+  // 正在往窗口里拖文件：整块对话区的虚线框文字（「松开以添加」）；没在拖时不设。
+  optional string drop_hint = 10;
 }
 
 message ProjectOption {
@@ -313,6 +315,8 @@ message ComposerView {
   ModelMenuView model_menu = 14;
   // 正文框里的占位文字：跟答话的助手说（ui-m1.md 3.4 的例子「跟阿森说点什么」）。
   string placeholder = 15;
+  // 回形针点不了时的原因（悬停说明）；不设就能点，点了发 PickAttachments。
+  optional string attach_unavailable = 16;
 }
 
 // 「运行时 · 模型」菜单：运行时、模型（仅本对话）、思考强度三节。选中项与可否选都由 Rust 侧给。
@@ -795,6 +799,9 @@ message FrameChunk {
 
 // ui_intent 的请求。
 message UiIntent {
+  // 原来网页直接带路径的两个操作，换成了 pick_attachments、pick_project_location（T09 组 2b）。
+  reserved 60, 73;
+  reserved "attach_paths", "relocate_project";
   oneof kind {
     // 视图声明
     SetVisible set_visible = 1;
@@ -836,15 +843,17 @@ message UiIntent {
     AttachmentIntent confirm_credential_attachment = 45;
     DraftIntent decide_agents_md_draft = 46;
 
-    // 附件
-    AttachPaths attach_paths = 60;
+    // 附件。本机文件只经系统选择框或拖入进来，路径由 Rust 侧拿（网页拿不到文件能力，方案 R7）：
+    // 网页只说「要选附件」，不带路径。
     AttachPasted attach_pasted = 61;
+    PickAttachments pick_attachments = 62;
 
     // 项目
     ProjectPathIntent add_project = 70;
     PinProjectIntent pin_project = 71;
     ProjectIntent remove_project = 72;
-    RelocateProjectIntent relocate_project = 73;
+    // 「重新定位」：Rust 弹文件夹选择框，选好后发 RelocateProject，由后台校验 project.toml。
+    ProjectIntent pick_project_location = 74;
 
     // 助手与设置
     AssistantEditIntent create_assistant = 80;
@@ -1009,10 +1018,9 @@ message DraftIntent {
   bool accept = 2;
 }
 
-// 拖入或选择的本机文件：只传路径（设计 3.7）。
-message AttachPaths {
+// 回形针：Rust 弹文件选择框，选中的本机文件只传路径（设计 3.7），附到这个对话。
+message PickAttachments {
   string conversation_id = 1;
-  repeated string paths = 2;
 }
 
 // 粘贴的数据：Rust 侧做 20MB 检查后用 Chunk 上传。
@@ -1034,11 +1042,6 @@ message PinProjectIntent {
 
 message ProjectIntent {
   string project_id = 1;
-}
-
-message RelocateProjectIntent {
-  string project_id = 1;
-  string new_path = 2;
 }
 
 message AssistantEditIntent {

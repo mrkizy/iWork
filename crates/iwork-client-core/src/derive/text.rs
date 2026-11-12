@@ -286,6 +286,12 @@ pub const COMPOSER_OFFLINE: &str = "正在重新连接，连上后就能发送";
 pub const COMPOSER_PATH_MISSING: &str = "找不到项目文件夹，重新定位后才能继续";
 pub const COMPOSER_DELETING: &str = "对话正在删除";
 pub const RELOCATE: &str = "重新定位";
+/// 拖文件进窗口时整块对话区的虚线框（ui-m1.md 第 2 节第 6 条）。
+pub const DROP_TO_ATTACH: &str = "松开以添加";
+/// 断线时点了要发命令的东西（附件、选择框）。
+pub const OFFLINE_TRY_LATER: &str = "正在重新连接，连上后再试";
+/// 首页的回形针：附件挂在对话上，发出第一条消息、对话建好后才能加。
+pub const ATTACH_AFTER_FIRST_MESSAGE: &str = "发出第一条消息后可以添加附件";
 pub const DETAILS: &str = "查看详情";
 
 pub fn tool_group(g: pb::ToolGroup) -> &'static str {

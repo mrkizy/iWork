@@ -6,7 +6,7 @@ import { HOME_DRAFT } from "../composer/drafts";
 import { useHost } from "../host";
 import "./pages.css";
 
-export function HomePage() {
+export function HomePage(props: { openRuntimeDetails: () => void }) {
   const host = useHost();
   const home = () => host.view.home;
   return (
@@ -23,6 +23,8 @@ export function HomePage() {
             draftKey={HOME_DRAFT + id()}
             starting={home()?.starting}
             startError={home()?.startError}
+            projectId={id()}
+            openRuntimeDetails={props.openRuntimeDetails}
           />
         )}
       </Show>

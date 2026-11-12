@@ -185,6 +185,7 @@ async fn client_act(
                 return Err(format!("SetVisibleRows 被拒：{}", e.message));
             }
         }
+        ClientAct::DragHover => app.shell(ShellEvent::Dragging(true)),
         ClientAct::DropOversized => {
             // 稀疏文件：只占目录项，不真写 21MB
             let path = dir.join("超过二十兆.bin");

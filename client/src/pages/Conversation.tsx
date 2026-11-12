@@ -1,10 +1,10 @@
 // 对话页（画布 04、10、15）：标题栏（标题、本对话用量）、提示条、时间线（虚拟行）、回到最新、输入框。
 // 还没有消息的对话显示和首页一样的「要做点什么？」。整页说明（如「数据不完整」）设了就不显示行。
+// 拖文件进窗口时整块对话区盖一层虚线框（文字由 Rust 给，没在拖时不设）。
 // 消息锚点（2a 第 11 条）：左边距的滚轮，内容超出一屏才显示；⌥↑ / ⌥↓ 不经滚轮直接逐处跳。
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import { AnchorRail } from "../anchor/AnchorRail";
 import { Composer } from "../composer/Composer";
-import { BlockAction } from "../gen/iwork/v1/view_pb";
 import { useHost } from "../host";
 import { RowView } from "../rows/RowView";
 import { Button } from "../ui/Button";
@@ -107,12 +107,20 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
           </div>
         </Show>
       </Show>
+      <Show when={header()?.dropHint}>
+        {(hint) => (
+          <div class="iw-drop" role="status">
+            <Icon name="paperclip" />
+            {hint()}
+          </div>
+        )}
+      </Show>
       <Composer
         target={{ kind: "conversation", id: props.id }}
         composer={conv()?.composer}
         draftKey={props.id}
-        // 「查看详情」去设置 › 运行时；「重新定位」要系统的文件夹选择框，还没接（按钮置灰）
-        blockAction={(a) => (a === BlockAction.OPEN_RUNTIME_DETAILS ? props.openRuntimeDetails : undefined)}
+        projectId={header()?.projectId || undefined}
+        openRuntimeDetails={props.openRuntimeDetails}
       />
     </div>
   );

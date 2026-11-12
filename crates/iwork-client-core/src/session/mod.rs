@@ -27,7 +27,7 @@ use tokio::time::Instant;
 use crate::attach;
 use crate::derive::Ctx;
 use crate::frame::{FrameEngine, Pull};
-use crate::intent::{self, Action, Effect, Local};
+use crate::intent::{self, Action, Effect, Local, Pick};
 use crate::store::{Connection, FollowUp, Item, QueryPurpose, Row, ScopeKind, Store, SummaryTable};
 use dial::{DialError, Dialer};
 use reconnect::{ReconnectState, Retry};
@@ -69,8 +69,12 @@ pub enum Request {
 pub enum ShellEvent {
     /// 窗口获得或失去焦点。
     Focused(bool),
-    /// 文件拖进窗口：Rust 侧拿到的绝对路径，附到当前可见的对话。
+    /// 正在往窗口里拖文件（拖进来为真，拖出去为假）：对话区显示「松开以添加」。
+    Dragging(bool),
+    /// 文件拖进窗口松开：Rust 侧拿到的绝对路径，附到当前可见的对话。拖动随之结束。
     Dropped(Vec<String>),
+    /// 系统选择框的结果（回应 `Effect::PickPaths`）：选中的绝对路径，取消或弹不出来时为空。
+    Picked(Vec<String>),
     /// 窗口开着还是关了（macOS 关窗不退进程，点 Dock 图标重新开窗；方案 2.8）。
     WindowOpen(bool),
     /// 菜单「完全退出 iWork」：先让网页弹确认框。
@@ -178,6 +182,8 @@ pub struct Session<D: Dialer> {
     open_target_in_flight: bool,
     /// 处理过的最大 token（只记在内存里）。
     open_target_seen: u64,
+    /// 开着的系统选择框：选好以后做什么，以及网页那次操作还没回的受理结果。同一时刻最多一个。
+    pick: Option<(Pick, oneshot::Sender<pb::IntentAck>)>,
     stats: Stats,
     stats_tx: Option<tokio::sync::watch::Sender<Stats>>,
     /// 每条连接一个代次：内部任务的结果带着它，断线重连后迟到的旧结果对得上号才处理（审查 1/F-9）。
@@ -253,6 +259,7 @@ impl<D: Dialer> Session<D> {
             open_target_wanted: false,
             open_target_in_flight: false,
             open_target_seen: 0,
+            pick: None,
             stats: Stats::default(),
             stats_tx: None,
             conn_epoch: 0,
@@ -522,16 +529,19 @@ impl<D: Dialer> Session<D> {
                     self.store.set_focused(false);
                 }
             }
+            ShellEvent::Dragging(on) => self.store.set_dragging(on),
+            ShellEvent::Picked(paths) => self.on_picked(paths),
             ShellEvent::Dropped(paths) => {
+                self.store.set_dragging(false);
                 let Some(cid) = self.store.visible.conversation_id.clone() else {
                     return;
                 };
                 let (tx, rx) = oneshot::channel();
                 self.on_attach(
-                    pb::ui_intent::Kind::AttachPaths(pb::AttachPaths {
+                    attach::Source::Paths {
                         conversation_id: cid,
                         paths,
-                    }),
+                    },
                     tx,
                 );
                 // 拖入没有回包可带错误：结果回来后放进输入框上方的提示。
@@ -568,7 +578,58 @@ impl<D: Dialer> Session<D> {
                 let _ = tx.send(ok);
             }
             Action::Command(kind) => self.send_command(kind, Some(tx)),
-            Action::Attach(kind) => self.on_attach(kind, tx),
+            Action::AttachPasted(x) => self.on_attach(attach::Source::Pasted(x), tx),
+            Action::Pick(p) => self.open_picker(p, tx),
+        }
+    }
+
+    /// 请壳弹系统选择框。网页那次操作的受理结果留到选完、命令受理后再回（[`Self::on_picked`]）。
+    fn open_picker(&mut self, pick: Pick, tx: oneshot::Sender<pb::IntentAck>) {
+        let refuse = |code: &str, message: &str| pb::IntentError {
+            code: code.into(),
+            message: message.into(),
+            retryable: false,
+        };
+        let error = if self.pick.is_some() {
+            refuse("picker_open", "已经开着一个选择框")
+        } else if !self.live() {
+            // 选完了也发不出去：先别弹框
+            offline_error()
+        } else if self.effects.send(Effect::PickPaths(pick.kind())).is_err() {
+            refuse("no_shell", "弹不出选择框")
+        } else {
+            self.pick = Some((pick, tx));
+            return;
+        };
+        let _ = tx.send(pb::IntentAck { error: Some(error) });
+    }
+
+    /// 选择框的结果：按打开它时的用途发附件或重新定位；取消就只回受理结果。
+    fn on_picked(&mut self, paths: Vec<String>) {
+        let Some((pick, tx)) = self.pick.take() else {
+            tracing::warn!(target: "iwork_client", "收到选择结果，但没有开着的选择框，丢掉");
+            return;
+        };
+        let Some(first) = paths.first().cloned() else {
+            let _ = tx.send(pb::IntentAck { error: None });
+            return;
+        };
+        match pick {
+            Pick::Attachments { conversation_id } => self.on_attach(
+                attach::Source::Paths {
+                    conversation_id,
+                    paths,
+                },
+                tx,
+            ),
+            // 选文件夹的框只给一个路径
+            Pick::ProjectLocation { project_id } => self.send_command(
+                pb::command::Kind::RelocateProject(pb::RelocateProject {
+                    project_id,
+                    new_path: first,
+                }),
+                Some(tx),
+            ),
         }
     }
 
@@ -760,40 +821,16 @@ impl<D: Dialer> Session<D> {
         });
     }
 
-    fn on_attach(&mut self, kind: pb::ui_intent::Kind, tx: oneshot::Sender<pb::IntentAck>) {
+    fn on_attach(&mut self, source: attach::Source, tx: oneshot::Sender<pb::IntentAck>) {
         let Some(client) = self.client.clone().filter(|_| self.live()) else {
             let _ = tx.send(pb::IntentAck {
-                error: Some(pb::IntentError {
-                    code: "offline".into(),
-                    message: "正在重新连接，连上后再试".into(),
-                    retryable: true,
-                }),
+                error: Some(offline_error()),
             });
             return;
         };
         // 附件按批发：不进在飞命令表（断线就整批作废，用户重新添加）。
-        let uploads: Result<(Vec<pb::Chunk>, Vec<pb::UploadAttachment>), pb::IntentError> =
-            match kind {
-                pb::ui_intent::Kind::AttachPaths(x) => {
-                    attach::path_commands(&x.conversation_id, &x.paths).map(|c| (Vec::new(), c))
-                }
-                pb::ui_intent::Kind::AttachPasted(x) => {
-                    attach::check_size(&x.name, x.data.len() as u64).map(|()| {
-                        let upload_id = ulid::Ulid::generate().to_string();
-                        let chunks = attach::chunks(&upload_id, &x.data);
-                        let cmd = pb::UploadAttachment {
-                            conversation_id: x.conversation_id,
-                            name: x.name,
-                            mime: x.mime,
-                            source: Some(pb::upload_attachment::Source::UploadId(upload_id)),
-                        };
-                        (chunks, vec![cmd])
-                    })
-                }
-                _ => return,
-            };
-        let (chunks, commands) = match uploads {
-            Ok(x) => x,
+        let attach::Batch { chunks, commands } = match attach::batch(source) {
+            Ok(b) => b,
             Err(e) => {
                 let _ = tx.send(pb::IntentAck { error: Some(e) });
                 return;
@@ -1458,7 +1495,7 @@ async fn sleep_until(deadline: Option<Instant>) {
 fn offline_error() -> pb::IntentError {
     pb::IntentError {
         code: "offline".into(),
-        message: "正在重新连接，连上后再试".into(),
+        message: crate::derive::text::OFFLINE_TRY_LATER.into(),
         retryable: true,
     }
 }
