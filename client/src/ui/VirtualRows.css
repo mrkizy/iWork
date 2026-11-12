@@ -7,3 +7,15 @@
 .iw-vrows__spacer {
   flex: none;
 }
+
+/* 跳到锚点后高亮那一行（1 秒，网页计时）；减少动态效果时直接出现、直接消失 */
+.iw-vrow--highlight {
+  border-radius: var(--r-sm);
+  background: var(--sel);
+  transition: background 0.3s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .iw-vrow--highlight {
+    transition: none;
+  }
+}

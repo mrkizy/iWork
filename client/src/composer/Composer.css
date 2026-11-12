@@ -69,9 +69,13 @@
 }
 .iw-composer__spacer {
   flex: 1;
+  min-width: 0;
 }
+/* 药丸防换行（ui-m1 2a 第 12b 条，审查 7/F-1）：一律不换行、默认不被压缩；只有运行时与模型药丸可以收窄，
+   最宽约 240px，超出用省略号收尾（自填的模型 ID 可能很长，只靠 nowrap 会把发送按钮挤出框外），悬停给完整文字 */
 .iw-pill {
   display: inline-flex;
+  flex: none;
   align-items: center;
   gap: 5px;
   height: 28px;
@@ -81,28 +85,44 @@
   background: transparent;
   color: var(--tx2);
   font-size: var(--fs-sm2);
+  white-space: nowrap;
   cursor: pointer;
+}
+.iw-pill--model {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 240px;
+}
+.iw-pill__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .iw-pill:hover:not(:disabled),
 .iw-pill[aria-expanded="true"] {
   background: var(--sideOn);
   color: var(--tx);
 }
+/* 禁用不动 opacity，见 ui/Button.css（提示会跟着变淡，4/F-2） */
 .iw-pill:disabled {
-  opacity: 0.5;
+  color: var(--idle);
   cursor: not-allowed;
 }
-/* 全开：赭红粗体、底色淡赭红，常驻醒目（2 节第 9 条） */
+/* 全开：赭红粗体、底色淡赭红，常驻醒目（2 节第 9 条）。底色 6%：12% 时赭红字只有 4.41 / 4.24:1（浅 / 深），
+   6% 时 4.80 / 4.57（UI 审查 5/F-1 的同类，client/tests/mixed-contrast.test.ts） */
 .iw-pill--full {
   color: var(--acc);
   font-weight: 700;
-  background: color-mix(in srgb, var(--acc) 12%, transparent);
+  background: color-mix(in srgb, var(--acc) 6%, transparent);
+  /* 底色变淡后用描边保住醒目（ui-m1 第 2 节第 9 条，2026-11-12）。手动、自动没有描边 */
+  border: 1px solid var(--acc);
 }
 .iw-pill__override {
   color: var(--mus);
 }
 .iw-send {
   display: inline-flex;
+  flex: none;
   align-items: center;
   justify-content: center;
   width: 36px;
@@ -114,7 +134,7 @@
   cursor: pointer;
 }
 .iw-send:disabled {
-  opacity: 0.4;
+  background: color-mix(in srgb, var(--acc) 40%, var(--surf));
   cursor: not-allowed;
 }
 .iw-send--stop {
@@ -182,7 +202,7 @@
 }
 .iw-segmented button:disabled {
   cursor: not-allowed;
-  opacity: 0.5;
+  color: var(--idle);
 }
 .iw-model-id {
   display: flex;

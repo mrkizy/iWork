@@ -6,7 +6,7 @@ mod support;
 
 use std::time::Duration;
 
-use iwork_client_core::store::QueryPurpose;
+use iwork_client_core::store::{PageCursor, QueryPurpose};
 use iwork_client_core::{App, DialError, Dialer, DirectDialer, FrameError, Options};
 use iwork_fake_daemon::{FakeDaemon, fixtures as f, scenario, self_trusting_identity};
 use iwork_ipc::client::{Client, Incoming};
@@ -320,6 +320,7 @@ async fn older_page_in_flight_survives_disconnect() {
             conversation_id: "c-long".into(),
             first_ordinal: i64::MIN,
             last_ordinal: i64::MIN + 1,
+            by_user: false,
         }),
     )
     .await;
@@ -345,6 +346,7 @@ async fn jump_to_latest_in_flight_survives_disconnect() {
             conversation_id: "c-long".into(),
             first_ordinal: i64::MIN,
             last_ordinal: i64::MIN + 1,
+            by_user: false,
         }),
     )
     .await;
@@ -358,6 +360,7 @@ async fn jump_to_latest_in_flight_survives_disconnect() {
             conversation_id: "c-long".into(),
             first_ordinal: i64::MAX - 1,
             last_ordinal: i64::MAX,
+            by_user: false,
         }),
     )
     .await;
@@ -410,12 +413,20 @@ fn every_query_purpose_has_a_disconnect_case() {
             QueryPurpose::Rules | QueryPurpose::LocalConfig { .. } => {
                 "session.rs::pending_query_table_cleared_on_close"
             }
+            QueryPurpose::Anchors { .. } => {
+                "anchors.rs::anchors_query_in_flight_survives_disconnect"
+            }
+            QueryPurpose::NewerPage { .. } => {
+                "anchors.rs::newer_page_in_flight_survives_disconnect"
+            }
+            QueryPurpose::AroundPage { .. } => "anchors.rs::jump_load_interrupted_resent",
         }
     }
     let src = format!(
-        "{}{}",
+        "{}{}{}",
         include_str!("session_more.rs"),
-        include_str!("session.rs")
+        include_str!("session.rs"),
+        include_str!("anchors.rs")
     );
     use iwork_client_core::store::SummaryTable;
     for p in [
@@ -428,7 +439,7 @@ fn every_query_purpose_has_a_disconnect_case() {
         },
         QueryPurpose::OlderPage {
             conversation_id: String::new(),
-            before: String::new(),
+            before: PageCursor::Seq(1),
         },
         QueryPurpose::Rules,
         QueryPurpose::LocalConfig {
@@ -439,6 +450,19 @@ fn every_query_purpose_has_a_disconnect_case() {
             filter: String::new(),
             append: false,
             round: None,
+        },
+        QueryPurpose::Anchors {
+            conversation_id: String::new(),
+            center: 0,
+            round: None,
+        },
+        QueryPurpose::NewerPage {
+            conversation_id: String::new(),
+            after: PageCursor::Seq(1),
+        },
+        QueryPurpose::AroundPage {
+            conversation_id: String::new(),
+            seq: 0,
         },
     ] {
         let name = case(&p).rsplit("::").next().unwrap();

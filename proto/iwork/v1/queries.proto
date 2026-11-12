@@ -26,6 +26,10 @@ message Query {
     ListSecurityLists list_security_lists = 20;
     GetSettings get_settings = 21;
     ReadArtifact read_artifact = 22;
+    // 消息锚点：以某个位置为中心按窗口取（T09 方案 2.9、G10）。
+    ListAnchors list_anchors = 23;
+    // 被系统通知叫到前台时跳到哪（T09 方案 2.8）：附带查询，结果不进视图。
+    GetOpenTarget get_open_target = 24;
   }
 }
 
@@ -46,14 +50,43 @@ message QueryResult {
     ListSecurityListsResult list_security_lists = 20;
     GetSettingsResult get_settings = 21;
     ArtifactChunk read_artifact = 22;
+    ListAnchorsResult list_anchors = 23;
+    GetOpenTargetResult get_open_target = 24;
   }
 }
 
-// 键集分页：十万条历史（设计 5.3 索引）。不带 before_message_id 取最新的一页。
+// 用户最近点过的那条系统通知指向哪（T09 方案 2.8）。后台只记用户确实点过的那一项；拿不到「点了哪一项」时不记。
+message GetOpenTarget {}
+
+message GetOpenTargetResult {
+  // 每记下一个新目标加一；0 表示没有。
+  uint64 token = 1;
+  string pending_item_id = 2;
+  // AGENTS.md 草稿这类没有对话归属的项不设。
+  optional string conversation_id = 3;
+  // 用户点这条通知的时刻。
+  google.protobuf.Timestamp at = 4;
+}
+
+// 键集分页：十万条历史（设计 5.3 索引）。三种取页方式至多设一个（同时设两个以上回 INVALID_ARGUMENT），
+// 都不设取最新的一页：
+//   before_message_id 往前翻一页；after_message_id 往后翻一页（T09 方案 G11）；
+//   around_seq 以这个位置为中心取 limit 条消息，连同范围内的回合、工具调用、审批、卡片（跳到没加载的锚点）。
+// 取页方式（T09 方案 G11、2.9）：什么都不设 = 最新页；before_message_id、after_message_id、around_seq、
+// before_seq、after_seq 至多设一个，设了两个以上回 INVALID_ARGUMENT。
+// 前三种按消息数取（limit 是消息条数，连同范围内的回合、工具调用、审批、卡片）；
+// 行级游标按行数取（limit 是行数，0 回 INVALID_ARGUMENT，大于 1000 按 1000；游标为 0 回 INVALID_ARGUMENT）：
+// 「行」是消息、工具调用、审批、亲手执行卡片（排序字段 created_seq）与回合结束（Turn.ended_seq）。
 message GetConversation {
   string conversation_id = 1;
   optional string before_message_id = 2;
   uint32 limit = 3;
+  optional string after_message_id = 4;
+  optional uint64 around_seq = 5;
+  // 排序字段小于它的各类行里，紧挨着它的 limit 行。
+  optional uint64 before_seq = 6;
+  // 排序字段大于它的各类行里，紧挨着它的 limit 行。
+  optional uint64 after_seq = 7;
 }
 
 message GetConversationResult {
@@ -71,6 +104,59 @@ message GetConversationResult {
   repeated Attachment attachments = 8;
   // 整个对话的累计用量（标题栏「本对话用量」）。
   Usage usage_total = 9;
+  // 更新的消息还有没有（往后翻、居中取时有意义；取最新一页时为假）。
+  bool has_newer = 10;
+}
+
+// 消息锚点（T09 方案 2.9、G10）：用户消息、等你处理的事、失败的回合按 created_seq 合在一起，
+// 以 around_seq 为中心前后各取若干条。哪些算锚点只在后台算，客户端不从已加载的行里挑。
+message ListAnchors {
+  string conversation_id = 1;
+  // 以这个位置为中心；0 = 从最新往回取。
+  uint64 around_seq = 2;
+  // created_seq 不大于 around_seq 的，最多取这么多条。
+  uint32 before = 3;
+  // 大于 around_seq 的，最多取这么多条。
+  uint32 after = 4;
+}
+
+message ListAnchorsResult {
+  // 按 created_seq 升序。
+  repeated Anchor anchors = 1;
+  bool has_before = 2;
+  bool has_after = 3;
+  // 整个对话里等你处理的锚点数、失败回合的锚点数。
+  uint32 waiting_count = 4;
+  uint32 failed_count = 5;
+}
+
+message Anchor {
+  // 与时间线行的排序键同一个数（T09 方案 2.2 行登记表）。
+  uint64 created_seq = 1;
+  google.protobuf.Timestamp at = 2;
+  oneof kind {
+    UserMessageAnchor user_message = 10;
+    WaitingAnchor waiting = 11;
+    FailedTurnAnchor failed_turn = 12;
+  }
+}
+
+message UserMessageAnchor {
+  string message_id = 1;
+  // 正文开头，后台截到 200 个字素簇。
+  string excerpt = 2;
+}
+
+// 审批、亲手执行卡片、继续卡片；处理掉就不再是锚点。
+message WaitingAnchor {
+  string pending_item_id = 1;
+}
+
+message FailedTurnAnchor {
+  string turn_id = 1;
+  string reason = 2;
+  // 失败前有没有输出过内容（「没能开始」还是「中途失败」）。
+  bool had_output = 3;
 }
 
 message ListConversations {

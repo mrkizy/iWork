@@ -114,7 +114,7 @@ proptest! {
                 Op::Settings(on) => {
                     s.apply(persisted(seq, &[SIDEBAR], E::GlobalSettingsChanged(pb::GlobalSettingsChanged { playful_ui: Some(on), ..Default::default() })));
                 }
-                Op::Window(first) => s.set_window(CID, first, first + 40),
+                Op::Window(first) => s.set_window(CID, first, first + 40, false),
                 Op::Pull { lose } => {
                     t += FRAME_INTERVAL;
                     if let Pull::Chunk(c) = e.pull(&mut s, w.epoch, w.applied, t, ctx()) {
@@ -205,7 +205,7 @@ fn window_moves_remove_rows() {
     assert_eq!(w.state.rows.len(), 60, "没声明窗口时给最新 60 行");
     // 窗口移到最前：发前面的行，删掉离开窗口的。
     let first = s.open.as_ref().unwrap().identities()[0].0.ordinal();
-    s.set_window(CID, first, first + 20);
+    s.set_window(CID, first, first + 20, false);
     drain(&mut s, &mut e, &mut w, t + FRAME_INTERVAL);
     assert_eq!(w.state.rows.len(), 11 + 30, "窗口 11 行 + 后面多带 30 行");
     assert!(w.state.rows.contains_key("m0"));
@@ -414,7 +414,8 @@ mod live {
             ..ProptestConfig::default()
         });
         // 7 号操作（实时改写时间线里的行）权重加倍：变异对照靠它发现「丢了一类变化事件」。
-        let strategy = proptest::collection::vec(0u8..10, 5..40);
+        // 10～12 号动锚点：新的待审批（等你处理）、审批被处理（那一处消失）、失败的回合。
+        let strategy = proptest::collection::vec(0u8..13, 5..40);
         let rt = tokio::runtime::Handle::current();
         runner
             .run(&strategy, |ops| {
@@ -425,12 +426,19 @@ mod live {
             .unwrap();
     }
 
+    /// proptest 缩出来的反例（d40dd09 全量测试里偶发）：固定下来单独跑。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconnect_equals_fresh_shrunk() {
+        case(vec![0, 2, 10, 1, 0]).await.unwrap();
+    }
+
     async fn scroll_top(app: &App) {
         app.intent(pb::UiIntent {
             kind: Some(I::SetVisibleRows(pb::SetVisibleRows {
                 conversation_id: "c-basic".into(),
                 first_ordinal: i64::MIN,
                 last_ordinal: i64::MIN + 1,
+                by_user: false,
             })),
         })
         .await;
@@ -442,6 +450,7 @@ mod live {
                 conversation_id: "c-basic".into(),
                 first_ordinal: i64::MIN,
                 last_ordinal: i64::MAX,
+                by_user: false,
             })),
         })
         .await;
@@ -470,6 +479,9 @@ mod live {
         // 「断在订阅途中」由下面开关对话的操作覆盖：重新打开后紧接着的操作就落在订阅途中。
         settle(&app, &mut web).await;
         let mut open = true;
+        // 还在等的审批（10 号加、11 号处理掉最早的一个）。
+        let mut waiting: Vec<String> = Vec::new();
+        let mut failed_any = false;
         for (i, op) in ops.into_iter().enumerate() {
             match op {
                 0 => {
@@ -501,6 +513,38 @@ mod live {
                     ));
                     d.append(f::message_completed("c-basic", &id, "实时完成"));
                 }
+                10 => {
+                    let id = format!("ap-{i}");
+                    d.append(f::approval(
+                        &id,
+                        "c-basic",
+                        "t-basic",
+                        f::command_action("rm -rf build"),
+                        pb::ApprovalKind::Ask,
+                        &[],
+                    ));
+                    waiting.push(id);
+                }
+                11 if !waiting.is_empty() => {
+                    let id = waiting.remove(0);
+                    d.append(f::approval_decided(
+                        &id,
+                        pb::ApprovalState::Denied,
+                        pb::ApprovalDecider::User,
+                    ));
+                }
+                12 => {
+                    let turn = format!("tf-{i}");
+                    d.append(f::turn_queued(&turn, "c-basic", f::IWORK));
+                    d.append(f::turn_state(
+                        &turn,
+                        pb::TurnState::Running,
+                        pb::TurnState::Failed,
+                        Some("模型暂时不可用"),
+                    ));
+                    d.append(f::turn_finished(&turn, pb::TurnState::Failed, false, None));
+                    failed_any = true;
+                }
                 6 => {
                     // 断在重查途中：命中侧栏的事件让摘要失效、重查发出，紧接着断线（审查 1/F-6）。
                     d.append(f::conversation_read("c-basic", 0));
@@ -518,6 +562,9 @@ mod live {
             set_conv(&app, Some("c-basic")).await;
         }
         let (fresh_app, mut fresh) = connect(&d, Some("c-basic")).await;
+        // 先等新客户端的订阅快照到：快照重建会作废之前声明的窗口（6/F-3），快照之前报的整条窗口会被丢掉，
+        // 这边就只剩下面第二次上报才开始往前翻，翻到底以后没人再报，锚点停在最新一段（d40dd09 全量测试里偶发）。
+        settle(&fresh_app, &mut fresh).await;
         // 两边都把窗口声明成整条时间线：窗口顶到最旧会一直往前翻到底，两边都加载全部历史后整份比较。
         // 只比各自的默认窗口会把「加载了多少历史」的差别误判成不一致（两边的窗口落在不同的行上）。
         for a in [&app, &fresh_app] {
@@ -525,8 +572,23 @@ mod live {
         }
         settle(&app, &mut web).await;
         settle(&fresh_app, &mut fresh).await;
+        // 翻到底以后行变了：网页（VirtualRows）这时会按新的行重新报一次可见范围，锚点的当前位置随它重算、
+        // 出了锚点窗口就重取。这里照做一次，两边都按「翻到底以后的第一行」对齐锚点。
+        for a in [&app, &fresh_app] {
+            scroll_all(a).await;
+        }
+        settle(&app, &mut web).await;
+        settle(&fresh_app, &mut fresh).await;
         prop_assert_eq!(&web.state.sidebar, &fresh.state.sidebar);
         prop_assert_eq!(&web.state.rows, &fresh.state.rows);
+        // 锚点窗口（列表、前后还有没有）与两个计数（等你处理、失败回合的状态点）、当前位置都对得上（方案 2.9）
+        prop_assert!(fresh.state.anchors.is_some(), "对照：新客户端取到了锚点");
+        prop_assert_eq!(&web.state.anchors, &fresh.state.anchors);
+        prop_assert_eq!(&web.state.anchor_cursor, &fresh.state.anchor_cursor);
+        // 两个计数的期望值由操作序列独立算出，不读后台：整个对话里有没有还在等的审批、有没有失败回合
+        let anchors = web.state.anchors.clone().unwrap_or_default();
+        prop_assert_eq!(anchors.has_waiting, !waiting.is_empty());
+        prop_assert_eq!(anchors.has_failed, failed_any);
         prop_assert!(
             fresh.state.rows.contains_key("m-basic-u"),
             "对照：确实翻到了最旧的一条"

@@ -14,9 +14,16 @@ iwork-client-core.workspace = true
 iwork-ipc.workspace = true
 iwork-proto.workspace = true
 prost.workspace = true
+rfd.workspace = true
 tauri.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Dock 角标与跳动、退出菜单的 Option 替换项（T09 方案 2.8、Q16）
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }

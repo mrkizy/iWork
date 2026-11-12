@@ -2,7 +2,7 @@
 // 录像播放页（方案 2.6、第 8 节）：吃 client-core 对着假后台跑出的 ViewPatch 录像，用和正式入口同一套组件画出来。
 // 只在开发服务器上（preview.html 不是发布入口）。地址：/preview.html 列出全部场景；
 // #/<场景>?theme=light|dark 打开一个场景；&play=1 按 16ms 一帧回放第一代的帧，否则直接应用全量；
-// &frame=N 回放到第 N 帧停住（流式中间帧要截图时用）。回放时右上角有控制条：暂停 / 继续、下一帧、帧号。
+// &frame=N 回放到第 N 帧停住（流式中间帧要截图时用）。#/characters 是全部形象 × 表情一览（不是录像）。回放时右上角有控制条：暂停 / 继续、下一帧、帧号。
 // 操作不发给任何后台：只在右下角显示最后一次操作，并回「受理」。
 import { create } from "@bufbuild/protobuf";
 import { createSignal, For, Show } from "solid-js";
@@ -12,13 +12,17 @@ import type { Host } from "../host";
 import { App } from "../shell/App";
 import { decodeFrames, type FixtureEntry } from "../state/fixtures";
 import { createViewStore } from "../state/store";
+import { DESIGN_CATALOG } from "../ui/characters";
 import { createToaster } from "../ui/Toast";
 import { applyTheme } from "../ui/theme";
 import "../ui/theme";
+import { CharacterGallery } from "./CharacterGallery";
 import "./preview.css";
 
 const FIXTURES = "/fixtures/";
 const FRAME_MS = 16;
+/** 形象一览的路由名。假后台没有叫这个名字的场景（CharacterGallery.test.tsx 守着），否则那个场景会被它挡住。 */
+const GALLERY = "characters";
 const VIEW_DECLARATIONS = new Set(["setVisible", "setVisibleRows", "setFocused", "loadOlder"]);
 
 const root = document.getElementById("root");
@@ -92,6 +96,10 @@ async function main() {
     render(() => <Index entries={index} />, root!);
     return;
   }
+  if (name === GALLERY) {
+    render(() => <CharacterGallery catalog={DESIGN_CATALOG} />, root!);
+    return;
+  }
   const entry = index.find((e) => e.name === name);
   if (entry === undefined) throw new Error(`录像里没有场景 ${name}`);
   const store = createViewStore();
@@ -153,6 +161,20 @@ function Index(props: { entries: FixtureEntry[] }) {
       <p>每个场景是 client-core 对着假后台跑出的录像。浅色、深色各一个链接；加 &play=1 按帧回放，&frame=N 回放到第 N 帧停住。</p>
       <table>
         <tbody>
+          <tr>
+            <td>{GALLERY}</td>
+            <td>测试专用：全部形象 × 表情一览（直接读设计系统素材，不是录像）</td>
+            <td>
+              <a href={`#/${GALLERY}?theme=light`} onClick={() => setTimeout(() => location.reload(), 0)}>
+                浅色
+              </a>
+            </td>
+            <td>
+              <a href={`#/${GALLERY}?theme=dark`} onClick={() => setTimeout(() => location.reload(), 0)}>
+                深色
+              </a>
+            </td>
+          </tr>
           <For each={props.entries}>
             {(e) => (
               <tr>

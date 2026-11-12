@@ -675,6 +675,10 @@ pub fn command_accepted() -> CommandAccepted {
 pub fn query_get_conversation() -> Query {
     Query {
         kind: Some(query::Kind::GetConversation(GetConversation {
+            after_message_id: None,
+            around_seq: None,
+            before_seq: None,
+            after_seq: None,
             conversation_id: s(CONVERSATION),
             before_message_id: Some(s(MESSAGE)),
             limit: 50,
@@ -686,6 +690,7 @@ pub fn query_result_get_conversation() -> QueryResult {
     QueryResult {
         seq: 1003,
         kind: Some(query_result::Kind::GetConversation(GetConversationResult {
+            has_newer: false,
             conversation: Some(conversation_project()),
             messages: vec![message_assistant()],
             turns: vec![turn()],
@@ -1549,6 +1554,7 @@ pub fn query_result_get_conversation_full() -> QueryResult {
     QueryResult {
         seq: 1011,
         kind: Some(query_result::Kind::GetConversation(GetConversationResult {
+            has_newer: false,
             conversation: Some(conversation_titled()),
             messages: vec![Message {
                 created_seq: 1001,

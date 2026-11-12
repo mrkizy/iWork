@@ -25,9 +25,19 @@ protox = "0.10"
 serde_json = "1"
 thiserror = "2"
 ulid = { version = "3", default-features = false }
+# 本机时区（锚点的时间文字：今天显示时刻，更早显示日期）；已经经 gix-date 在依赖图里，同一版本
+jiff = "0.2.41"
 proptest = "1"
 pollster = "1"
 tauri = "2.12"
+# 客户端 macOS 上的 Dock 角标与跳动、退出菜单的 Option 替换项（T09 步 5a）：没有窗口时只能经 NSApp 做。
+# 与 tauri 带进来的同一版本，只开用到的几个类。
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSResponder", "NSMenu", "NSMenuItem"] }
+# 系统文件选择框（回形针、「重新定位」；T09 组 2b）。关默认 feature：Linux 走 gtk3、Windows 走 common-controls-v6
+# （产品负责人 2026-11-11 定）。
+rfd = { version = "=0.17.2", default-features = false, features = ["gtk3", "common-controls-v6"] }
 agent-client-protocol = "5.1"
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "sync", "time"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }

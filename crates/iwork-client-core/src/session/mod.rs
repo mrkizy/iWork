@@ -6,12 +6,15 @@
 //! - 断了 → 立即重拨，之后按 `Backoff` 退避；在飞视图查询表整张清空，每种用途从状态里重新算「还要再发」。
 //! - 网页取帧是一次长等待：没有可交的就挂着，状态变了或到了 16ms 再试。
 
+mod attention;
 pub mod dial;
 mod models;
+mod presence;
 pub mod reconnect;
+mod reminders;
 mod start;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -24,8 +27,10 @@ use tokio::time::Instant;
 use crate::attach;
 use crate::derive::Ctx;
 use crate::frame::{FrameEngine, Pull};
-use crate::intent::{self, Action, Effect, Local};
-use crate::store::{Connection, FollowUp, Item, QueryPurpose, Row, ScopeKind, Store, SummaryTable};
+use crate::intent::{self, Action, Effect, Local, Pick};
+use crate::store::{
+    Connection, FollowUp, Item, PageCursor, QueryPurpose, Row, ScopeKind, Store, SummaryTable,
+};
 use dial::{DialError, Dialer};
 use reconnect::{ReconnectState, Retry};
 
@@ -66,10 +71,14 @@ pub enum Request {
 pub enum ShellEvent {
     /// 窗口获得或失去焦点。
     Focused(bool),
-    /// 文件拖进窗口：Rust 侧拿到的绝对路径，附到当前可见的对话。
+    /// 正在往窗口里拖文件（拖进来为真，拖出去为假）：对话区显示「松开以添加」。
+    Dragging(bool),
+    /// 文件拖进窗口松开：Rust 侧拿到的绝对路径，附到当前可见的对话。拖动随之结束。
     Dropped(Vec<String>),
-    /// 点了系统通知：跳到那个对话（拿不到对话 id 时为 None，跳到最近一条待处理项）。
-    NotificationClicked(Option<String>),
+    /// 系统选择框的结果（回应 `Effect::PickPaths`）：选中的绝对路径，取消或弹不出来时为空。
+    Picked(Vec<String>),
+    /// 窗口开着还是关了（macOS 关窗不退进程，点 Dock 图标重新开窗；方案 2.8）。
+    WindowOpen(bool),
     /// 菜单「完全退出 iWork」：先让网页弹确认框。
     QuitRequested,
 }
@@ -95,6 +104,11 @@ enum Internal {
     },
     /// 拖入的附件处理完：错误说明或成功（None）。
     AttachDone(Option<String>),
+    /// 被叫到前台时要跳到哪（GetOpenTarget，见 reminders 模块）；没问到为 None。
+    OpenTarget {
+        epoch: u64,
+        result: Option<pb::GetOpenTargetResult>,
+    },
     /// 模型清单的附带查询回来了（见 models 模块）。错误为 None 表示连接断了，不算失败。
     ModelsLoaded {
         epoch: u64,
@@ -129,6 +143,8 @@ pub struct Stats {
     pub loop_turns: u64,
     /// 发出的视图查询条数。
     pub view_queries: u64,
+    /// 发出的 ReportPresence 条数。
+    pub presence_reports: u64,
 }
 
 pub struct Session<D: Dialer> {
@@ -155,8 +171,21 @@ pub struct Session<D: Dialer> {
     want_older: bool,
     want_tail: bool,
     list_append: bool,
-    pending_known: Option<BTreeSet<String>>,
-    notified: BTreeSet<String>,
+    /// Dock 角标与跳动（方案 2.8）。
+    attention: attention::Attention,
+    /// 窗口开着（macOS 关窗不退进程；方案 2.8）。
+    window_open: bool,
+    /// 这条连接上最后报过的在看哪；连上后为 None（先发一次当前值）。
+    presence_sent: Option<presence::Presence>,
+    /// 延后要报的在看哪与到期时刻（到来延后报）。
+    presence_due: Option<(Instant, presence::Presence)>,
+    /// 该问一次 GetOpenTarget 了（窗口获得焦点、启动后第一次连上）。
+    open_target_wanted: bool,
+    open_target_in_flight: bool,
+    /// 处理过的最大 token（只记在内存里）。
+    open_target_seen: u64,
+    /// 开着的系统选择框：选好以后做什么，以及网页那次操作还没回的受理结果。同一时刻最多一个。
+    pick: Option<(Pick, oneshot::Sender<pb::IntentAck>)>,
     stats: Stats,
     stats_tx: Option<tokio::sync::watch::Sender<Stats>>,
     /// 每条连接一个代次：内部任务的结果带着它，断线重连后迟到的旧结果对得上号才处理（审查 1/F-9）。
@@ -225,8 +254,14 @@ impl<D: Dialer> Session<D> {
             want_older: false,
             want_tail: false,
             list_append: false,
-            pending_known: None,
-            notified: BTreeSet::new(),
+            attention: attention::Attention::default(),
+            window_open: true,
+            presence_sent: None,
+            presence_due: None,
+            open_target_wanted: false,
+            open_target_in_flight: false,
+            open_target_seen: 0,
+            pick: None,
             stats: Stats::default(),
             stats_tx: None,
             conn_epoch: 0,
@@ -314,6 +349,7 @@ impl<D: Dialer> Session<D> {
                 (None, Some(_)) => None,
             });
             take(self.mark_read_due());
+            take(self.presence_due.as_ref().map(|d| d.0).filter(|t| *t > now));
             // 退避到期只表示「可以再发」，要不要发由 service 用同一个 now 判过了；没发就是用不着，
             // 只登记还没到期的，免得过期的退避项让主循环空转。
             for (until, _) in self.query_backoff.values() {
@@ -365,18 +401,36 @@ impl<D: Dialer> Session<D> {
         }
         if self.live() {
             let with_list = self.store.conversation_list.is_some();
+            // 打开的对话已经有锚点窗口：这一轮按它的中心一起重取（方案 2.9）
+            let anchors = self
+                .store
+                .open
+                .as_ref()
+                .filter(|t| t.anchors.window.is_some())
+                .map(|t| (t.conversation_id.clone(), t.anchors.center));
             if !self.backed_off("summary", now)
-                && let Some((round, tables)) = self.store.refresh.due(now.into_std(), with_list)
+                && let Some((round, tables)) =
+                    self.store
+                        .refresh
+                        .due_with(now.into_std(), with_list, anchors.is_some())
             {
                 self.stats.refresh_rounds += 1;
                 for table in tables {
-                    match table.query() {
-                        Some(q) => self.view_query(q, QueryPurpose::Summary { round, table }),
-                        None => self.send_list_query(Some(round)),
+                    match (table.query(), table, &anchors) {
+                        (Some(q), _, _) => {
+                            self.view_query(q, QueryPurpose::Summary { round, table });
+                        }
+                        (None, SummaryTable::Anchors, Some((cid, center))) => {
+                            let (q, p) = anchors_query(cid, *center, Some(round));
+                            self.view_query(q, p);
+                        }
+                        (None, _, _) => self.send_list_query(Some(round)),
                     }
                 }
             }
             self.wanted_queries();
+            self.serve_presence(now);
+            self.ask_open_target();
             self.want_models(now);
             self.advance_start();
             self.mark_read(now);
@@ -464,17 +518,32 @@ impl<D: Dialer> Session<D> {
 
     fn on_shell(&mut self, e: ShellEvent) {
         match e {
-            ShellEvent::Focused(f) => self.store.set_focused(f),
+            ShellEvent::Focused(f) => {
+                self.store.set_focused(f);
+                // 被系统通知叫到前台：问一次要跳到哪（方案 2.8）
+                if f {
+                    self.open_target_wanted = true;
+                }
+            }
+            ShellEvent::WindowOpen(open) => {
+                self.window_open = open;
+                if !open {
+                    self.store.set_focused(false);
+                }
+            }
+            ShellEvent::Dragging(on) => self.store.set_dragging(on),
+            ShellEvent::Picked(paths) => self.on_picked(paths),
             ShellEvent::Dropped(paths) => {
+                self.store.set_dragging(false);
                 let Some(cid) = self.store.visible.conversation_id.clone() else {
                     return;
                 };
                 let (tx, rx) = oneshot::channel();
                 self.on_attach(
-                    pb::ui_intent::Kind::AttachPaths(pb::AttachPaths {
+                    attach::Source::Paths {
                         conversation_id: cid,
                         paths,
-                    }),
+                    },
                     tx,
                 );
                 // 拖入没有回包可带错误：结果回来后放进输入框上方的提示。
@@ -485,25 +554,8 @@ impl<D: Dialer> Session<D> {
                     }
                 });
             }
-            ShellEvent::NotificationClicked(conv) => {
-                let target = conv
-                    .map(|c| (c, String::new()))
-                    .or_else(|| self.latest_pending_target());
-                if let Some((c, row)) = target {
-                    self.store.request_navigate(c, row);
-                }
-            }
             ShellEvent::QuitRequested => self.store.set_quit_requested(true),
         }
-    }
-
-    /// 最近一条有对话的待处理项：(对话, 行)。
-    fn latest_pending_target(&self) -> Option<(String, String)> {
-        self.store.summary.pending.iter().rev().find_map(|p| {
-            let c = crate::derive::pending_conversation(p)?.to_owned();
-            let row = crate::derive::pending::item_id(p)?.to_owned();
-            Some((c, row))
-        })
     }
 
     fn on_intent(&mut self, intent: pb::UiIntent, tx: oneshot::Sender<pb::IntentAck>) {
@@ -528,7 +580,58 @@ impl<D: Dialer> Session<D> {
                 let _ = tx.send(ok);
             }
             Action::Command(kind) => self.send_command(kind, Some(tx)),
-            Action::Attach(kind) => self.on_attach(kind, tx),
+            Action::AttachPasted(x) => self.on_attach(attach::Source::Pasted(x), tx),
+            Action::Pick(p) => self.open_picker(p, tx),
+        }
+    }
+
+    /// 请壳弹系统选择框。网页那次操作的受理结果留到选完、命令受理后再回（[`Self::on_picked`]）。
+    fn open_picker(&mut self, pick: Pick, tx: oneshot::Sender<pb::IntentAck>) {
+        let refuse = |code: &str, message: &str| pb::IntentError {
+            code: code.into(),
+            message: message.into(),
+            retryable: false,
+        };
+        let error = if self.pick.is_some() {
+            refuse("picker_open", "已经开着一个选择框")
+        } else if !self.live() {
+            // 选完了也发不出去：先别弹框
+            offline_error()
+        } else if self.effects.send(Effect::PickPaths(pick.kind())).is_err() {
+            refuse("no_shell", "弹不出选择框")
+        } else {
+            self.pick = Some((pick, tx));
+            return;
+        };
+        let _ = tx.send(pb::IntentAck { error: Some(error) });
+    }
+
+    /// 选择框的结果：按打开它时的用途发附件或重新定位；取消就只回受理结果。
+    fn on_picked(&mut self, paths: Vec<String>) {
+        let Some((pick, tx)) = self.pick.take() else {
+            tracing::warn!(target: "iwork_client", "收到选择结果，但没有开着的选择框，丢掉");
+            return;
+        };
+        let Some(first) = paths.first().cloned() else {
+            let _ = tx.send(pb::IntentAck { error: None });
+            return;
+        };
+        match pick {
+            Pick::Attachments { conversation_id } => self.on_attach(
+                attach::Source::Paths {
+                    conversation_id,
+                    paths,
+                },
+                tx,
+            ),
+            // 选文件夹的框只给一个路径
+            Pick::ProjectLocation { project_id } => self.send_command(
+                pb::command::Kind::RelocateProject(pb::RelocateProject {
+                    project_id,
+                    new_path: first,
+                }),
+                Some(tx),
+            ),
         }
     }
 
@@ -548,11 +651,46 @@ impl<D: Dialer> Session<D> {
                 conversation_id,
                 first,
                 last,
+                by_user,
             } => {
-                self.store.set_window(&conversation_id, first, last);
+                // 开发构建里把每次可见行上报打到 stderr（`pnpm -C client dev:fake` 时看「用户滚动」有没有报出 by_user；
+                // 组 2b 第 6 轮 UI 审查）。发布构建没有这一行
+                #[cfg(feature = "dev")]
+                eprintln!(
+                    "[dev] SetVisibleRows conversation={conversation_id} first={first} last={last} by_user={by_user}"
+                );
+                self.store
+                    .set_window(&conversation_id, first, last, by_user);
             }
             Local::LoadOlder(_) => self.want_older = true,
-            Local::JumpToLatest(_) => self.want_tail = true,
+            Local::JumpToLatest(cid) => {
+                // 跳到最新：等着的锚点跳转作废（方案 2.9 第 3 条）
+                if let Some(t) = self
+                    .store
+                    .open
+                    .as_mut()
+                    .filter(|t| t.conversation_id == cid)
+                {
+                    t.anchors.pending_jump = None;
+                }
+                self.want_tail = true;
+            }
+            Local::AnchorBrowse {
+                conversation_id,
+                key,
+            } => {
+                self.store.anchor_browse(&conversation_id, &key);
+            }
+            Local::JumpToAnchor {
+                conversation_id,
+                key,
+            } => {
+                self.store.jump_to_anchor(&conversation_id, &key);
+            }
+            Local::JumpRelative {
+                conversation_id,
+                delta,
+            } => self.store.jump_relative(&conversation_id, delta),
             Local::SetFocused(f) => self.store.set_focused(f),
             Local::LoadMoreConversations => {
                 self.list_append = true;
@@ -693,40 +831,16 @@ impl<D: Dialer> Session<D> {
         });
     }
 
-    fn on_attach(&mut self, kind: pb::ui_intent::Kind, tx: oneshot::Sender<pb::IntentAck>) {
+    fn on_attach(&mut self, source: attach::Source, tx: oneshot::Sender<pb::IntentAck>) {
         let Some(client) = self.client.clone().filter(|_| self.live()) else {
             let _ = tx.send(pb::IntentAck {
-                error: Some(pb::IntentError {
-                    code: "offline".into(),
-                    message: "正在重新连接，连上后再试".into(),
-                    retryable: true,
-                }),
+                error: Some(offline_error()),
             });
             return;
         };
         // 附件按批发：不进在飞命令表（断线就整批作废，用户重新添加）。
-        let uploads: Result<(Vec<pb::Chunk>, Vec<pb::UploadAttachment>), pb::IntentError> =
-            match kind {
-                pb::ui_intent::Kind::AttachPaths(x) => {
-                    attach::path_commands(&x.conversation_id, &x.paths).map(|c| (Vec::new(), c))
-                }
-                pb::ui_intent::Kind::AttachPasted(x) => {
-                    attach::check_size(&x.name, x.data.len() as u64).map(|()| {
-                        let upload_id = ulid::Ulid::generate().to_string();
-                        let chunks = attach::chunks(&upload_id, &x.data);
-                        let cmd = pb::UploadAttachment {
-                            conversation_id: x.conversation_id,
-                            name: x.name,
-                            mime: x.mime,
-                            source: Some(pb::upload_attachment::Source::UploadId(upload_id)),
-                        };
-                        (chunks, vec![cmd])
-                    })
-                }
-                _ => return,
-            };
-        let (chunks, commands) = match uploads {
-            Ok(x) => x,
+        let attach::Batch { chunks, commands } = match attach::batch(source) {
+            Ok(b) => b,
             Err(e) => {
                 let _ = tx.send(pb::IntentAck { error: Some(e) });
                 return;
@@ -815,6 +929,7 @@ impl<D: Dialer> Session<D> {
                 runtime_id,
                 result,
             } => self.on_models(epoch, &runtime_id, result),
+            Internal::OpenTarget { epoch, result } => self.on_open_target(epoch, result),
             Internal::QueryFailed { epoch, request_id } => {
                 if epoch != self.conn_epoch {
                     // 旧连接上的查询：那条连接关闭时在飞表已整张清空，这里对不上号，不能删新连接的同号项。
@@ -828,6 +943,7 @@ impl<D: Dialer> Session<D> {
                         p,
                         QueryPurpose::Summary { .. }
                             | QueryPurpose::ConversationList { round: Some(_), .. }
+                            | QueryPurpose::Anchors { round: Some(_), .. }
                     ) {
                         self.store.refresh.abandon_round();
                     }
@@ -897,28 +1013,20 @@ impl<D: Dialer> Session<D> {
                 .subscription_of(&ScopeKind::Conversation(cid.clone()))
                 .and_then(|id| self.store.view_state(id))
                 == Some(crate::store::ViewState::Ready);
-            let window_at_top = match (self.store.window, tl.identities().first()) {
-                (Some((first, _)), Some((k, _))) => first <= k.ordinal(),
-                _ => false,
-            };
+            // 和 store 判断「翻页结果合不合并」用同一个条件（方案 2.2 第 4 条、2.3）
+            let window_at_top = self.store.window_touches_oldest();
             if ready
                 && tl.has_older
                 && (self.want_older || window_at_top)
-                && let Some(oldest) = tl.oldest_message_id()
+                && let Some(before) = tl.older_cursor()
                 && !self.backed_off("older", now)
                 && !self.in_flight(|p| matches!(p, QueryPurpose::OlderPage { .. }))
             {
                 want.push((
-                    pb::Query {
-                        kind: Some(Q::GetConversation(pb::GetConversation {
-                            conversation_id: cid.clone(),
-                            before_message_id: Some(oldest.to_owned()),
-                            limit: PAGE_SIZE,
-                        })),
-                    },
+                    page_query(&cid, Side::Older, &before),
                     QueryPurpose::OlderPage {
                         conversation_id: cid.clone(),
-                        before: oldest.to_owned(),
+                        before,
                     },
                 ));
             }
@@ -931,12 +1039,65 @@ impl<D: Dialer> Session<D> {
                 want.push((
                     latest_page(&cid),
                     QueryPurpose::LatestPage {
-                        conversation_id: cid,
+                        conversation_id: cid.clone(),
                     },
                 ));
             }
             if tl.at_tail {
                 self.want_tail = false;
+            }
+            // 往下翻到这一段的末尾、而后面还有（跳到旧处之后）：往后翻一页，接到最新就回到 at_tail（G11）
+            let window_at_bottom = self.store.window_touches_newest();
+            if ready
+                && !tl.at_tail
+                && window_at_bottom
+                && !self.want_tail
+                && let Some(after) = tl.newer_cursor()
+                && !self.backed_off("newer", now)
+                && !self.in_flight(|p| matches!(p, QueryPurpose::NewerPage { .. }))
+            {
+                want.push((
+                    page_query(&cid, Side::Newer, &after),
+                    QueryPurpose::NewerPage {
+                        conversation_id: cid.clone(),
+                        after,
+                    },
+                ));
+            }
+            // 跳到没加载的锚点：取以它为中心的一段
+            if ready
+                && let Some(j) = &tl.anchors.pending_jump
+                && !self.backed_off("around", now)
+                && !self.in_flight(|p| matches!(p, QueryPurpose::AroundPage { seq, .. } if *seq == j.anchor.created_seq))
+            {
+                let seq = j.anchor.created_seq;
+                want.push((
+                    pb::Query {
+                        kind: Some(Q::GetConversation(pb::GetConversation {
+                            after_message_id: None,
+                            around_seq: Some(seq),
+                            before_seq: None,
+                            after_seq: None,
+                            conversation_id: cid.clone(),
+                            before_message_id: None,
+                            limit: crate::store::anchors::JUMP_PAGE,
+                        })),
+                    },
+                    QueryPurpose::AroundPage {
+                        conversation_id: cid.clone(),
+                        seq,
+                    },
+                ));
+            }
+            // 锚点窗口：还没取过、或要换中心时单独取；过时的重取进摘要重查轮（service 里）
+            if ready
+                && let Some(center) = tl.anchors.wanted_center()
+                && !self.backed_off("anchors", now)
+                && !self.in_flight(
+                    |p| matches!(p, QueryPurpose::Anchors { center: c, .. } if *c == center),
+                )
+            {
+                want.push(anchors_query(&cid, center, None));
             }
         }
         if self.store.visible.settings
@@ -1158,6 +1319,10 @@ impl<D: Dialer> Session<D> {
     fn drop_connection(&mut self, why: &str) {
         tracing::info!(target: "iwork_client", why, "与后台服务的连接断了");
         self.client = None;
+        // 在看哪是连接级状态：断了就算没人在看，重新连上后发一次当前值；不重发旧值
+        self.presence_sent = None;
+        self.presence_due = None;
+        self.open_target_in_flight = false;
         self.incoming = None;
         self.queries.clear();
         // 查询退避属于出错的那条连接：新连接从头来（审查 2/F-3）。
@@ -1173,8 +1338,8 @@ impl<D: Dialer> Session<D> {
                 return;
             }
         };
-        let (applied, from_refresh) = match item {
-            IncomingItem::Event(e) => (self.store.apply(Item::Event(e)), false),
+        let applied = match item {
+            IncomingItem::Event(e) => self.store.apply(Item::Event(e)),
             IncomingItem::ViewResult { request_id, result } => {
                 let Some(purpose) = self.queries.remove(&request_id) else {
                     tracing::warn!(target: "iwork_client", request_id, "查询结果没有登记的用途，丢掉");
@@ -1184,23 +1349,10 @@ impl<D: Dialer> Session<D> {
                     self.want_older = false;
                 }
                 self.query_succeeded(purpose_kind(&purpose));
-                let refresh = matches!(
-                    purpose,
-                    QueryPurpose::Summary {
-                        table: SummaryTable::Pending,
-                        ..
-                    }
-                );
-                (
-                    self.store.apply(Item::ViewResult { purpose, result }),
-                    refresh,
-                )
+                self.store.apply(Item::ViewResult { purpose, result })
             }
             IncomingItem::Subscribed { subscribed, .. } => {
-                let a = self.store.apply(Item::Subscribed(subscribed));
-                // 快照带来的待处理项不发通知：只记为已知。
-                self.pending_known = Some(self.pending_ids());
-                (a, false)
+                self.store.apply(Item::Subscribed(subscribed))
             }
             IncomingItem::ServerError(e) => {
                 tracing::warn!(target: "iwork_client", code = e.code, message = %e.message, "后台服务主动报错");
@@ -1211,8 +1363,9 @@ impl<D: Dialer> Session<D> {
                 return;
             }
         };
-        if from_refresh {
-            self.notify_new_pending();
+        // 待处理表整份换过（摘要重查的那一条、快照）：更新 Dock 角标与跳动
+        if self.store.take_pending_replaced() {
+            self.pending_replaced();
         }
         if applied.had_seq {
             self.backoff = Backoff::new();
@@ -1222,6 +1375,10 @@ impl<D: Dialer> Session<D> {
         for f in applied.follow_ups {
             match f {
                 FollowUp::AllReady => {
+                    // 启动后第一次连上：问一次是不是被系统通知叫起来的（方案 2.8）
+                    if !self.ever_live {
+                        self.open_target_wanted = true;
+                    }
                     self.ever_live = true;
                     self.store.set_connection(Connection::Live);
                 }
@@ -1244,43 +1401,6 @@ impl<D: Dialer> Session<D> {
         }
     }
 
-    fn pending_ids(&self) -> BTreeSet<String> {
-        self.store
-            .summary
-            .pending
-            .iter()
-            .filter_map(|p| crate::derive::pending::item_id(p).map(str::to_owned))
-            .collect()
-    }
-
-    /// 系统通知（D6）：摘要重查后待处理表比上一次多出的项，窗口不在前台或那个对话不可见时发；每个 id 一次。
-    fn notify_new_pending(&mut self) {
-        let now_ids = self.pending_ids();
-        let Some(known) = self.pending_known.replace(now_ids.clone()) else {
-            return;
-        };
-        for item in &self.store.summary.pending {
-            let Some(id) = crate::derive::pending::item_id(item) else {
-                continue;
-            };
-            if known.contains(id) || self.notified.contains(id) {
-                continue;
-            }
-            let conv = crate::derive::pending_conversation(item).map(str::to_owned);
-            let looking =
-                self.store.focused && conv.is_some() && conv == self.store.visible.conversation_id;
-            if looking {
-                continue;
-            }
-            self.notified.insert(id.to_owned());
-            let _ = self.effects.send(Effect::Notify {
-                title: "iWork 需要你处理".into(),
-                body: crate::derive::pending::item_title(&self.store, item),
-                conversation_id: conv,
-            });
-        }
-    }
-
     // ---------- 测试与基准用的只读口 ----------
 
     pub fn store(&self) -> &Store {
@@ -1292,9 +1412,41 @@ impl<D: Dialer> Session<D> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Side {
+    Older,
+    Newer,
+}
+
+/// 往前 / 往后翻一页的查询（方案 2.2 第 4 条）：游标是消息 id 时按消息数取一页（[`PAGE_SIZE`] 条）；是边界 seq 时
+/// 用行级游标按行数取（[`crate::store::ROW_PAGE`] 行，合并时挑的也是这么多行）。
+fn page_query(cid: &str, side: Side, cursor: &PageCursor) -> pb::Query {
+    let mut g = pb::GetConversation {
+        conversation_id: cid.to_owned(),
+        ..Default::default()
+    };
+    match (side, cursor) {
+        (Side::Older, PageCursor::Message(id)) => g.before_message_id = Some(id.clone()),
+        (Side::Newer, PageCursor::Message(id)) => g.after_message_id = Some(id.clone()),
+        (Side::Older, PageCursor::Seq(seq)) => g.before_seq = Some(*seq),
+        (Side::Newer, PageCursor::Seq(seq)) => g.after_seq = Some(*seq),
+    }
+    g.limit = match cursor {
+        PageCursor::Message(_) => PAGE_SIZE,
+        PageCursor::Seq(_) => crate::store::ROW_PAGE,
+    };
+    pb::Query {
+        kind: Some(pb::query::Kind::GetConversation(g)),
+    }
+}
+
 fn latest_page(cid: &str) -> pb::Query {
     pb::Query {
         kind: Some(pb::query::Kind::GetConversation(pb::GetConversation {
+            after_message_id: None,
+            around_seq: None,
+            before_seq: None,
+            after_seq: None,
             conversation_id: cid.to_owned(),
             before_message_id: None,
             limit: PAGE_SIZE,
@@ -1364,9 +1516,29 @@ async fn sleep_until(deadline: Option<Instant>) {
 fn offline_error() -> pb::IntentError {
     pb::IntentError {
         code: "offline".into(),
-        message: "正在重新连接，连上后再试".into(),
+        message: crate::derive::text::OFFLINE_TRY_LATER.into(),
         retryable: true,
     }
+}
+
+/// 锚点窗口查询：以 `center` 为中心前后各取 `ANCHOR_SPAN` 条。
+fn anchors_query(cid: &str, center: u64, round: Option<u64>) -> (pb::Query, QueryPurpose) {
+    use crate::store::anchors::ANCHOR_SPAN;
+    (
+        pb::Query {
+            kind: Some(pb::query::Kind::ListAnchors(pb::ListAnchors {
+                conversation_id: cid.to_owned(),
+                around_seq: center,
+                before: ANCHOR_SPAN,
+                after: ANCHOR_SPAN,
+            })),
+        },
+        QueryPurpose::Anchors {
+            conversation_id: cid.to_owned(),
+            center,
+            round,
+        },
+    )
 }
 
 fn purpose_kind(p: &QueryPurpose) -> &'static str {
@@ -1377,5 +1549,8 @@ fn purpose_kind(p: &QueryPurpose) -> &'static str {
         QueryPurpose::Rules => "rules",
         QueryPurpose::LocalConfig { .. } => "local_config",
         QueryPurpose::ConversationList { .. } => "list",
+        QueryPurpose::Anchors { .. } => "anchors",
+        QueryPurpose::NewerPage { .. } => "newer",
+        QueryPurpose::AroundPage { .. } => "around",
     }
 }

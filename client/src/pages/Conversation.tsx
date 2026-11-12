@@ -1,8 +1,13 @@
 // 对话页（画布 04、10、15）：标题栏（标题、本对话用量）、提示条、时间线（虚拟行）、回到最新、输入框。
 // 还没有消息的对话显示和首页一样的「要做点什么？」。整页说明（如「数据不完整」）设了就不显示行。
-import { Show } from "solid-js";
+// 拖文件进窗口时整块对话区盖一层虚线框（文字由 Rust 给，没在拖时不设）。
+// 消息锚点（2a 第 11 条）：内容超出一屏才显示。宽形态（主区域 ≥ 600px）是左边距里的导轨，窄形态是标题栏最右端的按钮
+// 加弹出面板（形态按主区域宽度判断、有回差，见 anchor/layout.ts）；⌥↑ / ⌥↓ 两种形态都不经滚轮直接逐处跳。
+import { createSignal, onCleanup, onMount, Show } from "solid-js";
+import { AnchorButton } from "../anchor/AnchorButton";
+import { AnchorRail } from "../anchor/AnchorRail";
+import { nextNarrow } from "../anchor/layout";
 import { Composer } from "../composer/Composer";
-import { BlockAction } from "../gen/iwork/v1/view_pb";
 import { useHost } from "../host";
 import { RowView } from "../rows/RowView";
 import { Button } from "../ui/Button";
@@ -17,8 +22,38 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
   const header = () => conv()?.header;
   const win = () => conv()?.window;
   const empty = () => (conv()?.order.length ?? 0) === 0 && !win()?.hasOlder;
+  const [overflow, setOverflow] = createSignal(false);
+  const [narrow, setNarrow] = createSignal(false);
+  let page!: HTMLDivElement;
+  onMount(() => {
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width;
+      if (width !== undefined && width > 0) setNarrow((was) => nextNarrow(was, width));
+    });
+    observer.observe(page);
+    onCleanup(() => observer.disconnect());
+  });
+  const anchors = () => conv()?.anchors;
+  /** 有锚点、内容又超出一屏时才给锚点（两种形态同一个条件）。 */
+  const shownAnchors = () => (overflow() && (anchors()?.items.length ?? 0) > 0 ? anchors() : undefined);
+  const jumpTo = (key: string) => void host.act({ case: "jumpToAnchor", value: { conversationId: props.id, key } });
+  const browseAt = (key: string) => void host.act({ case: "anchorBrowse", value: { conversationId: props.id, key } });
+  const scrollTo = () => {
+    const s = conv()?.scrollTo;
+    return s && { rowKey: s.rowKey, token: s.token, highlightMs: s.highlightMs };
+  };
+  // ⌥↑ / ⌥↓：焦点在输入框里时是系统的光标移动，不抢
+  const onKey = (e: KeyboardEvent) => {
+    if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+    const t = e.target as HTMLElement | null;
+    if (t && (t.isContentEditable || t.tagName === "TEXTAREA" || t.tagName === "INPUT")) return;
+    e.preventDefault();
+    void host.act({ case: "jumpRelative", value: { conversationId: props.id, delta: e.key === "ArrowUp" ? -1 : 1 } });
+  };
+  onMount(() => document.addEventListener("keydown", onKey));
+  onCleanup(() => document.removeEventListener("keydown", onKey));
   return (
-    <div class="iw-conv-page">
+    <div ref={page} class={`iw-conv-page${narrow() ? "" : " iw-conv-page--wide"}`}>
       <div class="iw-conv-header">
         <span class="iw-conv-header__title">{header()?.title}</span>
         <Show when={header()?.usageText}>
@@ -27,6 +62,9 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
               {u()}
             </span>
           )}
+        </Show>
+        <Show when={narrow() && shownAnchors()}>
+          {(a) => <AnchorButton anchors={a()} currentKey={conv()?.anchorKey} onJump={jumpTo} onBrowse={browseAt} />}
         </Show>
       </div>
       <Show when={header()?.notice}>
@@ -57,14 +95,22 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
               atTail={win()?.atTail ?? true}
               hasOlder={win()?.hasOlder ?? false}
               resetToken={conv()?.resets ?? 0}
+              scrollTo={scrollTo()}
+              onOverflow={setOverflow}
               renderRow={(k) => (
                 <Show when={conv()?.rows[k]}>{(r) => <RowView row={r()} />}</Show>
               )}
-              onVisible={(first, last) =>
-                void host.act({ case: "setVisibleRows", value: { conversationId: props.id, firstOrdinal: first, lastOrdinal: last } })
+              onVisible={(first, last, byUser) =>
+                void host.act({
+                  case: "setVisibleRows",
+                  value: { conversationId: props.id, firstOrdinal: first, lastOrdinal: last, byUser },
+                })
               }
               onReachOldest={() => void host.act({ case: "loadOlder", value: { conversationId: props.id } })}
             />
+            <Show when={!narrow() && shownAnchors()}>
+              {(a) => <AnchorRail anchors={a()} currentKey={conv()?.anchorKey} onJump={jumpTo} onBrowse={browseAt} />}
+            </Show>
             <Show when={(win()?.newBelow ?? 0) > 0}>
               <Button
                 class="iw-jump"
@@ -77,12 +123,20 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
           </div>
         </Show>
       </Show>
+      <Show when={header()?.dropHint}>
+        {(hint) => (
+          <div class="iw-drop" role="status">
+            <Icon name="paperclip" />
+            {hint()}
+          </div>
+        )}
+      </Show>
       <Composer
         target={{ kind: "conversation", id: props.id }}
         composer={conv()?.composer}
         draftKey={props.id}
-        // 「查看详情」去设置 › 运行时；「重新定位」要系统的文件夹选择框，还没接（按钮置灰）
-        blockAction={(a) => (a === BlockAction.OPEN_RUNTIME_DETAILS ? props.openRuntimeDetails : undefined)}
+        projectId={header()?.projectId || undefined}
+        openRuntimeDetails={props.openRuntimeDetails}
       />
     </div>
   );

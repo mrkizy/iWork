@@ -44,7 +44,9 @@ export function App(props: { host: Host; toasts: Component; initialRoute?: Route
     if (n === undefined || n.seq <= navigated()) return;
     setNavigated(n.seq);
     if (n.startedProjectId !== undefined) setDraft(HOME_DRAFT + n.startedProjectId, "");
-    router.go({ page: "conversation", id: n.conversationId, rowKey: n.rowKey || undefined });
+    // 被系统通知叫到前台、那一项没有对话归属：打开「待你处理」页（方案 2.8）
+    if (n.pendingList) router.go({ page: "pending" });
+    else router.go({ page: "conversation", id: n.conversationId, rowKey: n.rowKey || undefined });
   });
 
   createEffect(() => applyPlayful(host.view.settings?.playfulUi ?? true));
@@ -81,7 +83,7 @@ export function App(props: { host: Host; toasts: Component; initialRoute?: Route
             <ConnectionBar />
             <Switch fallback={<div class="iw-placeholder">这一页在下一组实现</div>}>
               <Match when={home(p.router.route())}>
-                <HomePage />
+                <HomePage openRuntimeDetails={() => p.router.go({ page: "settings" })} />
               </Match>
               <Match when={conversation(p.router.route())}>{(r) => (
                   <ConversationPage id={r().id} rowKey={r().rowKey} openRuntimeDetails={() => p.router.go({ page: "settings" })} />

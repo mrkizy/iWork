@@ -17,7 +17,7 @@ pub mod store;
 use iwork_proto::pb;
 use tokio::sync::{mpsc, oneshot, watch};
 
-pub use intent::Effect;
+pub use intent::{Effect, PickKind};
 pub use session::dial::{DialError, Dialer, DirectDialer};
 pub use session::{Clock, FrameError, Request, ShellEvent, Stats, tokio_clock};
 

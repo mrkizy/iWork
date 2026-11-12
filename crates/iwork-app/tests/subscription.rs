@@ -58,6 +58,10 @@ fn scope_table() -> Vec<(pb::SubscriptionScope, Vec<StreamKey>, Vec<pb::Query>)>
                 query(Q::GetConversation(pb::GetConversation {
                     conversation_id: "c1".into(),
                     before_message_id: None,
+                    after_message_id: None,
+                    around_seq: None,
+                    before_seq: None,
+                    after_seq: None,
                     limit: CONVERSATION_SNAPSHOT_PAGE_SIZE,
                 })),
                 query(Q::ListPendingItems(pb::ListPendingItems {})),

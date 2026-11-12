@@ -23,7 +23,8 @@ struct H {
     daemon: FakeDaemon,
     app: App,
     web: Web,
-    effects: mpsc::UnboundedReceiver<Effect>,
+    /// 留着接收端：效果通道关了会话照样跑，但留着更像真壳。效果的用例在 reminders.rs。
+    _effects: mpsc::UnboundedReceiver<Effect>,
     _dir: tempfile::TempDir,
 }
 
@@ -59,7 +60,7 @@ async fn start(scenarios: &[&str]) -> H {
         daemon,
         app,
         web,
-        effects,
+        _effects: effects,
         _dir: dir,
     }
 }
@@ -209,6 +210,7 @@ async fn inflight_command_resent_once() {
             conversation_id: "c-basic".into(),
             before_message_id: None,
             limit: 200,
+            ..Default::default()
         })),
     });
     let Some(pb::query_result::Kind::GetConversation(r)) = page.kind else {
@@ -313,34 +315,6 @@ async fn mark_read_when_visible_and_focused() {
     assert!(has_unread(&h.web.state), "对照：没聚焦前有未读");
     ok(&h.app, I::SetFocused(pb::SetFocused { focused: true })).await;
     until(&h.app, &mut h.web, "徽标归零", |s| !has_unread(s)).await;
-}
-
-/// 系统通知：窗口不在前台时新出现的待处理项发一次，之后不重复；启动快照带来的不发。
-#[tokio::test(flavor = "multi_thread")]
-async fn notify_once_per_item() {
-    let mut h = start(&["approval-states"]).await;
-    ok(&h.app, visible(None).kind.unwrap()).await;
-    settle(&h.app, &mut h.web).await;
-    assert!(
-        h.effects.try_recv().is_err(),
-        "启动快照里的待处理项不发通知"
-    );
-    h.daemon.append(f::approval(
-        "ap-new",
-        "c-approval",
-        "t-approval",
-        f::command_action("rm -rf build"),
-        pb::ApprovalKind::Ask,
-        &[],
-    ));
-    let e = timeout(WAIT, h.effects.recv()).await.unwrap().unwrap();
-    assert!(matches!(e, Effect::Notify { conversation_id: Some(ref c), .. } if c == "c-approval"));
-    // 再来几个不相干的事件触发重查：不重复通知。
-    for _ in 0..3 {
-        h.daemon.append(f::conversation_read("c-approval", 0));
-        settle(&h.app, &mut h.web).await;
-    }
-    assert!(h.effects.try_recv().is_err());
 }
 
 /// 在飞查询表：发出后断线，重连后每种用途最终对齐（翻页、规则页、「全部对话」）。

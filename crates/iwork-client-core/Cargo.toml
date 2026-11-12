@@ -12,6 +12,7 @@ iwork-proto.workspace = true
 bytes.workspace = true
 prost.workspace = true
 prost-types.workspace = true
+jiff.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tracing.workspace = true
 ulid = { workspace = true, features = ["std"] }

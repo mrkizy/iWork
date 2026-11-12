@@ -76,6 +76,7 @@ pub fn command_name(command: &Kind) -> &'static str {
         Kind::SetPlayfulUi(_) => "set_playful_ui",
         Kind::SetAutostart(_) => "set_autostart",
         Kind::ShutdownDaemon(_) => "shutdown_daemon",
+        Kind::ReportPresence(_) => "report_presence",
     }
 }
 

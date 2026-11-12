@@ -60,6 +60,8 @@ pub enum ClientAct {
     ReadOldest,
     /// 拖入一个超过 20MB 的文件（输入框上方出现原因）。
     DropOversized,
+    /// 文件拖进窗口、还没松开（对话区出现「松开以添加」虚线框）。
+    DragHover,
 }
 
 impl Scenario {
@@ -170,6 +172,51 @@ pub const REGISTRY: &[Scenario] = &[
         about: "回合失败：一开始就失败（空的失败消息）、输出一部分后失败（ui-m1.md 2a 第 10 条）",
         focus: Some("c-turn-failed"),
         build: turn_failed,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "anchors-basic",
+        about: "消息锚点：用户消息、等你处理、失败的回合三种都有（T09 方案 2.9）",
+        focus: Some("c-anchors"),
+        build: anchors_basic,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "long-tool-turn",
+        about: "长工具回合：一个回合 400 次工具调用、中间一个待审批（等你处理的锚点），前后各一问一答；上限调小时两端都会被裁",
+        focus: Some("c-long-tools"),
+        build: long_tool_turn,
+        characters: &[],
+        client: &[],
+        timeline_cap: Some(60),
+    },
+    Scenario {
+        name: "anchors-unloaded",
+        about: "消息锚点：对话很长，最早的几处不在打开时加载的那一页里",
+        focus: Some("c-anchors-long"),
+        build: anchors_unloaded,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "anchors-short",
+        about: "消息锚点：一屏看得完（组件不显示）",
+        focus: Some("c-anchors-short"),
+        build: anchors_short,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "anchors-single",
+        about: "消息锚点：只有一处（上下都回弹）",
+        focus: Some("c-anchors-single"),
+        build: anchors_single,
         characters: &[],
         client: &[],
         timeline_cap: None,
@@ -291,6 +338,15 @@ pub const REGISTRY: &[Scenario] = &[
         timeline_cap: None,
     },
     Scenario {
+        name: "dock-drill-preview-only",
+        about: "演练用：客户端开着 15 秒后来一条审批（关窗后看 Dock 角标与跳动，T09 验收 9）。`pnpm -C client dev:fake dock-drill-preview-only`",
+        build: dock_drill,
+        focus: Some("c-approval"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
         name: "back-to-latest-notice",
         about: "Q9：停在旧消息上时断线、重连给的是快照：回到最新并提示「已重新连接，回到最新」",
         build: back_to_latest_notice,
@@ -369,6 +425,15 @@ pub const REGISTRY: &[Scenario] = &[
         focus: Some("c-attach"),
         characters: &[],
         client: &[ClientAct::DropOversized],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "drop-overlay",
+        about: "文件拖进窗口、还没松开：整块对话区的虚线框「松开以添加」",
+        build: drop_overlay,
+        focus: Some("c-drop"),
+        characters: &[],
+        client: &[ClientAct::DragHover],
         timeline_cap: None,
     },
     Scenario {
@@ -725,6 +790,165 @@ fn turn_failed() -> Vec<Step> {
         pb::MessageStatus::Failed,
     )));
     s.push(a(f::turn_finished("t-mid", T::Failed, false, None)));
+    s
+}
+
+/// 锚点场景用的一问一答，回合正常结束。
+fn finished_exchange(conv: &str, n: &str, question: &str, answer: &str) -> Vec<Step> {
+    let mut s = exchange(conv, n, question, answer);
+    s.push(a(f::turn_finished(
+        &format!("t-{n}"),
+        T::Completed,
+        false,
+        None,
+    )));
+    s
+}
+
+fn anchors_basic() -> Vec<Step> {
+    let c = "c-anchors";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    for i in 0..12 {
+        s.extend(finished_exchange(
+            c,
+            &format!("ab{i:02}"),
+            &format!("第 {i} 个问题：退款接口要不要加幂等"),
+            &format!("第 {i} 个回答。先看存储层，再看中间件挂载点。"),
+        ));
+    }
+    // 失败的回合：输出一部分后失败
+    s.extend(exchange(c, "ab-fail", "再跑一遍集成测试", "开始跑……"));
+    s.push(a(f::turn_state(
+        "t-ab-fail",
+        T::Running,
+        T::Failed,
+        Some("模型暂时不可用"),
+    )));
+    s.push(a(f::message_ended(
+        c,
+        "m-ab-fail-a",
+        "开始跑……",
+        pb::MessageStatus::Failed,
+    )));
+    s.push(a(f::turn_finished("t-ab-fail", T::Failed, false, None)));
+    for i in 12..16 {
+        s.extend(finished_exchange(
+            c,
+            &format!("ab{i:02}"),
+            &format!("第 {i} 个问题"),
+            "好的。",
+        ));
+    }
+    // 等你处理：最后一轮停在审批上
+    s.push(a(f::user_message("m-ab-wait-u", c, "提交并推到远端")));
+    s.push(a(f::turn_queued("t-ab-wait", c, IWORK)));
+    s.push(a(f::turn_state("t-ab-wait", T::Queued, T::Running, None)));
+    s.push(a(f::approval(
+        "ap-ab-wait",
+        c,
+        "t-ab-wait",
+        f::command_action("git push origin main"),
+        pb::ApprovalKind::Ask,
+        &[],
+    )));
+    s.push(a(f::turn_state(
+        "t-ab-wait",
+        T::Running,
+        T::WaitingApproval,
+        None,
+    )));
+    s
+}
+
+/// 一页取不完：打开时只加载最新 50 条消息，最早的用户消息在那一页之外。
+pub const ANCHORS_LONG_EXCHANGES: usize = 120;
+
+fn anchors_unloaded() -> Vec<Step> {
+    let c = "c-anchors-long";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    for i in 0..ANCHORS_LONG_EXCHANGES {
+        s.extend(finished_exchange(
+            c,
+            &format!("al{i:03}"),
+            &format!("第 {i} 轮：把第 {i} 个模块的日志改成结构化的"),
+            "改好了。",
+        ));
+    }
+    s
+}
+
+fn long_tool_turn() -> Vec<Step> {
+    let c = "c-long-tools";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(finished_exchange(
+        c,
+        "lt-first",
+        "先看下 README",
+        "看过了。",
+    ));
+    s.push(a(f::user_message(
+        "m-lt-q",
+        c,
+        "把整个仓库的测试全跑一遍，一个一个模块来",
+    )));
+    s.push(a(f::turn_queued("t-lt", c, IWORK)));
+    s.push(a(f::turn_state("t-lt", T::Queued, T::Running, None)));
+    for i in 0..400 {
+        s.push(a(f::tool_started(
+            "t-lt",
+            &format!("lt-{i:03}"),
+            "Bash",
+            &format!("cargo test -p module-{i:03}"),
+        )));
+        s.push(a(f::tool_finished("t-lt", &format!("lt-{i:03}"), true)));
+        if i == 200 {
+            s.push(a(f::approval(
+                "ap-lt",
+                c,
+                "t-lt",
+                f::command_action("rm -rf target"),
+                pb::ApprovalKind::Ask,
+                &[],
+            )));
+        }
+    }
+    s.push(a(f::assistant_message(
+        "m-lt-a",
+        c,
+        "t-lt",
+        IWORK,
+        "全部跑完了",
+    )));
+    s
+}
+
+fn anchors_short() -> Vec<Step> {
+    let c = "c-anchors-short";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(finished_exchange(
+        c,
+        "as0",
+        "看下 README",
+        "看过了，写得挺清楚。",
+    ));
+    s.extend(finished_exchange(c, "as1", "那就这样", "好。"));
+    s
+}
+
+fn anchors_single() -> Vec<Step> {
+    let c = "c-anchors-single";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(finished_exchange(
+        c,
+        "asg",
+        "给我讲讲这个仓库的分层",
+        &"从上往下依次是入口、应用服务、编排核心、端口与适配器。\n".repeat(40),
+    ));
     s
 }
 
@@ -1155,6 +1379,33 @@ fn switch_rows() -> Vec<Step> {
     s
 }
 
+/// 演练 Dock：已有一条待审批；打开对话（开发入口起客户端）后等一段时间再来一条，期间关窗、切到别的应用。
+fn dock_drill() -> Vec<Step> {
+    let c = "c-approval";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(exchange(c, "dock", "清一下构建目录", "需要你批准。"));
+    s.push(a(f::approval(
+        "ap-dock-1",
+        c,
+        "t-dock",
+        f::command_action("rm -rf target"),
+        pb::ApprovalKind::Ask,
+        &[],
+    )));
+    s.push(Step::OpenHere);
+    s.push(Step::Sleep(Duration::from_secs(15)));
+    s.push(a(f::approval(
+        "ap-dock-2",
+        c,
+        "t-dock",
+        f::command_action("git push origin main"),
+        pb::ApprovalKind::Ask,
+        &[],
+    )));
+    s
+}
+
 /// 一段对话历史：n 轮一问一答（都已结束）。
 fn history(c: &str, tag: &str, n: usize) -> Vec<Step> {
     let mut s = Vec::new();
@@ -1242,6 +1493,14 @@ fn attachments_tray() -> Vec<Step> {
     s.push(Step::OpenHere);
     s.push(a(f::attachment("att-1", c, "设计稿.png", 345_678)));
     s.push(a(f::attachment("att-2", c, "接口说明.pdf", 2_345_678)));
+    s
+}
+
+fn drop_overlay() -> Vec<Step> {
+    let c = "c-drop";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    s.extend(history(c, "drop-", 2));
     s
 }
 

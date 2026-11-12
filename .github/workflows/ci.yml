@@ -158,10 +158,10 @@ jobs:
           cargo build --release --locked -p iwork-client
           scripts/check-no-dev-trust.sh --artifacts "target/release/iwork-client${exe}"
 
-  # 前端：类型检查与 vitest。从 test 拆出来单独跑，和 Rust 测试并行，各有各的时限（与 T09 分支 fed3802 的拆法一致，
-  #   T09 合入时以它的 frontend job 为准，它另加了对着假后台录场景的步骤）。
+  # 前端：类型检查与 vitest。从 test 拆出来单独跑，和 Rust 测试并行，各有各的时限。
+  #   pnpm test 先 gen、再编译假后台录场景（fixtures）、再跑 vitest，所以这里要 rust-cache。
   frontend:
-    # ubuntu 上前端三步约 4 分钟（run 43210134953）；留足余量
+    # 最长一次（ubuntu，run 43156265818）前端测试 6.4 分钟，加上单独编译录像程序；留足余量
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -173,6 +173,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
       - uses: pnpm/action-setup@v4
         with:
           # 版本取 client/package.json 的 packageManager 字段

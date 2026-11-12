@@ -23,6 +23,14 @@ export function fixtureEntry(name: string): FixtureEntry {
   return e;
 }
 
+/** 只把一个场景的全量帧读进 store，不渲染（单独测某个组件时取数据用）。 */
+export function loadScenario(name: string) {
+  fixtureEntry(name);
+  const store = createViewStore();
+  for (const p of decodeFrames(new Uint8Array(readFileSync(`${DIR}${name}.full.binpb`)))) store.applyPatch(p);
+  return store;
+}
+
 /** 渲染一个场景的全量帧；返回发出的操作记录。 */
 export function renderScenario(name: string, route?: Route) {
   const entry = fixtureEntry(name);

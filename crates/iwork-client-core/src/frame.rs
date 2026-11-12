@@ -220,7 +220,7 @@ impl FrameEngine {
                     .map(|view| {
                         C::ConversationList(pb::ConversationListPatch { view: Some(view) })
                     }),
-                ViewKey::Conversation => self.conversation(store, &dirty).map(C::Conversation),
+                ViewKey::Conversation => self.conversation(store, &dirty, ctx).map(C::Conversation),
                 ViewKey::Navigate => store.navigate.clone().map(C::Navigate),
                 ViewKey::Home if v.home.is_some() => Some(C::Home(pb::HomePatch {
                     view: Some(derive::conversation::home(store)),
@@ -236,7 +236,12 @@ impl FrameEngine {
         pb::ViewPatch { frame: 0, changes }
     }
 
-    fn conversation(&mut self, store: &Store, dirty: &DirtySet) -> Option<pb::ConversationPatch> {
+    fn conversation(
+        &mut self,
+        store: &Store,
+        dirty: &DirtySet,
+        ctx: Ctx,
+    ) -> Option<pb::ConversationPatch> {
         let visible = store.visible.conversation_id.as_deref()?;
         let Some(tl) = store.open.as_ref().filter(|t| t.conversation_id == visible) else {
             // 对话被删了或还没打开：让网页清空。
@@ -295,6 +300,17 @@ impl FrameEngine {
                 .incomplete
                 .as_ref()
                 .map(|_| derive::text::INCOMPLETE.to_owned()),
+            // 锚点：列表、位置变了才发（整份换代时也发）；滚动指令只在跳转那一次发，网页按 token 去重
+            anchors: (reset || dirty.conversation.anchors)
+                .then(|| derive::anchors::anchors(store, tl, ctx))
+                .flatten(),
+            anchor_cursor: (reset || dirty.conversation.cursor || dirty.conversation.anchors)
+                .then(|| derive::anchors::cursor(tl)),
+            scroll_to: dirty
+                .conversation
+                .scroll
+                .then(|| derive::anchors::scroll_to(tl))
+                .flatten(),
             ..Default::default()
         })
     }

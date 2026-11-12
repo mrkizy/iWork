@@ -23,8 +23,6 @@ type MenuState =
 
 /** 尚未实现的入口（下一组）上的说明。 */
 const NEXT_GROUP = "下一组实现";
-/** 要系统的文件夹选择框，M1 还没接（见报告）。 */
-const NEEDS_PICKER = "需要系统的文件夹选择框，还没接";
 
 export function Sidebar(props: { router: Router }) {
   const host = useHost();
@@ -57,6 +55,8 @@ export function Sidebar(props: { router: Router }) {
     (e.currentTarget as HTMLElement).focus();
     setMenu(m({ x: e.clientX, y: e.clientY }));
   };
+  /** 「重新定位」：Rust 弹文件夹选择框，选好后交后台核对（选择框与校验都不在网页）。 */
+  const relocate = (projectId: string) => void host.act({ case: "pickProjectLocation", value: { projectId } });
   /** 就地重命名用键盘收尾：那一项已经重新画出来了，把焦点放回去。 */
   const focusConversation = (id: string) =>
     queueMicrotask(() => root.querySelector<HTMLElement>(`button[data-conversation-id="${CSS.escape(id)}"]`)?.focus());
@@ -117,9 +117,9 @@ export function Sidebar(props: { router: Router }) {
                   <Badge badge={p.unreadBadge} />
                 </button>
                 <Show when={p.pathMissing}>
-                  <span data-tip={NEEDS_PICKER} class="iw-btn iw-btn--link iw-project__relocate" aria-disabled="true">
+                  <button type="button" class="iw-btn iw-btn--link iw-project__relocate" onClick={() => relocate(p.projectId)}>
                     重新定位
-                  </span>
+                  </button>
                 </Show>
               </div>
               <Show when={isExpanded(p.projectId)}>
@@ -264,7 +264,12 @@ export function Sidebar(props: { router: Router }) {
               {m.project.pinned ? "取消置顶" : "置顶"}
             </MenuItem>
             <Show when={m.project.pathMissing}>
-              <MenuItem disabled tip={NEEDS_PICKER} onSelect={close}>
+              <MenuItem
+                onSelect={() => {
+                  close();
+                  relocate(m.project.projectId);
+                }}
+              >
                 重新定位
               </MenuItem>
             </Show>

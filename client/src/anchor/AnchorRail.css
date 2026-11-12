@@ -1,0 +1,274 @@
+/* 消息锚点（画布 16-Anchor-*）：宽形态贴着侧栏右边缘、在对话区左边距里，上下居中。展开态刻度以中间为准上下排，
+   越远越短越淡。导轨在主区域里定位，left: 0 就是侧栏右边缘，随侧栏宽度移动（ui-m1 2a 第 11 条：不写死 296px）。 */
+.iw-anchor {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: var(--anchor-rail-w);
+  outline: none;
+}
+.iw-anchor:focus-visible .iw-anchor__rest {
+  outline: 2px solid var(--brand);
+  outline-offset: 4px;
+  border-radius: var(--r-xs);
+}
+
+/* 静止态：三条短线，下面按需的状态点 */
+.iw-anchor__rest {
+  position: absolute;
+  top: 50%;
+  left: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  transform: translateY(-50%);
+}
+.iw-anchor__rest span {
+  display: block;
+  width: 16px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--line);
+}
+.iw-anchor__rest span:nth-child(2) {
+  width: 11px;
+}
+.iw-anchor__dot {
+  display: block;
+  width: 5px;
+  height: 5px;
+  margin: 3px 0 0 1px;
+  border-radius: 50%;
+}
+.iw-anchor__dot--waiting {
+  background: var(--mus);
+}
+.iw-anchor__dot--failed {
+  background: var(--acc);
+}
+
+/* 展开态：刻度按离中间的距离排，越远越短、越淡 */
+.iw-anchor__wheel {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  width: 0;
+  height: 0;
+}
+.iw-tick {
+  position: absolute;
+  left: 0;
+  top: calc(var(--off) * 11px - 1px);
+  width: calc(20px - var(--d) * 3px);
+  height: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 1px;
+  background: var(--tx3);
+  opacity: calc(1 - var(--d) * 0.18);
+  cursor: pointer;
+  transition: top 0.12s ease, width 0.12s ease, opacity 0.12s ease;
+}
+.iw-tick::before {
+  /* 点击区比线粗 */
+  content: "";
+  position: absolute;
+  inset: -4px 0;
+}
+.iw-tick--center {
+  height: 3px;
+  background: var(--tx);
+}
+.iw-tick--waiting {
+  background: var(--mus);
+}
+.iw-tick--failed {
+  background: var(--acc);
+}
+
+/* 信息卡：样式同画布「锚点样式 S3」的预览卡，左侧小三角指向中间刻度 */
+.iw-anchor__card {
+  position: absolute;
+  top: 0;
+  left: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 280px;
+  padding: 10px 12px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-md);
+  background: var(--surf);
+  box-shadow: var(--shadow-pop, 0 6px 24px rgba(19, 51, 77, 0.12));
+  color: var(--tx);
+  text-align: left;
+  transform: translateY(-50%);
+  cursor: pointer;
+  animation: iw-anchor-card-in 0.12s ease;
+}
+.iw-anchor__card::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: -6px;
+  width: 10px;
+  height: 10px;
+  border-left: 1px solid var(--bd);
+  border-bottom: 1px solid var(--bd);
+  background: var(--surf);
+  transform: translateY(-50%) rotate(45deg);
+}
+.iw-anchor__card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--fs-xs);
+  color: var(--tx3);
+}
+.iw-anchor__kind {
+  padding: 0 6px;
+  border-radius: var(--r-xs);
+  background: var(--tag);
+  color: var(--tx2);
+}
+.iw-anchor__kind.iw-tick--waiting {
+  background: var(--warnBg);
+  color: var(--warnTx);
+}
+.iw-anchor__kind.iw-tick--failed {
+  background: var(--blkBg);
+  color: var(--blkTx);
+}
+.iw-anchor__preview {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+@keyframes iw-anchor-card-in {
+  from {
+    opacity: 0.4;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 到头轻轻回弹 */
+.iw-anchor__wheel--bounce-start {
+  animation: iw-anchor-bounce-start 0.18s ease;
+}
+.iw-anchor__wheel--bounce-end {
+  animation: iw-anchor-bounce-end 0.18s ease;
+}
+@keyframes iw-anchor-bounce-start {
+  50% {
+    transform: translateY(4px);
+  }
+}
+@keyframes iw-anchor-bounce-end {
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+/* 跳到没加载的地方、正在取那一段（Q18：原地不动，加一行提示） */
+.iw-anchor__loading {
+  position: absolute;
+  top: calc(50% + 70px);
+  left: 12px;
+  padding: 2px 8px;
+  border-radius: var(--r-xs);
+  background: var(--tag);
+  color: var(--tx2);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+/* 窄形态：标题栏最右端 32×32 按钮，三条短线；状态点画在按钮右上角（ui-m1 2a 第 11 条「窄形态」） */
+.iw-anchor-btn-wrap {
+  position: relative;
+  margin-left: auto;
+}
+.iw-anchor-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  cursor: pointer;
+}
+.iw-anchor-btn:hover,
+.iw-anchor-btn--open {
+  background: var(--sideOn);
+}
+.iw-anchor-btn__icon {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.iw-anchor-btn__icon span {
+  display: block;
+  width: 16px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--tx2);
+}
+.iw-anchor-btn__icon span:nth-child(2) {
+  width: 11px;
+}
+.iw-anchor-btn__icon .iw-anchor__dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  margin: 0;
+}
+.iw-anchor-btn__icon .iw-anchor__dot--failed:nth-child(5) {
+  /* 两个点都有时赭红点挪到芥末黄点左边，不叠在一起 */
+  right: 11px;
+}
+
+/* 窄形态的弹出面板：按钮下方、右对齐，约 312px；左边刻度滚轮，右边信息卡，样式同展开态 */
+.iw-anchor-panel {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 312px;
+  height: 180px;
+  border: 1px solid var(--bd2);
+  border-radius: var(--r-lg);
+  background: var(--surf);
+  box-shadow: var(--shadow-pop);
+}
+.iw-anchor-panel .iw-anchor__wheel {
+  top: 50%;
+  left: 20px;
+}
+.iw-anchor-panel .iw-anchor__card {
+  width: 248px;
+}
+.iw-anchor-panel .iw-anchor__loading {
+  top: auto;
+  bottom: 8px;
+}
+
+/* 减少动态效果：去掉滑动、淡入与回弹 */
+@media (prefers-reduced-motion: reduce) {
+  .iw-tick,
+  .iw-anchor__card,
+  .iw-anchor__wheel {
+    transition: none;
+    animation: none;
+  }
+}

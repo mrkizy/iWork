@@ -107,6 +107,11 @@ internal = ["iwork-ipc", "iwork-proto"]
 transitive_exempt = ["tokio"]
 
 [crates.iwork-client]
+# macOS 上直接依赖 objc2 / objc2-foundation / objc2-app-kit（tauri 已带进来的同一版本）：
+# Dock 角标与跳动在没有窗口时只能走 NSApp（T09 步 5a，产品负责人 2026-11-11 同意）；退出菜单的 Option 替换项（Q16）
+# 同一套，objc2-app-kit 为它加开 NSMenu、NSMenuItem。直接依赖 objc2、objc2-foundation 与加开的这两项：产品负责人 2026-11-12 批准。
+# rfd 0.17.2（关默认 feature，只开 gtk3、common-controls-v6）：回形针与「重新定位」的系统文件选择框（T09 组 2b，
+# 产品负责人 2026-11-11 定）。关掉默认的 xdg-portal / wayland，不带进 zbus 一类的 D-Bus 栈。
 internal = ["iwork-client-core", "iwork-ipc", "iwork-proto"]
 transitive_exempt = ["tokio", "tauri"]
 

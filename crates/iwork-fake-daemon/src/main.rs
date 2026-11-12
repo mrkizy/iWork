@@ -1,6 +1,8 @@
 //! `iwork-fake-daemon --endpoint <sock> [--scenario <名字>] [--pace <倍数>] [--auto-reply]`：起假后台、跑一个场景、
 //! 继续服务到被杀。`--pace` 把场景里的等待放大（同样形状的流量摊长，真实 WebView 的 1 分钟用例用）。
 //! `--list` 列出场景。只在开发期有意义（`pnpm -C client dev:fake`、录像工具）。
+//! 场景里有 `OpenHere` 标记时，先跑完标记前那一段就报「跑完」（开发入口据此起客户端），再接着跑后一段：
+//! 后一段在客户端里是实时到达的（演练 Dock 角标与跳动等要「客户端开着时再来」的情形）。
 
 use std::process::ExitCode;
 
@@ -46,11 +48,24 @@ async fn main() -> ExitCode {
     }
     eprintln!("iwork-fake-daemon：在 {endpoint} 上监听（DevTrust）");
     if let Some(name) = value("--scenario") {
-        if let Err(e) = daemon.run_scenario(&name).await {
-            eprintln!("{e}");
+        let Some(sc) = scenario::get(&name) else {
+            eprintln!("{}", scenario::UnknownScenario(name));
             return ExitCode::from(2);
-        }
+        };
+        let mut steps = sc.steps();
+        let later = match steps
+            .iter()
+            .position(|s| matches!(s, scenario::Step::OpenHere))
+        {
+            Some(at) => steps.split_off(at),
+            None => Vec::new(),
+        };
+        daemon.run_steps(steps).await;
         eprintln!("场景 {name} 跑完，head = {}", daemon.head());
+        if !later.is_empty() {
+            daemon.run_steps(later).await;
+            eprintln!("场景 {name} 打开后那一段也跑完了，head = {}", daemon.head());
+        }
     }
     std::future::pending::<()>().await;
     ExitCode::SUCCESS

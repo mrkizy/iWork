@@ -58,6 +58,48 @@ pub fn path_commands(
     Ok(out)
 }
 
+/// 附件从哪来。本机文件（拖入、系统选择框）的路径都是壳给的，不经网页。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Source {
+    Paths {
+        conversation_id: String,
+        paths: Vec<String>,
+    },
+    Pasted(pb::AttachPasted),
+}
+
+/// 一批附件要发的东西：先发完分片，再逐条发命令。
+pub struct Batch {
+    pub chunks: Vec<pb::Chunk>,
+    pub commands: Vec<pb::UploadAttachment>,
+}
+
+/// 检查大小并转成要发的分片与命令；任一不合格整批不发。
+pub fn batch(source: Source) -> Result<Batch, pb::IntentError> {
+    match source {
+        Source::Paths {
+            conversation_id,
+            paths,
+        } => path_commands(&conversation_id, &paths).map(|commands| Batch {
+            chunks: Vec::new(),
+            commands,
+        }),
+        Source::Pasted(x) => {
+            check_size(&x.name, x.data.len() as u64)?;
+            let upload_id = ulid::Ulid::generate().to_string();
+            Ok(Batch {
+                chunks: chunks(&upload_id, &x.data),
+                commands: vec![pb::UploadAttachment {
+                    conversation_id: x.conversation_id,
+                    name: x.name,
+                    mime: x.mime,
+                    source: Some(pb::upload_attachment::Source::UploadId(upload_id)),
+                }],
+            })
+        }
+    }
+}
+
 /// 粘贴的数据切成不超过 1MiB 的分片；最后一片 `last = true`（空数据也发一片）。
 pub fn chunks(upload_id: &str, data: &Bytes) -> Vec<pb::Chunk> {
     let max = MAX_CHUNK_DATA;

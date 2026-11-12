@@ -6,6 +6,9 @@
 //!
 //! 只有 [`Tables::fold`] 改表（加上测试场景经 `FakeDaemon::mutate_tables` 的直接修改）；查询只读。
 
+mod anchors;
+mod paging;
+
 use std::collections::{BTreeMap, HashMap};
 
 use bytes::Bytes;
@@ -59,6 +62,8 @@ pub struct Tables {
     pub last_message_by_assistant: HashMap<String, (String, String)>,
     /// 制品内容（sha256 → 字节），ReadArtifact 用。场景经 `mutate_tables` 放进来。
     pub artifacts: BTreeMap<String, Bytes>,
+    /// 用户最近点过的那条系统通知（GetOpenTarget）；测试经 `FakeDaemon::set_open_target` 设。token 0 表示没有。
+    pub open_target: pb::GetOpenTargetResult,
 }
 
 pub fn tool_call_key(turn_id: &str, tool_call_id: &str) -> String {
@@ -562,6 +567,7 @@ impl Tables {
             .ok_or_else(|| invalid("query", "查询为空"))?;
         let result = match kind {
             Q::GetConversation(g) => R::GetConversation(self.get_conversation(g)?),
+            Q::ListAnchors(a) => R::ListAnchors(self.list_anchors(a)?),
             Q::ListConversations(l) => R::ListConversations(self.list_conversations(l)?),
             Q::ListProjects(_) => R::ListProjects(pb::ListProjectsResult {
                 projects: self
@@ -587,6 +593,7 @@ impl Tables {
             Q::GetRuntimeStatus(_) => R::GetRuntimeStatus(pb::GetRuntimeStatusResult {
                 runtimes: self.runtimes.values().cloned().collect(),
             }),
+            Q::GetOpenTarget(_) => R::GetOpenTarget(self.open_target.clone()),
             Q::ListModels(_) => R::ListModels(pb::ListModelsResult {
                 models: vec![
                     pb::ModelOption {
@@ -892,29 +899,15 @@ impl Tables {
         &self,
         g: &pb::GetConversation,
     ) -> Result<pb::GetConversationResult, pb::Error> {
-        let row = self
-            .conversations
-            .get(&g.conversation_id)
-            .ok_or_else(|| pb::Error {
-                code: pb::ErrorCode::NotFound.into(),
-                message: format!("对话不存在：{}", g.conversation_id),
-                retryable: false,
-                details: Default::default(),
-            })?;
+        let row = self.conversation_row(&g.conversation_id)?;
+        if let paging::Mode::Rows(cursor) = paging::mode(g)? {
+            return Ok(self.row_page(row, cursor));
+        }
         let limit = if g.limit == 0 { DEFAULT_PAGE } else { g.limit } as usize;
-        let end = match &g.before_message_id {
-            None => row.messages.len(),
-            Some(before) => row
-                .messages
-                .iter()
-                .position(|m| &m.id == before)
-                .ok_or_else(|| {
-                    invalid("before_message_id", &format!("消息不在对话里：{before}"))
-                })?,
-        };
-        let start = end.saturating_sub(limit);
+        let (start, end) = paging::page_range(&row.messages, g, limit)?;
         let page = &row.messages[start..end];
         let has_more = start > 0;
+        let has_newer = end < row.messages.len();
         // 页的 seq 范围 [lo, hi)：最旧一页从 0 起，最新一页到无穷。
         let lo = if has_more {
             page.first().map_or(0, |m| m.created_seq)
@@ -970,10 +963,26 @@ impl Tables {
             .filter_map(|id| self.attachments.get(id))
             .cloned()
             .collect();
-        let usage_total = self
-            .turns
+        let usage_total = self.usage_total(&row.conversation.id);
+        Ok(pb::GetConversationResult {
+            conversation: Some(self.conversation_view(row)),
+            messages: page.to_vec(),
+            turns,
+            has_more,
+            tool_calls,
+            approvals,
+            user_actions,
+            attachments,
+            usage_total,
+            has_newer,
+        })
+    }
+
+    /// 整个对话的累计用量（标题栏「本对话用量」）。
+    fn usage_total(&self, conversation_id: &str) -> Option<pb::Usage> {
+        self.turns
             .values()
-            .filter(|t| t.conversation_id == row.conversation.id)
+            .filter(|t| t.conversation_id == conversation_id)
             .filter_map(|t| t.usage.as_ref())
             .fold(None::<pb::Usage>, |acc, u| {
                 let mut acc = acc.unwrap_or_default();
@@ -985,17 +994,115 @@ impl Tables {
                     acc.cost_usd = Some(acc.cost_usd.unwrap_or(0.0) + c);
                 }
                 Some(acc)
-            });
-        Ok(pb::GetConversationResult {
+            })
+    }
+
+    /// 行级游标的一页（方案 2.9「行级游标的语义」）：消息、工具调用、审批、亲手执行卡片按 created_seq，回合结束按
+    /// ended_seq，五路合在一起排好，取紧挨游标的 limit 行。结果里放选中行对应的实体、它们所属的回合（以及结束行被
+    /// 选中的回合；回合自己的 created_seq、ended_seq 可以在范围外）、选中消息的附件。
+    fn row_page(
+        &self,
+        row: &ConversationRow,
+        cursor: paging::RowCursor,
+    ) -> pb::GetConversationResult {
+        enum R<'a> {
+            Message(&'a pb::Message),
+            Tool(&'a pb::ToolCall),
+            Approval(&'a pb::Approval),
+            UserAction(&'a pb::UserActionCard),
+            TurnEnd(&'a pb::Turn),
+        }
+        let cid = row.conversation.id.as_str();
+        let conv_turns: std::collections::BTreeSet<&str> = self
+            .turns
+            .values()
+            .filter(|t| t.conversation_id == cid)
+            .map(|t| t.id.as_str())
+            .collect();
+        let mut all: Vec<(u64, R<'_>)> = Vec::new();
+        all.extend(row.messages.iter().map(|m| (m.created_seq, R::Message(m))));
+        all.extend(
+            self.tool_calls
+                .values()
+                .filter(|c| conv_turns.contains(c.turn_id.as_str()))
+                .map(|c| (c.created_seq, R::Tool(c))),
+        );
+        all.extend(
+            self.approvals
+                .values()
+                .filter(|a| a.conversation_id == cid)
+                .map(|a| (a.created_seq, R::Approval(a))),
+        );
+        all.extend(
+            self.user_actions
+                .values()
+                .filter(|c| c.conversation_id == cid)
+                .map(|c| (c.created_seq, R::UserAction(c))),
+        );
+        // 回合结束行：和客户端建这一行的条件一样（iwork-client-core store::timeline 的 merge_page：结束了、不在跑、
+        // 不是中断——中断的回合显示继续卡片，不显示结束行）。两边对「哪些算一行」必须一致，否则按行数取的页对不上。
+        all.extend(
+            self.turns
+                .values()
+                .filter(|t| t.conversation_id == cid && t.ended_seq != 0)
+                .filter(|t| !turn_active(t.state) && t.state != pb::TurnState::Interrupted as i32)
+                .map(|t| (t.ended_seq, R::TurnEnd(t))),
+        );
+        all.sort_by_key(|(seq, _)| *seq);
+        let seqs: Vec<u64> = all.iter().map(|(seq, _)| *seq).collect();
+        let ((start, end), has_more, has_newer) = cursor.select(&seqs);
+
+        let mut out = pb::GetConversationResult {
             conversation: Some(self.conversation_view(row)),
-            messages: page.to_vec(),
-            turns,
             has_more,
-            tool_calls,
-            approvals,
-            user_actions,
-            attachments,
-            usage_total,
+            has_newer,
+            usage_total: self.usage_total(cid),
+            ..Default::default()
+        };
+        let mut turn_ids: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for (_, r) in &all[start..end] {
+            match r {
+                R::Message(m) => {
+                    turn_ids.extend(m.turn_id.as_deref());
+                    out.attachments.extend(
+                        m.attachment_ids
+                            .iter()
+                            .filter_map(|id| self.attachments.get(id))
+                            .cloned(),
+                    );
+                    out.messages.push((*m).clone());
+                }
+                R::Tool(c) => {
+                    turn_ids.insert(&c.turn_id);
+                    out.tool_calls.push((*c).clone());
+                }
+                R::Approval(a) => {
+                    turn_ids.insert(&a.turn_id);
+                    out.approvals.push((*a).clone());
+                }
+                R::UserAction(c) => {
+                    turn_ids.insert(&c.turn_id);
+                    out.user_actions.push((*c).clone());
+                }
+                R::TurnEnd(t) => {
+                    turn_ids.insert(&t.id);
+                }
+            }
+        }
+        out.turns = turn_ids
+            .into_iter()
+            .filter_map(|id| self.turns.get(id))
+            .cloned()
+            .collect();
+        out
+    }
+
+    fn conversation_row(&self, id: &str) -> Result<&ConversationRow, pb::Error> {
+        self.conversations.get(id).ok_or_else(|| pb::Error {
+            code: pb::ErrorCode::NotFound.into(),
+            message: format!("对话不存在：{id}"),
+            retryable: false,
+            details: Default::default(),
         })
     }
 }
@@ -1086,4 +1193,14 @@ fn invalid(field: &str, message: &str) -> pb::Error {
         retryable: false,
         details: [("field".to_owned(), field.to_owned())].into(),
     }
+}
+
+/// 回合还在跑（排队、运行、等审批、取消中）：和 iwork-client-core `store::timeline::turn_is_active` 同一个条件
+/// （假后台不依赖 client-core，照抄一份；两处对「哪些回合有结束行」必须一致，见 `row_page`）。
+fn turn_active(state: i32) -> bool {
+    use pb::TurnState as S;
+    matches!(
+        S::try_from(state),
+        Ok(S::Queued | S::Running | S::WaitingApproval | S::Cancelling)
+    )
 }

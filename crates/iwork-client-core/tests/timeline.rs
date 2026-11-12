@@ -119,6 +119,7 @@ fn detached_tail_rebuilds() {
             true,
         )],
     ));
+    look_above_oldest(&mut s);
     s.apply(view_result(older(&s), page(9001, older_msgs, true)));
     let tl = s.open.as_ref().unwrap();
     assert_eq!(tl.len(), TIMELINE_CAP);
@@ -154,6 +155,7 @@ fn timeline_cap_detaches_tail() {
     let older_msgs: Vec<pb::Message> = (0..TIMELINE_CAP as u64 + 10)
         .map(|i| assistant_msg(&format!("o{i}"), 1 + i, S::Completed, "x"))
         .collect();
+    look_above_oldest(&mut s);
     s.apply(view_result(older(&s), page(9001, older_msgs, true)));
     assert!(!s.open.as_ref().unwrap().at_tail);
     // 之后的新消息不进时间线，只计数。
@@ -412,6 +414,7 @@ fn detached_timeline_gets_no_model_switch_row() {
     let older_msgs: Vec<pb::Message> = (0..TIMELINE_CAP as u64 + 1)
         .map(|i| assistant_msg(&format!("o{i}"), 1 + i, S::Completed, "x"))
         .collect();
+    look_above_oldest(&mut s);
     s.apply(view_result(older(&s), page(9002, older_msgs, true)));
     assert!(!s.open.as_ref().unwrap().at_tail);
     s.apply(persisted(9003, &[CONV], turn("t2", "b")));
@@ -433,7 +436,7 @@ fn snapshots_across_subscribed_clear_stale_only_without_events_between() {
                     SummaryTable::Conversations => K::ListConversations(Default::default()),
                     SummaryTable::Assistants => K::ListAssistants(Default::default()),
                     SummaryTable::Pending => K::ListPendingItems(Default::default()),
-                    SummaryTable::List => unreachable!(),
+                    SummaryTable::List | SummaryTable::Anchors => unreachable!(),
                 }),
             })
             .collect()
@@ -572,10 +575,18 @@ fn trimming_newest_end_keeps_turn_entries() {
     let older_msgs: Vec<pb::Message> = (0..(TIMELINE_CAP - before + 1) as u64)
         .map(|i| assistant_msg(&format!("o{i}"), 1 + i, S::Completed, "x"))
         .collect();
+    look_above_oldest(&mut s);
     s.apply(view_result(older(&s), page(9002, older_msgs, true)));
     let tl = s.open.as_ref().unwrap();
     assert!(tl.row("end:t2").is_none(), "对照：结束行确实被截掉了");
     assert!(tl.row("m2").is_some());
     assert!(tl.turns.contains_key("t2"), "回合条目还在");
     assert!(tl.row("model:t2").is_some(), "模型切换行还在");
+}
+
+/// 网页往上翻时声明的窗口：顶在已加载的最旧一行之上（往前翻回来的行都落在窗口里）。方案 2.2 第 4 条「丢哪一端」
+/// 按窗口定：窗口在旧的一侧，往前翻超上限时丢的是新的一端。
+fn look_above_oldest(s: &mut iwork_client_core::store::Store) {
+    let first = s.open.as_ref().unwrap().identities()[0].0.ordinal();
+    s.set_window(CID, i64::MIN, first - 1, false);
 }

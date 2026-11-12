@@ -42,7 +42,9 @@ fn summary_result(
         }),
         SummaryTable::Assistants => K::ListAssistants(pb::ListAssistantsResult::default()),
         SummaryTable::Pending => K::ListPendingItems(pb::ListPendingItemsResult::default()),
-        SummaryTable::List => unreachable!("这些用例不开列表页"),
+        SummaryTable::List | SummaryTable::Anchors => {
+            unreachable!("这些用例不开列表页、没有锚点窗口")
+        }
     };
     pb::QueryResult {
         seq,

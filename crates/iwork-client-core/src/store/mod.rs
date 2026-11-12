@@ -3,6 +3,7 @@
 //! 连接来的数据只经 [`Store::apply`] 写入，吃的是 `iwork_ipc` `Incoming` 给出的全序；网页声明的视图状态经
 //! `set_*` 写入。两者都只往 [`DirtySet`] 记「哪块脏了」，帧在网页来取时才由 `derive` 从当前状态算（方案 2.4）。
 
+pub mod anchors;
 pub mod created;
 pub mod home;
 pub mod models;
@@ -14,7 +15,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use iwork_proto::pb;
 
 pub use summary::{Refresh, Summary, SummaryTable};
-pub use timeline::{PageMode, Row, RowKey, Timeline, TimelineChange};
+pub use timeline::{
+    PageCursor, PageMode, PageSide, ROW_PAGE, Row, RowKey, Timeline, TimelineChange, TrimPlan,
+    page_anchor,
+};
 
 use timeline::{Delta, DeltaOutcome, DeltaTarget};
 
@@ -75,11 +79,11 @@ pub enum QueryPurpose {
     LatestPage {
         conversation_id: String,
     },
-    /// 往前翻页；`before` 是发出时最旧一条消息的 id。结果回来时它已不是最旧的一行（中间重建过），
-    /// 结果就不接上去，免得时间线中间留一段空洞。
+    /// 往前翻页；`before` 是发出时的游标（最旧一条消息的 id，或这一端被裁过时的边界 seq）。结果回来时游标已经
+    /// 变了（中间重建过、又裁过），结果就不接上去，免得时间线中间留一段空洞。
     OlderPage {
         conversation_id: String,
-        before: String,
+        before: PageCursor,
     },
     Rules,
     LocalConfig {
@@ -92,6 +96,22 @@ pub enum QueryPurpose {
         filter: String,
         append: bool,
         round: Option<u64>,
+    },
+    /// 锚点窗口（T09 方案 2.9）：以 `center` 为中心（0 = 最新）。`round` 有值表示它是那一轮摘要重查的一条。
+    Anchors {
+        conversation_id: String,
+        center: u64,
+        round: Option<u64>,
+    },
+    /// 往后翻页；`after` 是发出时的游标（最新一条消息的 id，或边界 seq），结果回来时游标变了就丢掉。
+    NewerPage {
+        conversation_id: String,
+        after: PageCursor,
+    },
+    /// 以某处为中心的一段（跳到没加载的锚点）。
+    AroundPage {
+        conversation_id: String,
+        seq: u64,
     },
 }
 
@@ -259,6 +279,8 @@ pub struct Store {
     pub quit_requested: bool,
     /// 上一次添加附件被拒的原因（拖入时没有回包可带，放在输入框上方）。
     pub attach_error: Option<String>,
+    /// 正在往窗口里拖文件（壳的 DragDrop Enter / Leave，松开时清掉）。
+    pub dragging: bool,
     /// 最近一次跳转请求（点击系统通知、新建对话后）。
     pub navigate: Option<pb::NavigatePatch>,
     /// 首页：选过的模型与档位、正在进行的「新建并发出」（见 home 模块）。
@@ -285,6 +307,8 @@ pub struct Store {
     pub character_overrides: crate::derive::avatar::CharacterOverrides,
     /// 有视图查询失败、在退避中：连接条上显示一行（审查 1/F-5）。
     pub query_failing: bool,
+    /// 待处理表刚被整份替换过（摘要重查或快照）：会话层取走后更新 Dock 角标与跳动（方案 2.8）。
+    pending_replaced: bool,
     pub dirty: DirtySet,
 }
 
@@ -396,14 +420,118 @@ impl Store {
         self.dirty.views.extend(ViewKey::ALL);
     }
 
-    pub fn set_window(&mut self, conversation_id: &str, first: i64, last: i64) {
-        if self
+    /// 网页报可见范围。`by_user`：这次变化来自用户自己滚动，等待中的锚点跳转（居中加载、等窗口的相对跳转）
+    /// 一并作废，迟到的结果不再把用户拉回去（方案 2.9「跳转」第 3 条，审查 4/F-6）。
+    pub fn set_window(&mut self, conversation_id: &str, first: i64, last: i64, by_user: bool) {
+        let Some(t) = self
             .open
+            .as_mut()
+            .filter(|t| t.conversation_id == conversation_id)
+        else {
+            return;
+        };
+        if by_user {
+            let e = t.anchors.cancel_waiting();
+            self.dirty.conversation(TimelineChange::from_anchor(e));
+        }
+        self.window = Some((first.min(last), first.max(last)));
+        self.dirty.mark(ViewKey::Conversation);
+        self.anchors_follow_window();
+    }
+
+    /// 实时事件、继续卡片同步这类写入的裁剪条件：没有专门的锚，用记着的窗口（方案 2.2 第 4 条锚表最后一行）。
+    fn live_trim_plan(&self) -> TrimPlan {
+        TrimPlan {
+            anchor: None,
+            window: self.window,
+            page: None,
+        }
+    }
+
+    /// 网页声明的窗口顶着已加载的最旧一行（往前翻页的条件，方案 2.3）。会话层发查询与这里判断结果合不合并共用。
+    pub fn window_touches_oldest(&self) -> bool {
+        self.open
             .as_ref()
-            .is_some_and(|t| t.conversation_id == conversation_id)
+            .is_some_and(|t| t.window_touches_oldest(self.window))
+    }
+
+    /// 网页声明的窗口底着已加载的最新一行（往后翻页的条件）。
+    pub fn window_touches_newest(&self) -> bool {
+        self.open
+            .as_ref()
+            .is_some_and(|t| t.window_touches_newest(self.window))
+    }
+
+    /// 可见窗口第一行的 seq（锚点的当前位置按它算，Q17）。没声明窗口时按最新一行。
+    fn first_visible_seq(&self) -> Option<u64> {
+        let t = self.open.as_ref()?;
+        let ids = t.identities();
+        let k = match self.window {
+            Some((first, _)) => ids
+                .iter()
+                .find(|(k, _)| k.ordinal() >= first)
+                .or(ids.last()),
+            None => ids.last(),
+        }?;
+        Some(k.0.seq)
+    }
+
+    /// 可见窗口或锚点窗口变了：重算当前位置。
+    fn anchors_follow_window(&mut self) {
+        let Some(seq) = self.first_visible_seq() else {
+            return;
+        };
+        if let Some(t) = self.open.as_mut() {
+            let e = t.anchors.on_visible(seq);
+            self.dirty.conversation(TimelineChange::from_anchor(e));
+        }
+    }
+
+    /// 网页翻看到了离窗口边缘不远的一处：以它为中心重取（不跳转）。
+    pub fn anchor_browse(&mut self, conversation_id: &str, key: &str) {
+        if let Some(t) = self
+            .open
+            .as_mut()
+            .filter(|t| t.conversation_id == conversation_id)
         {
-            self.window = Some((first.min(last), first.max(last)));
+            t.anchors.browse(key);
+        }
+    }
+
+    /// 跳到某一处：行已加载就发滚动指令，否则记下等以它为中心的那一段（会话层据此发查询）。
+    pub fn jump_to_anchor(&mut self, conversation_id: &str, key: &str) {
+        let Some(t) = self
+            .open
+            .as_mut()
+            .filter(|t| t.conversation_id == conversation_id)
+        else {
+            return;
+        };
+        let Some(a) = t.anchors.find(key).cloned() else {
+            tracing::debug!(target: "iwork_client", key, "跳转的锚点不在当前窗口里，忽略");
+            return;
+        };
+        let row = t.anchor_row(&a);
+        // 行在时间线里但可能不在发给网页的那一段里：窗口先放到它上面，帧才带上它（网页滚到以后会报新的窗口）
+        if let Some(k) = row.as_deref().and_then(|r| t.key_of(r)) {
+            self.window = Some((k.ordinal(), k.ordinal()));
             self.dirty.mark(ViewKey::Conversation);
+        }
+        let (e, _fetch) = t.anchors.jump(a, row);
+        self.dirty.conversation(TimelineChange::from_anchor(e));
+    }
+
+    /// ⌥↑ / ⌥↓：相对当前位置跳一处；越过窗口时先重取，窗口到了再落（见 `apply_result` 的 ListAnchors）。
+    pub fn jump_relative(&mut self, conversation_id: &str, delta: i32) {
+        let Some(t) = self
+            .open
+            .as_mut()
+            .filter(|t| t.conversation_id == conversation_id)
+        else {
+            return;
+        };
+        if let Some(key) = t.anchors.relative_target(delta) {
+            self.jump_to_anchor(conversation_id, &key);
         }
     }
 
@@ -444,6 +572,13 @@ impl Store {
         self.dirty.mark(ViewKey::Connection);
     }
 
+    pub fn set_dragging(&mut self, on: bool) {
+        if self.dragging != on {
+            self.dragging = on;
+            self.mark_header();
+        }
+    }
+
     pub fn set_attach_error(&mut self, e: Option<String>) {
         if self.attach_error != e {
             self.attach_error = e;
@@ -462,6 +597,7 @@ impl Store {
             conversation_id,
             row_key,
             started_project_id: started,
+            pending_list: false,
         });
         self.dirty.mark(ViewKey::Navigate);
     }
@@ -501,6 +637,42 @@ impl Store {
                 if let Some(s) = self.home.start.as_mut() {
                     s.conversation_id = Some(conversation_id);
                 }
+            }
+        }
+    }
+
+    /// 待处理表刚被整份替换过：返回真一次。
+    pub fn take_pending_replaced(&mut self) -> bool {
+        std::mem::take(&mut self.pending_replaced)
+    }
+
+    /// 被系统通知叫到前台、点「待你处理」列表的一项：跳到它所在对话的那一行（行身份与列表项同一个函数算）；
+    /// 已经不在待处理表里时跳到对话最新处；没有对话归属的打开「待你处理」页。
+    pub fn open_pending_item(&mut self, item_id: &str, conversation_id: Option<&str>) {
+        let item = self
+            .summary
+            .pending
+            .iter()
+            .find(|p| crate::derive::pending::item_id(p) == Some(item_id));
+        let conversation = item
+            .and_then(crate::derive::pending_conversation)
+            .or(conversation_id)
+            .map(str::to_owned);
+        match conversation {
+            Some(c) => {
+                let row = item
+                    .and_then(crate::derive::pending::row_key)
+                    .unwrap_or_default();
+                self.navigate_to(c, row, None);
+            }
+            None => {
+                let seq = self.navigate.as_ref().map_or(1, |n| n.seq + 1);
+                self.navigate = Some(pb::NavigatePatch {
+                    seq,
+                    pending_list: true,
+                    ..Default::default()
+                });
+                self.dirty.mark(ViewKey::Navigate);
             }
         }
     }
@@ -577,6 +749,15 @@ impl Store {
                     tracing::warn!(target: "iwork_client", seq = p.seq, "持久事件没有载荷");
                     return;
                 };
+                if self.open.as_ref().is_some_and(|t| {
+                    t.anchors.window.is_some()
+                        && hit.iter().any(|s| {
+                            matches!(&s.scope, ScopeKind::Conversation(c) if *c == t.conversation_id)
+                        })
+                }) {
+                    // 锚点窗口失效后重查，不推演，进摘要重查的同一轮（方案 2.9）；流式增量是瞬时事件，不走这里。
+                    self.refresh.invalidate();
+                }
                 self.apply_persisted(p.seq, p.at.as_ref(), &event);
             }
             Some(pb::event::Body::Transient(t)) => {
@@ -664,9 +845,13 @@ impl Store {
             }
             _ => {}
         }
+        let plan = self.live_trim_plan();
         if let Some(t) = self.open.as_mut() {
             match t.apply_event(seq, at, event) {
-                Some(c) => self.dirty.conversation(c),
+                Some(mut c) => {
+                    c.merge(t.fit(plan, self.summary.resume_cards()));
+                    self.dirty.conversation(c);
+                }
                 None => {
                     if matches!(
                         event,
@@ -810,9 +995,11 @@ impl Store {
                 }
             }
             (_, K::ListProjects(l)) => {
-                // 项目名进了分隔线与「已切到项目」说明的文字（derive::row::project_name）。
+                // 项目名进了分隔线与「已切到项目」说明的文字（derive::row::project_name），也进了草稿那一类
+                // 待处理项的标题（锚点信息卡读它）。
                 if self.summary.projects != l.projects {
                     self.mark_rows(|r| matches!(r, Row::Divider { .. } | Row::Note { .. }));
+                    self.mark_anchor_texts();
                 }
                 self.summary.projects = l.projects;
                 self.mark_summary_views();
@@ -832,40 +1019,154 @@ impl Store {
                 self.mark_summary_views();
             }
             (_, K::ListPendingItems(l)) => {
+                // 等你处理那一处的说明用这张表里的标题（derive::anchors::item）：表变了锚点要重画（审查 4/F-9）
+                if self.summary.pending != l.items {
+                    self.mark_anchor_texts();
+                }
                 self.summary.pending = l.items;
+                self.pending_replaced = true;
                 self.mark_summary_views();
+                let plan = self.live_trim_plan();
                 if let Some(t) = self.open.as_mut() {
-                    let c = t.sync_resume_cards(self.summary.resume_cards());
+                    let c = t.fit(plan, self.summary.resume_cards());
                     self.dirty.conversation(c);
                 }
             }
             (p, K::GetConversation(page)) => {
                 let mode = match p {
                     None => PageMode::Snapshot,
-                    Some(QueryPurpose::OlderPage { .. }) => PageMode::Older,
+                    Some(QueryPurpose::OlderPage {
+                        before: PageCursor::Message(_),
+                        ..
+                    }) => PageMode::Older,
+                    Some(QueryPurpose::OlderPage {
+                        before: PageCursor::Seq(s),
+                        ..
+                    }) => PageMode::OlderRows { before: *s },
+                    Some(QueryPurpose::NewerPage {
+                        after: PageCursor::Message(_),
+                        ..
+                    }) => PageMode::Newer,
+                    Some(QueryPurpose::NewerPage {
+                        after: PageCursor::Seq(s),
+                        ..
+                    }) => PageMode::NewerRows { after: *s },
+                    Some(QueryPurpose::AroundPage { seq, .. }) => PageMode::Around { center: *seq },
                     Some(_) => PageMode::LiveLatest,
                 };
+                // 先核对归属，再碰窗口和重建状态（审查 7/F-4）：切走以后上一个对话的结果迟到，整个丢掉，
+                // 不能先作废当前对话的窗口、算回到最新
                 let cid = page.conversation.as_ref().map(|c| c.id.as_str());
-                if let Some(QueryPurpose::OlderPage { before, .. }) = p
-                    && self.open.as_ref().and_then(|t| t.oldest_message_id())
-                        != Some(before.as_str())
-                {
-                    tracing::debug!(target: "iwork_client", before, "翻页结果到达时已不接着最旧一行，丢掉");
+                let owned = self.open.as_ref().is_some_and(|t| {
+                    cid == Some(t.conversation_id.as_str())
+                        || matches!(p, Some(QueryPurpose::OlderPage { conversation_id, .. } | QueryPurpose::LatestPage { conversation_id }) if *conversation_id == t.conversation_id)
+                });
+                if !owned {
+                    tracing::debug!(target: "iwork_client", ?cid, "对话页结果不属于当前打开的对话，丢掉");
                     return;
                 }
-                if let Some(t) = self.open.as_mut()
-                    && (cid == Some(t.conversation_id.as_str())
-                        || matches!(p, Some(QueryPurpose::OlderPage { conversation_id, .. } | QueryPurpose::LatestPage { conversation_id }) if *conversation_id == t.conversation_id))
+                if let Some(QueryPurpose::NewerPage { after, .. }) = p
+                    && self.open.as_ref().and_then(Timeline::newer_cursor).as_ref() != Some(after)
                 {
-                    // Q9（产品负责人 2026-11-11）：快照重建时用户正在看旧消息 → 回到最新并提示。
-                    // 「在看旧消息」= 网页声明的窗口没顶到最新一行，或时间线已不接着最新。
-                    let reading_old = mode == PageMode::Snapshot
-                        && t.identities().last().is_some_and(|(newest, _)| {
+                    tracing::debug!(target: "iwork_client", ?after, "往后翻页结果到达时游标已经变了，丢掉");
+                    return;
+                }
+                if let Some(QueryPurpose::AroundPage { seq, .. }) = p
+                    && self
+                        .open
+                        .as_ref()
+                        .and_then(|t| t.anchors.pending_jump.as_ref())
+                        .is_none_or(|j| j.anchor.created_seq != *seq)
+                {
+                    // 等的跳转换了或取消了：这一段照常进时间线（它是一段合法的连续消息），但不再滚动。
+                    tracing::debug!(target: "iwork_client", seq, "居中加载的结果到达时已不再等它");
+                }
+                if let Some(QueryPurpose::OlderPage { before, .. }) = p
+                    && self.open.as_ref().and_then(Timeline::older_cursor).as_ref() != Some(before)
+                {
+                    tracing::debug!(target: "iwork_client", ?before, "翻页结果到达时游标已经变了，丢掉");
+                    return;
+                }
+                // 翻页的方向，以及游标在时间线上的位置（锚是这一页里紧挨它的那一组）
+                let paging = match p {
+                    Some(QueryPurpose::OlderPage { before, .. }) => Some((PageSide::Older, before)),
+                    Some(QueryPurpose::NewerPage { after, .. }) => Some((PageSide::Newer, after)),
+                    _ => None,
+                };
+                let paging = paging.and_then(|(side, cursor)| {
+                    let seq = match cursor {
+                        PageCursor::Seq(s) => Some(*s),
+                        PageCursor::Message(id) => {
+                            self.open.as_ref().and_then(|t| t.key_of(id)).map(|k| k.seq)
+                        }
+                    }?;
+                    Some((side, seq))
+                });
+                // 窗口已经离开这一端、又装不下：这次结果不合并，时间线不动；窗口贴回来时会话层按 2.3 重发
+                if let Some((side, _)) = paging
+                    && self
+                        .open
+                        .as_ref()
+                        .is_some_and(|t| t.page_result_would_evict_window(side, self.window))
+                {
+                    tracing::debug!(target: "iwork_client", ?side, "翻页结果到达时窗口已离开这一端、装不下，不合并");
+                    return;
+                }
+                // Q9（产品负责人 2026-11-11）：快照重建时用户正在看旧消息 → 回到最新并提示。要在窗口作废之前判断。
+                // 「在看旧消息」= 网页声明的窗口没顶到最新一行，或时间线已不接着最新。
+                let reading_old = mode == PageMode::Snapshot
+                    && self.open.as_ref().is_some_and(|t| {
+                        t.identities().last().is_some_and(|(newest, _)| {
                             !t.at_tail
                                 || self.window.is_some_and(|(_, last)| last < newest.ordinal())
-                        });
+                        })
+                    });
+                // 这次裁剪的锚与窗口（方案 2.2 第 4 条锚表）：整条重建成最新页（订阅快照、不接着最新时收到最新页）
+                // 锚是最新一组、旧窗口作废（6/F-3）；居中加载锚是目标行、旧窗口作废；翻页的锚是这一页紧挨游标的一组
+                let latest_rebuild = mode == PageMode::Snapshot
+                    || (mode == PageMode::LiveLatest
+                        && self.open.as_ref().is_some_and(|t| !t.at_tail));
+                if latest_rebuild || matches!(mode, PageMode::Around { .. }) {
+                    self.window = None;
+                }
+                let plan = TrimPlan {
+                    anchor: match (mode, paging) {
+                        (PageMode::Around { center }, _) => Some(center),
+                        (_, Some((side, cursor))) => page_anchor(&page, side, cursor),
+                        _ => None,
+                    },
+                    window: self.window,
+                    page: paging.map(|(side, _)| side),
+                };
+                if let Some(t) = self.open.as_mut() {
                     let mut c = t.apply_page(&page, mode);
-                    c.merge(t.sync_resume_cards(self.summary.resume_cards()));
+                    c.merge(t.fit(plan, self.summary.resume_cards()));
+                    match mode {
+                        // 打开对话、重连走了快照：时间线回到最新，不再跳，锚点按最新位置重取（Q9 一并）
+                        PageMode::Snapshot => {
+                            c.merge(TimelineChange::from_anchor(t.anchors.reset_to_latest()));
+                        }
+                        // 只有等着的正是这一次跳转时才落点（审查 4/F-5）：过时的结果（先跳 A 再跳 B 时 A 的、
+                        // 用户滚动作废了的）照常进时间线，但不消费当前的等待、不发滚动、不挪窗口
+                        PageMode::Around { center } => {
+                            if let Some(j) = t
+                                .anchors
+                                .pending_jump
+                                .as_ref()
+                                .filter(|j| j.anchor.created_seq == center)
+                            {
+                                let row = t.anchor_row(&j.anchor);
+                                // 旧窗口指着重建前的位置。落到目标行：窗口先放在它上面，帧才带上它前后的行
+                                // （网页要先有这一行才滚得过去）；网页滚到以后会报新的窗口。目标不在就从这一段的末尾看
+                                self.window = row
+                                    .as_deref()
+                                    .and_then(|r| t.key_of(r))
+                                    .map(|k| (k.ordinal(), k.ordinal()));
+                                c.merge(TimelineChange::from_anchor(t.anchors.landed(center, row)));
+                            }
+                        }
+                        _ => {}
+                    }
                     if reading_old {
                         // 旧窗口指着重建前的位置；清掉它，下一帧从最新的一页开始。
                         self.window = None;
@@ -907,7 +1208,45 @@ impl Store {
             }
             (_, K::ListLocalConfig(_)) => {}
             // 安全清单页 M1 不实现（ui-m1.md 第 2 节第 16 条）；制品与模型列表不走视图查询。
-            (_, K::ListSecurityLists(_) | K::ReadArtifact(_) | K::ListModels(_)) => {}
+            (
+                Some(QueryPurpose::Anchors {
+                    conversation_id,
+                    center,
+                    round,
+                }),
+                K::ListAnchors(w),
+            ) => {
+                if let Some(round) = round {
+                    self.refresh.result_applied(*round, SummaryTable::Anchors);
+                }
+                let seq = self.first_visible_seq();
+                let Some(t) = self
+                    .open
+                    .as_mut()
+                    .filter(|t| t.conversation_id == *conversation_id)
+                else {
+                    return;
+                };
+                let c = TimelineChange::from_anchor(t.anchors.window_arrived(*center, w, seq));
+                // 相对跳转在等这份窗口：现在落
+                let relative = t.anchors.pending_relative.take();
+                self.dirty.conversation(c);
+                if let Some(delta) = relative {
+                    let cid = conversation_id.clone();
+                    self.jump_relative(&cid, delta);
+                }
+            }
+            (_, K::ListAnchors(_)) => {
+                tracing::warn!(target: "iwork_client", "锚点结果的用途对不上，丢掉");
+            }
+            // 附带查询：结果在回包里，不经这里（会话层直接处理）
+            (
+                _,
+                K::ListSecurityLists(_)
+                | K::ReadArtifact(_)
+                | K::ListModels(_)
+                | K::GetOpenTarget(_),
+            ) => {}
         }
         if let (Some(QueryPurpose::Summary { round, table: want }), Some(got)) = (purpose, table)
             && *want == got
@@ -921,6 +1260,20 @@ impl Store {
         self.dirty.mark(ViewKey::Conversation);
         self.dirty.conversation.header = true;
         self.dirty.mark(ViewKey::Home);
+    }
+
+    /// 锚点信息卡的文字读了摘要表（待处理标题、项目名）：这些表一变，打开着的锚点列表整份重发。
+    fn mark_anchor_texts(&mut self) {
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|t| t.anchors.window.is_some())
+        {
+            self.dirty.conversation(TimelineChange {
+                anchors: true,
+                ..TimelineChange::default()
+            });
+        }
     }
 
     fn mark_summary_views(&mut self) {

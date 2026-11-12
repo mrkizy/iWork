@@ -1,13 +1,18 @@
-//! iWork 客户端的 Tauri 壳：起窗口、把三个命令转给 `iwork-client-core`、把效果（通知、外链、退出）落到系统上。
-//! 连接、界面状态、帧合并等逻辑全部在 `iwork-client-core`，这里不放业务判断。
+//! iWork 客户端的 Tauri 壳：起窗口、把三个命令转给 `iwork-client-core`、把效果（Dock 角标与跳动、外链、选择框、退出）
+//! 落到系统上。连接、界面状态、帧合并等逻辑全部在 `iwork-client-core`，这里不放业务判断。
+//!
+//! macOS 上关窗只关窗口、进程留在 Dock（角标与跳动照常，方案 2.8）；点 Dock 图标重新开窗，新窗口 attach 后
+//! 换一代取帧。Cmd+Q（「退出 iWork」）才退客户端进程。Linux 关窗即退出。
 
 // release 构建在 Windows 上不额外弹出控制台窗口；debug 保留控制台便于看日志。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bridge;
+mod dock;
 #[cfg(feature = "e2e")]
 mod e2e;
 mod effects;
+mod picker;
 
 use std::sync::Arc;
 
@@ -15,10 +20,10 @@ use bridge::{Cmd, PathCounters};
 use iwork_client_core::{App, Options, ShellEvent};
 use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::webview::NewWindowResponse;
-use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 /// 主窗口的标识：capability 只放行它（capabilities/main.json）。
-const MAIN: &str = "main";
+pub(crate) const MAIN: &str = "main";
 
 struct Bridge {
     app: App,
@@ -74,6 +79,56 @@ fn is_app_origin(url: &tauri::Url) -> bool {
     }
 }
 
+/// 主窗口的建法（启动时、macOS 上点 Dock 图标重新开窗时共用）。
+fn main_window<'a, M: Manager<tauri::Wry>>(m: &'a M) -> WebviewWindowBuilder<'a, tauri::Wry, M> {
+    WebviewWindowBuilder::new(m, MAIN, WebviewUrl::App("index.html".into()))
+        .title("iWork")
+        .inner_size(1440.0, 900.0)
+        // 最小宽度 = tokens.css 的 --window-min-w（ui-m1 2a 第 12b 条，client/tests/window-min-width.test.ts 对拍）
+        .min_inner_size(880.0, 640.0)
+        .on_navigation(|url| {
+            let ok = is_app_origin(url);
+            if !ok {
+                tracing::warn!(target: "iwork_client", %url, "主窗口导航到别的来源，已拦下");
+            }
+            ok
+        })
+        // 不开新窗口；外链只经 OpenExternal（网页发 UiIntent，Rust 只放行 http/https）。
+        .on_new_window(|_, _| NewWindowResponse::Deny)
+}
+
+/// macOS 上点 Dock 图标：窗口关着就重新开一个（新窗口的网页 attach 后换一代取帧，全量开始）。
+#[cfg(target_os = "macos")]
+fn reopen(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window(MAIN) {
+        let _ = w.set_focus();
+        return;
+    }
+    match main_window(app).build() {
+        Ok(_) => {
+            if let Some(bridge) = app.try_state::<Bridge>() {
+                bridge.app.shell(ShellEvent::WindowOpen(true));
+            }
+        }
+        Err(e) => tracing::error!(target: "iwork_client", error = %e, "重新开窗失败"),
+    }
+}
+
+/// 客户端的可调项。开发构建（`dev` feature）可用 `IWORK_DEV_TIMELINE_CAP` 把时间线行数上限调小，方便对着假后台看裁剪
+/// 与翻页（至少 2：一组最多两行，方案 2.2 第 4 条）；发布构建不认识这个变量（R8）。
+fn options() -> Options {
+    #[allow(unused_mut, reason = "只有 dev 构建改上限")]
+    let mut o = Options::default();
+    #[cfg(feature = "dev")]
+    if let Ok(v) = std::env::var("IWORK_DEV_TIMELINE_CAP") {
+        match v.parse::<usize>() {
+            Ok(cap) if cap >= 2 => o.timeline_cap = cap,
+            _ => eprintln!("[dev] IWORK_DEV_TIMELINE_CAP={v} 不是不小于 2 的整数，用默认上限"),
+        }
+    }
+    o
+}
+
 fn main() {
     let dialer = effects::dialer().unwrap_or_else(|e| panic!("找不到后台服务的端点：{e}"));
     #[allow(unused_mut, reason = "只有 e2e 构建改上下文")]
@@ -89,7 +144,8 @@ fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![attach, next_frame, ui_intent])
         .setup(move |app| {
-            let (core, effects) = tauri::async_runtime::block_on(async { App::start(dialer, Options::default()) });
+            let (core, effects) =
+                tauri::async_runtime::block_on(async { App::start(dialer, options()) });
             app.manage(Bridge {
                 app: core.clone(),
                 counters: Arc::new(PathCounters::default()),
@@ -97,7 +153,7 @@ fn main() {
                 harness: setup_harness.clone(),
             });
             #[allow(unused_mut, reason = "只有 e2e 构建加初始化脚本")]
-            let mut window = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into()));
+            let mut window = main_window(app);
             #[cfg(feature = "e2e")]
             if let Some(h) = &setup_harness {
                 window = window
@@ -108,20 +164,7 @@ fn main() {
                     e2e::open_other(app, &h.script, move |t| e2e_on_title(&handle, "other", &t))?;
                 }
             }
-            window
-                .title("iWork")
-                .inner_size(1440.0, 900.0)
-                .min_inner_size(1024.0, 640.0)
-                .on_navigation(|url| {
-                    let ok = is_app_origin(url);
-                    if !ok {
-                        tracing::warn!(target: "iwork_client", %url, "主窗口导航到别的来源，已拦下");
-                    }
-                    ok
-                })
-                // 不开新窗口；外链只经 OpenExternal（网页发 UiIntent，Rust 只放行 http/https）。
-                .on_new_window(|_, _| NewWindowResponse::Deny)
-                .build()?;
+            window.build()?;
             effects::spawn(app.handle().clone(), core, effects);
             Ok(())
         })
@@ -131,15 +174,43 @@ fn main() {
             };
             match event {
                 WindowEvent::Focused(f) => bridge.app.shell(ShellEvent::Focused(*f)),
-                WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
-                    let paths = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-                    bridge.app.shell(ShellEvent::Dropped(paths));
+                // 主窗口关了（macOS 上进程留在 Dock）：没人在看了
+                WindowEvent::Destroyed if window.label() == MAIN => {
+                    bridge.app.shell(ShellEvent::WindowOpen(false));
                 }
+                // 拖文件进来：拖动中给对话区画虚线框，松开把路径附到当前对话（ui-m1.md 第 2 节第 6 条）
+                WindowEvent::DragDrop(drag) => match drag {
+                    tauri::DragDropEvent::Enter { .. } => {
+                        bridge.app.shell(ShellEvent::Dragging(true));
+                    }
+                    tauri::DragDropEvent::Leave => bridge.app.shell(ShellEvent::Dragging(false)),
+                    tauri::DragDropEvent::Drop { paths, .. } => {
+                        let paths = paths
+                            .iter()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .collect();
+                        bridge.app.shell(ShellEvent::Dropped(paths));
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         })
-        .run(context)
-        .expect("Tauri 运行时启动失败");
+        .build(context)
+        .expect("Tauri 运行时启动失败")
+        .run(|app, event| match event {
+            // 最后一个窗口关了（不是显式退出）：macOS 上进程留在 Dock，角标与跳动照常（方案 2.8）
+            RunEvent::ExitRequested {
+                code: None, api, ..
+            } if cfg!(target_os = "macos") => {
+                api.prevent_exit();
+            }
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => reopen(app),
+            _ => {
+                let _ = app;
+            }
+        });
 }
 
 #[cfg(feature = "e2e")]
