@@ -1,12 +1,13 @@
 //! 整包签名的包（macOS；有证书构建，包里不放清单）：后台程序在一个 `.app` 的 `Contents/MacOS` 里，且 `.app`
-//! 有签名封印（`Contents/_CodeSignature/CodeResources`）。装齐的依据：整包静态验签通过（严格、含嵌套代码）——
-//! 封印登记了包里每一个文件，少一个、半个、多一个没登记的，都过不了。
+//! 有签名封印（`Contents/_CodeSignature/CodeResources`）。装齐的依据：后台程序在 `Contents/MacOS` 里，并且整包
+//! 静态验签通过（严格、含嵌套代码）——封印登记了包里每一个文件，少一个、半个、多一个没登记的，都过不了；后台
+//! 在而封印里没有它也过不了。只有客户端的 `.app` 验签能过，但后台不在，不算装齐（组 3 审查 1/F-5）。
 
 use std::path::{Path, PathBuf};
 
 use iwork_ipc::peer;
 
-use super::{FormVerdict, PackageForm};
+use super::{DAEMON_NAME, FormVerdict, PackageForm};
 
 pub struct SignedBundleForm;
 
@@ -35,6 +36,10 @@ impl PackageForm for SignedBundleForm {
         if !app.join("Contents/_CodeSignature/CodeResources").exists() {
             return FormVerdict::NotThisForm;
         }
+        let daemon = exe_dir.join(DAEMON_NAME);
+        if !std::fs::symlink_metadata(&daemon).is_ok_and(|m| m.is_file()) {
+            return FormVerdict::Incomplete(format!("包里没有 {DAEMON_NAME}"));
+        }
         match peer::verify_bundle(&app) {
             Ok(()) => FormVerdict::Complete,
             Err(e) => FormVerdict::Incomplete(format!("整包验签不过：{e}")),
@@ -59,6 +64,11 @@ pub(crate) mod tests {
     /// 在 `root` 下造一个 ad-hoc 整包签名的 `iWork.app`：Info.plist、`Contents/MacOS` 里的后台与客户端
     /// （本测试程序的拷贝，各按 `variant` 换签名标识）、一个资源文件。返回 `.app` 路径。
     pub(crate) fn sealed_app(root: &Path, variant: &str) -> PathBuf {
+        sealed_app_with(root, variant, &["iwork-daemon", "iwork-client"])
+    }
+
+    /// 同 [`sealed_app`]，`Contents/MacOS` 里只放 `binaries` 这几个。
+    pub(crate) fn sealed_app_with(root: &Path, variant: &str, binaries: &[&str]) -> PathBuf {
         let app = root.join("iWork.app");
         let macos = app.join("Contents/MacOS");
         std::fs::create_dir_all(&macos).unwrap();
@@ -80,7 +90,8 @@ pub(crate) mod tests {
             format!("资源 {variant}"),
         )
         .unwrap();
-        for (name, id) in [("iwork-daemon", "daemon"), ("iwork-client", "client")] {
+        for name in binaries {
+            let id = name.trim_start_matches("iwork-");
             let staged = root.join(format!(".{name}"));
             std::fs::copy(std::env::current_exe().unwrap(), &staged).unwrap();
             run(Command::new("codesign")
@@ -139,6 +150,17 @@ pub(crate) mod tests {
             matches!(verdict(&c), FormVerdict::Incomplete(_)),
             "多一个文件"
         );
+    }
+
+    /// 1/F-5 反例：只有客户端的 `.app`，整包验签能过，后台不在 → 没装齐。对照：再按同样做法带上后台 → 装齐。
+    #[test]
+    fn client_only_bundle_is_incomplete() {
+        let t = tempfile::tempdir().unwrap();
+        let app = sealed_app_with(&t.path().join("client-only"), "a", &["iwork-client"]);
+        assert!(peer::verify_bundle(&app).is_ok(), "前提：整包验签能过");
+        assert!(matches!(verdict(&app), FormVerdict::Incomplete(_)));
+        let full = sealed_app(&t.path().join("full"), "a");
+        assert_eq!(verdict(&full), FormVerdict::Complete);
     }
 
     /// 不是 .app、或没有封印 → NotThisForm（交给别的行判）。

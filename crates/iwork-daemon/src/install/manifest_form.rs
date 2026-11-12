@@ -1,12 +1,13 @@
 //! 带清单的包（无证书构建；T03 方案 2.4a）：后台程序旁边有 `iwork-manifest.json`。装齐的依据：清单能解析，
-//! 且它为每个二进制登记的每一种身份都对得上磁盘上的那个文件（`sha256:` 核全文哈希；macOS 另核 `cdhash:`）。
+//! 登记了后台程序（至少一种身份），且它为每个二进制登记的每一种身份都对得上磁盘上的那个文件（`sha256:` 核全文
+//! 哈希；macOS 另核 `cdhash:`）。空清单、只登记了客户端的清单都不算装齐（组 3 审查 1/F-5）。
 //! 看内容不看时间：只 `touch` 不改变结论。
 
 use std::path::Path;
 
 use iwork_ipc::peer::{self, MANIFEST_FILE, Manifest, Want};
 
-use super::{FormVerdict, PackageForm};
+use super::{DAEMON_NAME, FormVerdict, PackageForm};
 
 pub struct ManifestForm;
 
@@ -31,6 +32,13 @@ impl PackageForm for ManifestForm {
             Ok(m) => m,
             Err(e) => return FormVerdict::Incomplete(format!("清单解析不了：{e}")),
         };
+        if manifest
+            .binaries
+            .get(DAEMON_NAME)
+            .is_none_or(|ids| ids.is_empty())
+        {
+            return FormVerdict::Incomplete(format!("清单没登记 {DAEMON_NAME} 的身份"));
+        }
         for (name, listed) in &manifest.binaries {
             let file = exe_dir.join(binary_file(name));
             let on_disk = match peer::file_image_ids(&file, Want::All) {
@@ -162,6 +170,32 @@ pub(crate) mod tests {
             ManifestForm.check(d.path()),
             FormVerdict::Incomplete(_)
         ));
+    }
+
+    /// 1/F-5 反例：清单的 binaries 是空的，或只登记了客户端、或后台登记了空列表 → 没装齐（后台没核验过）。
+    #[test]
+    fn manifest_without_daemon_is_incomplete() {
+        let d = dir();
+        place_binary(d.path(), "iwork-daemon", "a");
+        place_binary(d.path(), "iwork-client", "c");
+        let incomplete = |text: &str| {
+            std::fs::write(d.path().join(MANIFEST_FILE), text).unwrap();
+            matches!(ManifestForm.check(d.path()), FormVerdict::Incomplete(_))
+        };
+        assert!(incomplete(
+            r#"{"manifest_version":1,"app_version":"t","binaries":{}}"#
+        ));
+        write_manifest(d.path(), &["iwork-client"]);
+        assert!(matches!(
+            ManifestForm.check(d.path()),
+            FormVerdict::Incomplete(_)
+        ));
+        assert!(incomplete(
+            r#"{"manifest_version":1,"app_version":"t","binaries":{"iwork-daemon":[]}}"#
+        ));
+        // 对照：登记了后台就装齐
+        write_manifest(d.path(), &["iwork-daemon", "iwork-client"]);
+        assert_eq!(ManifestForm.check(d.path()), FormVerdict::Complete);
     }
 
     /// 登记了而文件不在（客户端还没拷到）→ 没装齐。

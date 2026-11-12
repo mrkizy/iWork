@@ -16,6 +16,9 @@ pub mod manifest_form;
 #[cfg(target_os = "macos")]
 pub mod signed_bundle_form;
 
+/// 包里后台程序的名字（清单里的键；文件名另加平台的可执行后缀）。两种包的形态判装齐时都要求它在、并核验过。
+pub const DAEMON_NAME: &str = "iwork-daemon";
+
 /// 磁盘上的清单。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiskManifest {
@@ -84,7 +87,8 @@ pub enum FormVerdict {
     Complete,
 }
 
-/// 一种包的形态。只读，每次都完整地查，不记上次的结果。
+/// 一种包的形态。只读，每次都完整地查，不记上次的结果。判 `Complete` 必须核验过后台程序（[`DAEMON_NAME`]）：
+/// 它在，并且对得上清单登记的身份、或在整包签名的封印里。只有客户端齐了不算装齐。
 pub trait PackageForm: Send + Sync {
     fn name(&self) -> &'static str;
     fn check(&self, exe_dir: &Path) -> FormVerdict;
