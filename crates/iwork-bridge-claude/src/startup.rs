@@ -198,6 +198,7 @@ async fn open_in(dir: &SessionDir, req: &OpenRequest<'_>) -> Result<Parts, OpenE
         token_hex: token.hex(),
         bridge_pid: std::process::id(),
         hook_deadline: limits.hook,
+        hook_timeout: req.hook_timeout,
     };
     let plan = build_launch(req.setup, req.opening, req.bridge, &channel)
         .map_err(OpenError::SetupInvalid)?;

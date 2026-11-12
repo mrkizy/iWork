@@ -29,6 +29,10 @@ pub enum CliEvent {
     Init(Init),
     /// 别的 `system` 子类型（`hook_started` 之类），不处理
     OtherSystem,
+    /// 后台任务起来了（D5：M1 关着后台任务，开关没生效才会看到，3.1a）：`system/task_started` 带
+    /// `is_backgrounded: true`，或 `system/background_tasks_changed` 报了非空的 `tasks`。任务结束后后者会再来一条
+    /// 空的，那条不算（形状照 S0 的 g1-BashBg 实录）
+    BackgroundTask,
     /// `stream_event` 里的正文增量；`message_id` 是顶层的 `api_message_id`，和整条消息的 `message.id` 同一个
     TextDelta {
         message_id: Option<String>,
@@ -211,6 +215,7 @@ pub fn parse_line(line: &str) -> Result<CliEvent, LineError> {
                 },
             })
         }
+        Some("system") if background_task(&v) => CliEvent::BackgroundTask,
         Some("system") => CliEvent::OtherSystem,
         Some("stream_event") => stream_event(&v, s(&v, "api_message_id")),
         Some("assistant") => CliEvent::Assistant(assistant(&v)),
@@ -222,6 +227,18 @@ pub fn parse_line(line: &str) -> Result<CliEvent, LineError> {
         Some("control_response") => CliEvent::ControlResponse(control_response(&v)),
         _ => CliEvent::Unknown,
     })
+}
+
+/// 3.1a「开关没生效时怎么知道」的两个信号。
+fn background_task(v: &Value) -> bool {
+    match v.get("subtype").and_then(Value::as_str) {
+        Some("task_started") => v.get("is_backgrounded").and_then(Value::as_bool) == Some(true),
+        Some("background_tasks_changed") => v
+            .get("tasks")
+            .and_then(Value::as_array)
+            .is_some_and(|t| !t.is_empty()),
+        _ => false,
+    }
 }
 
 fn stream_event(v: &Value, message_id: Option<String>) -> CliEvent {
@@ -604,6 +621,30 @@ mod tests {
         assert_eq!((i.plugins, i.memory_auto), (None, MemoryAuto::Malformed));
         let i = init_of(r#","memory_paths":{}"#);
         assert_eq!(i.memory_auto, MemoryAuto::Absent);
+    }
+
+    /// D5 的两个后台信号；前台的子代理（`is_backgrounded: false`）与空的任务清单不算。
+    #[test]
+    fn background_task_signals() {
+        let p = |l: &str| parse_line(l).unwrap();
+        assert_eq!(
+            p(r#"{"type":"system","subtype":"task_started","task_id":"a","is_backgrounded":true}"#),
+            CliEvent::BackgroundTask
+        );
+        assert_eq!(
+            p(
+                r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a"}]}"#
+            ),
+            CliEvent::BackgroundTask
+        );
+        for quiet in [
+            r#"{"type":"system","subtype":"task_started","task_id":"a","is_backgrounded":false}"#,
+            r#"{"type":"system","subtype":"task_started","task_id":"a"}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"a"}"#,
+        ] {
+            assert_eq!(p(quiet), CliEvent::OtherSystem, "{quiet}");
+        }
     }
 
     #[test]

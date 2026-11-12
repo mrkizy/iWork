@@ -1,13 +1,17 @@
 //! 起 CLI 的环境变量（T06 方案 3.1a；P14，产品负责人 2026-11-12 定：不筛选）。
 //!
-//! CLI 的环境 = 桥接自己的环境原样继承，只额外设上 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`（覆盖继承来的值）和 hook
-//! 通道的四个 `IWORK_HOOK_*`。不筛选是定下来的做法：正式包由登录自启项或 Finder 启动，环境本来就干净；从带着用户
+//! CLI 的环境 = 桥接自己的环境原样继承，只额外设上两个开关 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`、
+//! `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`（都覆盖继承来的值）和 hook 通道的四个 `IWORK_HOOK_*`。不筛选是定下来的做法：正式包由登录自启项或 Finder 启动，环境本来就干净；从带着用户
 //! 变量的终端、从 Claude Code 里起 iWork 时带进来的东西是已知限制（3.1a），由每一轮 init 的会话内容核对事后发现。
 //!
 //! 桥接不读、不记录任何环境变量的值（需求第 11 章）：[`LaunchEnv`] 的 `Debug` 只列变量名。
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+
+/// 关掉后台任务（D5，产品负责人 2026-11-12 定：M1 先关，M2 开放）：子代理在前台跑、Bash 不收 `run_in_background`。
+/// 继承来的是别的值也覆盖成 `1`（3.1a）。M2 拿掉时只动这一处、禁用名单里的 Monitor 和 `events.rs` 里认后台信号的那一段
+pub const DISABLE_BACKGROUND_TASKS: &str = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS";
 
 /// 关掉 CLI 的自动记忆：设成 `1` 不建也不读自动记忆文件；继承来的是 `0`（强制打开）也要被它盖掉（3.1a）。
 pub const DISABLE_AUTO_MEMORY: &str = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
