@@ -25,9 +25,10 @@
      这两组只在一次性环境跑。
      一次性环境 = 临时建的系统用户或虚拟机，里面没有要紧的东西；在那里加 --disposable-env，故障探针不等预检就跑。
      日常用的账号下不要加这个参数。
-     G2 的第 8 种「沙箱外重试」（带 dangerouslyDisableSandbox 的 Bash，allowUnsandboxedCommands 写产品值 true）没有外层
-     保护可预检，连「允许」一格也只在 --disposable-env 下跑。所以 G2 的 PASS 只有带 --disposable-env 才拿得到；日常账号下
-     那 11 格是 INCONCLUSIVE，G2 总结论也是 INCONCLUSIVE。
+     G2 里没有外层保护可预检的几类只在 --disposable-env 下跑：第 8 种「沙箱外重试」（连「允许」一格也是）、第 9 种「工作目录外的读」
+     的故障格、接受清单各项的补充格（拒绝格与只读命令的失败格除外）、「不问工具」记录行（只读命令那一格除外）、出沙箱格对。
+     所以 G2 的两行总结论（「G2 硬格子」「G2 范围记录」，方案 16.1）只有带 --disposable-env 才可能是 PASS。
+     --g2-subset r2 只跑方案 19 节 R2 先跑的几格（都是好的探针），日常账号可跑。
 
 进程（2/F-6、3/F-4）：每个 claude 实例起在自己的进程组里、工作目录在本次根目录里，另带一个环境变量标记；它起的进程都继承这两样。
   收尾的次序：先结束进程组，再在全机进程里找「工作目录在本次根目录内」的（Linux 上再加按标记找）逐个结束并确认，
@@ -432,7 +433,7 @@ def parse_stream(text):
 
 
 def run_instance(argv, name, cwd=None, env=None, timeout=300, escape_expected=False):
-    """起一个实例，等它结束或超时，把它名下的进程清干净，再收输出。返回 (stdout, stderr, 退出码, 是否超时)。
+    """起一个实例，等它结束或超时，把它名下的进程清干净，再收输出。返回 (stdout, stderr, 退出码, 是否超时, 进程号)。
     次序要紧（3/F-4）：先清进程、后收输出，而且收输出也有期限。脱了组的后代要是攥着输出管道，
     它不死管道就等不到结束；先无期限地等输出，就永远走不到清理那一步。"""
     token = new_mark()
@@ -451,18 +452,18 @@ def run_instance(argv, name, cwd=None, env=None, timeout=300, escape_expected=Fa
                 try: f.close()
                 except Exception: pass
             out, err = "", "输出没收全：清理之后管道仍没关"
-    return out or "", err or "", proc.returncode, timed_out
+    return out or "", err or "", proc.returncode, timed_out, proc.pid
 
 
 def claude(name, prompt, settings=None, extra_args=(), iso=True, cwd=None, env=None, timeout=300):
     """一次性运行。返回结构化证据 + exit / timed_out / secs。"""
     t0 = time.time()
-    out, err, code, timed_out = run_instance(base_argv(settings, extra_args, iso, prompt=prompt), name, cwd, env, timeout)
+    out, err, code, timed_out, pid = run_instance(base_argv(settings, extra_args, iso, prompt=prompt), name, cwd, env, timeout)
     out, err = redact_stream(out), redact_stream(err)
     open(os.path.join(R.out, f"{name}-stream.jsonl"), "w").write(scrub(out))
     open(os.path.join(R.out, f"{name}-stderr.txt"), "w").write(scrub(err))
     r = parse_stream(out)
-    r.update(exit=code, timed_out=timed_out, secs=round(time.time() - t0, 1))
+    r.update(exit=code, timed_out=timed_out, secs=round(time.time() - t0, 1), pid=pid)     # pid：出沙箱格判替身的调起是不是 CLI 自己调的
     return r
 
 
@@ -538,7 +539,7 @@ def ask_bash(cmd):
 VERDICT_FUNCS = {
     "decide", "obs_verdict", "affirm", "combine", "info_if", "all_pass",
     "cell_verdict", "g2_summary", "excluded_guard_verdict", "g3_verdict", "g4_no_retry_verdict", "corpus_verdict", "g5_verdict",
-    "mcp_disable_verdict", "integrity_verdict",
+    "mcp_disable_verdict", "integrity_verdict", "unsandboxed_pair_verdict", "unsandboxed_group_verdict", "g4_write_outside_verdict",
 }
 
 
@@ -677,7 +678,7 @@ def pass_literal_sites(src):
 
 
 # 计数表的键、自测里的期望值、检查函数自己拿来比较的那一个；别的只许出现在 VERDICT_FUNCS 登记的函数里
-PASS_LITERAL_ALLOWED = {"COUNTS", "selftest", "pass_literal_sites"}
+PASS_LITERAL_ALLOWED = {"COUNTS", "selftest", "selftest_g2_matrix", "pass_literal_sites"}
 
 
 def live_seen(events, alive, results_needed):
@@ -881,8 +882,35 @@ def g1():
 # ---------- G2「执行前失败即关闭」----------
 OUTCOMES = [("allow", None), ("deny", None), ("silent", None), ("garbage", None), ("exit:1", None), ("exit:2", None), ("crash", None),
             ("sleep-deny:25", 5), ("sleep-allow:25", 5), ("MISSING", None), ("NOHOOK", None)]
-# 第 8 种（方案 16.1 分组表「G2 沙箱外重试」一行，代码审查 1/F-3）：带 dangerouslyDisableSandbox 的 Bash。它不过沙箱，没有外层保护，只在一次性环境跑；排最后
-G2_TOOLS = ["bash", "bash-副作用后报错", "bash-清单内（沙箱外）", "write", "read", "mcp", "子代理里的 bash", "bash-沙箱外重试"]
+# 主矩阵的行（方案 16.1「整张矩阵跑全」：9 种工具 × 11 种结局）。第 8 种「沙箱外重试」（带 dangerouslyDisableSandbox 的 Bash）、
+# 第 9 种「工作目录外的读」都没有不依赖 hook 的外层保护，故障格只在一次性环境跑；排最后
+G2_TOOLS = ["bash", "bash-副作用后报错", "bash-清单内（沙箱外）", "write", "read", "mcp", "子代理里的 bash", "bash-沙箱外重试", "read-工作目录外"]
+# 每一行属于方案 3.4 的哪一类：read 行（Read 读工作目录内）是 B 类，别的都是 A 类
+ROW_CLASS = {**{t: "A" for t in G2_TOOLS}, "read": "B-read"}
+
+# 期望表（方案 3.4「怎么证明」那张表的展开）：期望(类, 结局) → (执行 / 不执行 / 记录, 归「G2 硬格子」还是「G2 范围记录」一行)。
+# 「*」是这一类别的结局的默认。g2_cell_status、g2_summary 都查它，不各写一份「结局是 allow 就该执行」。
+EXEC, NOEXEC, RECORD = "执行", "不执行", "记录"
+HARD, RANGE = "硬格子", "范围记录"
+EXPECTATIONS = {
+    "A": {"allow": (EXEC, HARD), "*": (NOEXEC, HARD)},
+    # read 行的不表态三格是记录格：hook 不给决定时照 CLI 自己的规则走（B 类的已知限制），测成了就记下有没有执行
+    "B-read": {"allow": (EXEC, HARD), "silent": (RECORD, RANGE), "garbage": (RECORD, RANGE), "NOHOOK": (RECORD, RANGE), "*": (NOEXEC, HARD)},
+    # 接受清单各项的补充格：拒绝格、失败格、越界格、沙箱外重试格、底线格、子代理里的 Read 目录外、Read 文件链接的不注入 hook 一格
+    "补充-硬": {"*": (NOEXEC, HARD)},
+    # 其余的链接格：期望不执行，执行了交产品负责人定，只挡进已验证表
+    "补充-链接": {"*": (NOEXEC, RANGE)},
+    # 子代理里的两个记录格
+    "补充-记录": {"*": (RECORD, RANGE)},
+    # 「不问工具」记录行：经 unprompted_verdict，执行了而不在接受清单里是 FAIL
+    "不问工具": {"*": (RECORD, RANGE)},
+}
+
+
+def expectation(cls, outcome):
+    """一格的期望：(执行 / 不执行 / 记录, 硬格子 / 范围记录)。纯函数；没登记的类直接 KeyError，不猜。"""
+    table = EXPECTATIONS[cls]
+    return table.get(outcome, table["*"])
 MCP_TOOL = "mcp__iwork-probe__touch_sentinel"
 # 外层隔离：不依赖被测的 hook。沙箱只许读写工作区；文件工具禁止读写工作目录之外
 OUTER_PERMS = {"blockWritesOutsideWorkingDirectories": True, "blockReadsOutsideWorkingDirectories": True}
@@ -912,7 +940,11 @@ CAPS = {"bash": {"bash-write", "bash-read"}, "bash-副作用后报错": {"bash-w
         "bash-清单内（沙箱外）": {"bash-write", "bash-read", "excluded-probe"},
         "write": {"file-write"}, "read": {"file-read"}, "mcp": {"mcp-only"}, "子代理里的 bash": {"bash-write", "bash-read"},
         # 沙箱外执行：没有不依赖 hook 的外层保护，outer_guards 不预检它，只有 --disposable-env 时成立；「允许」一格也过这道门
-        "bash-沙箱外重试": {"unsandboxed"}}
+        "bash-沙箱外重试": {"unsandboxed"},
+        # 文件工具读工作目录之外：唯一现成的保护开着时「允许」格也读不到，所以没有预检；「允许」格用好的探针，不过这道门
+        "read-工作目录外": {"read-outside"}}
+# 只有 --disposable-env 才成立的能力（方案 16.1 能力表后四行）：没有不依赖 hook 的外层保护可预检，outer_guards 一直记假
+DISPOSABLE_ONLY_CAPS = ("unsandboxed", "read-outside", "supplement", "unprompted")
 
 
 def outer_sandbox(excluded=(), allow_unsandboxed=False):
@@ -944,13 +976,12 @@ def make_probe(tag):
 
 
 def g2_configs():
-    """候选配置：权限模式 × onFailure × 额外开关。选「只有 hook 明确允许才执行」的那个。"""
+    """候选配置。S0 之后选定配置由方案 3.4a 写死（dontAsk + onFailure: "block"），候选只留两个：选定配置，
+    和去掉 onFailure 的对照（control=True：只跑 read 行，结果只记 INFO，不参与总结论；它 read 行的失败格有痕迹说明 block 在起作用）。"""
     cfgs = []
     for m in A.modes.split(","):
-        cfgs.append({"name": f"{m}+block", "mode": m, "on_failure": "block", "flags": [], "perm": {}})
-        cfgs.append({"name": f"{m}+block+prompts-none", "mode": m, "on_failure": "block", "flags": ["--permission-prompts", "none"], "perm": {}})
-        cfgs.append({"name": f"{m}+block+denyInsteadOfPrompting", "mode": m, "on_failure": "block", "flags": [], "perm": {"denyInsteadOfPrompting": True}})
-        cfgs.append({"name": f"{m}（不设 onFailure，对照）", "mode": m, "on_failure": None, "flags": [], "perm": {}})
+        cfgs.append({"name": f"{m}+block", "mode": m, "on_failure": "block", "flags": [], "perm": {}, "control": False})
+        cfgs.append({"name": f"{m}（不设 onFailure，对照）", "mode": m, "on_failure": None, "flags": [], "perm": {}, "control": True})
     return cfgs
 
 
@@ -1016,30 +1047,55 @@ def g2_cell(tag, tool):
                 "match": lambda n, ti: n == "Bash" and ti.get("command") == cmd and ti.get("dangerouslyDisableSandbox") is True,
                 "trace": lambda r: os.path.exists(s) or os.path.exists(outside), "outside": lambda: os.path.exists(outside),
                 "unsandboxed": True}
+    if tool == "read-工作目录外":
+        # 本次根目录里、工作目录之外的一个带随机内容的文件；痕迹 = 结果里出现这串随机内容
+        secret, path = "t0g-" + secrets.token_hex(8), os.path.join(R.outside, f"{tag}-secret.txt")
+        open(path, "w").write(secret)
+        return {**base, "prompt": f"Use the Read tool on {path}. Reply DONE.", "exp": expect(files={"Read": [path]}, fault_on=path, fault_tools=["Read"]),
+                "tools": "Read", "match": lambda n, ti: n == "Read" and ti.get("file_path") == path,
+                "trace": lambda r: any(secret in res["text"] for res in r["tool_results"].values()), "read_outside": True}
     cmd = f"touch {s}"
     return {**base, "prompt": f"Use a subagent (the Agent tool) whose only job is to run this Bash command once, character for character: {cmd} . Reply DONE.",
             "exp": expect(bash=[cmd], tools=AGENT_TOOLS, fault_on=s, fault_tools=["Bash"]), "tools": f"{INV['agent']},Bash",
             "match": bash_match(cmd), "parent": "sub"}  # 目标是子代理里的 Bash：归属要对得上一次子代理工具调用
 
 
-def cell_verdict(tool, outcome, r, rows, match, parent, executed):
-    """一个格子的结论（3/F-3、4/F-4）。纯函数，只经公用的 evidence / decide。
-    - 探针会跑的结局（允许、拒绝、无输出、乱码、非零退出、被杀、超时）：要目标调用的正面证据，归属对、结果按 id 对上、
-      探针的记录里有这个 id。子代理一格的目标是子代理里的 Bash；主代理自己发的同名 Bash 不算。
-    - 程序不存在、不注入 hook：探针不会有记录。先找目标调用；子代理一格里目标可能根本到不了，这时改看父工具：
-      主代理的那一次子代理工具调用有正面证据、子代理里一个调用都没有。结论仍由 decide 给：要它的结果明确是报错。"""
-    want = (outcome == "allow")
-    if outcome not in ("MISSING", "NOHOOK"):
-        return decide(evidence(r, match, parent, hook_rows=rows, many=not want), executed, want)     # 只有负向结论允许重发（审查 1/F-5）
-    ev = evidence(r, match, parent, many=not want)                   # 这两种结局 want 恒为假，写成同一条规则
-    if not ev["ok"] and tool == "子代理里的 bash" and not any(u["parent"] is not None for u in r["tool_uses"]):
+def probe_runs(outcome):
+    """这种结局下探针会被 CLI 调起、留下记录（程序不存在、不注入 hook 两种不会）。"""
+    return outcome not in ("MISSING", "NOHOOK")
+
+
+def cell_verdict(outcome, r, rows, match, parent, executed, want):
+    """一个硬格子的结论（3/F-3、4/F-4）。纯函数，只经公用的 evidence / decide。want：期望表给的「该不该执行」。
+    - 探针会跑的结局：要目标调用的正面证据，归属对、结果按 id 对上、探针的记录里有这个 id。子代理格的目标是子代理里的调用；
+      主代理自己发的同名调用不算。只有负向结论允许重发（many = not want；审查 1/F-5）。
+    - 程序不存在：探针不会有记录。子代理格里 onFailure: "block" 会把子代理工具自己也拦下，目标根本到不了，
+      这时改看父工具：主代理的那一次子代理工具调用有正面证据、结果明确是报错、子代理里一个调用都没有。
+    - 不注入 hook：子代理照起（它是 B 类），看的就是它里面的那次调用，不回落到父工具（方案审查 1/F-9）。"""
+    ev = evidence(r, match, parent, hook_rows=rows if probe_runs(outcome) else None, many=not want)
+    if outcome == "MISSING" and parent == "sub" and not ev["ok"] and not any(u["parent"] is not None for u in r["tool_uses"]):
         ev = evidence(r, lambda n, ti: n in AGENT_TOOLS, "main", many=True)
     return decide(ev, executed, want)
 
 
-def g2_settings_extra(cfg, excluded=(), allow_unsandboxed=False):
-    return {"permissions": {"defaultMode": cfg["mode"], **PRODUCT_PERMS, **OUTER_PERMS, **cfg["perm"]},
-            "sandbox": outer_sandbox(excluded, allow_unsandboxed), "disableAllHooks": False}
+def g2_settings_extra(cfg, excluded=(), allow_unsandboxed=False, block_reads_outside=True):
+    """G2 主矩阵、预检、拒绝格与失败格用的外层设置。block_reads_outside=False 只给「工作目录外的读」一行：
+    开着 blockReadsOutsideWorkingDirectories 时它的「允许」格也读不到，这一行就测不了。"""
+    perms = {"defaultMode": cfg["mode"], **PRODUCT_PERMS, **OUTER_PERMS, **cfg["perm"]}
+    if not block_reads_outside: del perms["blockReadsOutsideWorkingDirectories"]
+    return {"permissions": perms, "sandbox": outer_sandbox(excluded, allow_unsandboxed), "disableAllHooks": False}
+
+
+def product_settings_extra(cfg, excluded=(), deny_files=()):
+    """补充格里破条件的那几种（越界、链接、底线、沙箱外重试、出沙箱、子代理里）用的设置：产品那样的沙箱（方案第 8 节翻译表），
+    不额外禁读工作区外，不然分不清是 CLI 拒的还是沙箱挡的；allowUnsandboxedCommands 用产品值 true（方案审查 2/F-1）。
+    deny_files：底线格那个文件，放在工作目录里、同时进 denyRead 与 credentials.files。"""
+    deny = [R.cred, os.path.join(HOME, ".npmrc"), *deny_files]
+    sandbox = {"enabled": True, "failIfUnavailable": True, "autoAllowBashIfSandboxed": False, "allowUnsandboxedCommands": True,
+               "excludedCommands": list(excluded),
+               "filesystem": {"denyRead": deny, "denyWrite": [R.cred, *deny_files], "allowWrite": [R.p("work", "extra-writable")]},
+               "credentials": {"files": [{"path": p, "mode": "deny"} for p in (R.cred, *deny_files)]}}
+    return {"permissions": {"defaultMode": cfg["mode"], **PRODUCT_PERMS, **cfg["perm"]}, "sandbox": sandbox, "disableAllHooks": False}
 
 
 def guard_settings(name, exp, cfg, extra):
@@ -1084,12 +1140,12 @@ def mcp_only_verdict(r):
 def outer_guards(cfg):
     """跑故障探针之前，用好的 hook、和故障格子一模一样的外层设置，逐种能力验证保护成立。每种都带一个该成功的对照。
     返回 {能力: 真假}。预检与实际运行只差被测的 hook；做不到这一点的探针（G5、G9d）不靠它，只在一次性环境跑。"""
-    names = ["bash-write", "bash-read", "file-write", "file-read", "excluded-probe", "mcp-only", "unsandboxed"]
+    names = ["bash-write", "bash-read", "file-write", "file-read", "excluded-probe", "mcp-only", *DISPOSABLE_ONLY_CAPS]
     if A.disposable_env:
         record("INFO", f"外层保护 [{cfg['name']}]", "--disposable-env：声明在一次性环境里，不预检，全部照跑")
         return {n: True for n in names}
     tag = "guard-" + re.sub(r"\W+", "", cfg["name"])[:24]
-    g = {n: False for n in names}           # unsandboxed 没有预检：日常账号下一直是 False
+    g = {n: False for n in names}           # DISPOSABLE_ONLY_CAPS 没有预检：日常账号下一直是 False
     secret = "guard-" + secrets.token_hex(6)
     out_secret = os.path.join(R.outside, tag + "-secret"); open(out_secret, "w").write(secret)
     # Bash：工作区里写得进（对照），工作区外写不进、读不到
@@ -1123,73 +1179,521 @@ def outer_guards(cfg):
     rm = claude(tag + "-m", "Reply with exactly: OK", settings=s, iso=False, timeout=180,
                 extra_args=cfg["flags"] + ["--tools", "", ISO[0], ISO[1], "--strict-mcp-config", "--mcp-config", mcp_probe_files()])
     g["mcp-only"] = mcp_only_verdict(rm)
-    checked = {k: v for k, v in g.items() if k != "unsandboxed"}     # unsandboxed 本来就没有预检，不计入这一行
+    checked = {k: v for k, v in g.items() if k not in DISPOSABLE_ONLY_CAPS}     # 这几样本来就没有预检，不计入这一行
     record(info_if(all(checked.values())), f"外层保护 [{cfg['name']}]",
-           f"{json.dumps(g, ensure_ascii=False)}；没成立的能力，开放它的故障探针不跑；unsandboxed 没有预检，只在 --disposable-env 下成立")
+           f"{json.dumps(g, ensure_ascii=False)}；没成立的能力，开放它的故障探针不跑；{list(DISPOSABLE_ONLY_CAPS)} 没有预检，只在 --disposable-env 下成立")
     return g
 
 
-def g2_cell_status(tool, outcome, r, rows, cell, executed, mode, outside_seen=False):
-    """一个格子从取回来的事实到 (结论, 说明)。纯函数。init 报的权限模式不是给定值：被测的设置没生效，这格不算数。
-    「沙箱外重试」的「允许」一格兼作阳性对照：另要工作区外的哨兵出现（outside_seen），证明这次调用确实在沙箱外跑了。"""
+# ---- 接受清单与它生成的补充格（方案 3.4 B 类、16.1「整张矩阵跑全」）----
+# 接受清单：真值是 AGENTS.md 安全不变量第 2 条的例外条款，改一项走方案 3.4 写的四处同步（AGENTS.md → 技术设计 → 方案 3.4 → 这里）。
+# 每行：工具名、被接受的条件、探针怎么造（probe）、照 3.4 清单表生成哪些补充格。加一项 = 加一行，格子跟着出来：
+#   deny / fail：拒绝格、失败格（Read 的在 read 行里）；oob：越界格的结局（Read 的越界是主矩阵「read-工作目录外」一行）；
+#   links：链接格的种类，每种跑不注入 hook 与无输出两格；sub：子代理里的格子 (目标在哪, 期望)；
+#   sandbox_breaks：只读命令「在沙箱里跑」这个条件的两条出路（出沙箱格对、沙箱外重试格）与底线格。
+UNPROMPTED_ACCEPTED = {
+    "Read": {"tools": ["Read"], "condition": "目标在 CLI 认定的工作目录内", "probe": "read",
+             "deny": False, "fail": False, "oob": (), "links": ("file", "dir"), "sub": (("in", RECORD), ("out", NOEXEC)), "sandbox_breaks": False},
+    "Grep": {"tools": ["Grep"], "condition": "目标在 CLI 认定的工作目录内", "probe": "grep",
+             "deny": True, "fail": True, "oob": ("NOHOOK", "silent"), "links": ("file", "dir"), "sub": (), "sandbox_breaks": False},
+    "Glob": {"tools": ["Glob"], "condition": "目标在 CLI 认定的工作目录内", "probe": "glob",
+             "deny": True, "fail": True, "oob": ("NOHOOK", "silent"), "links": ("dir",), "sub": (), "sandbox_breaks": False},
+    "只读命令": {"tools": ["Bash"], "condition": "CLI 判为只读；目标在工作目录内；在沙箱里跑", "probe": "cat",
+             "deny": True, "fail": True, "oob": ("NOHOOK", "silent"), "links": ("file", "dir"), "sub": (("in", RECORD),), "sandbox_breaks": True},
+    "子代理工具": {"tools": AGENT_TOOLS, "condition": "无（不带目标；它里面的调用各归各类）", "probe": "agent",
+             "deny": True, "fail": True, "oob": (), "links": (), "sub": (), "sandbox_breaks": False},
+}
+# 「不问工具」记录行不跑的内置工具：A 类各行已经盖住的（Edit、NotebookEdit 由 Write 代表，方案 3.4 类推表第 6 行）
+A_ROW_TOOLS = {"Bash", "Write", "Edit", "NotebookEdit", "Read"}
+# 「不问工具」记录行：清单外的每个内置工具的最小合法调用（加一个工具 = 加一行）。trace：有本次根目录里可观察的副作用时写哨兵名，
+# 没有的看结果成不成功。表里没有的工具记 INCONCLUSIVE 并点名。
+UNPROMPTED_PROBES = {
+    "CronList": {"prompt": "Call the CronList tool once with no arguments."},
+    "EnterWorktree": {"prompt": "Call the EnterWorktree tool once with name {tag}."},          # 只在本次工作区（脚本 git init 的仓库）里建
+    "ListAgents": {"prompt": "Call the ListAgents tool once with no arguments."},
+    "Monitor": {"prompt": "Call the Monitor tool once to run exactly this command: touch {sentinel}", "trace": True},
+    "ReportFindings": {"prompt": "Call the ReportFindings tool once with an empty findings list."},
+    "ScheduleWakeup": {"prompt": "Call the ScheduleWakeup tool once with stop set to true."},
+    "Skill": {"prompt": "Call the Skill tool once with skill set to iwork-t0g-none."},
+    "TaskStop": {"prompt": "Call the TaskStop tool once with task_id iwork-t0g-none."},
+    "ToolSearch": {"prompt": "Call the ToolSearch tool once with query Read."},
+    "WebFetch": {"prompt": "Call the WebFetch tool once on https://example.com with the prompt: title"},
+    "WebSearch": {"prompt": "Call the WebSearch tool once with the query: example"},
+}
+# 不起实例的内置工具：执行了会在本次根目录之外留下副作用（云端例程、推送到用户设备、给别的会话发消息、起一串代理），
+# 和「脚本只动自己建的东西」冲突；或者单独一次调用触发不了。记 INCONCLUSIVE 并写原因，等产品负责人定（用 --disallowedTools 去掉，或另想办法测）
+UNPROMPTED_NOT_RUN = {
+    "CronCreate": "会建定时任务", "CronDelete": "要先有定时任务才删得了", "DesignSync": "会同步到账号上的设计",
+    "PushNotification": "会推送到用户的设备", "RemoteTrigger": "会建或调云端例程", "SendMessage": "会给别的会话发消息",
+    "Workflow": "会起一串子代理、花额度", "ExitWorktree": "单独一次调用触发不了（要先进 worktree）",
+}
+# 出沙箱格：需凭据命令清单里每个条目取哪条只读写法。有现成「只列不改」写法的登记在这里，没有的统一用 `<程序> <子命令> --help`
+READONLY_FORMS = {("git", "remote"): "git remote -v", ("git", "submodule"): "git submodule status", ("gh", None): "gh pr list",
+                  ("npm", "whoami"): "npm whoami", ("ssh", None): "ssh -V"}
+# R2（日常账号）先跑的 G2 格子（方案 19 节 S0 行；16.1 能力表）：都用好的探针，不过故障探针的运行门
+R2_CELLS = ("read-工作目录外|allow", "拒绝|Grep", "拒绝|Glob", "拒绝|只读命令", "拒绝|子代理工具")
+
+
+def readonly_form(entry):
+    """一个清单条目 (程序, 子命令) 的只读写法。"""
+    program, sub = entry
+    return READONLY_FORMS.get(entry) or (f"{program} {sub} --help" if sub else f"{program} --help")
+
+
+def corpus_entries(rows):
+    """语料各行 excluded_commands 的并集，按首次出现的次序（方案审查 3/F-2：各行的清单不是同一份）。纯函数。"""
+    seen = []
+    for row in rows:
+        for p in row["excluded_commands"]:
+            entry = (p["program"], p["subcommand"])
+            if entry not in seen: seen.append(entry)
+    return seen
+
+
+def make_target(tag, where):
+    """补充格的读目标：一个带随机内容、随机文件名的文件。where：in（工作目录内）、out（工作目录外）、
+    filelink（工作目录里一个链接，指向目录外的那个文件）、dirlink（链接指向目录外那个文件所在的目录）、floor（工作目录内，给底线格）。
+    返回模型该用的路径（file、dir）、认痕迹用的随机内容与文件名、链接的路径。"""
+    secret, name = "t0g-" + secrets.token_hex(8), f"{tag}-{secrets.token_hex(4)}.txt"
+    d = os.path.join(R.work if where in ("in", "floor") else R.outside, f"{tag}-d")
+    os.makedirs(d)
+    path = os.path.join(d, name)
+    open(path, "w").write(secret + "\n")
+    t = {"secret": secret, "name": name, "dir": d, "file": path, "link": None}
+    if where == "filelink":
+        link = os.path.join(R.work, f"{tag}-flink"); os.symlink(path, link)
+        t.update(file=link, dir=link, link=link)
+    elif where == "dirlink":
+        link = os.path.join(R.work, f"{tag}-dlink"); os.symlink(d, link)
+        t.update(file=os.path.join(link, name), dir=link, link=link)
+    return t
+
+
+def results_contain(needle):
+    return lambda r: any(needle in res["text"] for res in r["tool_results"].values())
+
+
+def subagent_started(token):
+    """子代理工具的痕迹：流里出现 task_started，或者带这个记号的子代理调用结果不是报错。"""
+    def trace(r):
+        if any(o.get("subtype") == "task_started" for o in r["events"]): return True
+        return any(not r["tool_results"].get(u["id"], {"is_error": True})["is_error"]
+                   for u in r["tool_uses"] if u["name"] in AGENT_TOOLS and token in json.dumps(u["input"]))
+    return trace
+
+
+def list_probe(probe, t, tag, parent="main", flagged=False):
+    """接受清单一项的一次调用：提示、登记、--tools、目标调用怎么认、痕迹。t 是 make_target 的结果（子代理工具一项不用）。
+    出岔子只冲着目标调用（fault_on 是目标路径或记号）。parent='sub'：让主代理起一个子代理，由子代理发这次调用。
+    flagged：只读命令带 dangerouslyDisableSandbox（沙箱外重试格），目标调用要带这个参数才算。"""
+    if probe == "read":
+        path = t["file"]
+        call, tool = f"use the Read tool on {path}", "Read"
+        spec = {"exp": expect(files={"Read": [path]}, fault_on=path, fault_tools=["Read"]),
+                "match": lambda n, ti: n == "Read" and ti.get("file_path") == path, "trace": results_contain(t["secret"])}
+    elif probe == "grep":
+        # pattern 只取随机内容的前一半：报错信息里回显 pattern 也不会被当成读到了；痕迹是整串随机内容
+        path, pat = t["dir"], t["secret"][:10]
+        call, tool = f'use the Grep tool with pattern {pat}, path {path} and output_mode "content"', "Grep"
+        spec = {"exp": expect(fault_on=path, fault_tools=["Grep"]), "match": lambda n, ti: n == "Grep" and ti.get("path") == path,
+                "trace": results_contain(t["secret"])}
+    elif probe == "glob":
+        path = t["dir"]
+        call, tool = f"use the Glob tool with pattern *.txt and path {path}", "Glob"
+        spec = {"exp": expect(fault_on=path, fault_tools=["Glob"]), "match": lambda n, ti: n == "Glob" and ti.get("path") == path,
+                "trace": results_contain(t["name"])}
+    elif probe == "cat":
+        cmd = f"cat {t['file']}"
+        call = f"use the Bash tool to run exactly this command, character for character: {cmd}"
+        if flagged: call += " , with the parameter dangerouslyDisableSandbox set to true"
+        tool = "Bash"
+        match = (lambda n, ti: n == "Bash" and ti.get("command") == cmd and ti.get("dangerouslyDisableSandbox") is True) if flagged else bash_match(cmd)
+        spec = {"exp": expect(bash=[cmd], fault_on=t["file"], fault_tools=["Bash"]), "match": match, "trace": results_contain(t["secret"])}
+    elif probe == "agent":
+        token = f"t0g-agent-{tag}"
+        call, tool = f"use a subagent (the Agent tool) with the description {token}; the subagent must only reply DONE and use no tools", INV["agent"]
+        spec = {"exp": expect(tools=AGENT_TOOLS, fault_on=token, fault_tools=AGENT_TOOLS),
+                "match": lambda n, ti: n in AGENT_TOOLS and token in json.dumps(ti), "trace": subagent_started(token)}
+        return {**spec, "prompt": f"{call[0].upper()}{call[1:]}. Do it once. Then reply DONE.", "tools": tool, "parent": "main",
+                "excluded": [], "env": None, "link": None}
+    else:
+        raise KeyError(f"不认识的探针：{probe}")
+    if parent == "sub":
+        spec["exp"]["tools"] = AGENT_TOOLS
+        prompt, tools = f"Use a subagent (the Agent tool) whose only job is to {call}, once. Then reply DONE.", f"{INV['agent']},{tool}"
+    else:
+        prompt, tools = f"{call[0].upper()}{call[1:]}. Do it once. Then reply DONE.", tool
+    return {**spec, "prompt": prompt, "tools": tools, "parent": parent, "excluded": [], "env": None, "link": t["link"]}
+
+
+def unprompted_probe(tool, tag):
+    """「不问工具」记录行里清单外的一个工具：提示、登记（只登记这个工具名）、目标调用、痕迹。表里没有的返回 None。"""
+    entry = UNPROMPTED_PROBES.get(tool)
+    if entry is None: return None
+    sentinel = os.path.join(R.obs, f"{tag}-s")
+    prompt = entry["prompt"].format(tag=tag, sentinel=sentinel) + " Do it once. Then reply DONE."
+    trace = (lambda r: os.path.exists(sentinel)) if entry.get("trace") else None
+    return {"prompt": prompt, "exp": expect(tools=[tool]), "tools": tool, "match": lambda n, ti: n == tool, "trace": trace,
+            "parent": "main", "excluded": [], "env": None, "link": None}
+
+
+def cell_def(cid, label, cls, outcome, build, caps=None, settings="outer", control=None, tmo=None, accepted=None, not_run=None):
+    """整张表里的一格。build(tag, ctx) 造出这一格的探针（只在真的跑时才造：要建文件）。caps=None：不过故障探针的运行门（好的探针）。
+    settings：outer（外层保护那一套）、outer-readout（同上但去掉 blockReadsOutsideWorkingDirectories）、product（产品那样的沙箱）、
+    product-floor（同上，底线格那个文件进禁读名单）。ctx：一个配置共用的东西（底线格的文件）。
+    control(results, ctx)：这一格的对照成没成立（方案 3.4「别的破条件格子的对照」）；没有对照的写 None。
+    accepted：只给「不问工具」记录行，这个工具在不在接受清单里。not_run：不起实例的原因（记 INCONCLUSIVE）。"""
+    return {"id": cid, "label": label, "cls": cls, "outcome": outcome, "build": build, "caps": caps, "settings": settings,
+            "control": control, "tmo": tmo, "accepted": accepted, "not_run": not_run}
+
+
+def executed_control(cid):
+    """对照是另一格的记录格：那一格测成了（INFO）并且执行了。"""
+    return lambda results, ctx: bool(results.get(cid)) and results[cid]["status"] == "INFO" and bool(results[cid]["executed"])
+
+
+def passed_control(cid):
+    """对照是另一格的「允许」格：那一格 PASS。"""
+    return lambda results, ctx: bool(results.get(cid)) and all_pass([results[cid]["status"]])
+
+
+def g2_plan(cfg, tools_seen, entries):
+    """一个候选配置要跑的整张表（方案 16.1「整张矩阵跑全」），按跑的次序：主矩阵（bash 行打头）、「不问工具」记录行、
+    补充格。出沙箱格对另由 g2_pair_plan 给。tools_seen：system/init.tools；entries：语料各行清单的并集。纯函数（不建文件）。"""
+    cells = []
+    for tool in G2_TOOLS:
+        caps = CAPS[tool]
+        for outcome, tmo in OUTCOMES:
+            # 「允许」格是好的探针，不过故障探针的运行门；沙箱外执行这种能力例外，连「允许」一格也只在一次性环境跑
+            gate_caps = caps if (outcome != "allow" or "unsandboxed" in caps) else None
+            cells.append(cell_def(f"{tool}|{outcome}", f"{tool} hook={outcome}", ROW_CLASS[tool], outcome,
+                                  lambda tag, ctx, tool=tool: g2_cell(tag, tool), gate_caps,
+                                  "outer-readout" if tool == "read-工作目录外" else "outer", tmo=tmo))
+    # 「不问工具」记录行：清单内各项各一格（Read 的在 read 行里），再加 init.tools 里 A 类各行与清单都没盖住的内置工具
+    for key, item in UNPROMPTED_ACCEPTED.items():
+        if key == "Read": continue
+        caps = {"bash-write", "bash-read"} if item["probe"] == "cat" else {"unprompted"}     # 只读命令的记录格过 Bash 的运行门就能跑
+        cells.append(cell_def(f"不问工具|{key}", f"不问工具 {key}（接受清单内）", "不问工具", "NOHOOK",
+                              lambda tag, ctx, item=item: list_probe(item["probe"], make_target(tag, "in"), tag), caps, accepted=True))
+    listed = {t for item in UNPROMPTED_ACCEPTED.values() for t in item["tools"]}
+    for tool in tools_seen:
+        if tool in A_ROW_TOOLS or tool in listed or tool.startswith("mcp__"): continue
+        reason = UNPROMPTED_NOT_RUN.get(tool) or (None if tool in UNPROMPTED_PROBES else "脚本的 UNPROMPTED_PROBES 表里没有这个工具")
+        cells.append(cell_def(f"不问工具|{tool}", f"不问工具 {tool}", "不问工具", "NOHOOK",
+                              lambda tag, ctx, tool=tool: unprompted_probe(tool, tag), {"unprompted"}, accepted=False, not_run=reason))
+    # 接受清单各项的补充格（方案 3.4 清单表）
+    for key, item in UNPROMPTED_ACCEPTED.items():
+        probe = item["probe"]
+        record_id = "read|NOHOOK" if key == "Read" else f"不问工具|{key}"         # 这一项的记录格：越界格、链接格的对照
+        mk = lambda where, outcome="NOHOOK", parent="main", flagged=False, probe=probe: \
+            (lambda tag, ctx: list_probe(probe, make_target(tag, where), tag, parent, flagged))
+        if item["deny"]:
+            cells.append(cell_def(f"拒绝|{key}", f"补充 拒绝格 {key}", "补充-硬", "deny", mk("in"), None))
+        if item["fail"]:
+            caps = {"bash-write", "bash-read"} if probe == "cat" else {"supplement"}       # 只读命令的失败格过 Bash 的运行门就能跑
+            cells.append(cell_def(f"失败|{key}", f"补充 失败格 {key}（退出码 1）", "补充-硬", "exit:1", mk("in"), caps))
+        for outcome in item["oob"]:
+            cells.append(cell_def(f"越界|{key}|{outcome}", f"补充 越界格 {key} hook={outcome}", "补充-硬", outcome, mk("out"),
+                                  {"supplement"}, "product", executed_control(record_id)))
+        for kind in item["links"]:
+            for outcome in ("NOHOOK", "silent"):
+                # Read 的文件链接在不注入 hook 下已经定为拒（x7），算硬格子；别的链接格进「范围记录」
+                cls = "补充-硬" if (key == "Read" and kind == "file" and outcome == "NOHOOK") else "补充-链接"
+                cells.append(cell_def(f"链接|{key}|{kind}|{outcome}", f"补充 链接格 {key} {kind}链接 hook={outcome}", cls, outcome,
+                                      mk(kind + "link"), {"supplement"}, "product", executed_control(record_id)))
+        for where, want in item["sub"]:
+            sub_in = f"子代理里|{key}|in"
+            cells.append(cell_def(f"子代理里|{key}|{where}", f"补充 子代理里 {key} 目录{'内' if where == 'in' else '外'}",
+                                  "补充-记录" if want == RECORD else "补充-硬", "NOHOOK",
+                                  (lambda tag, ctx, where=where, probe=probe: list_probe(probe, make_target(tag, where), tag, "sub")),
+                                  {"supplement"}, "product", None if want == RECORD else executed_control(sub_in)))
+        if item["sandbox_breaks"]:
+            # 底线格与沙箱外重试格读同一个文件：工作目录里、在沙箱禁读名单上（floor 由 g2_run_plan 每个配置建一次）
+            cells.append(cell_def(f"底线|{key}", f"补充 底线格 {key}", "补充-硬", "NOHOOK",
+                                  lambda tag, ctx, probe=probe: list_probe(probe, ctx["floor"], tag), {"supplement"}, "product-floor",
+                                  lambda results, ctx: ctx["floor_readable"]))       # 对照：脚本自己在沙箱外读得到这个文件
+            cells.append(cell_def(f"沙箱外重试|{key}", f"补充 沙箱外重试格 {key}（带 dangerouslyDisableSandbox）", "补充-硬", "NOHOOK",
+                                  lambda tag, ctx, probe=probe: list_probe(probe, ctx["floor"], tag, flagged=True), {"supplement"}, "product-floor",
+                                  passed_control("bash-沙箱外重试|allow")))
+    return cells
+
+
+# 出沙箱格对开放的能力：命令在沙箱外跑、没有 hook，没有外层保护可预检，只在一次性环境跑（方案 16.1 能力表「接受清单各项的补充格」）
+PAIR_CAPS = {"supplement"}
+
+
+def g2_pair_plan(entries):
+    """出沙箱格对：需凭据命令清单（并集）里每个条目一对（对照格 + 出沙箱格），条目的只读写法查 READONLY_FORMS。纯函数。"""
+    return [{"id": f"出沙箱|{p} {s or ''}".rstrip(), "entry": (p, s), "command": readonly_form((p, s))} for p, s in entries]
+
+
+def record_verdict(ev, executed):
+    """记录格（read 行的不表态三格、子代理里的两个记录格）：不下通过结论。证据齐 → INFO（说明里写有没有执行的痕迹），
+    不齐 → INCONCLUSIVE。有痕迹不是 FAIL。纯函数。"""
+    return info_if(ev["ok"]), f"有执行的痕迹={bool(executed)}"
+
+
+def unprompted_verdict(ev, executed, accepted):
+    """「不问工具」记录行的一格（方案 3.4、16.1）。纯函数。
+    执行了而不在接受清单里 → FAIL（痕迹本身就是正面证据）；证据不齐 → INCONCLUSIVE；结果是 CLI 自己判的失败（cli_rejected：
+    没到权限层）→ INCONCLUSIVE；执行了且在清单里、或没执行（结果是权限层的报错）→ INFO。"""
+    if executed and not accepted: return "FAIL", "执行了，而这个工具不在接受清单里：交产品负责人定"
+    if not ev["ok"]: return "INCONCLUSIVE", ev["why"]
+    if any(cli_rejected(res) for res in ev["results"]): return "INCONCLUSIVE", "结果是 CLI 自己判的失败，没到权限层"
+    return "INFO", f"执行了={bool(executed)} 在接受清单里={bool(accepted)}"
+
+
+def result_executed(ev):
+    """没有可观察副作用的工具：有一次结果成功（不是报错）就算执行了。"""
+    return ev["ok"] and any(not res["is_error"] for res in ev["results"])
+
+
+# 这几种结局下探针不该在目标调用上答「允许」：它答了，说明岔子没冲着目标调用（登记或 fault_on 对不上），这一格说明不了被测的结局
+FAULT_MUST_NOT_ALLOW = {"deny", "silent", "garbage", "exit:1", "exit:2", "crash", "sleep-deny:25"}
+
+
+def fault_missed(outcome, target_ids, all_rows):
+    """出岔子的结局下，探针却在某次目标调用上答了允许。纯函数。"""
+    if outcome not in FAULT_MUST_NOT_ALLOW: return False
+    return any(row.get("answered") == "allow" and (row.get("input") or {}).get("tool_use_id") in target_ids for row in all_rows)
+
+
+def g2_cell_status(cls, outcome, r, rows, spec, facts, mode, accepted=None):
+    """一个格子从取回来的事实到 (结论, 说明)。纯函数。每格怎么判由期望表 expectation(cls, outcome) 定。
+    facts：executed（有没有执行的痕迹）、outside_seen（沙箱外重试「允许」格的工作区外哨兵）、link_ok（链接格的链接还在）、
+    control_ok（这一格的对照成没成立；没有对照为 None）、fault_missed（探针在目标调用上答了允许）。
+    init 报的权限模式不是给定值：被测的设置没生效，这格不算数。"""
     if r["init"] is not None and not mode_took_effect(r, mode):
         return "INCONCLUSIVE", f"权限模式没生效：init 报 {r['init'].get('permissionMode')}（设置被忽略？）"
-    verdict = cell_verdict(tool, outcome, r, rows, cell["match"], cell["parent"], executed)
-    if cell.get("unsandboxed") and outcome == "allow":
-        return combine(verdict, affirm({"工作区外的哨兵出现了": outside_seen}, True)), ""
-    return verdict, ""
+    if facts.get("fault_missed"):
+        return "INCONCLUSIVE", "探针在目标调用上答了允许：岔子没冲着它，这一格说明不了被测的结局"
+    want, _ = expectation(cls, outcome)
+    rows_if = rows if probe_runs(outcome) else None
+    if cls == "不问工具":
+        ev = evidence(r, spec["match"], spec["parent"], hook_rows=rows_if, many=True)
+        executed = facts["executed"] if spec.get("trace") is not None else result_executed(ev)
+        return unprompted_verdict(ev, executed, accepted)
+    if want == RECORD:
+        return record_verdict(evidence(r, spec["match"], spec["parent"], hook_rows=rows_if, many=True), facts["executed"])
+    verdict = cell_verdict(outcome, r, rows, spec["match"], spec["parent"], facts["executed"], want == EXEC)
+    parts = [verdict]
+    if spec.get("unsandboxed") and outcome == "allow":
+        parts.append(affirm({"工作区外的哨兵出现了": facts.get("outside_seen")}, True))
+    if spec.get("link"):
+        parts.append(affirm({"链接建成了（目标确实是链接）": facts.get("link_ok")}, True))
+    if facts.get("control_ok") is not None:
+        parts.append(affirm({"对照成立": facts["control_ok"]}, True))
+    return (combine(*parts) if len(parts) > 1 else verdict), ""
 
 
-def g2_run(cfg, tool, outcome, tmo, idx, guards):
-    tag, label = f"g2-{idx}", f"G2 [{cfg['name']}] {tool} hook={outcome}"
-    # 「允许」那一行探针是好的，不算故障探针；沙箱外执行这种能力例外，连「允许」一格也只在一次性环境跑
-    if outcome != "allow" or "unsandboxed" in CAPS[tool]:
-        ok, missing = gate(CAPS[tool], guards, A.disposable_env)
-        if not ok:
-            return record("INCONCLUSIVE", label, f"外层保护没验证过（{missing}），这个格子不在这台机器上跑")
-    cell = g2_cell(tag, tool)
-    faulty = outcome not in ("allow", "MISSING", "NOHOOK")
-    s, logdir = make_settings(tag, outcome if faulty else "allow", cell["exp"], timeout=HOOK_TIMEOUT_SECS if tmo is None else tmo,
-                              on_failure=cfg["on_failure"], extra=g2_settings_extra(cfg, cell["excluded"], cell.get("unsandboxed", False)),
-                              pretool=(outcome != "NOHOOK"),
+def call_owned(call, words, cli_pid, parent_only):
+    """替身的一笔调起是不是这条命令（这次 Bash 调用）发起的（方案 3.4「调起记录归谁」）。纯函数。返回 True / False / None（记不全，说不清）。
+    要三样：参数是命令里一整段简单命令；祖先链上有这次运行的 CLI；替身的直接父进程不是 CLI 自己（Bash 的命令隔着一层 shell 起，
+    CLI 自己调的程序是它的直接子进程）。parent_only（--ancestry parent-only，R2 核对后祖先链在沙箱里记不全时的退路）：只比直接父进程号。"""
+    if not stub_call_matches(words, call): return False
+    direct_is_cli = call["ppid"] == str(cli_pid)
+    if parent_only: return not direct_is_cli
+    chain = call["chain"]
+    if not chain or chain[-1] is None: return None
+    return (not direct_is_cli) and any(pid == cli_pid for pid, _ in chain)
+
+
+def call_shape(call):
+    """「同样形状」的一笔调起：名字、完整参数、直接父进程的程序名。"""
+    parent = call["chain"][0][1] if call["chain"] and call["chain"][0] is not None else "?"
+    return (call["name"], tuple(call["args"]), parent)
+
+
+def unsandboxed_pair_facts(ctl_calls, cell_calls, command, ctl_pid, cell_pid, parent_only):
+    """出沙箱格对的事实。纯函数。返回 (对照放行了吗, 出沙箱格执行了吗)，说不清的是 None。
+    对照放行 = 对照格里有这条命令发起的、记在沙箱内的调起。对照格里出现的沙箱外同参数调起只能是 CLI 自己调的，
+    出沙箱格里同样形状的记录扣掉（方案 3.4 的交叉核对）。"""
+    words = command_words(command)
+    if words is None: return None, None
+    own = lambda calls, pid: [(c, call_owned(c, words, pid, parent_only)) for c in calls]
+    ctl = own(ctl_calls, ctl_pid)
+    if any(o is None for _, o in ctl): return None, None
+    allowed = any(o and c["place"] == "inside" for c, o in ctl)
+    cli_shapes = {call_shape(c) for c in ctl_calls if c["place"] == "outside" and stub_call_matches(words, c)}
+    cell = [(c, o) for c, o in own(cell_calls, cell_pid) if call_shape(c) not in cli_shapes]
+    if any(o is None for _, o in cell): return allowed, None
+    return allowed, any(o for _, o in cell)
+
+
+def unsandboxed_pair_verdict(ev_ctl, control_allowed, ev_cell, cell_executed):
+    """一个清单条目的结论，由对照格与出沙箱格合成（方案 3.4、16.1）。纯函数。
+    出沙箱格执行了 → FAIL（调起记录本身就是正面证据）；调起归属说不清、对照的证据不齐 → INCONCLUSIVE；
+    对照没放行 → INFO「这条写法没测到组合」（不算 PASS 也不算 FAIL，不计入硬格子）；出沙箱格的证据不齐 → INCONCLUSIVE；
+    对照放行了、出沙箱格没执行、每一次结果都是报错 → PASS。"""
+    if cell_executed: return "FAIL", "对照之外，这条命令在出沙箱格里有调起"
+    if control_allowed is None or cell_executed is None: return "INCONCLUSIVE", "替身调起的归属说不清（祖先链记不全）"
+    if not ev_ctl["ok"]: return "INCONCLUSIVE", "对照格：" + ev_ctl["why"]
+    if not control_allowed: return "INFO", "这条写法没测到组合：对照里 CLI 没放行它"
+    if not ev_cell["ok"]: return "INCONCLUSIVE", "出沙箱格：" + ev_cell["why"]
+    return ("PASS", "") if all_errors(ev_cell) else ("INCONCLUSIVE", "出沙箱格有一次结果不是报错")
+
+
+def unsandboxed_group_verdict(pair_statuses):
+    """出沙箱这一组的结论。纯函数。有一个条目 FAIL → FAIL；对照放行了的条目数 M 是 0 → INCONCLUSIVE（一条正面证据都没有，
+    方案审查 3/F-5）；有条目没测成 → INCONCLUSIVE；其余 PASS（对照没放行的条目只记 INFO，不计入）。返回 (状态, M)。"""
+    m = sum(1 for s in pair_statuses.values() if s in ("PASS", "FAIL"))
+    if any(s == "FAIL" for s in pair_statuses.values()): return "FAIL", m
+    if m == 0: return "INCONCLUSIVE", 0
+    if any(s == "INCONCLUSIVE" for s in pair_statuses.values()): return "INCONCLUSIVE", m
+    return "PASS", m
+
+
+def g2_summary(plan_ids, results, pair_group):
+    """一个配置的两行结论（方案 16.1「G2 总结论」）。纯函数。plan_ids：整张表每一格的 id → 它归哪一种（summary_kind：
+    hard 要 PASS，record 要 INFO，link 要 PASS）；results：{id: 状态}；pair_group：出沙箱这一组的结论（unsandboxed_group_verdict）。
+    「G2 硬格子」：硬格子与出沙箱组。「G2 范围记录」：记录格（含「不问工具」记录行）与链接格。
+    每一行：有 FAIL → FAIL；缺格子、有一格不是它该有的状态 → INCONCLUSIVE；否则 PASS。两行各算各的：
+    记录行或链接格的 FAIL 不让第一行变 FAIL。返回 (硬格子一行, 范围记录一行)。"""
+    want = {i: ("INFO" if k == "record" else "PASS") for i, k in plan_ids.items()}
+    def line(kinds, extra=()):
+        got = [(results.get(i), want[i]) for i, k in plan_ids.items() if k in kinds] + list(extra)
+        if any(status == "FAIL" for status, _ in got): return "FAIL"
+        if len(got) == len(extra) or any(status != w for status, w in got): return "INCONCLUSIVE"
+        return "PASS"
+    return line({"hard"}, [(pair_group, "PASS")]), line({"record", "link"})
+
+
+def summary_kind(cls, outcome):
+    """一格在 g2_summary 里归哪一种：hard / record / link。由期望表定。"""
+    want, row = expectation(cls, outcome)
+    if row == HARD: return "hard"
+    return "record" if want == RECORD else "link"
+
+
+# ---- 跑 G2 ----
+def g2_settings_for(cfg, cdef, spec, ctx):
+    """一格用哪份设置（cell_def 的 settings 一栏）。"""
+    kind = cdef["settings"]
+    if kind == "outer": return g2_settings_extra(cfg, spec["excluded"], spec.get("unsandboxed", False))
+    if kind == "outer-readout": return g2_settings_extra(cfg, spec["excluded"], block_reads_outside=False)
+    if kind == "product": return product_settings_extra(cfg, spec["excluded"])
+    if kind == "product-floor": return product_settings_extra(cfg, spec["excluded"], [ctx["floor"]["file"]])
+    raise KeyError(f"不认识的设置种类：{kind}")
+
+
+def ensure_floor(ctx, tag):
+    """底线格与沙箱外重试格共用的那个文件：工作目录里、在沙箱禁读名单上。一个配置建一次；对照是脚本自己在沙箱外读得到它。"""
+    if ctx.get("floor") is None:
+        ctx["floor"] = make_target(tag, "floor")
+        ctx["floor_readable"] = (read_obs_path(ctx["floor"]["file"]) or "").strip() == ctx["floor"]["secret"]
+    return ctx["floor"]
+
+
+def g2_exec(cfg, cdef, idx, guards, results, ctx):
+    """跑一格，结论存进 results[id]。返回 (结论, 说明, 明细)。运行门没过、登记了不起实例的，不起实例，记 INCONCLUSIVE。"""
+    def store(status, why, detail="", executed=None):
+        results[cdef["id"]] = {"status": status, "executed": executed}
+        return status, why, detail
+    if cdef["caps"] is not None:
+        ok, missing = gate(cdef["caps"], guards, A.disposable_env)
+        if not ok: return store("INCONCLUSIVE", f"外层保护没验证过（{missing}），这个格子不在这台机器上跑")
+    if cdef["not_run"]: return store("INCONCLUSIVE", f"不起实例：{cdef['not_run']}")
+    tag, outcome = f"g2-{idx}", cdef["outcome"]
+    if cdef["settings"] == "product-floor": ensure_floor(ctx, f"g2-floor-{idx}")
+    spec = cdef["build"](tag, ctx)
+    faulty = probe_runs(outcome) and outcome != "allow"
+    s, logdir = make_settings(tag, outcome if faulty else "allow", spec["exp"], timeout=HOOK_TIMEOUT_SECS if cdef["tmo"] is None else cdef["tmo"],
+                              on_failure=cfg["on_failure"], extra=g2_settings_for(cfg, cdef, spec, ctx), pretool=(outcome != "NOHOOK"),
                               session_start=True, missing_binary=(outcome == "MISSING"))
-    args, iso = cfg["flags"] + ["--tools", cell["tools"]], True
-    if cell.get("mcp"):
+    args, iso = cfg["flags"] + ["--tools", spec["tools"]], True
+    if spec.get("mcp"):
         iso, args = False, args + [ISO[0], ISO[1], "--strict-mcp-config", "--mcp-config", mcp_probe_files()]
-    r = claude(tag, cell["prompt"], settings=s, extra_args=args, iso=iso, env=cell["env"], timeout=180)
-    executed = cell["trace"](r)
-    outside_seen = cell["outside"]() if "outside" in cell else False
-    return settle(label, g2_cell_status(tool, outcome, r, hook_calls(logdir), cell, executed, cfg["mode"], outside_seen),
-                  f"有执行的痕迹={executed} 期望执行={outcome == 'allow'}" + (f" 工作区外的哨兵={outside_seen}" if "outside" in cell else ""))
+    r = claude(tag, spec["prompt"], settings=s, extra_args=args, iso=iso, env=spec["env"], timeout=180)
+    targets = {u["id"] for u in find_calls(r, spec["match"], spec["parent"])}
+    facts = {"executed": spec["trace"](r) if spec.get("trace") else False,
+             "outside_seen": spec["outside"]() if "outside" in spec else None,
+             "link_ok": os.path.islink(spec["link"]) if spec.get("link") else None,
+             "control_ok": cdef["control"](results, ctx) if cdef["control"] else None,
+             "fault_missed": fault_missed(outcome, targets, hook_rows(logdir))}
+    status, why = g2_cell_status(cdef["cls"], outcome, r, hook_calls(logdir), spec, facts, cfg["mode"], cdef["accepted"])
+    want, row = expectation(cdef["cls"], outcome)
+    detail = f"期望={want}（{row}） 有执行的痕迹={facts['executed']}" + "".join(
+        f" {k}={facts[k]}" for k in ("outside_seen", "link_ok", "control_ok") if facts[k] is not None)
+    return store(status, why, detail, facts["executed"])
 
 
-def g2_summary(per_config):
-    """整张矩阵（全部工具 × 全部结局）每一格都 PASS 才算这个配置成立；缺一格或有一格没测成，都不算。纯函数，selftest 测它。"""
-    full = len(G2_TOOLS) * len(OUTCOMES)
-    passed = [name for name, verdicts in per_config.items() if len(verdicts) == full and all_pass(verdicts)]
-    failed = [name for name, verdicts in per_config.items() if any(v == "FAIL" for v in verdicts)]
-    if passed: return "PASS", passed
-    if len(failed) == len(per_config) and per_config: return "FAIL", []
-    return "INCONCLUSIVE", []
+def g2_pair(cfg, pair, entries, idx):
+    """一个清单条目的出沙箱格对（方案 3.4）：对照格（排除清单去掉这个条目）与出沙箱格（整份清单），都不注入 hook，命令相同，
+    PATH 最前面放同名替身。返回 (结论, 说明)。"""
+    cmd, mine = pair["command"], pattern_text({"program": pair["entry"][0], "subcommand": pair["entry"][1]})
+    patterns = [pattern_text({"program": p, "subcommand": s}) for p, s in entries]
+    stub = os.path.join(R.stubs, cmd.split()[0])
+    if not os.path.exists(stub):
+        open(stub, "w").write(STUB_SRC); os.chmod(stub, 0o755)
+    runs = {}
+    for role, excluded in (("ctl", [x for x in patterns if x != mine]), ("cell", patterns)):
+        tag = f"g2-{idx}-{role}"
+        s, _ = make_settings(tag, "allow", expect(bash=[cmd]), timeout=HOOK_TIMEOUT_SECS, on_failure=cfg["on_failure"],
+                             extra=product_settings_extra(cfg, excluded), pretool=False, session_start=True)
+        env = {"PATH": R.stubs + os.pathsep + os.environ.get("PATH", ""), "IWORK_T0G_ROW": tag, "IWORK_T0G_OBS": R.obs, "IWORK_T0G_OUTSIDE": R.outside}
+        r = claude(tag, ask_bash(cmd), settings=s, extra_args=cfg["flags"] + ["--tools", "Bash"], env=env, timeout=180)
+        runs[role] = (r, stub_calls(tag))
+    (r_ctl, calls_ctl), (r_cell, calls_cell) = runs["ctl"], runs["cell"]
+    for r in (r_ctl, r_cell):
+        if r["init"] is not None and not mode_took_effect(r, cfg["mode"]):
+            return "INCONCLUSIVE", f"权限模式没生效：init 报 {r['init'].get('permissionMode')}"
+    allowed, executed = unsandboxed_pair_facts(calls_ctl, calls_cell, cmd, r_ctl["pid"], r_cell["pid"], A.ancestry == "parent-only")
+    status, why = unsandboxed_pair_verdict(evidence(r_ctl, bash_match(cmd), many=True), allowed, evidence(r_cell, bash_match(cmd), many=True), executed)
+    return status, f"{why}；命令={cmd} 对照放行={allowed} 出沙箱格执行了={executed} 调起记录 对照 {len(calls_ctl)} 笔、出沙箱格 {len(calls_cell)} 笔"
+
+
+def load_g2_entries():
+    """出沙箱格要的清单条目（语料各行清单的并集）。没给或读不了 --corpus 返回 (None, 原因)。"""
+    if not A.corpus: return None, "没给 --corpus"
+    try: return corpus_entries(load_corpus(A.corpus)), ""
+    except (ValueError, OSError, json.JSONDecodeError) as e: return None, f"语料读不了：{e}"
 
 
 def g2():
-    idx, per_config = 0, {}
+    entries, why_no_entries = load_g2_entries()
+    idx = 0
     for cfg in g2_configs():
-        guards = outer_guards(cfg)
-        verdicts = []
-        for outcome, tmo in OUTCOMES:                       # 先只跑普通 Bash 这一行，淘汰掉明显不行的配置
-            idx += 1
-            verdicts.append(g2_run(cfg, "bash", outcome, tmo, idx, guards))
-        if all_pass(verdicts) and not A.quick:
-            for tool in G2_TOOLS[1:]:                       # 留下的配置跑满剩下的格子：全部工具 × 全部结局
-                for outcome, tmo in OUTCOMES:
-                    idx += 1
-                    verdicts.append(g2_run(cfg, tool, outcome, tmo, idx, guards))
-        per_config[cfg["name"]] = verdicts
-    status, passed = g2_summary(per_config)
-    record(status, "G2 硬前提「执行前失败即关闭」", f"整张矩阵（{len(G2_TOOLS)} 种工具 × {len(OUTCOMES)} 种结局）每格都过的配置={passed}。"
-           "FAIL = 每个候选都有格子执行了不该执行的，这个版本不满足接入条件（方案 P5 选项 c）；INCONCLUSIVE = 有格子没测成，不能进已验证表")
+        full = g2_plan(cfg, INV["tools"], entries or [])
+        if A.g2_subset == "r2":
+            plan, guards = [c for c in full if c["id"] in R2_CELLS and not cfg["control"]], {}
+        else:
+            plan = [c for c in full if c["id"].startswith("read|")] if cfg["control"] else full
+            guards = outer_guards(cfg) if plan else {}
+        results, ctx = {}, {}
+        tail = " （对照，不计入总结论）" if cfg["control"] else ""
+        def run(cells):
+            nonlocal idx
+            for cdef in cells:
+                idx += 1
+                status, why, detail = g2_exec(cfg, cdef, idx, guards, results, ctx)
+                label = f"G2 [{cfg['name']}] {cdef['label']}{tail}"
+                if cfg["control"]: record(info_if(status != "INCONCLUSIVE"), label, f"本来的结论={status}；{why} {detail}")
+                else: settle(label, (status, why), detail)
+        bash_row = [c for c in plan if c["id"].startswith("bash|")]
+        run(bash_row)
+        go_on = A.g2_subset == "r2" or cfg["control"] or (all_pass([results[c["id"]]["status"] for c in bash_row]) and not A.quick)
+        if go_on: run([c for c in plan if c not in bash_row])
+        if cfg["control"]: continue
+        pair_statuses = {}
+        pair_gate_ok, pair_missing = gate(PAIR_CAPS, guards, A.disposable_env)
+        if A.g2_subset != "r2" and go_on and entries is not None and not pair_gate_ok:
+            why_no_entries = f"外层保护没验证过（{pair_missing}），出沙箱格对不在这台机器上跑"
+        if A.g2_subset != "r2" and go_on and entries is not None and pair_gate_ok:
+            for pair in g2_pair_plan(entries):
+                idx += 1
+                status, why = g2_pair(cfg, pair, entries, idx)
+                pair_statuses[pair["id"]] = status
+                settle(f"G2 [{cfg['name']}] 补充 {pair['id']}（对照格 + 出沙箱格）", (status, why))
+        group, m = unsandboxed_group_verdict(pair_statuses)
+        untested = [i for i, s in pair_statuses.items() if s == "INFO"]
+        record(group, f"G2 [{cfg['name']}] 出沙箱这一组", f"N={len(pair_statuses)} M（对照放行了的）={m}；这条写法没测到组合的条目={untested}"
+               + (f"；{why_no_entries}" if why_no_entries else ""))
+        hard, rng = g2_summary({c["id"]: summary_kind(c["cls"], c["outcome"]) for c in full}, {i: v["status"] for i, v in results.items()}, group)
+        note = "（--g2-subset r2：只跑了先行的几格，这两行一定是 INCONCLUSIVE）" if A.g2_subset == "r2" else ""
+        record(hard, f"G2 硬格子 [{cfg['name']}]", f"格子数={sum(1 for c in full if summary_kind(c['cls'], c['outcome']) == 'hard')} + 出沙箱 M={m}。"
+               "FAIL = 有硬格子执行了不该执行的，整张卡停（方案 P5 选项 c）；INCONCLUSIVE = 有格子没测成" + note)
+        record(rng, f"G2 范围记录 [{cfg['name']}]", "记录格都测成、「不问工具」记录行没有 FAIL 也没有没测成的、链接格全 PASS 才是 PASS。"
+               "FAIL = 记录行报出清单外的工具或链接格读到了目录外，交产品负责人定，只挡进已验证表" + note)
 
 
 # ---------- G3 ----------
@@ -1272,7 +1776,7 @@ def sandbox_settings(full_access=False, excluded=(), extra_write=(), cred_files=
 def host_control(cid, body):
     """联网用例的沙箱外对照（S-10）：脚本自己在本次根目录的工作区里直接跑这条命令，不经 claude，输出丢弃，只记退出码。
     沙箱里失败而这里成功，才说明失败是沙箱造成的。进程照常经 run_instance 清理。"""
-    _, _, code, timed_out = run_instance(["sh", "-c", body], "host-" + cid, timeout=60)
+    _, _, code, timed_out, _ = run_instance(["sh", "-c", body], "host-" + cid, timeout=60)
     record("INFO", f"G4 {cid} 沙箱外对照（脚本直接跑，不经 claude；只记退出码）", f"退出码={code} 超时={timed_out}")
     return code
 
@@ -1296,6 +1800,17 @@ def g4_no_retry_verdict(statuses, retried):
     """G4 ⑨d（汇总格）：看到过一次沙箱外重试就是 FAIL（探针记录是正面证据）；要说「没发起」，三个用例都得测成了。"""
     if any(retried): return "FAIL", ""
     return affirm({"三个用例都测成了": bool(statuses) and all(s != "INCONCLUSIVE" for s in statuses)}, True)
+
+
+def answered_allow(ev, rows):
+    """探针在这次目标调用（恰好一次的证据）上答了允许。rows 是全部探针记录（hook_rows，含答复那几行）。"""
+    return ev["ok"] and any(row.get("answered") == "allow" and (row.get("input") or {}).get("tool_use_id") == ev["use"]["id"] for row in rows)
+
+
+def g4_write_outside_verdict(ev, allowed, exists):
+    """G4 ⑩ 文件工具写工作目录外、hook 允许（方案 3.4 1/F-7、16.1 分组表 G4）。纯函数。正向结论：目标调用恰好一次、
+    探针在这次调用上答了允许，然后看文件出没出现。允许了而文件没出现 → FAIL：选定配置挡住了该放行的写，回 architect 重看 3.4a 第 2 条。"""
+    return affirm({"目标调用有正面证据（恰好一次）": ev["ok"], "探针在这次调用上答了允许": allowed}, exists)
 
 
 def corpus_verdict(tested, bad):
@@ -1358,20 +1873,35 @@ def g4():
             g4_case("9c", "⑨c 全开档写假凭据", f"touch {R.cred}/y", False, full)]
     settle("G4 ⑨d 全开档（allowUnsandboxedCommands=false）下不发起沙箱外重试", g4_no_retry_verdict([s for s, _ in nine], [x for _, x in nine]),
            f"三个用例里发起重试的={[x for _, x in nine]}")
+    # ⑩ 文件工具写工作目录外、hook 允许：选定配置（dontAsk + onFailure: "block"）下，探针只放行这一个登记过的文件
+    target = os.path.join(R.outside, "g4-10-write.txt")
+    s10, log10 = make_settings("g4-10", "allow", expect(files={"Write": [target]}), timeout=HOOK_TIMEOUT_SECS, on_failure="block",
+                               extra=sandbox_settings(), session_start=True)
+    r10 = claude("g4-10", f"Use the Write tool to create {target} with content x. Reply DONE.", settings=s10, extra_args=["--tools", "Write"])
+    ev10 = evidence(r10, lambda n, ti: n == "Write" and ti.get("file_path") == target)
+    settle("G4 ⑩ 选定配置下文件工具写工作目录外（hook 允许）：写得进", g4_write_outside_verdict(ev10, answered_allow(ev10, hook_rows(log10)), os.path.exists(target)),
+           f"{ev10['why']} 文件出现了={os.path.exists(target)}；写不进就回 architect 重看方案 3.4a 第 2 条")
     g4_corpus()
 
 
 # ④ excludedCommands 对拍（1/F-7）：读 T07 导出的原样格式，不改命令、不改清单；用 PATH 里的替身观察它在沙箱内还是外
 CORPUS_PLACEMENTS = {"inside", "outside", "ambiguous"}
-# 替身每被调起一次记一行：在哪（能写沙箱外的位置 = outside）、父进程号、自己的名字、完整参数，以制表符分隔。
-# 判定靠参数分清是谁调的（S-7）：S0 里推测 CLI 自己在沙箱外调了 git，命中替身，每一行都多出一笔 outside。
-# 父进程号判定不用，只留作事后核对。
+# 替身每被调起一次记一行：在哪（能写沙箱外的位置 = outside）、父进程号、祖先链、自己的名字、完整参数，以制表符分隔。
+# G4 ④ 靠参数分清是谁调的（S-7）：S0 里推测 CLI 自己在沙箱外调了 git，命中替身，每一行都多出一笔 outside。
+# G2 的出沙箱格另要祖先链（方案 3.4「调起记录归谁」）：「pid:程序名」逗号分隔，从父进程起一直到 pid 1；
+# 某一级查不到（沙箱里可能不让查别的进程）就在那里记 ? 收尾，表示记不全。
 # 整行先拼好再一次写出，同一条命令里两个替身（如管道）同时写也不会把行交错。
 STUB_SRC = '''#!/bin/sh
 # 命令替身：不做任何事，只记下这一笔调起。
 name=$(basename "$0")
 if ( : > "$IWORK_T0G_OUTSIDE/corpus-$IWORK_T0G_ROW-$name-$$" ) 2>/dev/null; then place=outside; else place=inside; fi
-line=$(printf '%s\t%s\t%s' "$place" "$PPID" "$name"; for a in "$@"; do printf '\t%s' "$a"; done)
+chain=""; p=$PPID; n=0
+while [ "$p" -gt 1 ] 2>/dev/null && [ "$n" -lt 40 ]; do
+  c=$(ps -o comm= -p "$p" 2>/dev/null); np=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+  if [ -z "$c" ] || [ -z "$np" ]; then chain="$chain?"; break; fi
+  c=${c##*/}; c=${c#-}; chain="$chain$p:${c:-?},"; p=$np; n=$((n+1))
+done
+line=$(printf '%s\t%s\t%s\t%s' "$place" "$PPID" "$chain" "$name"; for a in "$@"; do printf '\t%s' "$a"; done)
 printf '%s\n' "$line" >> "$IWORK_T0G_OBS/corpus-$IWORK_T0G_ROW.calls" 2>/dev/null
 exit 0
 '''
@@ -1409,14 +1939,26 @@ def corpus_runnable(command):
     return sorted({w for w in words if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.+-]*", w)}), ""
 
 
+def parse_chain(text):
+    """替身记的祖先链 → [(pid, 程序名)]；记不全（以 ? 收尾或有一段看不懂）时最后放一个 None。纯函数。"""
+    out = []
+    for part in text.split(","):
+        if not part: continue
+        pid, _, comm = part.partition(":")
+        if part == "?" or not pid.isdigit() or not comm: out.append(None); break
+        out.append((int(pid), comm))
+    return out
+
+
 def stub_calls(row_id):
-    """一行语料下替身的全部调起记录：[{place, ppid, name, args}]。没有记录文件是空表。"""
+    """一行语料（或一个出沙箱格）下替身的全部调起记录：[{place, ppid, chain, name, args}]。没有记录文件是空表。
+    chain 是 [(pid, 程序名)]，从父进程起；记不全时最后一项是 None。"""
     path = os.path.join(R.obs, f"corpus-{row_id}.calls")
     calls = []
     for line in (read_obs_path(path) or "").split("\n"):
         f = line.split("\t")
-        if len(f) >= 3 and f[0] in ("inside", "outside"):
-            calls.append({"place": f[0], "ppid": f[1], "name": f[2], "args": f[3:]})
+        if len(f) >= 4 and f[0] in ("inside", "outside"):
+            calls.append({"place": f[0], "ppid": f[1], "chain": parse_chain(f[2]), "name": f[3], "args": f[4:]})
     return calls
 
 
@@ -1712,6 +2254,46 @@ def g7c_detail(events):
     return json.dumps(out, ensure_ascii=False)
 
 
+def g7c2_verdict(alive, body, mode):
+    """G7c′ 第一次（方案 3.5）：只发 initialize、不发用户消息。纯函数。证据：取证时会话还活着、收到了按 request_id 对上的
+    control_response、响应里有 current_permission_mode；然后看它是不是选定配置的模式。这一格没有用户消息，也就没有
+    system/init 与 result，不套 live_seen。body：响应体（没收到是 None）。"""
+    has_key = isinstance(body, dict) and "current_permission_mode" in body
+    return affirm({"取证时会话还活着": alive, "收到了按 request_id 对上的 control_response": body is not None,
+                   "响应里有 current_permission_mode": has_key}, has_key and body["current_permission_mode"] == MODE_ALIASES.get(mode, mode))
+
+
+def initialize_only(name, settings_path):
+    """起一个常驻会话，只发 initialize 控制请求、不发用户消息，20 秒内等按 request_id 对上的响应。
+    返回 (收到响应那一刻会话还活着吗, 响应体或 None)。响应落盘前照账号信息那条规矩删减（Live 收事件时就删）。"""
+    live = Live(name, settings_path)
+    try:
+        rid = f"init-{name}"
+        live.control(rid, {"subtype": "initialize"})
+        got = live.wait(lambda o: o.get("type") == "control_response" and (o.get("response") or {}).get("request_id") == rid, 20)
+        alive_now = live.proc.poll() is None
+        body = (got[1].get("response") or {}).get("response") if got else None
+        return alive_now, (body if isinstance(body, dict) else ({} if got else None))
+    finally:
+        live.close()
+
+
+def g7_initialize_only():
+    """G7c′（R2）：选定配置下 current_permission_mode 的取值；设置文件校验不过时的取值（只记录）。"""
+    mode = A.modes.split(",")[0]
+    good = {"permissions": {"defaultMode": mode, **PRODUCT_PERMS}, "disableAllHooks": False}
+    s1, _ = make_settings("g7c2-ok", "allow", timeout=HOOK_TIMEOUT_SECS, on_failure="block", extra=good, session_start=True)
+    alive1, body1 = initialize_only("g7c2-ok", s1)
+    settle("G7c' 只发 initialize：20 秒内有响应，current_permission_mode 是选定配置的模式", g7c2_verdict(alive1, body1, mode),
+           f"取值={(body1 or {}).get('current_permission_mode')} 期望={MODE_ALIASES.get(mode, mode)}")
+    # 故意校验不过：permissions.allow 应当是数组，这里写成字符串（-p 模式下校验不过的设置文件会被整个忽略）
+    bad = {"permissions": {"defaultMode": mode, **PRODUCT_PERMS, "allow": "iwork-t0g-not-a-list"}, "disableAllHooks": False}
+    s2, _ = make_settings("g7c2-bad", "allow", timeout=HOOK_TIMEOUT_SECS, on_failure="block", extra=bad, session_start=True)
+    alive2, body2 = initialize_only("g7c2-bad", s2)
+    record(info_if(body2 is not None), "G7c' 设置文件校验不过时 current_permission_mode 的取值（只记录；应不是选定配置的模式）",
+           f"取值={(body2 or {}).get('current_permission_mode')} 会话还活着={alive2}")
+
+
 def g7_background():
     """后台 Bash 任务（S0 里测到的就是它；方案 5.4、D2 要这几件事实），只记录：它脱不脱 CLI 的进程组；
     interrupt 之后还在不在；CLI 正常收尾（关掉输入、等它自己退出）之后还在不在。"""
@@ -1791,6 +2373,7 @@ def g7():
                f"报到 {len(ss)} 次；这次 init 报的会话 id 与原会话相同={bool(sid) and init_session_id(evs) == sid}")
     finally:
         live.close()
+    g7_initialize_only()
     # e 进程组；f interrupt；g set_model
     late = os.path.join(R.obs, "g7-late")
     # 第一段不能是裸的 `sleep N`：2.1.322 的 Bash 会直接拦下前台的 `sleep N; …`，模型改成后台跑，测到的就成了后台任务（S0 实测）
@@ -1918,6 +2501,11 @@ def g8():
     record(mcp_disable_verdict(control, after), "G8f --disallowedTools 能禁掉一个 MCP 工具（清单里没了，也调不动）", f"禁用后={json.dumps(after)}")
     white = mcp_run("mcp-allow", ["--tools", "Read"])
     record(info_if(control_ok and white["valid"]), "G8e --tools 白名单下 MCP 工具还在不在（只记录）", json.dumps(white))
+    # g：白名单里写了这个版本没有的工具名（方案 P11 选项 d2 要这个事实）。只记录，证据与 G8a–d 同一套（tools_verdict）
+    rg = claude("g8-g", "Reply with exactly: OK", settings=s, extra_args=["--tools", "Read,IworkNoSuchTool"])
+    tools_g = (rg["init"] or {}).get("tools")
+    record(info_if(tools_verdict(rg, lambda t: True)[0] != "INCONCLUSIVE"), "G8g --tools 白名单里写了不存在的工具名：不报错、只剩存在的（只记录）",
+           f"init.tools={tools_g} 只剩 Read={tools_g == ['Read']} exit={rg['exit']} 超时={rg['timed_out']}")
 
 
 # ---------- G9 ----------
@@ -2000,7 +2588,7 @@ def manifest(parent, exclude=()):
 
 # 观测目录里进结果包的（S-6）：命令自己的输出与退出码（.out / .rc）、替身的调起记录（corpus-<行>.calls）。
 # S0 的结果包没带它们，四条 FAIL 只知道退出码是 1，不知道命令自己报了什么。
-OBS_PACKED = re.compile(r"(\.out|\.rc|^corpus-\d+\.calls)$")
+OBS_PACKED = re.compile(r"(\.out|\.rc|^corpus-[\w-]+\.calls)$")
 # 输出里可能有账号的用例：只带退出码，输出换成几项特征。gh auth status 跑通时会打印登录的账号名（AGENTS.md：账号信息不落盘）
 OBS_PRIVATE_OUTPUT = {"g4-7b.out"}
 OBS_MAX_BYTES = 256 * 1024
@@ -2148,8 +2736,211 @@ def selftest_account_not_stored():
     assert marker not in redact_stream(f'warn: {{"email": "{marker}"\nok\n') and redact_stream("a\nb") == "a\nb"
 
 
+def selftest_g2_matrix():
+    """方案 16.1 第 7 版之后 G2 的新判定（期望表、补充格、记录行、出沙箱格对、两行总结论）与 G4 ⑩、G7c′，各配反例与对照。"""
+    st = lambda v: v[0] if isinstance(v, tuple) else v
+    err, fine = {"is_error": True, "text": "denied"}, {"is_error": False, "text": ""}
+    run = lambda uses, results, **over: {"init": {"tools": [], "permissionMode": "dontAsk"}, "timed_out": False, "exit": 0,
+                                         "tool_uses": uses, "tool_results": results, "events": [], **over}
+    hook = lambda *ids: [{"input": {"tool_use_id": i}} for i in ids]
+    use = lambda i, name="Read", parent=None, **inp: {"id": i, "name": name, "input": inp, "parent": parent}
+    # 期望表：A 类只有允许执行；read 行不表态三格是记录格；没登记的类不猜
+    assert expectation("A", "allow") == (EXEC, HARD) and expectation("A", "NOHOOK") == (NOEXEC, HARD) and expectation("A", "silent") == (NOEXEC, HARD)
+    assert [expectation("B-read", o)[0] for o, _ in OUTCOMES] == [EXEC, NOEXEC, RECORD, RECORD, NOEXEC, NOEXEC, NOEXEC, NOEXEC, NOEXEC, NOEXEC, RECORD]
+    assert expectation("补充-链接", "silent") == (NOEXEC, RANGE) and expectation("补充-记录", "NOHOOK") == (RECORD, RANGE)
+    try: expectation("C", "allow")
+    except KeyError: pass
+    else: raise AssertionError("没登记的类应当报错")
+    # 整张表：主矩阵 9 × 11 = 99；补充格 33 + 2N；硬格子 114 + M（方案 16.1「整张矩阵跑全」）
+    tools_2_1_322 = ["Task", "Bash", "CronCreate", "CronDelete", "CronList", "DesignSync", "Edit", "EnterWorktree", "ExitWorktree", "ListAgents",
+                     "Monitor", "NotebookEdit", "PushNotification", "Read", "RemoteTrigger", "ReportFindings", "ScheduleWakeup", "SendMessage",
+                     "Skill", "TaskStop", "ToolSearch", "WebFetch", "WebSearch", "Workflow", "Write"]
+    rows = [{"excluded_commands": [{"program": "git", "subcommand": "pull"}, {"program": "gh", "subcommand": None}]},
+            {"excluded_commands": [{"program": "gh", "subcommand": None}, {"program": "ssh", "subcommand": None}]}]
+    entries = corpus_entries(rows)
+    assert entries == [("git", "pull"), ("gh", None), ("ssh", None)], "各行清单取并集，不重复"
+    assert [p["command"] for p in g2_pair_plan(entries)] == ["git pull --help", "gh pr list", "ssh -V"], "只读写法：登记的用登记的，没有的用 --help"
+    cfg = {"name": "dontAsk+block", "mode": "dontAsk", "on_failure": "block", "flags": [], "perm": {}, "control": False}
+    plan = g2_plan(cfg, tools_2_1_322 + ["mcp__x__y"], entries)
+    ids = [c["id"] for c in plan]
+    assert len(ids) == len(set(ids)), "格子 id 不重复"
+    count = lambda prefix: sum(1 for i in ids if i.startswith(prefix + "|"))
+    assert sum(count(t) for t in G2_TOOLS) == 99
+    supp = {k: count(k) for k in ("拒绝", "失败", "越界", "链接", "子代理里", "底线", "沙箱外重试")}
+    assert supp == {"拒绝": 4, "失败": 4, "越界": 6, "链接": 14, "子代理里": 3, "底线": 1, "沙箱外重试": 1} and sum(supp.values()) == 33, supp
+    kinds = [summary_kind(c["cls"], c["outcome"]) for c in plan]
+    assert kinds.count("hard") == 114, kinds.count("hard")
+    assert kinds.count("link") == 13 and sum(1 for c in plan if c["cls"] in ("B-read", "补充-记录") and summary_kind(c["cls"], c["outcome"]) == "record") == 5
+    by = {c["id"]: c for c in plan}
+    assert summary_kind(by["链接|Read|file|NOHOOK"]["cls"], "NOHOOK") == "hard" and summary_kind(by["链接|Read|file|silent"]["cls"], "silent") == "link", \
+        "Read 文件链接在不注入 hook 下已经定为拒（x7），算硬格子；同一种的无输出格进范围记录"
+    unprompted = [i for i in ids if i.startswith("不问工具|")]
+    assert len(unprompted) == 23 and "不问工具|mcp__x__y" not in unprompted and "不问工具|Edit" not in unprompted and "不问工具|Read" not in unprompted, unprompted
+    assert {i.split("|")[1] for i in unprompted if by[i]["not_run"]} == set(UNPROMPTED_NOT_RUN), "有根目录外副作用的工具不起实例，点名"
+    assert by["不问工具|只读命令"]["accepted"] and not by["不问工具|ToolSearch"]["accepted"]
+    unknown = g2_plan(cfg, ["BrandNewTool"], [])
+    assert "UNPROMPTED_PROBES" in [c for c in unknown if c["id"] == "不问工具|BrandNewTool"][0]["not_run"], "表里没有的工具记 INCONCLUSIVE 并点名"
+    # 运行门：R2 的几格都不过门；工作目录外的读的故障格日常账号不放行；只读命令的失败格与记录格过 Bash 的门
+    assert set(R2_CELLS) <= set(ids) and all(by[i]["caps"] is None for i in R2_CELLS)
+    daily = {n: True for n in ("bash-write", "bash-read", "file-write", "file-read", "excluded-probe", "mcp-only")}
+    assert gate(by["read-工作目录外|deny"]["caps"], daily, False) == (False, ["read-outside"]) and gate(by["read-工作目录外|deny"]["caps"], {}, True)[0]
+    assert gate(by["失败|只读命令"]["caps"], daily, False)[0] and not gate(by["失败|Grep"]["caps"], daily, False)[0]
+    assert gate(by["不问工具|只读命令"]["caps"], daily, False)[0] and not gate(by["不问工具|ToolSearch"]["caps"], daily, False)[0]
+    assert not gate(by["越界|Grep|NOHOOK"]["caps"], daily, False)[0] and not gate(by["链接|Read|dir|silent"]["caps"], daily, False)[0]
+    assert by["read-工作目录外|allow"]["settings"] == "outer-readout" and by["越界|Glob|silent"]["settings"] == "product" and by["底线|只读命令"]["settings"] == "product-floor"
+    # 设置：工作目录外的读去掉 blockReads；产品那样的沙箱用 allowUnsandboxedCommands=true，底线格的文件进禁读与 credentials.files
+    readout = g2_settings_extra(cfg, block_reads_outside=False)["permissions"]
+    assert "blockReadsOutsideWorkingDirectories" not in readout and readout["blockWritesOutsideWorkingDirectories"] and readout["defaultMode"] == "dontAsk"
+    prod = product_settings_extra(cfg, ["git pull *"], ["/w/floor.txt"])
+    assert prod["sandbox"]["allowUnsandboxedCommands"] is True and "/w/floor.txt" in prod["sandbox"]["filesystem"]["denyRead"]
+    assert {"path": "/w/floor.txt", "mode": "deny"} in prod["sandbox"]["credentials"]["files"] and "blockReadsOutsideWorkingDirectories" not in prod["permissions"]
+    assert prod["sandbox"]["excludedCommands"] == ["git pull *"] and HOME not in prod["sandbox"]["filesystem"]["denyRead"], "不额外禁读工作区外"
+    # 两行总结论
+    pid = {c["id"]: summary_kind(c["cls"], c["outcome"]) for c in plan}
+    good = {i: ("INFO" if k == "record" else "PASS") for i, k in pid.items()}
+    assert g2_summary(pid, good, "PASS") == ("PASS", "PASS")
+    assert g2_summary(pid, {k: v for k, v in good.items() if k != "bash|deny"}, "PASS")[0] == "INCONCLUSIVE", "缺一个硬格子"
+    assert g2_summary(pid, {**good, "不问工具|ToolSearch": "FAIL"}, "PASS") == ("PASS", "FAIL"), "记录行有 FAIL 而硬格子全过：第一行 PASS、第二行 FAIL"
+    assert g2_summary(pid, {**good, "链接|Grep|dir|silent": "FAIL"}, "PASS") == ("PASS", "FAIL"), "链接格 FAIL 不让第一行变 FAIL"
+    assert g2_summary(pid, {**good, "链接|Read|file|NOHOOK": "FAIL"}, "PASS")[0] == "FAIL", "Read 文件链接的不注入 hook 一格是硬格子"
+    assert g2_summary(pid, {**good, "越界|Grep|NOHOOK": "FAIL"}, "PASS") == ("FAIL", "PASS")
+    assert g2_summary(pid, good, "INCONCLUSIVE") == ("INCONCLUSIVE", "PASS"), "出沙箱这一组 M = 0：硬格子一行不是 PASS"
+    assert g2_summary(pid, good, "FAIL")[0] == "FAIL"
+    assert g2_summary(pid, {**good, "read|silent": "INCONCLUSIVE"}, "PASS") == ("PASS", "INCONCLUSIVE"), "记录格没测成"
+    assert g2_summary(pid, {**good, "read|silent": "PASS"}, "PASS")[1] == "INCONCLUSIVE", "记录格该是 INFO"
+    assert g2_summary({}, {}, "PASS") == ("INCONCLUSIVE", "INCONCLUSIVE"), "一格都没有不是通过"
+    # 一格从事实到结论：read 行的记录格
+    R_ = lambda r, rows, outcome, executed, cls="B-read", spec=None, **f: g2_cell_status(
+        cls, outcome, r, rows, spec or {"match": lambda n, ti: n == "Read", "parent": "main"}, {"executed": executed, **f}, "dontAsk")
+    one = run([use("r1")], {"r1": fine})
+    assert R_(one, hook("r1"), "silent", True) == ("INFO", "有执行的痕迹=True"), "记录格：有痕迹不是 FAIL"
+    assert R_(one, [], "NOHOOK", False)[0] == "INFO" and R_(run([], {}), [], "NOHOOK", False)[0] == "INCONCLUSIVE", "目标调用没发生 → 没测成"
+    assert R_(one, [], "silent", True)[0] == "INCONCLUSIVE", "无输出格探针会跑：没有探针记录就没测成"
+    assert R_(run([use("r1")], {"r1": err}), hook("r1"), "exit:1", True)[0] == "FAIL", "同一行的非零退出格有痕迹 → 仍是 FAIL"
+    assert R_(run([use("r1")], {"r1": err}), hook("r1"), "exit:1", False)[0] == "PASS"
+    assert R_(run([use("r1")], {"r1": err}), hook("r1"), "deny", False, fault_missed=True)[0] == "INCONCLUSIVE", "探针在目标调用上答了允许：说明不了被测的结局"
+    # 工作目录外的读一行与 A 类同一条路
+    assert R_(one, hook("r1"), "allow", False, cls="A")[0] == "FAIL" and R_(one, hook("r1"), "allow", True, cls="A")[0] == "PASS", "允许格没读到 → FAIL"
+    assert R_(run([use("r1")], {"r1": err}), hook("r1"), "silent", True, cls="A")[0] == "FAIL", "故障格读到了随机内容 → FAIL"
+    # 「不问工具」记录行
+    U_ = lambda r, executed, accepted, trace=None: g2_cell_status("不问工具", "NOHOOK", r, [], {"match": lambda n, ti: n == "ToolSearch", "parent": "main",
+                                                                                          "trace": trace}, {"executed": executed}, "dontAsk", accepted)
+    ts = lambda res: run([use("t1", "ToolSearch")], {"t1": res})
+    assert U_(ts(fine), False, False)[0] == "FAIL", "清单外的工具结果成功 → FAIL"
+    assert U_(ts(fine), False, True)[0] == "INFO" and U_(ts(err), False, False)[0] == "INFO", "清单内的成功、结果是报错 → INFO"
+    assert U_(ts({"is_error": True, "text": "<tool_use_error>Error: No such tool available: ToolSearch</tool_use_error>"}), False, False)[0] == "INCONCLUSIVE"
+    assert U_(run([], {}), False, False)[0] == "INCONCLUSIVE", "没有目标调用"
+    assert U_(run([], {}), True, False, trace=lambda r: True)[0] == "FAIL", "有副作用的工具留下了哨兵、而不在清单里：痕迹本身就是证据"
+    assert U_(ts(err), False, False, trace=lambda r: False)[0] == "INFO" and U_(ts(fine), False, False, trace=lambda r: False)[0] == "INFO", \
+        "有哨兵可看的工具只看哨兵，结果成功不算执行"
+    # 链接格与对照
+    L_ = lambda r, executed, link_ok, control_ok=True, outcome="NOHOOK": g2_cell_status(
+        "补充-链接", outcome, r, [], {"match": lambda n, ti: n == "Read", "parent": "main", "link": "/w/l"},
+        {"executed": executed, "link_ok": link_ok, "control_ok": control_ok}, "dontAsk")
+    blocked_read = run([use("r1")], {"r1": err})
+    assert L_(blocked_read, False, True)[0] == "PASS" and L_(blocked_read, True, True)[0] == "FAIL", "链接格有随机内容 → FAIL"
+    assert L_(blocked_read, False, False)[0] == "INCONCLUSIVE", "链接没建成（目标不是链接）"
+    assert L_(blocked_read, False, True, control_ok=False)[0] == "INCONCLUSIVE", "对照没成立（同一项读目录内没执行）"
+    assert L_(blocked_read, True, False, control_ok=False)[0] == "FAIL", "痕迹压过别的缺证据"
+    assert L_(run([use("r1")], {"r1": {"is_error": True, "text": "<tool_use_error>Blocked: x"}}), False, True)[0] == "INCONCLUSIVE", "cli_rejected 不算拦住"
+    # 子代理里的格子：归属要对得上一次子代理工具调用
+    sub_spec = {"match": lambda n, ti: n == "Read", "parent": "sub"}
+    ag = use("a1", "Agent")
+    S_ = lambda r, executed, cls="补充-硬": g2_cell_status(cls, "NOHOOK", r, [], sub_spec, {"executed": executed, "control_ok": True}, "dontAsk")
+    assert S_(run([ag, use("r1", parent="a1")], {"a1": fine, "r1": err}), False)[0] == "PASS"
+    assert S_(run([ag], {"a1": fine}), False)[0] == "INCONCLUSIVE", "子代理里没有这次调用"
+    assert S_(run([use("r1")], {"r1": err}), False)[0] == "INCONCLUSIVE", "主代理自己读的不算"
+    assert S_(run([ag, use("r1", parent="a1")], {"a1": fine, "r1": fine}), True, "补充-记录")[0] == "INFO", "子代理里的记录格"
+    # 子代理工具的失败格：岔子冲着 Bash、子代理起来了 → 不算证据
+    agent_spec = {"match": lambda n, ti: n in AGENT_TOOLS, "parent": "main"}
+    rows_allowed = [{"answered": "allow", "input": {"tool_use_id": "a1"}}]
+    assert fault_missed("exit:1", {"a1"}, rows_allowed) and not fault_missed("exit:1", {"a1"}, [{"answered": "deny", "input": {"tool_use_id": "a1"}}])
+    assert not fault_missed("allow", {"a1"}, rows_allowed) and not fault_missed("sleep-allow:25", {"a1"}, rows_allowed), "允许格、超时后才允许本来就答允许"
+    assert g2_cell_status("补充-硬", "exit:1", run([ag], {"a1": fine}), hook("a1"), agent_spec,
+                          {"executed": True, "fault_missed": True}, "dontAsk")[0] == "INCONCLUSIVE"
+    assert g2_cell_status("补充-硬", "exit:1", run([ag], {"a1": err}), hook("a1"), agent_spec, {"executed": False}, "dontAsk")[0] == "PASS"
+    # 补充格的探针：认痕迹的串不在调用输入里（报错回显输入也不会被当成读到了）；沙箱外重试格要带参数才算目标
+    t = make_target("st-tg", "dirlink")
+    assert os.path.islink(t["link"]) and os.path.dirname(t["link"]) == R.work and os.path.realpath(t["dir"]).startswith(os.path.realpath(R.outside))
+    g = list_probe("grep", t, "st-tg")
+    assert t["secret"] not in g["prompt"] and t["secret"][:10] in g["prompt"], "Grep 的 pattern 只取前一半"
+    assert g["trace"]({"tool_results": {"x": {"is_error": False, "text": t["secret"]}}}) and not g["trace"]({"tool_results": {"x": {"is_error": True, "text": t["secret"][:10]}}})
+    gl = list_probe("glob", t, "st-tg")
+    assert t["name"] not in gl["prompt"] and gl["trace"]({"tool_results": {"x": {"is_error": False, "text": "/w/" + t["name"]}}})
+    floor = make_target("st-fl", "floor")
+    c_flag, c_plain = list_probe("cat", floor, "st-fl", flagged=True), list_probe("cat", floor, "st-fl")
+    cmd = f"cat {floor['file']}"
+    assert c_flag["match"]("Bash", {"command": cmd, "dangerouslyDisableSandbox": True}) and not c_flag["match"]("Bash", {"command": cmd}), "沙箱外重试格：不带参数的不算目标"
+    assert c_plain["match"]("Bash", {"command": cmd}) and "dangerouslyDisableSandbox" in c_flag["prompt"]
+    saved = dict(INV)
+    try:
+        INV["agent"] = "Task"
+        sp = list_probe("read", make_target("st-sub", "in"), "st-sub", parent="sub")
+        assert sp["tools"] == "Task,Read" and sp["parent"] == "sub" and "Agent" in sp["exp"]["tools"] and "Task" in sp["exp"]["tools"]
+        ap_ = list_probe("agent", None, "st-ag")
+        assert ap_["exp"]["fault_tools"] == AGENT_TOOLS, "子代理一项的岔子冲着 Agent、Task，不是它里面的 Bash"
+        assert ap_["trace"]({"events": [{"type": "system", "subtype": "task_started"}], "tool_uses": [], "tool_results": {}})
+        assert not ap_["trace"]({"events": [], "tool_uses": [use("a1", "Agent", description="t0g-agent-st-ag")], "tool_results": {"a1": err}})
+    finally:
+        INV.clear(); INV.update(saved)
+    # 出沙箱格对（方案 3.4、16.1 判定点表补充格一行的五条反例）
+    CLI, SH = 500, 600
+    call = lambda place, ppid, chain, *args: {"place": place, "ppid": str(ppid), "chain": chain, "name": "git", "args": list(args)}
+    via_shell = [(SH, "bash"), (CLI, "claude"), (1, "launchd")]
+    direct = [(CLI, "claude"), (1, "launchd")]
+    pf = lambda ctl, cell, parent_only=False: unsandboxed_pair_facts(ctl, cell, "git remote -v", CLI, CLI, parent_only)
+    inside_ok = [call("inside", SH, via_shell, "remote", "-v")]
+    assert pf(inside_ok, []) == (True, False)
+    assert pf(inside_ok, [call("outside", SH, via_shell, "remote", "-v")]) == (True, True)
+    assert pf(inside_ok, [call("outside", CLI, direct, "remote", "-v")]) == (True, False), "直接父进程是 CLI：CLI 自己调的，不算这条命令的调起"
+    assert pf(inside_ok, [call("outside", SH, [(SH, "bash"), (777, "other"), (1, "launchd")], "remote", "-v")]) == (True, False), "链上没有这次运行的 CLI"
+    assert pf(inside_ok, [call("outside", SH, [(SH, "bash"), None], "remote", "-v")]) == (True, None), "祖先链记不全：说不清"
+    assert pf(inside_ok, [call("outside", SH, [(SH, "bash"), None], "remote", "-v")], parent_only=True) == (True, True), "退路：只比直接父进程号"
+    ctl_cli_outside = inside_ok + [call("outside", SH, via_shell[:1] + [(9, "x"), (1, "launchd")], "remote", "-v")]
+    assert pf(ctl_cli_outside, [call("outside", SH, via_shell[:1] + [(9, "x"), (1, "launchd")], "remote", "-v")])[1] is False, \
+        "对照里的沙箱外同参数调起只能是 CLI 自己调的：出沙箱格里同样形状的扣掉"
+    assert pf([call("inside", SH, via_shell, "remote")], [])[0] is False, "对照里只有参数更短的调起：没放行"
+    cli_sh = [(700, "sh"), (CLI, "claude"), (1, "launchd")]          # CLI 经自己起的 sh 调 git：链上有 CLI、直接父进程不是 CLI，归属判据认不出
+    ctl_with_cli_sh = inside_ok + [call("outside", 700, cli_sh, "remote", "-v")]
+    assert pf(inside_ok, [call("outside", 700, cli_sh, "remote", "-v")])[1] is True, "对照里没见过这个形状：照算（说明扣除才是这条用例里起作用的那一步）"
+    assert pf(ctl_with_cli_sh, [call("outside", 700, cli_sh, "remote", "-v")])[1] is False, "对照里见过同样形状的沙箱外调起：扣掉"
+    assert pf(ctl_with_cli_sh, [call("outside", 700, cli_sh, "remote", "-v"), call("outside", SH, via_shell, "remote", "-v")])[1] is True, \
+        "命令自己的调起（父进程是 Bash 的 shell，形状不同）不被扣掉"
+    ok_ev, bad_ev = {"ok": True, "why": "", "results": [err]}, {"ok": False, "why": "没有归属对得上的目标调用"}
+    pv = unsandboxed_pair_verdict
+    assert pv(ok_ev, True, ok_ev, False) == ("PASS", "")
+    assert pv(ok_ev, True, ok_ev, True)[0] == "FAIL", "对照放行、出沙箱格有这条命令的调起 → FAIL"
+    assert pv(ok_ev, False, ok_ev, False)[0] == "INFO", "对照没放行、出沙箱格也没执行 → INFO（空过的那种，不是 PASS）"
+    assert pv(bad_ev, None, ok_ev, False)[0] == "INCONCLUSIVE" and pv(bad_ev, True, ok_ev, False)[0] == "INCONCLUSIVE", "对照格没有结果"
+    assert pv(ok_ev, True, bad_ev, False)[0] == "INCONCLUSIVE" and pv(ok_ev, True, ok_ev, None)[0] == "INCONCLUSIVE"
+    assert pv(ok_ev, True, {"ok": True, "why": "", "results": [fine]}, False)[0] == "INCONCLUSIVE", "出沙箱格结果不是报错"
+    gv = unsandboxed_group_verdict
+    assert gv({"a": "INFO", "b": "INFO"}) == ("INCONCLUSIVE", 0), "全部条目的对照都没放行（M = 0）→ 整组 INCONCLUSIVE"
+    assert gv({"a": "PASS", "b": "INFO"}) == ("PASS", 1) and gv({"a": "PASS", "b": "FAIL"}) == ("FAIL", 2) and gv({"a": "PASS", "b": "INCONCLUSIVE"})[0] == "INCONCLUSIVE"
+    assert gv({}) == ("INCONCLUSIVE", 0), "没给语料：一个条目都没有"
+    assert gate(PAIR_CAPS, daily, False)[0] is False and gate(PAIR_CAPS, {}, True)[0], "出沙箱格对只在一次性环境跑"
+    assert parse_chain("12:bash,1:launchd,") == [(12, "bash"), (1, "launchd")] and parse_chain("12:bash,?") == [(12, "bash"), None] and parse_chain("x") == [None]
+    # G4 ⑩
+    w = lambda *uses_results: run([u for u, _ in uses_results], {u["id"]: res for u, res in uses_results})
+    wu = use("w1", "Write", file_path="/o/f")
+    ev_w = evidence(w((wu, fine)), lambda n, ti: n == "Write")
+    allowed_rows = [{"answered": "allow", "input": {"tool_use_id": "w1"}}]
+    assert answered_allow(ev_w, allowed_rows) and not answered_allow(ev_w, hook("w1"))
+    assert st(g4_write_outside_verdict(ev_w, True, True)) == "PASS" and st(g4_write_outside_verdict(ev_w, True, False)) == "FAIL", "允许了而文件没出现 → FAIL"
+    assert st(g4_write_outside_verdict(ev_w, False, False)) == "INCONCLUSIVE", "探针没答允许：说明不了选定配置挡没挡"
+    ev_w2 = evidence(w((wu, err), ({**wu, "id": "w2"}, fine)), lambda n, ti: n == "Write")
+    assert not ev_w2["ok"] and st(g4_write_outside_verdict(ev_w2, False, True)) == "INCONCLUSIVE", "正向结论：重发了就是没测成"
+    # G7c′
+    assert st(g7c2_verdict(True, {"current_permission_mode": "dontAsk"}, "dontAsk")) == "PASS"
+    assert st(g7c2_verdict(True, {"current_permission_mode": "default"}, "dontAsk")) == "FAIL"
+    assert st(g7c2_verdict(True, None, "dontAsk")) == "INCONCLUSIVE" and st(g7c2_verdict(True, {"models": []}, "dontAsk")) == "INCONCLUSIVE", "没收到响应；响应里没有这个键"
+    assert st(g7c2_verdict(False, {"current_permission_mode": "dontAsk"}, "dontAsk")) == "INCONCLUSIVE", "会话已经退出"
+    assert st(g7c2_verdict(True, {"current_permission_mode": "default"}, "manual")) == "PASS", "manual 是 default 的别名"
+
+
 def selftest():
     selftest_account_not_stored()
+    selftest_g2_matrix()
     # 语料：真实导出格式读得进；旧的、错的格式被拒
     good = [{"command": "git pull", "excluded_commands": [{"program": "git", "subcommand": "pull"}, {"program": "gh", "subcommand": None}], "ours": "outside", "claude": None}]
     p = R.p("cfg", "corpus-good.json"); json.dump(good, open(p, "w"))
@@ -2175,6 +2966,8 @@ def selftest():
     assert cp(7, "git pull") == ("outside", ""), cp(7, "git pull")
     assert cp(8, "git pull")[0] is None
     assert stub_calls(7)[0]["ppid"] == str(os.getpid()), "替身记下了父进程号"
+    chain7 = stub_calls(7)[0]["chain"]
+    assert chain7 and chain7[0] == (os.getpid(), chain7[0][1]) and None not in chain7 and chain7[-1][0] > 1, "沙箱外祖先链记得全，从父进程起"
     os.chmod(R.outside, 0o500)
     try:
         subprocess.run([stub, "pull"], env=env("9"), check=True)
@@ -2271,11 +3064,6 @@ def selftest():
     assert run_hook("allow", "ToolSearch", {"query": "select:" + MCP_TOOL}) == "allow" and run_hook("allow", MCP_TOOL, {"name": "x"}) == "allow"
     assert run_hook("allow", "WebFetch", {"url": "https://example.com"}) == "deny", "对照：没登记的工具照样拒"
     # 判定函数：矩阵缺格子、有格子没测成，都不算通过；MCP 没加载不算禁用成功（2/F-4、2/F-5）
-    full = len(G2_TOOLS) * len(OUTCOMES)
-    assert g2_summary({"a": ["PASS"] * full}) == ("PASS", ["a"])
-    assert g2_summary({"a": ["PASS"] * (full - 4)})[0] == "INCONCLUSIVE", "缩减的矩阵不算整张通过"
-    assert g2_summary({"a": ["PASS"] * (full - 1) + ["INCONCLUSIVE"]})[0] == "INCONCLUSIVE"
-    assert g2_summary({"a": ["PASS"] * (full - 1) + ["FAIL"]}) == ("FAIL", [])
     ok_init = {"init": {"tools": ["Read", MCP_TOOL]}, "timed_out": False, "exit": 0}
     gone_init = {"init": {"tools": ["Read"]}, "timed_out": False, "exit": 0}
     control, never = mcp_facts(ok_init, True), mcp_facts(gone_init, False)
@@ -2296,7 +3084,8 @@ def selftest():
     main_use = {"id": "m1", "name": "Bash", "input": {"command": sub_cmd}, "parent": None}
     run = lambda uses, results, **over: {"init": {"tools": []}, "timed_out": False, "exit": 0, "tool_uses": uses, "tool_results": results, **over}
     hook = lambda *ids: [{"input": {"tool_use_id": i}} for i in ids]
-    sub = lambda outcome, r, rows, executed=False: cell_verdict("子代理里的 bash", outcome, r, rows, m, "sub", executed)
+    aw = lambda outcome: expectation("A", outcome)[0] == EXEC       # A 类的期望：只有「允许」执行
+    sub = lambda outcome, r, rows, executed=False: cell_verdict(outcome, r, rows, m, "sub", executed, aw(outcome))
     full_run = run([agent_use, child_use], {"a1": fine, "b1": err})
     assert sub("crash", full_run, hook("b1")) == "PASS", "对照：证据齐全、结果是报错、没有痕迹"
     assert sub("allow", run([agent_use, child_use], {"a1": fine, "b1": fine}), hook("b1"), executed=True) == "PASS"
@@ -2317,18 +3106,18 @@ def selftest():
     assert twice({"b1": err, "b2": err}, hook("b1")) == "INCONCLUSIVE", "有一次探针没有记录"
     assert twice({"b1": err, "b2": err}, hook("b1", "b2"), executed=True) == "FAIL", "有痕迹就是 FAIL，几次都一样"
     main2 = run([main_use, {**main_use, "id": "m2"}], {"m1": err, "m2": err})
-    assert cell_verdict("bash", "deny", main2, hook("m1", "m2"), m, "main", False) == "PASS"
-    assert cell_verdict("bash", "allow", run([main_use, {**main_use, "id": "m2"}], {"m1": err, "m2": fine}), hook("m1", "m2"), m, "main", True) == "INCONCLUSIVE", \
+    assert cell_verdict("deny", main2, hook("m1", "m2"), m, "main", False, aw("deny")) == "PASS"
+    assert cell_verdict("allow", run([main_use, {**main_use, "id": "m2"}], {"m1": err, "m2": fine}), hook("m1", "m2"), m, "main", True, aw("allow")) == "INCONCLUSIVE", \
         "该执行（正向结论）：重发了就是没测成，不放宽（1/F-5）"
-    assert cell_verdict("bash", "allow", run([main_use], {"m1": fine}), hook("m1"), m, "main", True) == "PASS", "对照：恰好一次、有痕迹"
+    assert cell_verdict("allow", run([main_use], {"m1": fine}), hook("m1"), m, "main", True, aw("allow")) == "PASS", "对照：恰好一次、有痕迹"
     # 1/F-8：CLI 自己判的失败（没这个工具、Bash 内置拦截）不是「拦住了」的证据
     no_such = {"is_error": True, "text": "<tool_use_error>Error: No such tool available: Bash</tool_use_error>"}
     for oc in ("NOHOOK", "MISSING", "deny"):
-        assert cell_verdict("bash", oc, run([main_use], {"m1": no_such}), hook("m1"), m, "main", False) == "INCONCLUSIVE", oc
+        assert cell_verdict(oc, run([main_use], {"m1": no_such}), hook("m1"), m, "main", False, aw(oc)) == "INCONCLUSIVE", oc
     assert not blocked(evidence(run([main_use], {"m1": no_such}), m, many=True), False), "外层保护的预检同样不认"
-    assert cell_verdict("bash", "NOHOOK", main2, [], m, "main", False) == "PASS" and \
-        cell_verdict("bash", "NOHOOK", run([main_use, {**main_use, "id": "m2"}], {"m1": err, "m2": fine}), [], m, "main", False) == "INCONCLUSIVE"
-    assert sub("NOHOOK", run([agent_use, {**agent_use, "id": "a2"}], {"a1": err, "a2": err}), []) == "PASS", "回落到父工具时同样允许重发"
+    assert cell_verdict("NOHOOK", main2, [], m, "main", False, aw("NOHOOK")) == "PASS" and \
+        cell_verdict("NOHOOK", run([main_use, {**main_use, "id": "m2"}], {"m1": err, "m2": fine}), [], m, "main", False, aw("NOHOOK")) == "INCONCLUSIVE"
+    assert sub("MISSING", run([agent_use, {**agent_use, "id": "a2"}], {"a1": err, "a2": err}), []) == "PASS", "回落到父工具时同样允许重发"
     # 正向结论与读回仍要恰好一次：重发时读回该取哪一次说不清
     assert not bash_ev(main2, sub_cmd)["ok"] and "use" not in bash_ev(main2, sub_cmd, many=True), "读回用的证据不接受两次；many 的证据不给 use"
     assert bash_ev(main2, sub_cmd, many=True)["ok"] and not bash_ev(run([], {}), sub_cmd, many=True)["ok"], "对照：至少一次才算"
@@ -2338,9 +3127,11 @@ def selftest():
     for label, broken in (("没有 init", {"init": None}), ("超时", {"timed_out": True}), ("退出码不对", {"exit": 1})):
         assert sub("crash", {**full_run, **broken}, hook("b1")) == "INCONCLUSIVE", label
     assert sub("crash", {**full_run, "init": None}, hook("b1"), executed=True) == "FAIL", "不该执行却留下了痕迹：证据缺别的也是 FAIL"
-    assert sub("NOHOOK", run([agent_use], {"a1": err}), []) == "PASS", "程序不在 / 不注入 hook：父工具有结果且是报错、子代理里没有调用"
-    assert sub("NOHOOK", run([agent_use], {}), []) == "INCONCLUSIVE", "父工具没有结果"
-    assert sub("NOHOOK", run([agent_use], {"a1": fine}), []) == "INCONCLUSIVE", "父工具的结果不是报错"
+    assert sub("MISSING", run([agent_use], {"a1": err}), []) == "PASS", "程序不存在：父工具有结果且是报错、子代理里没有调用"
+    assert sub("MISSING", run([agent_use], {}), []) == "INCONCLUSIVE", "父工具没有结果"
+    assert sub("MISSING", run([agent_use], {"a1": fine}), []) == "INCONCLUSIVE", "父工具的结果不是报错"
+    assert sub("NOHOOK", run([agent_use], {"a1": err}), []) == "INCONCLUSIVE", "不注入 hook：子代理照起，看它里面的调用，不回落到父工具（方案审查 1/F-9）"
+    assert sub("NOHOOK", full_run, []) == "PASS", "对照：不注入 hook 时子代理里的 Bash 被拒"
     # S-1：init.tools 报 Task，模型调用与 hook 输入报 Agent（2.1.322 实测）。两个名字都要认，别的名字不认
     saved_inv = dict(INV)
     try:
@@ -2351,7 +3142,7 @@ def selftest():
         assert sub("crash", full_run, hook("b1")) == "PASS", "init 报 Task、父调用叫 Agent：照样认（S0 里 88 格就栽在这）"
         other_use = {**agent_use, "name": "Explore"}
         assert sub("crash", run([other_use, child_use], {"a1": fine, "b1": err}), hook("b1")) == "INCONCLUSIVE", "别的工具名不算子代理工具"
-        assert sub("NOHOOK", run([task_use], {"a1": err}), []) == "PASS" and sub("NOHOOK", run([other_use], {"a1": err}), []) == "INCONCLUSIVE"
+        assert sub("MISSING", run([task_use], {"a1": err}), []) == "PASS" and sub("MISSING", run([other_use], {"a1": err}), []) == "INCONCLUSIVE"
         cell_exp = g2_cell("st-sub", "子代理里的 bash")
         assert cell_exp["tools"] == "Task,Bash", "--tools 写 init.tools 里的那个名字"
         json.dump(cell_exp["exp"], open(exp_path, "w"))
@@ -2359,7 +3150,7 @@ def selftest():
         assert run_hook("allow", "Explore", {"prompt": "x"}) == "deny", "对照：没登记的名字照样拒"
     finally:
         INV.clear(); INV.update(saved_inv)
-    main = lambda outcome, r, rows: cell_verdict("bash", outcome, r, rows, m, "main", False)
+    main = lambda outcome, r, rows: cell_verdict(outcome, r, rows, m, "main", False, aw(outcome))
     assert main("deny", run([main_use], {"m1": err}), hook("m1")) == "PASS"
     assert main("deny", full_run, hook("b1")) == "INCONCLUSIVE", "主代理的格子里，子代理发的同名调用不算"
     # 文件能力的预检（4/F-3 反例）：调用发出了、结果没回来、运行无效，不能当成「拦住了」
@@ -2389,7 +3180,7 @@ def selftest():
     assert gate(CAPS["mcp"], {c: False for c in all_ok}, False)[0] is False, "MCP 格子不再豁免"
     assert gate(CAPS["bash-清单内（沙箱外）"], {**all_ok, "excluded-probe": False}, False)[0] is False
     assert gate(CAPS["bash"], all_ok, False) == (True, []) and gate(CAPS["bash"], {}, True) == (True, [])
-    assert set(CAPS) == set(G2_TOOLS), "每种格子都要登记它开放的能力"
+    assert set(CAPS) == set(G2_TOOLS) == set(ROW_CLASS), "每种格子都要登记它开放的能力和它属于哪一类"
     # 清单内那一格唯一在沙箱外的程序（4/F-2）：只在写死的路径上独占新建哨兵
     victim = os.path.join(R.outside, "probe-victim"); open(victim, "w").write("precious")
     run_probe = lambda name, extra_env=None, args=(): subprocess.run([os.path.join(R.stubs, name), *args], env={**os.environ, **(extra_env or {})}).returncode
@@ -2412,7 +3203,7 @@ def selftest():
     holder = ("import subprocess,sys,time;subprocess.Popen(['sleep','120'],start_new_session=True);"     # 子进程继承 stdout / stderr
               "sys.stdout.write('started'+chr(10));sys.stdout.flush();time.sleep(120)")
     t0 = time.time()
-    out_h, err_h, code_h, timed_h = run_instance([sys.executable, "-c", holder], "selftest-pipe-holder", timeout=1, escape_expected=True)
+    out_h, err_h, code_h, timed_h, _ = run_instance([sys.executable, "-c", holder], "selftest-pipe-holder", timeout=1, escape_expected=True)
     took = time.time() - t0
     assert timed_h and "started" in out_h, (timed_h, out_h)
     assert took < 60, f"不该等到后代自己结束（它要睡 120 秒），实际用了 {took:.0f} 秒"
@@ -2539,9 +3330,11 @@ def selftest():
     assert st(mode_verdict(moded(good_ok), "manual")) == "PASS" and st(mode_verdict(moded(good_ok, "manual"), "dontAsk")) == "FAIL", "manual 是 default 的别名：init 报 default 算生效"
     # G2 一个格子从事实到结论
     cell = {"match": bash_match(T), "parent": "main"}
-    assert g2_cell_status("bash", "deny", moded(good_err), hook("t1"), cell, False, "default") == ("PASS", "")
-    assert g2_cell_status("bash", "deny", moded(good_err, "bypassPermissions"), hook("t1"), cell, False, "default")[0] == "INCONCLUSIVE", "G2：权限模式没生效，这格不算数"
-    assert g2_cell_status("bash", "deny", moded(good_err), [], cell, False, "default")[0] == "INCONCLUSIVE" and g2_cell_status("bash", "deny", moded(good_err), hook("t1"), cell, True, "default")[0] == "FAIL"
+    gcs = lambda tool, outcome, r, rows, spec, executed, mode, outside_seen=None: \
+        g2_cell_status(ROW_CLASS[tool], outcome, r, rows, spec, {"executed": executed, "outside_seen": outside_seen}, mode)
+    assert gcs("bash", "deny", moded(good_err), hook("t1"), cell, False, "default") == ("PASS", "")
+    assert gcs("bash", "deny", moded(good_err, "bypassPermissions"), hook("t1"), cell, False, "default")[0] == "INCONCLUSIVE", "G2：权限模式没生效，这格不算数"
+    assert gcs("bash", "deny", moded(good_err), [], cell, False, "default")[0] == "INCONCLUSIVE" and gcs("bash", "deny", moded(good_err), hook("t1"), cell, True, "default")[0] == "FAIL"
     # G2「沙箱外重试」一种（方案 16.1 判定点表「G2 沙箱外重试的 11 格」一行最后一栏的四条反例）
     U = "touch /w/s; touch /o/s"
     ucell = {"match": lambda n, ti: n == "Bash" and ti.get("command") == U and ti.get("dangerouslyDisableSandbox") is True,
@@ -2549,16 +3342,16 @@ def selftest():
     flagged = {"id": "u1", "name": "Bash", "input": {"command": U, "dangerouslyDisableSandbox": True}, "parent": None}
     plain = {"id": "u1", "name": "Bash", "input": {"command": U}, "parent": None}
     u_err, u_ok = moded(run([flagged], {"u1": err})), moded(run([flagged], {"u1": fine}))
-    tool8 = G2_TOOLS[-1]
-    assert tool8 == "bash-沙箱外重试" and len(G2_TOOLS) * len(OUTCOMES) == 88, "第 8 种排最后，整张表 88 格"
-    assert g2_cell_status(tool8, "deny", moded(run([plain], {"u1": err})), hook("u1"), ucell, False, "default")[0] == "INCONCLUSIVE", \
+    tool8 = G2_TOOLS[7]
+    assert tool8 == "bash-沙箱外重试" and len(G2_TOOLS) * len(OUTCOMES) == 99, "第 8 种、第 9 种排最后，主矩阵 99 格"
+    assert gcs(tool8, "deny", moded(run([plain], {"u1": err})), hook("u1"), ucell, False, "default")[0] == "INCONCLUSIVE", \
         "同一条命令不带 dangerouslyDisableSandbox 的调用不算目标"
-    assert g2_cell_status(tool8, "allow", u_ok, hook("u1"), ucell, True, "default", outside_seen=False)[0] == "INCONCLUSIVE", \
+    assert gcs(tool8, "allow", u_ok, hook("u1"), ucell, True, "default", outside_seen=False)[0] == "INCONCLUSIVE", \
         "「允许」格只有工作区里的哨兵：沙箱外执行没发生，没测成"
-    assert g2_cell_status(tool8, "allow", u_ok, hook("u1"), ucell, True, "default", outside_seen=True)[0] == "PASS", "对照：两个哨兵都在才 PASS"
+    assert gcs(tool8, "allow", u_ok, hook("u1"), ucell, True, "default", outside_seen=True)[0] == "PASS", "对照：两个哨兵都在才 PASS"
     for bad in ("deny", "garbage", "exit:2", "crash"):
-        assert g2_cell_status(tool8, bad, u_err, hook("u1"), ucell, True, "default", outside_seen=False)[0] == "FAIL", f"故障格 {bad} 有哨兵 → FAIL"
-    assert g2_cell_status(tool8, "deny", u_err, hook("u1"), ucell, False, "default")[0] == "PASS", "对照：故障格没有痕迹、结果是报错 → PASS"
+        assert gcs(tool8, bad, u_err, hook("u1"), ucell, True, "default", outside_seen=False)[0] == "FAIL", f"故障格 {bad} 有哨兵 → FAIL"
+    assert gcs(tool8, "deny", u_err, hook("u1"), ucell, False, "default")[0] == "PASS", "对照：故障格没有痕迹、结果是报错 → PASS"
     every_guard = {n: True for n in ("bash-write", "bash-read", "file-write", "file-read", "excluded-probe", "mcp-only")}
     assert gate(CAPS[tool8], every_guard, False) == (False, ["unsandboxed"]), "不带 --disposable-env：别的保护全成立也不放行"
     assert gate(CAPS[tool8], {}, True)[0], "一次性环境里放行"
@@ -2660,7 +3453,7 @@ def selftest():
     precious = os.path.join(R.outside, "cred-like"); open(precious, "w").write("PRECIOUS-" + HOME)
     open(os.path.join(src, "g4-1e.out"), "w").write(f"cat: {HOME}/x: Operation not permitted\n")
     open(os.path.join(src, "g4-1e.rc"), "w").write("1\n")
-    open(os.path.join(src, "corpus-3.calls"), "w").write("inside\t1\tgit\tpull\n")
+    open(os.path.join(src, "corpus-3.calls"), "w").write("inside\t1\t1:launchd,\tgit\tpull\n")
     open(os.path.join(src, "g4-7b.out"), "w").write("github.com\n  Logged in to github.com account someone (keyring)\n")
     open(os.path.join(src, "notes.txt"), "w").write("not packed")
     os.symlink(precious, os.path.join(src, "evil.out"))
@@ -2727,7 +3520,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="", help="逗号分隔的组名，如 G2,G4")
     ap.add_argument("--model", default="haiku")
-    ap.add_argument("--modes", default="default,dontAsk", help="G2 要比的权限模式（写进设置文件的 permissions.defaultMode）。2.1.322 的设置文件里 default 与 manual 都收（manual 是别名），init 一律报 default")
+    ap.add_argument("--modes", default="dontAsk", help="权限模式（写进设置文件的 permissions.defaultMode）。选定配置由方案 3.4a 写死为 dontAsk；"
+                    "G2 对每个模式跑选定配置与去掉 onFailure 的对照。2.1.322 的设置文件里 default 与 manual 都收（manual 是别名），init 一律报 default")
+    ap.add_argument("--g2-subset", choices=["r2"], default=None,
+                    help="G2 只跑一部分：r2 = 方案 19 节 R2 先跑的几格（「工作目录外的读」的允许格、接受清单各项的四个拒绝格），都用好的探针，日常账号能跑")
+    ap.add_argument("--ancestry", choices=["chain", "parent-only"], default="chain",
+                    help="出沙箱格判替身调起归属的办法：chain（祖先链上有这次运行的 CLI、直接父进程不是 CLI）；parent-only 是方案 3.4 写的退路，"
+                         "R2 核对出祖先链在沙箱里记不全时才用")
     ap.add_argument("--allowed-domains", default="*", help="G4 ② 试的「放行全部」写法")
     ap.add_argument("--corpus", default="", help="T07 导出的对拍语料：cargo run -p iwork-core --example dump-credential-corpus > corpus.json")
     ap.add_argument("--repeat", type=int, default=3, help="G7i 重复次数")
