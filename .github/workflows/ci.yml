@@ -111,6 +111,9 @@ jobs:
           install -m 755 target/debug/examples/ipc-tool /tmp/iwork-ipc-tool
           IWORK_TEST_OTHER_USER=1 IWORK_IPC_TOOL=/tmp/iwork-ipc-tool \
             cargo test -p iwork-ipc --features dev --test peer_other_user -- --ignored
+          # T06 方案 4.6 第 5 行：hook 通道上别的用户连进来，桥接直接关连接（测试自己把客户端拷进 /tmp 再以另一用户跑）
+          IWORK_TEST_OTHER_USER=1 \
+            cargo test -p iwork-bridge-claude --test hook_channel -- --ignored --exact other_user_rejected
 
       - uses: pnpm/action-setup@v4
         with:
