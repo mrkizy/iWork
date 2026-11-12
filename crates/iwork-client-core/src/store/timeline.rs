@@ -1268,15 +1268,10 @@ impl Timeline {
         if anchor == Some(new) {
             return Some(End::Old);
         }
+        // 没有网页窗口：拿锚这一组当窗口，上下界都是这一组的合法行号（审查 7/F-2）。下面 `in_window` 里的
+        // `slot: u8::MAX` 只是 BTreeMap 取同一组的范围哨兵，不能换算成行号当窗口边界
         let (wf, wl) = plan.window.unwrap_or_else(|| match anchor {
-            Some(a) => (
-                RowKey::derived(a).ordinal(),
-                RowKey {
-                    seq: a,
-                    slot: u8::MAX,
-                }
-                .ordinal(),
-            ),
+            Some(a) => (RowKey::derived(a).ordinal(), RowKey::entity(a).ordinal()),
             // 没有锚也没有窗口：时间线是空的才会这样，上面已经返回了
             None => (i64::MAX, i64::MAX),
         });

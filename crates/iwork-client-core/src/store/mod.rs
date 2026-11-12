@@ -1054,6 +1054,17 @@ impl Store {
                     Some(QueryPurpose::AroundPage { seq, .. }) => PageMode::Around { center: *seq },
                     Some(_) => PageMode::LiveLatest,
                 };
+                // 先核对归属，再碰窗口和重建状态（审查 7/F-4）：切走以后上一个对话的结果迟到，整个丢掉，
+                // 不能先作废当前对话的窗口、算回到最新
+                let cid = page.conversation.as_ref().map(|c| c.id.as_str());
+                let owned = self.open.as_ref().is_some_and(|t| {
+                    cid == Some(t.conversation_id.as_str())
+                        || matches!(p, Some(QueryPurpose::OlderPage { conversation_id, .. } | QueryPurpose::LatestPage { conversation_id }) if *conversation_id == t.conversation_id)
+                });
+                if !owned {
+                    tracing::debug!(target: "iwork_client", ?cid, "对话页结果不属于当前打开的对话，丢掉");
+                    return;
+                }
                 if let Some(QueryPurpose::NewerPage { after, .. }) = p
                     && self.open.as_ref().and_then(Timeline::newer_cursor).as_ref() != Some(after)
                 {
@@ -1070,7 +1081,6 @@ impl Store {
                     // 等的跳转换了或取消了：这一段照常进时间线（它是一段合法的连续消息），但不再滚动。
                     tracing::debug!(target: "iwork_client", seq, "居中加载的结果到达时已不再等它");
                 }
-                let cid = page.conversation.as_ref().map(|c| c.id.as_str());
                 if let Some(QueryPurpose::OlderPage { before, .. }) = p
                     && self.open.as_ref().and_then(Timeline::older_cursor).as_ref() != Some(before)
                 {
@@ -1128,10 +1138,7 @@ impl Store {
                     window: self.window,
                     page: paging.map(|(side, _)| side),
                 };
-                if let Some(t) = self.open.as_mut()
-                    && (cid == Some(t.conversation_id.as_str())
-                        || matches!(p, Some(QueryPurpose::OlderPage { conversation_id, .. } | QueryPurpose::LatestPage { conversation_id }) if *conversation_id == t.conversation_id))
-                {
+                if let Some(t) = self.open.as_mut() {
                     let mut c = t.apply_page(&page, mode);
                     c.merge(t.fit(plan, self.summary.resume_cards()));
                     match mode {

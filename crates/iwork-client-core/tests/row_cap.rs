@@ -476,6 +476,11 @@ fn resume_card_follows_loaded_range() {
     }
     let k = tl(&s).key_of("resume:t-r").unwrap();
     assert_eq!(k.seq, interrupted_at, "回到原位");
+    // 待处理表里这一项没了（用户处理掉了）：卡片在已加载范围里也要消失；再回来时重新出现
+    s.apply(pending_with(None));
+    assert!(!has_card(&s), "待处理项移除后卡片消失");
+    s.apply(pending_with(Some(card.clone())));
+    assert!(has_card(&s), "待处理项回来，卡片回到原位");
     // 往下翻回最新：旧的一端（连同卡片）被裁掉
     while {
         look_at_bottom(&mut s);
@@ -1321,4 +1326,86 @@ fn distance_counts_rows_not_seq() {
     );
     assert!(t.row("m10030").is_none(), "新的一端（隔 27 行）丢了");
     assert!(!t.at_tail);
+}
+
+/// 没有网页窗口时，拿锚这一组当窗口（审查 7/F-2）：窗口只覆盖这一组的合法行号，不能把 BTreeMap 取同组用的
+/// slot 哨兵当成行号（那样窗口会延伸到锚之后 127 个 seq，裁剪偏向新的一端）。九条连续的 seq、上限 5：
+/// 锚在中间两端交替裁，锚靠近哪端就留哪端。
+#[test]
+fn no_window_trims_around_anchor_group() {
+    use iwork_client_core::store::{PageMode, Timeline, TrimPlan};
+    let kept = |anchor: u64| {
+        let msgs = (1..=9)
+            .map(|i| support::assistant_msg(&format!("m{i}"), i, pb::MessageStatus::Completed, "x"))
+            .collect();
+        let page = match support::page(100, msgs, false).kind.unwrap() {
+            pb::query_result::Kind::GetConversation(g) => g,
+            _ => unreachable!(),
+        };
+        let mut t = Timeline::with_cap(CID, 5);
+        t.apply_page(&page, PageMode::Around { center: anchor });
+        t.fit(
+            TrimPlan {
+                anchor: Some(anchor),
+                window: None,
+                page: None,
+            },
+            std::iter::empty(),
+        );
+        t.identities()
+            .iter()
+            .map(|(k, _)| k.seq)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(kept(5), vec![3, 4, 5, 6, 7], "锚在中间：两边各留两条");
+    assert_eq!(kept(2), vec![1, 2, 3, 4, 5], "锚靠旧端：丢新的一端");
+    assert_eq!(kept(8), vec![5, 6, 7, 8, 9], "锚靠新端：丢旧的一端");
+}
+
+/// 切到别的对话后，上一个对话的居中加载 / 最新页结果迟到（审查 7/F-4）：不合并，也不能动当前对话的窗口。
+fn late_other_conversation_page_keeps_window(purpose: impl Fn() -> QueryPurpose) {
+    let mut w = World::new();
+    let approval = w.long_turn("x", 200, Some(10)).unwrap();
+    let mut s = store(40);
+    open(&mut s, &w);
+    around(&mut s, &w, approval);
+    look_at_top(&mut s);
+    let before = s.window;
+    let rows = keys(&s);
+    assert!(
+        before.is_some() && !tl(&s).at_tail,
+        "对照：在读旧消息、有窗口"
+    );
+    let mut old = w.get(pb::GetConversation {
+        limit: PAGE_SIZE,
+        ..Default::default()
+    });
+    match old.kind.as_mut() {
+        Some(pb::query_result::Kind::GetConversation(page)) => {
+            page.conversation.as_mut().unwrap().id = "previous-conversation".into();
+        }
+        _ => panic!("expected conversation query"),
+    }
+    s.apply(Item::ViewResult {
+        purpose: purpose(),
+        result: Box::new(old),
+    });
+    assert_eq!(keys(&s), rows, "上一个对话的页没有合并进来");
+    assert_eq!(s.window, before, "当前对话的窗口不动");
+    assert!(s.back_to_latest.is_none(), "也不触发回到最新");
+}
+
+#[test]
+fn late_other_conversation_around_keeps_window() {
+    late_other_conversation_page_keeps_window(|| QueryPurpose::AroundPage {
+        conversation_id: "previous-conversation".into(),
+        seq: 5,
+    });
+}
+
+#[test]
+fn late_other_conversation_latest_keeps_window() {
+    late_other_conversation_page_keeps_window(|| QueryPurpose::LatestPage {
+        conversation_id: "previous-conversation".into(),
+    });
 }
