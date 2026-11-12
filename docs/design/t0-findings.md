@@ -361,9 +361,11 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 | 2 | `python3 tools/t0/iwork-t0g.py --only G7` | 14 | `G7e`、`G7f` 对**前台**命令的结论（目标命令换成 `/bin/sleep 61; …`，后台跑的调用不算）；新的一行「G7 后台命令：进程组、interrupt 与 CLI 退出之后」；「进程组」行里脱组的是谁 |
 | 3 | `python3 tools/t0/iwork-t0g.py --only G1` | 10 | `G1d` 子代理进不进 hook（子代理工具认 `Agent`、`Task` 两个名字）；`g1-Agent-stream.jsonl` 里子代理是不是后台跑、有没有第二个 `result`；`G1c`；`G1f`（CLI 自己判了失败的结果单独计数，说明里写着几个） |
 | 4 | `python3 tools/t0/iwork-t0g.py --only G8` | 7 | `G8 MCP 阳性对照`、`G8f`、`G8e`（MCP 用例放行了 `ToolSearch`） |
-| 5 | `cargo run -p iwork-core --example dump-credential-corpus > corpus.json && python3 tools/t0/iwork-t0g.py --only G4 --skip-builds --corpus corpus.json` | 25 + 语料行数（现在 44） | `①e′`（去掉 `credentials.files` 后只读区读不读得到）；`②c′`（`allowLocalBinding` 管不管用）；四条「沙箱外对照」的退出码；`⑥` 的计数（同一条命令加 `dangerouslyDisableSandbox` 的重试不再算成第二次目标调用）；`④` 里我们判沙箱内、判不确定的那些行有没有实测成（替身只认参数与这一行命令对得上的调起）；结果包 `obs/` 下四条 FAIL 的命令自己报了什么 |
+| 5 | `cargo run -p iwork-core --example dump-credential-corpus > corpus.json && python3 tools/t0/iwork-t0g.py --only G4 --skip-builds --corpus corpus.json` | 25 + 语料行数（现在 44） | `①e′`（去掉 `credentials.files` 后只读区读不读得到）；`②c′`（`allowLocalBinding` 管不管用）；四条「沙箱外对照」的退出码；`⑥` 的计数（同一条命令加 `dangerouslyDisableSandbox` 的重试不再算成第二次目标调用）；`④` 全部行重新实测（替身只认参数与这一行命令对得上、且这一行的 Bash 调用有证据的调起；我们判沙箱内、判不确定的那些行第一轮一行都没测成）；结果包 `obs/` 下四条 FAIL 的命令自己报了什么 |
 
 合计约 56 + 语料行数，加每条命令 1 个探查。
+
+**第一轮 ④ 的结果不回填 T07**：第一轮 `g4-corpus-filled.json` 里记成「实测 outside」的 17 行不可信（审查复核：替身的调起没有和命令对上，有一行命令根本没跑也记成了实测）。T07 `credential_corpus` 第四列只用上面第 5 条重测的结果。
 
 ### 一次性环境怎么搭（16.2 第 5 项）
 
@@ -389,7 +391,7 @@ macOS 上：`sudo sysadminctl -addUser t0gtmp -password -`（按提示输密码�
 | 「缺正面证据：……」「运行无效（没有 init、超时或退出码不对）」「没有归属对得上的目标调用」「目标调用不止一次（N 次）」「有一次目标调用没有按 id 对上的结果」「有一次目标调用探针没有被调起的记录」 | 这次运行本身不算数：模型没按要求发调用、超时，或 CLI 没起来。「没执行 / 被拦下」这类格子允许模型重发，只要每一次都有结果、都是报错、探针每一次都有记录（2026-11-12 起）；要读回值的格子（G1b、G6 读回、G9a 等）仍要恰好一次，重发了就是「不止一次」。先看这个用例的 `<名>-stream.jsonl` 和 `<名>-stderr.txt`；偶发的（模型没照做、网络抖）就用 `--only <组>` 单独重跑这一组；每次都这样的，交 supervisor |
 | 「权限模式没生效：init 报 ...」 | 设置文件没被 CLI 收下（`-p` 模式下设置文件校验不过会被整个静默忽略）。看 `<名>-stderr.txt` 有没有设置校验的告警，交 supervisor，别重跑 |
 | 对照没成立（`G5 阳性对照`、`G8 MCP 阳性对照`、G9b 对照变量看不到、外层保护里要成功的那一笔没成功） | 测的办法在这台机器上不灵，负向结论说明不了问题。看对照那次的 stream 和 stderr，交 supervisor |
-| G4 ④「没给 --corpus」或「语料读不了」 | 等 T07 的 `dump-credential-corpus` 合入，再 `--only G4 --corpus corpus.json` 补跑 |
+| G4 ④「没给 --corpus」或「语料读不了」 | 用 `cargo run -p iwork-core --example dump-credential-corpus > corpus.json` 生成语料，再 `--only G4 --skip-builds --corpus corpus.json` 补跑 |
 | 「登记之外的调用（探针一律拒绝）」一行次数很多 | 这行是 `INFO`，不算结论；但次数多说明模型老跑偏，相应用例容易变成没测成。看各用例目录 `hook-calls.jsonl` 里带 `refused` 的行。偶发就重跑那一组 |
 | 「脚本自己出错：...」 | 脚本的错，交 developer，附上这一行和结果包 |
 

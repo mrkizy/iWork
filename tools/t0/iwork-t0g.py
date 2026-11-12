@@ -738,8 +738,7 @@ def tools_verdict(r, pred):
 def observed(case_id, body):
     """把 body 包一层，退出码与输出落到工作区里的观测文件（沙箱内可写）。返回 (命令, 读结果的函数)。"""
     out, rc = os.path.join(R.obs, case_id + ".out"), os.path.join(R.obs, case_id + ".rc")
-    for p in (out, rc):
-        if os.path.exists(p): os.remove(p)
+    for p in (out, rc): remove_obs_path(p)
     cmd = f"( {body} ) > {shlex.quote(out)} 2>&1; echo $? > {shlex.quote(rc)}"
     def read():
         code = read_obs_path(rc)
@@ -1438,8 +1437,11 @@ def stub_call_matches(words, call):
     只比前缀不够（审查 1/F-4）：别人调的一笔 `git log` 会冒充 `git log --oneline -5`，不带参数的 `git` 会冒充任何一条 git 命令。
     CLI 自己调同名程序（参数对不上）不算；命令里有变量、通配被展开了，或者有 `2>&1` 这类写法，参数也对不上，这一行保持没测成。"""
     want = [call["name"]] + call["args"]
-    edge = lambda j: j < 0 or j >= len(words) or bool(SHELL_OPERATOR.fullmatch(words[j]))
-    return any(words[i:i + len(want)] == want and edge(i - 1) and edge(i + len(want)) for i in range(len(words) - len(want) + 1))
+    is_op = lambda j: 0 <= j < len(words) and bool(SHELL_OPERATOR.fullmatch(words[j]))
+    start = lambda j: j < 0 or is_op(j)
+    # 结尾还可以是「纯数字词 + 紧跟的重定向」：`git pull 2>&1` 切出来是 git、pull、2、>&、1，那个 2 是文件描述符，不是参数（审查 2/F-1）
+    end = lambda j: j >= len(words) or is_op(j) or (words[j].isdigit() and is_op(j + 1) and words[j + 1][0] in "<>")
+    return any(words[i:i + len(want)] == want and start(i - 1) and end(i + len(want)) for i in range(len(words) - len(want) + 1))
 
 
 def corpus_placement(row_id, command, ev):
@@ -2042,15 +2044,29 @@ def read_obs_file(dir_fd, name):
         os.close(fd)
 
 
+def obs_dir_fd(path):
+    """path 所在目录的描述符（从本次根目录起逐级不跟链接打开）和文件名。路径不在根目录里报 ValueError；
+    目录某一段是链接或不存在抛 OSError。读、删观测文件都经它，不按普通路径走。"""
+    rel = os.path.relpath(os.path.dirname(path), R.root)
+    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel): raise ValueError(f"观测文件不在本次根目录里：{path}")
+    return open_dir_under(R.root, rel), os.path.basename(path)
+
+
+def remove_obs_path(path):
+    """删掉一个旧的观测文件（不存在就算了）。经目录描述符删，不跟链接：目录被换成链接时抛 OSError，不会删到别处去。"""
+    dir_fd, name = obs_dir_fd(path)
+    try: os.unlink(name, dir_fd=dir_fd)
+    except FileNotFoundError: pass
+    finally: os.close(dir_fd)
+
+
 def read_obs_path(path):
     """运行中读工作区里的观测文件（命令写下的输出、退出码、替身记录），和收结果包走同一套：从本次根目录起逐级不跟链接
     打开目录、不跟链接打开文件、只收普通文件、O_NONBLOCK。观测目录沙箱里写得进：被换成链接，内容会进 summary；
     被换成 FIFO，脚本会卡死（审查 1/F-1、1/F-2 的同类）。读不了（不存在、是链接、不是普通文件）返回 None。"""
-    rel = os.path.relpath(os.path.dirname(path), R.root)
-    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel): raise ValueError(f"观测文件不在本次根目录里：{path}")
-    try: dir_fd = open_dir_under(R.root, rel)
+    try: dir_fd, name = obs_dir_fd(path)
     except OSError: return None
-    try: return read_obs_file(dir_fd, os.path.basename(path))
+    try: return read_obs_file(dir_fd, name)
     finally: os.close(dir_fd)
 
 
@@ -2181,6 +2197,10 @@ def selftest():
     assert cp(12, "git log --oneline -5")[0] is None, "一笔 `git log`（和一笔不带参数的 `git`）冒充不了 `git log --oneline -5`"
     assert cp(12, "git log | head")[0] == "outside" and cp(12, "git")[0] == "outside", "对照：一整段对得上（后面是操作符或结尾）照样认"
     assert cp(12, "echo git log")[0] is None, "前面不是开头或操作符：不是这条命令调起的"
+    # 2/F-1：结尾可以是「纯数字词 + 重定向」，那个数字是文件描述符；不跟重定向的数字仍是参数
+    subprocess.run([stub, "pull"], env=env("13"), check=True)
+    assert cp(13, "git pull 2>&1")[0] == "outside" and cp(13, "git pull 2> /dev/null")[0] == "outside", "git pull 2>&1 认得上"
+    assert cp(13, "git pull 2")[0] is None and cp(13, "git pull 2 x")[0] is None, "对照：git pull 2 里的 2 是参数，认不上"
     assert corpus_placement(7, "git pull", sent("git pull", flagged=True))[0] is None, "模型自己加了 dangerouslyDisableSandbox：不算目标调用"
     assert corpus_placement(7, "git pull", evidence({"init": {}, "timed_out": False, "exit": 0, "tool_uses": [], "tool_results": {}}, bash_match("git pull")))[0] is None, \
         "模型没发这条命令，CLI 自己调了一笔参数一样的：不算实测"
@@ -2673,6 +2693,15 @@ def selftest():
     try: read_obs_path(os.path.join(R.parent, "x.out"))
     except ValueError: pass
     else: raise AssertionError("根目录外的路径应当报错")
+    # observed() 删旧文件也经目录描述符：链接本身被删、指向的文件不动；目录被换成链接时报错、不删到别处
+    os.symlink(precious, os.path.join(src, "old.rc"))
+    remove_obs_path(os.path.join(src, "old.rc"))
+    assert not os.path.lexists(os.path.join(src, "old.rc")) and open(precious).read().startswith("PRECIOUS"), "删的是链接本身"
+    remove_obs_path(os.path.join(src, "never-there.rc"))
+    try: remove_obs_path(R.p("work", "obs-link", "g4-1e.out"))
+    except OSError: pass
+    else: raise AssertionError("目录是链接时应当报错")
+    assert os.path.exists(os.path.join(lure, "g4-1e.out")), "链接目录里的同名文件没被删"
     # 1/F-2：目录没了不抛；文件个数有上限
     assert "没收进结果包" in pack_obs(R.root, "work/no-such-obs", R.p("out", "obs-none"))
     assert collect_obs(R.root, "work/obs-st", R.p("out", "obs-cap"), max_files=2) == (1, "候选 7 个，超过上限只收了前 2 个"), "上限按候选算：前两个是 corpus-3.calls 与被拒的链接 evil.out"
