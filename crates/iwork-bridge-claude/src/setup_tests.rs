@@ -4,6 +4,16 @@ use serde_json::json;
 
 use super::*;
 
+/// 这个平台上的绝对路径：unix 原样，Windows 前面补盘符（M1 不支持 Windows，AGENTS.md：只在测试里统一写法，
+/// 不为它改产品代码）。
+fn abs(p: &str) -> String {
+    if cfg!(windows) {
+        format!("C:{p}")
+    } else {
+        p.to_owned()
+    }
+}
+
 pub(crate) fn valid() -> pb::SessionSetup {
     pb::SessionSetup {
         model: Some(pb::ModelSelection {
@@ -11,11 +21,11 @@ pub(crate) fn valid() -> pb::SessionSetup {
             effort: Some("high".into()),
         }),
         constraints: Some(pb::SessionConstraints {
-            deny_read_write: vec!["/home/u/.ssh".into()],
-            read_only: vec!["/data/attachments".into()],
+            deny_read_write: vec![abs("/home/u/.ssh")],
+            read_only: vec![abs("/data/attachments")],
             allow_write: Some(pb::AllowWrite {
                 kind: Some(pb::allow_write::Kind::Whitelist(pb::WritablePaths {
-                    paths: vec!["/work".into()],
+                    paths: vec![abs("/work")],
                 })),
             }),
             excluded_commands: vec![
@@ -36,7 +46,7 @@ pub(crate) fn valid() -> pb::SessionSetup {
             include_always_on: true,
         }),
         disabled_tools: vec!["CronCreate".into()],
-        plugin_dirs: vec!["/data/imports/p1".into()],
+        plugin_dirs: vec![abs("/data/imports/p1")],
     }
 }
 
@@ -55,9 +65,9 @@ fn decodes_valid_setup() {
                 effort: "high",
             },
             constraints: Constraints {
-                deny_read_write: vec!["/home/u/.ssh".into()],
-                read_only: vec!["/data/attachments".into()],
-                allow_write: AllowWrite::Whitelist(vec!["/work".into()]),
+                deny_read_write: vec![abs("/home/u/.ssh").into()],
+                read_only: vec![abs("/data/attachments").into()],
+                allow_write: AllowWrite::Whitelist(vec![abs("/work").into()]),
                 excluded_commands: vec![
                     CommandPattern {
                         program: "git".into(),
@@ -73,7 +83,7 @@ fn decodes_valid_setup() {
             },
             tools: Tools::Default,
             disabled_tools: vec!["CronCreate".into()],
-            plugin_dirs: vec!["/data/imports/p1".into()],
+            plugin_dirs: vec![abs("/data/imports/p1").into()],
         }
     );
 }
