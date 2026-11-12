@@ -677,6 +677,8 @@ pub fn query_get_conversation() -> Query {
         kind: Some(query::Kind::GetConversation(GetConversation {
             after_message_id: None,
             around_seq: None,
+            before_seq: None,
+            after_seq: None,
             conversation_id: s(CONVERSATION),
             before_message_id: Some(s(MESSAGE)),
             limit: 50,

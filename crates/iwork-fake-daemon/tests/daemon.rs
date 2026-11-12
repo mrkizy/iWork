@@ -218,6 +218,8 @@ async fn confirming_unknown_card_finishes_pending_delete() {
                 before_message_id: None,
                 after_message_id: None,
                 around_seq: None,
+                before_seq: None,
+                after_seq: None,
                 limit: 0,
             })),
         })

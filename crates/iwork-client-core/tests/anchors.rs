@@ -488,7 +488,7 @@ fn cap_drops_far_end() {
     s.apply(Item::ViewResult {
         purpose: QueryPurpose::NewerPage {
             conversation_id: CID.into(),
-            after: "m4".into(),
+            after: iwork_client_core::store::PageCursor::Message("m4".into()),
         },
         result: Box::new(newer),
     });

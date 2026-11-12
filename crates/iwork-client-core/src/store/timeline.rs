@@ -184,6 +184,10 @@ pub struct Timeline {
     pub usage_total: Option<pb::Usage>,
     pub has_older: bool,
     pub at_tail: bool,
+    /// 这一端被行数上限裁过：留下来的最外一行的 seq（比它旧 / 新的这一侧都不在时间线里）。有值时这一端用行级游标翻页
+    /// （方案 2.2「查询结果怎么进时间线」第 4 条，R14）；时间线重建时清空。
+    pub edge_older: Option<u64>,
+    pub edge_newer: Option<u64>,
     pub new_below: u32,
     pub incomplete: Option<Incomplete>,
     /// 有缺口在等检查点（最新页查询）时为真；结果回来就清。
@@ -203,9 +207,45 @@ pub enum PageMode {
     Older,
     /// 带 after_message_id 的翻页结果：往后接；接到最新（has_newer 为假）就回到 at_tail（T09 方案 G11）。
     Newer,
+    /// 带 before_seq 的行级翻页结果：只取紧挨游标的 [`ROW_PAGE`] 行往前接（方案 2.2 第 4 条）。
+    OlderRows { before: u64 },
+    /// 带 after_seq 的行级翻页结果：只取紧挨游标的 [`ROW_PAGE`] 行往后接；接到最新就回到 at_tail。
+    NewerRows { after: u64 },
     /// 带 around_seq 的居中一段：和已加载的行不保证接得上，整个重建成这一段（跳到没加载的锚点）。
-    /// `center` 是那个 around_seq：超过上限时保留它附近连续的一段。
     Around { center: u64 },
+}
+
+/// 往前 / 往后翻页用的游标：这一端被行数上限裁过（有边界）用行级游标，否则用消息 id（方案 2.2 第 4 条）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageCursor {
+    Message(String),
+    Seq(u64),
+}
+
+/// 行级翻页一页取多少行（请求的 limit 与合并时挑的行数是同一个数，只写这一处；后台封顶 1000，见方案 2.9）。
+pub const ROW_PAGE: u32 = 200;
+
+/// 裁剪时以哪里为中心（方案 2.2 第 4 条「离可见窗口远的一端」）：可见窗口两端的 seq；居中加载时是目标行；
+/// 网页还没声明窗口时是最新一行（`u64::MAX`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Focus {
+    pub lo: u64,
+    pub hi: u64,
+}
+
+impl Focus {
+    pub const NEWEST: Focus = Focus {
+        lo: u64::MAX,
+        hi: u64::MAX,
+    };
+    pub fn at(seq: u64) -> Focus {
+        Focus { lo: seq, hi: seq }
+    }
+}
+
+/// 回合有没有结束行：结束了、不在跑、不是中断（中断的回合显示继续卡片）。行级游标数行时后台用同一个条件。
+fn has_end_row(t: &pb::Turn) -> bool {
+    t.ended_seq != 0 && !turn_is_active(t.state) && t.state != pb::TurnState::Interrupted as i32
 }
 
 impl Timeline {
@@ -229,6 +269,8 @@ impl Timeline {
             usage_total: None,
             has_older: false,
             at_tail: true,
+            edge_older: None,
+            edge_newer: None,
             new_below: 0,
             incomplete: None,
             gap_pending: false,
@@ -275,6 +317,26 @@ impl Timeline {
             Row::Message(m) => Some(m.id.as_str()),
             _ => None,
         })
+    }
+
+    /// 往前翻页的游标（这一端裁过就用行级游标）。没有可用的游标时为 `None`。
+    pub fn older_cursor(&self) -> Option<PageCursor> {
+        match self.edge_older {
+            Some(seq) => Some(PageCursor::Seq(seq)),
+            None => self
+                .oldest_message_id()
+                .map(|id| PageCursor::Message(id.to_owned())),
+        }
+    }
+
+    /// 往后翻页的游标（这一端裁过就用行级游标）。
+    pub fn newer_cursor(&self) -> Option<PageCursor> {
+        match self.edge_newer {
+            Some(seq) => Some(PageCursor::Seq(seq)),
+            None => self
+                .newest_message_id()
+                .map(|id| PageCursor::Message(id.to_owned())),
+        }
     }
 
     /// 正在跑的回合（排队、运行、等审批、取消中）。
@@ -623,8 +685,7 @@ impl Timeline {
             }
             _ => return None,
         };
-        let mut change = change;
-        change.merge(self.trim_oldest());
+        // 行数上限由调用方随后的 [`Timeline::fit`] 统一查（方案 2.2 第 4 条：每次写入之后都查）
         Some(change)
     }
 
@@ -750,6 +811,7 @@ impl Timeline {
     // ---------- 查询结果 ----------
 
     /// 对话查询结果进时间线。结果里有排序字段为 0 的实体时记下 `incomplete`（协议错误），界面整页说明。
+    /// 行数上限由调用方随后的 [`Timeline::fit`] 统一查。
     pub fn apply_page(
         &mut self,
         page: &pb::GetConversationResult,
@@ -762,9 +824,13 @@ impl Timeline {
         let rebuild = match mode {
             PageMode::Snapshot | PageMode::Around { .. } => true,
             PageMode::LiveLatest => !self.at_tail,
-            PageMode::Older | PageMode::Newer => false,
+            PageMode::Older
+            | PageMode::Newer
+            | PageMode::OlderRows { .. }
+            | PageMode::NewerRows { .. } => false,
         };
         if rebuild {
+            // 整个重建：两端的边界随新的 Timeline 清空（方案 2.2 第 4 条「边界什么时候清空」）
             let id = self.conversation_id.clone();
             let conv = self.conversation.take();
             let anchors = std::mem::take(&mut self.anchors);
@@ -772,19 +838,45 @@ impl Timeline {
             self.conversation = conv;
             self.anchors = anchors;
         }
-        if mode != PageMode::Older {
+        if !matches!(mode, PageMode::Older | PageMode::OlderRows { .. }) {
             self.usage_total = page.usage_total;
         }
-        if let Err(bad) = self.merge_page(page) {
+        // 行级翻页：结果的 turns 会带来游标这一侧更远处的结束位置，照后台同一个办法只取紧挨游标的 ROW_PAGE 行
+        let picked = match mode {
+            PageMode::OlderRows { before } => Some(pick_rows(page, |s| s < before, true)),
+            PageMode::NewerRows { after } => Some(pick_rows(page, |s| s > after, false)),
+            _ => None,
+        };
+        let merged = match &picked {
+            Some(p) => self.merge_page(&p.page, |t| p.ends.contains(t.id.as_str())),
+            None => self.merge_page(page, |_| true),
+        };
+        if let Err(bad) = merged {
             tracing::warn!(target: "iwork_client", entity = bad.entity, id = %bad.id, "查询结果的排序字段为 0，时间线不显示");
             self.incomplete = Some(bad);
         }
         match mode {
             PageMode::Older => self.has_older = page.has_more,
+            PageMode::OlderRows { .. } => {
+                self.has_older = page.has_more;
+                if let Some(oldest) = picked.as_ref().and_then(|p| p.span).map(|(lo, _)| lo) {
+                    self.edge_older = Some(oldest);
+                }
+            }
             PageMode::Newer => {
                 // 接到最新：这个结果在全序里有确定位置，之后的新消息事件都排在它后面，不变量成立（方案 2.2 第 3 条）。
                 if !page.has_newer {
                     self.at_tail = true;
+                    self.new_below = 0;
+                }
+            }
+            PageMode::NewerRows { .. } => {
+                if let Some(newest) = picked.as_ref().and_then(|p| p.span).map(|(_, hi)| hi) {
+                    self.edge_newer = Some(newest);
+                }
+                if !page.has_newer {
+                    self.at_tail = true;
+                    self.edge_newer = None;
                     self.new_below = 0;
                 }
             }
@@ -808,18 +900,15 @@ impl Timeline {
         if !rebuild {
             c.rows.extend(self.by_id.keys().cloned());
         }
-        // 上限：从离可见窗口远的那一端丢（方案 2.2 第 4 条）——往上翻丢新的一端，往下翻丢旧的一端。
-        match mode {
-            PageMode::Older => self.enforce_cap(),
-            PageMode::Newer => c.merge(self.drop_oldest_over_cap()),
-            // 居中那一段不接着最新，trim_oldest 管不到它（审查 4/F-8）：两端都可能超，按离目标远近裁
-            PageMode::Around { center } => self.trim_around(center),
-            _ => c.merge(self.trim_oldest()),
-        }
         c
     }
 
-    fn merge_page(&mut self, page: &pb::GetConversationResult) -> Result<(), Incomplete> {
+    /// `ends`：哪些回合这次建结束行（行级翻页只建被挑中的，见 [`pick_rows`]）。
+    fn merge_page(
+        &mut self,
+        page: &pb::GetConversationResult,
+        ends: impl Fn(&pb::Turn) -> bool,
+    ) -> Result<(), Incomplete> {
         fn need(entity: &'static str, id: &str, seq: u64) -> Result<u64, Incomplete> {
             if seq == 0 {
                 Err(Incomplete {
@@ -847,10 +936,7 @@ impl Timeline {
         for t in &page.turns {
             need("Turn", &t.id, t.created_seq)?;
             self.turns.insert(t.id.clone(), t.clone());
-            if t.ended_seq != 0
-                && !turn_is_active(t.state)
-                && t.state != pb::TurnState::Interrupted as i32
-            {
+            if has_end_row(t) && ends(t) {
                 self.insert(
                     RowKey::entity(t.ended_seq),
                     format!("end:{}", t.id),
@@ -883,14 +969,20 @@ impl Timeline {
         Ok(())
     }
 
-    /// 待处理表换了：同步这个对话的继续 / 放弃卡片行。
-    pub fn sync_resume_cards<'a>(
+    /// 同步这个对话的继续 / 放弃卡片行。卡片来自待处理表，不在 `GetConversation` 里，所以只放 `created_seq` 落在
+    /// 已加载范围里的（[`Timeline::loaded_range`]）；范围变了（翻页、裁剪、重建）或待处理表换了都重放一次，
+    /// 被裁掉的卡片翻回原位时就会再出现（方案 2.2 第 4 条）。
+    fn sync_resume_cards<'a>(
         &mut self,
         cards: impl Iterator<Item = &'a pb::ResumeCard>,
     ) -> TimelineChange {
+        let (lo, hi) = self.loaded_range();
         let mut want: BTreeMap<String, &pb::ResumeCard> = BTreeMap::new();
         for c in cards.filter(|c| c.conversation_id == self.conversation_id) {
-            want.insert(format!("resume:{}", c.turn_id), c);
+            // created_seq 为 0 的照样放进来，由下面记成协议错误（不能因为范围把坏数据悄悄藏掉）
+            if c.created_seq == 0 || (lo..=hi).contains(&c.created_seq) {
+                want.insert(format!("resume:{}", c.turn_id), c);
+            }
         }
         let mut change = TimelineChange::default();
         let have: Vec<String> = self
@@ -936,12 +1028,14 @@ impl Timeline {
         let mut want: BTreeMap<String, (RowKey, Row)> = BTreeMap::new();
 
         // 模型切换：按回合的 created_seq 排序，相邻不同模型贴在后一个前；两者之间已有模型当次说明就不贴。
+        // 只贴在已加载范围里：行级翻页带来的回合可以在范围外，照着它贴会在范围外长出一行（同继续卡片）。
+        let (lo, hi) = self.loaded_range();
         let mut turns: Vec<&pb::Turn> =
             self.turns.values().filter(|t| t.created_seq != 0).collect();
         turns.sort_by_key(|t| t.created_seq);
         for pair in turns.windows(2) {
             let (prev, next) = (pair[0], pair[1]);
-            if model_id(prev) == model_id(next) {
+            if model_id(prev) == model_id(next) || !(lo..=hi).contains(&next.created_seq) {
                 continue;
             }
             if self.has_note_between(prev.created_seq, next.created_seq, NoteKind::Model) {
@@ -1006,61 +1100,84 @@ impl Timeline {
             .any(|(_, r)| matches!(r, Row::Note { kind: k, .. } if *k == kind))
     }
 
-    /// 往上翻超过上限时从新的一端丢，之后新消息只计数（方案 2.2 查询结果第 4 条）。
-    fn enforce_cap(&mut self) {
-        while self.rows.len() > self.cap {
-            let Some(&key) = self.rows.keys().next_back() else {
-                break;
-            };
-            self.remove_key(key, false);
-            self.at_tail = false;
-        }
+    /// 已加载范围（两端都含）：旧的一侧 `has_older == false` 就没有界，否则以最旧的实体行（不算继续卡片与重建
+    /// 得出的行）为界；新的一侧 `at_tail` 就没有界，否则以最新的实体行为界。时间线里还没有实体行时不设界。
+    fn loaded_range(&self) -> (u64, u64) {
+        let mut entity = self
+            .rows
+            .iter()
+            .filter(|(_, r)| !r.is_derived() && !matches!(r, Row::Resume(_)))
+            .map(|(k, _)| k.seq);
+        let first = entity.next();
+        let last = entity.next_back().or(first);
+        let lo = match first {
+            Some(seq) if self.has_older => seq,
+            _ => 0,
+        };
+        let hi = match last {
+            Some(seq) if !self.at_tail => seq,
+            _ => u64::MAX,
+        };
+        (lo, hi)
     }
 
-    /// 居中一段超过上限：每次丢离 `center` 远的那一端，留下目标附近连续的一段。丢了旧的一端标成还能往上翻，
-    /// 丢了新的一端标成不接着最新（往下翻取回）。整段是重建出来的，网页随 reset 整份重画，不用逐行通知删除。
-    fn trim_around(&mut self, center: u64) {
-        while self.rows.len() > self.cap {
-            let (Some(&old), Some(&new)) = (self.rows.keys().next(), self.rows.keys().next_back())
-            else {
-                break;
-            };
-            if center.saturating_sub(old.seq) >= new.seq.saturating_sub(center) {
-                self.remove_key(old, true);
-                self.has_older = true;
-            } else {
-                self.remove_key(new, false);
-                self.at_tail = false;
-            }
-        }
-    }
-
-    /// 停在最新时超过上限：从老的一端丢，标成还能往上翻取回（supervisor 2026-11-11 定：长时间挂着的对话
-    /// 内存要有上界）。返回被丢的行，帧引擎据此让网页删掉。
-    fn trim_oldest(&mut self) -> TimelineChange {
-        if !self.at_tail {
-            return TimelineChange::default();
-        }
-        self.drop_oldest_over_cap()
-    }
-
-    /// 超过上限的部分从老的一端丢，标成还能往上翻取回。
-    fn drop_oldest_over_cap(&mut self) -> TimelineChange {
-        let mut c = TimelineChange::default();
-        while self.rows.len() > self.cap {
-            let Some(&key) = self.rows.keys().next() else {
-                break;
-            };
-            if let Some(id) = self.remove_key(key, true) {
-                c.rows.insert(id);
-            }
-            self.has_older = true;
+    /// 每次往时间线里写东西之后调（方案 2.2「查询结果怎么进时间线」第 4 条、R14）：按已加载范围同步继续卡片与
+    /// 重建得出的行，再查行数上限，超了从离 `focus` 远的一端按 seq 成组丢、记下边界。返回被丢的行（网页删掉）。
+    pub fn fit<'a>(
+        &mut self,
+        focus: Focus,
+        cards: impl Iterator<Item = &'a pb::ResumeCard> + Clone,
+    ) -> TimelineChange {
+        let mut c = self.sync_resume_cards(cards.clone());
+        c.merge(self.rebuild_derived());
+        let trimmed = self.trim(focus);
+        if !trimmed.is_empty() {
+            // 范围缩了：范围外的卡片与重建得出的行一起去掉（只会减少，不会再超）
+            c.merge(trimmed);
+            c.merge(self.sync_resume_cards(cards));
+            c.merge(self.rebuild_derived());
         }
         c
     }
 
-    /// 满足条件的行的身份。行的视图模型读了行外的状态（回合状态、连接、摘要表、设置）时，
-    /// 那份状态一变，持有它的一方用这个把受影响的行标脏（`derive::row` 里每一处行外读取都要有对应的标脏）。
+    /// 超过上限时从离 `focus` 远的一端丢，每丢一次重新比；同一个 seq 的行（重建得出的行与它贴着的那一行）一起丢，
+    /// 边界两侧的 seq 才不同，严格比较的行级游标取得回留在外面的那一行。丢旧端记 `edge_older`、`has_older`；
+    /// 丢新端记 `edge_newer`、`at_tail = false`。只剩一个 seq 时停下（同一 seq 最多两行，上限至少 2 时不会超）。
+    fn trim(&mut self, focus: Focus) -> TimelineChange {
+        let mut c = TimelineChange::default();
+        while self.rows.len() > self.cap {
+            let (Some(old), Some(new)) = (
+                self.rows.keys().next().map(|k| k.seq),
+                self.rows.keys().next_back().map(|k| k.seq),
+            ) else {
+                break;
+            };
+            if old == new {
+                break;
+            }
+            let from_old = focus.lo.saturating_sub(old) >= new.saturating_sub(focus.hi);
+            let seq = if from_old { old } else { new };
+            let keys: Vec<RowKey> = self
+                .rows
+                .range(RowKey::derived(seq)..=RowKey { seq, slot: u8::MAX })
+                .map(|(k, _)| *k)
+                .collect();
+            for k in keys {
+                if let Some(id) = self.remove_key(k, from_old) {
+                    c.rows.insert(id);
+                }
+            }
+            if from_old {
+                self.has_older = true;
+                self.edge_older = self.rows.keys().next().map(|k| k.seq);
+            } else {
+                self.at_tail = false;
+                self.edge_newer = self.rows.keys().next_back().map(|k| k.seq);
+            }
+        }
+        c
+    }
+
     pub fn identities_where(&self, pred: impl Fn(&Row) -> bool) -> Vec<String> {
         self.by_id
             .iter()
@@ -1146,6 +1263,88 @@ pub enum DeltaOutcome {
     Ignored,
     /// 中间缺了一段：要一次检查点（最新页查询）。
     Gap,
+}
+
+/// 行级翻页结果里被挑中的部分（方案 2.2 第 4 条「行级翻页的结果怎么进时间线」）。
+struct Picked {
+    /// 只留被挑中实体的结果（turns 原样留着：工具行要读它所属的回合）。
+    page: pb::GetConversationResult,
+    /// 结束行被挑中的回合。
+    ends: std::collections::HashSet<String>,
+    /// 挑中的行的 seq 范围（两端都含）；没挑中任何行为 `None`。
+    span: Option<(u64, u64)>,
+}
+
+/// 照后台同一个办法再挑一遍：把结果里能造出来的行（四个实体列表的行，加上 `turns` 里结束位置在游标这一侧的
+/// 结束行）按排序字段排好，只取紧挨游标的 [`ROW_PAGE`] 行。后台选中的行都在候选里、候选又都在游标这一侧，
+/// 所以挑出来的正好是后台选中的那些；多带来的回合结束行（回合很久以后才结束）这次不建，翻到那里再建。
+fn pick_rows(page: &pb::GetConversationResult, side: impl Fn(u64) -> bool, older: bool) -> Picked {
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    enum Id<'a> {
+        Message(&'a str),
+        Tool(&'a str, &'a str),
+        Approval(&'a str),
+        UserAction(&'a str),
+        End(&'a str),
+    }
+    let mut all: Vec<(u64, Id<'_>)> = Vec::new();
+    all.extend(
+        page.messages
+            .iter()
+            .map(|m| (m.created_seq, Id::Message(&m.id))),
+    );
+    all.extend(
+        page.tool_calls
+            .iter()
+            .map(|t| (t.created_seq, Id::Tool(&t.turn_id, &t.tool_call_id))),
+    );
+    all.extend(
+        page.approvals
+            .iter()
+            .map(|a| (a.created_seq, Id::Approval(&a.id))),
+    );
+    all.extend(
+        page.user_actions
+            .iter()
+            .map(|c| (c.created_seq, Id::UserAction(&c.id))),
+    );
+    all.extend(
+        page.turns
+            .iter()
+            .filter(|t| has_end_row(t))
+            .map(|t| (t.ended_seq, Id::End(&t.id))),
+    );
+    all.retain(|(seq, _)| side(*seq));
+    all.sort();
+    let take = ROW_PAGE as usize;
+    let chosen: &[(u64, Id<'_>)] = if older {
+        &all[all.len().saturating_sub(take)..]
+    } else {
+        &all[..all.len().min(take)]
+    };
+    let span = chosen
+        .first()
+        .map(|(lo, _)| *lo)
+        .zip(chosen.last().map(|(hi, _)| *hi));
+    let has = |id: Id<'_>| chosen.iter().any(|(_, x)| *x == id);
+    let mut out = page.clone();
+    out.messages.retain(|m| has(Id::Message(&m.id)));
+    out.tool_calls
+        .retain(|t| has(Id::Tool(&t.turn_id, &t.tool_call_id)));
+    out.approvals.retain(|a| has(Id::Approval(&a.id)));
+    out.user_actions.retain(|c| has(Id::UserAction(&c.id)));
+    let ends = chosen
+        .iter()
+        .filter_map(|(_, id)| match id {
+            Id::End(t) => Some((*t).to_owned()),
+            _ => None,
+        })
+        .collect();
+    Picked {
+        page: out,
+        ends,
+        span,
+    }
 }
 
 pub fn turn_is_active(state: i32) -> bool {

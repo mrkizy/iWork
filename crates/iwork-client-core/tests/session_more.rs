@@ -6,7 +6,7 @@ mod support;
 
 use std::time::Duration;
 
-use iwork_client_core::store::QueryPurpose;
+use iwork_client_core::store::{PageCursor, QueryPurpose};
 use iwork_client_core::{App, DialError, Dialer, DirectDialer, FrameError, Options};
 use iwork_fake_daemon::{FakeDaemon, fixtures as f, scenario, self_trusting_identity};
 use iwork_ipc::client::{Client, Incoming};
@@ -439,7 +439,7 @@ fn every_query_purpose_has_a_disconnect_case() {
         },
         QueryPurpose::OlderPage {
             conversation_id: String::new(),
-            before: String::new(),
+            before: PageCursor::Seq(1),
         },
         QueryPurpose::Rules,
         QueryPurpose::LocalConfig {
@@ -458,7 +458,7 @@ fn every_query_purpose_has_a_disconnect_case() {
         },
         QueryPurpose::NewerPage {
             conversation_id: String::new(),
-            after: String::new(),
+            after: PageCursor::Seq(1),
         },
         QueryPurpose::AroundPage {
             conversation_id: String::new(),

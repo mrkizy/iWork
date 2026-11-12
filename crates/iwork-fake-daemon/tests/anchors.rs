@@ -159,6 +159,8 @@ fn around_and_after_paging_reach_the_ends() {
     let first = anchors(&t, head, "c-anchors-long", 1, 0, 1).anchors[0].created_seq;
     let around = page(pb::GetConversation {
         around_seq: Some(first),
+        before_seq: None,
+        after_seq: None,
         ..base()
     });
     assert!(

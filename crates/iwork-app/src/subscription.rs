@@ -76,6 +76,8 @@ fn scope_entry(scope: &Scope) -> Option<ScopeEntry> {
                     Q::GetConversation(pb::GetConversation {
                         after_message_id: None,
                         around_seq: None,
+                        before_seq: None,
+                        after_seq: None,
                         conversation_id: c.conversation_id.clone(),
                         before_message_id: None,
                         limit: CONVERSATION_SNAPSHOT_PAGE_SIZE,

@@ -69,6 +69,8 @@ impl World {
             before_message_id: before.map(Into::into),
             after_message_id: None,
             around_seq: None,
+            before_seq: None,
+            after_seq: None,
             limit,
         })) {
             R::GetConversation(g) => g,

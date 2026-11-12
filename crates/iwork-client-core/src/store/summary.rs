@@ -78,7 +78,7 @@ impl Summary {
         })
     }
 
-    pub fn resume_cards(&self) -> impl Iterator<Item = &pb::ResumeCard> {
+    pub fn resume_cards(&self) -> impl Iterator<Item = &pb::ResumeCard> + Clone {
         self.pending.iter().filter_map(|p| match &p.item {
             Some(pb::pending_item::Item::Resume(r)) => Some(r),
             _ => None,

@@ -72,12 +72,21 @@ message GetOpenTargetResult {
 // 都不设取最新的一页：
 //   before_message_id 往前翻一页；after_message_id 往后翻一页（T09 方案 G11）；
 //   around_seq 以这个位置为中心取 limit 条消息，连同范围内的回合、工具调用、审批、卡片（跳到没加载的锚点）。
+// 取页方式（T09 方案 G11、2.9）：什么都不设 = 最新页；before_message_id、after_message_id、around_seq、
+// before_seq、after_seq 至多设一个，设了两个以上回 INVALID_ARGUMENT。
+// 前三种按消息数取（limit 是消息条数，连同范围内的回合、工具调用、审批、卡片）；
+// 行级游标按行数取（limit 是行数，0 回 INVALID_ARGUMENT，大于 1000 按 1000；游标为 0 回 INVALID_ARGUMENT）：
+// 「行」是消息、工具调用、审批、亲手执行卡片（排序字段 created_seq）与回合结束（Turn.ended_seq）。
 message GetConversation {
   string conversation_id = 1;
   optional string before_message_id = 2;
   uint32 limit = 3;
   optional string after_message_id = 4;
   optional uint64 around_seq = 5;
+  // 排序字段小于它的各类行里，紧挨着它的 limit 行。
+  optional uint64 before_seq = 6;
+  // 排序字段大于它的各类行里，紧挨着它的 limit 行。
+  optional uint64 after_seq = 7;
 }
 
 message GetConversationResult {

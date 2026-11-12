@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use iwork_proto::pb;
 
 pub use summary::{Refresh, Summary, SummaryTable};
-pub use timeline::{PageMode, Row, RowKey, Timeline, TimelineChange};
+pub use timeline::{Focus, PageCursor, PageMode, ROW_PAGE, Row, RowKey, Timeline, TimelineChange};
 
 use timeline::{Delta, DeltaOutcome, DeltaTarget};
 
@@ -76,11 +76,11 @@ pub enum QueryPurpose {
     LatestPage {
         conversation_id: String,
     },
-    /// 往前翻页；`before` 是发出时最旧一条消息的 id。结果回来时它已不是最旧的一行（中间重建过），
-    /// 结果就不接上去，免得时间线中间留一段空洞。
+    /// 往前翻页；`before` 是发出时的游标（最旧一条消息的 id，或这一端被裁过时的边界 seq）。结果回来时游标已经
+    /// 变了（中间重建过、又裁过），结果就不接上去，免得时间线中间留一段空洞。
     OlderPage {
         conversation_id: String,
-        before: String,
+        before: PageCursor,
     },
     Rules,
     LocalConfig {
@@ -100,10 +100,10 @@ pub enum QueryPurpose {
         center: u64,
         round: Option<u64>,
     },
-    /// 往后翻页；`after` 是发出时最新一条消息的 id（结果回来时它已不是最新的一行就丢掉）。
+    /// 往后翻页；`after` 是发出时的游标（最新一条消息的 id，或边界 seq），结果回来时游标变了就丢掉。
     NewerPage {
         conversation_id: String,
-        after: String,
+        after: PageCursor,
     },
     /// 以某处为中心的一段（跳到没加载的锚点）。
     AroundPage {
@@ -434,6 +434,18 @@ impl Store {
         self.window = Some((first.min(last), first.max(last)));
         self.dirty.mark(ViewKey::Conversation);
         self.anchors_follow_window();
+    }
+
+    /// 裁剪时间线的焦点：网页声明的可见窗口换算成 seq（ordinal = seq × 2 + slot）；没声明窗口时是最新一行。
+    fn timeline_focus(&self) -> Focus {
+        let seq = |ordinal: i64| u64::try_from(ordinal).unwrap_or(0) / 2;
+        match self.window {
+            Some((first, last)) => Focus {
+                lo: seq(first),
+                hi: seq(last),
+            },
+            None => Focus::NEWEST,
+        }
     }
 
     /// 可见窗口第一行的 seq（锚点的当前位置按它算，Q17）。没声明窗口时按最新一行。
@@ -819,9 +831,13 @@ impl Store {
             }
             _ => {}
         }
+        let focus = self.timeline_focus();
         if let Some(t) = self.open.as_mut() {
             match t.apply_event(seq, at, event) {
-                Some(c) => self.dirty.conversation(c),
+                Some(mut c) => {
+                    c.merge(t.fit(focus, self.summary.resume_cards()));
+                    self.dirty.conversation(c);
+                }
                 None => {
                     if matches!(
                         event,
@@ -996,24 +1012,38 @@ impl Store {
                 self.summary.pending = l.items;
                 self.pending_replaced = true;
                 self.mark_summary_views();
+                let focus = self.timeline_focus();
                 if let Some(t) = self.open.as_mut() {
-                    let c = t.sync_resume_cards(self.summary.resume_cards());
+                    let c = t.fit(focus, self.summary.resume_cards());
                     self.dirty.conversation(c);
                 }
             }
             (p, K::GetConversation(page)) => {
                 let mode = match p {
                     None => PageMode::Snapshot,
-                    Some(QueryPurpose::OlderPage { .. }) => PageMode::Older,
-                    Some(QueryPurpose::NewerPage { .. }) => PageMode::Newer,
+                    Some(QueryPurpose::OlderPage {
+                        before: PageCursor::Message(_),
+                        ..
+                    }) => PageMode::Older,
+                    Some(QueryPurpose::OlderPage {
+                        before: PageCursor::Seq(s),
+                        ..
+                    }) => PageMode::OlderRows { before: *s },
+                    Some(QueryPurpose::NewerPage {
+                        after: PageCursor::Message(_),
+                        ..
+                    }) => PageMode::Newer,
+                    Some(QueryPurpose::NewerPage {
+                        after: PageCursor::Seq(s),
+                        ..
+                    }) => PageMode::NewerRows { after: *s },
                     Some(QueryPurpose::AroundPage { seq, .. }) => PageMode::Around { center: *seq },
                     Some(_) => PageMode::LiveLatest,
                 };
                 if let Some(QueryPurpose::NewerPage { after, .. }) = p
-                    && self.open.as_ref().and_then(|t| t.newest_message_id())
-                        != Some(after.as_str())
+                    && self.open.as_ref().and_then(Timeline::newer_cursor).as_ref() != Some(after)
                 {
-                    tracing::debug!(target: "iwork_client", after, "往后翻页结果到达时已不接着最新一行，丢掉");
+                    tracing::debug!(target: "iwork_client", ?after, "往后翻页结果到达时游标已经变了，丢掉");
                     return;
                 }
                 if let Some(QueryPurpose::AroundPage { seq, .. }) = p
@@ -1027,11 +1057,20 @@ impl Store {
                     tracing::debug!(target: "iwork_client", seq, "居中加载的结果到达时已不再等它");
                 }
                 let cid = page.conversation.as_ref().map(|c| c.id.as_str());
+                // 裁剪的焦点（方案 2.2 第 4 条）：居中加载还没有窗口，拿目标行当窗口；快照重建成最新页，看最新一行
+                // 网页还没声明窗口时：往前翻的结果是用户在往上看，焦点在最旧一端；别的看最新一行
+                let focus = match mode {
+                    PageMode::Around { center } => Focus::at(center),
+                    PageMode::Snapshot => Focus::NEWEST,
+                    PageMode::Older | PageMode::OlderRows { .. } if self.window.is_none() => {
+                        Focus::at(0)
+                    }
+                    _ => self.timeline_focus(),
+                };
                 if let Some(QueryPurpose::OlderPage { before, .. }) = p
-                    && self.open.as_ref().and_then(|t| t.oldest_message_id())
-                        != Some(before.as_str())
+                    && self.open.as_ref().and_then(Timeline::older_cursor).as_ref() != Some(before)
                 {
-                    tracing::debug!(target: "iwork_client", before, "翻页结果到达时已不接着最旧一行，丢掉");
+                    tracing::debug!(target: "iwork_client", ?before, "翻页结果到达时游标已经变了，丢掉");
                     return;
                 }
                 if let Some(t) = self.open.as_mut()
@@ -1046,7 +1085,7 @@ impl Store {
                                 || self.window.is_some_and(|(_, last)| last < newest.ordinal())
                         });
                     let mut c = t.apply_page(&page, mode);
-                    c.merge(t.sync_resume_cards(self.summary.resume_cards()));
+                    c.merge(t.fit(focus, self.summary.resume_cards()));
                     match mode {
                         // 打开对话、重连走了快照：时间线回到最新，不再跳，锚点按最新位置重取（Q9 一并）
                         PageMode::Snapshot => {

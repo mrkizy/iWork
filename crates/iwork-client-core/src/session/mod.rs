@@ -28,7 +28,9 @@ use crate::attach;
 use crate::derive::Ctx;
 use crate::frame::{FrameEngine, Pull};
 use crate::intent::{self, Action, Effect, Local, Pick};
-use crate::store::{Connection, FollowUp, Item, QueryPurpose, Row, ScopeKind, Store, SummaryTable};
+use crate::store::{
+    Connection, FollowUp, Item, PageCursor, QueryPurpose, Row, ScopeKind, Store, SummaryTable,
+};
 use dial::{DialError, Dialer};
 use reconnect::{ReconnectState, Retry};
 
@@ -1012,23 +1014,15 @@ impl<D: Dialer> Session<D> {
             if ready
                 && tl.has_older
                 && (self.want_older || window_at_top)
-                && let Some(oldest) = tl.oldest_message_id()
+                && let Some(before) = tl.older_cursor()
                 && !self.backed_off("older", now)
                 && !self.in_flight(|p| matches!(p, QueryPurpose::OlderPage { .. }))
             {
                 want.push((
-                    pb::Query {
-                        kind: Some(Q::GetConversation(pb::GetConversation {
-                            after_message_id: None,
-                            around_seq: None,
-                            conversation_id: cid.clone(),
-                            before_message_id: Some(oldest.to_owned()),
-                            limit: PAGE_SIZE,
-                        })),
-                    },
+                    page_query(&cid, Side::Older, &before),
                     QueryPurpose::OlderPage {
                         conversation_id: cid.clone(),
-                        before: oldest.to_owned(),
+                        before,
                     },
                 ));
             }
@@ -1057,23 +1051,15 @@ impl<D: Dialer> Session<D> {
                 && !tl.at_tail
                 && window_at_bottom
                 && !self.want_tail
-                && let Some(newest) = tl.newest_message_id()
+                && let Some(after) = tl.newer_cursor()
                 && !self.backed_off("newer", now)
                 && !self.in_flight(|p| matches!(p, QueryPurpose::NewerPage { .. }))
             {
                 want.push((
-                    pb::Query {
-                        kind: Some(Q::GetConversation(pb::GetConversation {
-                            after_message_id: Some(newest.to_owned()),
-                            around_seq: None,
-                            conversation_id: cid.clone(),
-                            before_message_id: None,
-                            limit: PAGE_SIZE,
-                        })),
-                    },
+                    page_query(&cid, Side::Newer, &after),
                     QueryPurpose::NewerPage {
                         conversation_id: cid.clone(),
-                        after: newest.to_owned(),
+                        after,
                     },
                 ));
             }
@@ -1089,6 +1075,8 @@ impl<D: Dialer> Session<D> {
                         kind: Some(Q::GetConversation(pb::GetConversation {
                             after_message_id: None,
                             around_seq: Some(seq),
+                            before_seq: None,
+                            after_seq: None,
                             conversation_id: cid.clone(),
                             before_message_id: None,
                             limit: crate::store::anchors::JUMP_PAGE,
@@ -1423,11 +1411,41 @@ impl<D: Dialer> Session<D> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Side {
+    Older,
+    Newer,
+}
+
+/// 往前 / 往后翻一页的查询（方案 2.2 第 4 条）：游标是消息 id 时按消息数取一页（[`PAGE_SIZE`] 条）；是边界 seq 时
+/// 用行级游标按行数取（[`crate::store::ROW_PAGE`] 行，合并时挑的也是这么多行）。
+fn page_query(cid: &str, side: Side, cursor: &PageCursor) -> pb::Query {
+    let mut g = pb::GetConversation {
+        conversation_id: cid.to_owned(),
+        ..Default::default()
+    };
+    match (side, cursor) {
+        (Side::Older, PageCursor::Message(id)) => g.before_message_id = Some(id.clone()),
+        (Side::Newer, PageCursor::Message(id)) => g.after_message_id = Some(id.clone()),
+        (Side::Older, PageCursor::Seq(seq)) => g.before_seq = Some(*seq),
+        (Side::Newer, PageCursor::Seq(seq)) => g.after_seq = Some(*seq),
+    }
+    g.limit = match cursor {
+        PageCursor::Message(_) => PAGE_SIZE,
+        PageCursor::Seq(_) => crate::store::ROW_PAGE,
+    };
+    pb::Query {
+        kind: Some(pb::query::Kind::GetConversation(g)),
+    }
+}
+
 fn latest_page(cid: &str) -> pb::Query {
     pb::Query {
         kind: Some(pb::query::Kind::GetConversation(pb::GetConversation {
             after_message_id: None,
             around_seq: None,
+            before_seq: None,
+            after_seq: None,
             conversation_id: cid.to_owned(),
             before_message_id: None,
             limit: PAGE_SIZE,
