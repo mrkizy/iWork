@@ -6,12 +6,22 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# 测试用的假 CLI（方案 15.1）：只在这个 feature 下编译，不进发布包。测试经 cargo 按需构建它（tests/support）
+fake-cli = ["dep:serde"]
+
+[[bin]]
+name = "iwork-fake-claude"
+path = "src/bin/iwork-fake-claude.rs"
+required-features = ["fake-cli"]
+
 [dependencies]
 iwork-proto.workspace = true
 iwork-claude-hook.workspace = true
 prost.workspace = true
 base64.workspace = true
 serde_json.workspace = true
+serde = { workspace = true, optional = true }
 getrandom.workspace = true
 tokio = { workspace = true, features = ["net"] }
 tracing.workspace = true

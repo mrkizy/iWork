@@ -29,6 +29,13 @@ pub fn user_line(blocks: &[InputBlock]) -> Result<String, InputInvalid> {
     Ok(json!({ "type": "user", "message": { "role": "user", "content": content } }).to_string())
 }
 
+/// 桥接发给 CLI 的控制请求：`{"type":"control_request","request_id":…,"request":{"subtype":…}}`（一行，不带换行符）。
+/// `request_id` 由桥接定，响应按它配对。写法照录制脚本（`tests/fixtures/record.py`）与 t0g 实测过的那种。
+pub fn control_request_line(request_id: &str, subtype: &str) -> String {
+    json!({ "type": "control_request", "request_id": request_id, "request": { "subtype": subtype } })
+        .to_string()
+}
+
 fn block(b: &InputBlock) -> Result<Value, InputInvalid> {
     Ok(match b {
         InputBlock::Text(text) => json!({ "type": "text", "text": text }),
@@ -93,6 +100,16 @@ mod tests {
             ]}})
         );
         assert!(!line.contains('\n'), "一行");
+    }
+
+    #[test]
+    fn control_request_shape() {
+        let line = control_request_line("init-1", "initialize");
+        assert_eq!(
+            serde_json::from_str::<Value>(&line).unwrap(),
+            json!({ "type": "control_request", "request_id": "init-1", "request": { "subtype": "initialize" } })
+        );
+        assert!(!line.contains('\n'));
     }
 
     #[test]
