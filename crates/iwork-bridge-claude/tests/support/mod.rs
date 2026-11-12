@@ -7,6 +7,8 @@
 #![allow(dead_code)]
 
 #[cfg(unix)]
+pub mod acp;
+#[cfg(unix)]
 pub mod channel;
 #[cfg(unix)]
 pub mod startup;

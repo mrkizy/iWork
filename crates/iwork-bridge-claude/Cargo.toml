@@ -24,6 +24,9 @@ serde_json.workspace = true
 serde = { workspace = true, optional = true }
 getrandom.workspace = true
 tokio = { workspace = true, features = ["net"] }
+agent-client-protocol.workspace = true
+futures.workspace = true
+prost-types.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
@@ -37,3 +40,7 @@ libc.workspace = true
 # 对拍：桥接取到的对端凭据与 iwork-ipc 的 Connection::peer() 一致（T06 方案 2.1）
 [target.'cfg(unix)'.dev-dependencies]
 iwork-ipc.workspace = true
+# 端到端：经真实的 ACP 客户端驱动桥接（方案 15.3「三条都经真实的 iwork-agent-acp 客户端断言 AgentUpdate」）
+iwork-agent-acp.workspace = true
+iwork-ports.workspace = true
+iwork-domain.workspace = true
