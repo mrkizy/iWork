@@ -2862,12 +2862,16 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.3.4",
  "iwork-claude-hook",
+ "iwork-ipc",
  "iwork-proto",
  "libc",
  "proptest",
  "prost",
  "serde_json",
  "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
