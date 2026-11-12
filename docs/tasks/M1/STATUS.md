@@ -81,6 +81,9 @@
 - T04p：方案第 2 轮 4 条（2 blocking），`a2c030fb` 在改，9a5980a0 审；实施者定 e5b90212（含 T09 步 10），等方案过 + T09 2b 合入后开工。
 - T10f A：`b57765cc` 本地 WIP 0f4d51e，在套锁跑全量，过了推送送审。
 - **待产品负责人手验**（醒后）：T09 实时界面 iwork-client PID 80649（4518cbb，long-tool-turn，上限 60），日志 /private/tmp/claude-501/-Users-lilithgames-LiWork-iWork--cao-worktrees-b20e49db/a6310d3b-7a47-4ed4-a967-24c5a7f5c6c2/scratchpad/live-4518cbb.log：① 侧栏点开长工具回合对话，用滚轮滚，`grep -a SetVisibleRows` 见 by_user=true；② 锚点跳审批后两端各翻到头、接回最新；③ 拖侧栏/悬停展开导轨/全开真实切换；④ 真窗口缩不到 880 以下、真切自动/全开/自填模型 ID 时药丸正常。预览 http://127.0.0.1:1447/preview.html。
+- **醒后要产品负责人定的（夜里攒的）**：① T10a KA1（完全退出时存储卡住 5 秒内记不下取消，排着的回合下次打开会被派发；在跑的不受影响）要不要登记为已知限制；② 改动前就有的窗口：第一笔提交后、prompt 前进程没了，回合是 Running 带会话编号，会话记录在但空时用户点「继续」这一轮请求丢失（T05/T06 派发顺序遗留）——这次修 / 另开任务 / 不改；③ 告知：只有排着的消息、没有在跑回合时点完全退出也会先问一次（supervisor 按 P2 a 认可）；重连后没回执的取消/继续命令客户端丢掉不重发（supervisor 定，交 T09）。
+- T10f A：92e3827 已推，ad7b3f77 审（任务 2026-11-13-m1-t10f-a）；`b57765cc` 开 script6。
+- T04p 第 3 版 8fd61b2，9a5980a0 审第 3 轮（最后一轮）。T10a 表第 2 版 7a531fc，8036b426 审。
 - 待转设计窗口：tokens.css 259 行 --sidebar-w-max 注释「主区域至少 480」与 12b 的 568 不一致；P4 沙箱依赖缺失时的提示文案。
 - 小卡待排：iwork-ipc slow_consumer 延迟阈值在高负载下偶发；CI 主干 rust-cache 常 miss。
 
