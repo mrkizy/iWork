@@ -570,3 +570,88 @@ async fn sealed_permission_path_denies() {
     );
     h.stop().await;
 }
+
+/// E4 ③：补记绑定回退的那一笔在清树回来之后才走到提交，封口发生在等清树的时候。这里不经宿主的 `select`，直接驱动
+/// 一条会话线跑回合：续接 rt-0 时运行时说记录丢了 → 新开 rt-new → 首条 prompt 不收 → 编排收尾先清树（停住）再补记
+/// rt-0。封口 → 放开：补记那一笔入不了队（是闸挡住的，不是被丢掉的），编排以存储忙的错误收场，库里没有补记的绑定。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sealed_settle_after_retire_wait() {
+    use iwork_app::message_blocks::message_blocks;
+    use iwork_core::turn::{RunTag, SessionLine, TurnEntry, TurnPlan, TurnPorts, TurnRunError};
+    use iwork_daemon::gate::GatedStore;
+    use iwork_daemon::host::ports::{HostEngine, HostEnv};
+    use iwork_daemon::host::prepare::prepare;
+    use iwork_daemon::time::{MonotonicIds, SystemClock, TokioTimer};
+    use iwork_ports::read_model::ReadModelPort;
+
+    // 宿主不起：这个回合由测试自己驱动
+    let h = harness(Opts::default()).await;
+    let t = h.send(1, "直接跑").await;
+    let read = read_model(&h.raw);
+    let (turn, c) = read.turn_with_conversation(t).await.unwrap().unwrap();
+    let inputs = read.snapshot_inputs(c.id).await.unwrap();
+    let request = read.turn_request(t).await.unwrap().expect("有请求");
+    let env = HostEnv {
+        platform: HostEnv::platform(),
+        home: h.env.tmp.path().join("home"),
+        data_dir: h.env.dir.root().into(),
+        tmp_dirs: vec![std::env::temp_dir()],
+    };
+    let fs = iwork_host::fs::OsPathResolver::new(env.home.clone(), false);
+    let prepared = prepare(&env, &fs, &inputs, &turn).unwrap();
+    let plan = TurnPlan {
+        turn,
+        entry: TurnEntry::New,
+        assistant_name: prepared.assistant_name,
+        context_project_id: prepared.context_project_id,
+        spec: prepared.spec,
+        blocks: message_blocks(&request).unwrap(),
+        changes: None,
+        run: RunTag(1),
+    };
+    let decider = Arc::new(HostEngine::decider_for(&h.engine, prepared.keys));
+    let mut line = SessionLine::new(decider, Some("rt-0".into()));
+    h.agent.lose_on_resume.store(true, Ordering::SeqCst);
+    *h.agent.next_id.lock().unwrap() = Some("rt-new".into());
+    h.agent.fail_next_prompt.store(true, Ordering::SeqCst);
+    h.agent.terminate_stall.arm();
+    let store = support::hooked::HookedStore {
+        inner: GatedStore::new(h.raw.clone(), h.gate.clone()),
+        knobs: h.knobs.clone(),
+    };
+    let agent = FakeAgent(h.agent.clone());
+    let run = tokio::spawn(async move {
+        let (clock, ids) = (SystemClock::new(), MonotonicIds::new(SystemClock::new()));
+        let ports = TurnPorts {
+            store: &store,
+            clock: &clock,
+            ids: &ids,
+            live: &NoLive,
+            timer: &TokioTimer,
+            history: &read,
+        };
+        line.run_turn(&agent, ports, plan).await
+    });
+    within("收尾停在等清树", h.agent.terminate_stall.wait_stuck()).await;
+    h.gate.seal();
+    let enqueued = count_enqueues(&h);
+    h.agent.terminate_stall.release();
+    let result = within("编排收场", run).await.unwrap();
+    assert!(
+        matches!(
+            result,
+            Err(TurnRunError::Storage(
+                iwork_ports::store::StorageError::Busy
+            ))
+        ),
+        "补记那一笔被闸挡下：{result:?}"
+    );
+    assert_eq!(enqueued.load(Ordering::SeqCst), 0, "没有入队");
+    assert!(
+        !events(&h.raw).await.iter().any(|(_, e)| matches!(
+            e,
+            DomainEvent::TurnSessionBound(b) if b.runtime_session_id == "rt-0"
+        )),
+        "库里没有补记的绑定"
+    );
+}
