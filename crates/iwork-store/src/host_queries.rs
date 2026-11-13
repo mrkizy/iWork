@@ -258,3 +258,42 @@ pub(crate) fn snapshot_inputs<C: EventCodec + ?Sized>(
         lists_seq: seq_col("events", "seq", lists_seq)?,
     })
 }
+
+/// 回合与它所在的对话（受理回合命令用）。回合在、对话不在是投影坏了（级联删除不留这种行，X5）。
+pub(crate) fn turn_with_conversation<C: EventCodec + ?Sized>(
+    conn: &Connection,
+    codec: &C,
+    turn: iwork_domain::id::TurnId,
+) -> Result<
+    Option<(
+        iwork_domain::turn::Turn,
+        iwork_domain::conversation::Conversation,
+    )>,
+    StorageError,
+> {
+    let key = turn.to_string();
+    let row: Option<(Vec<u8>, Option<Vec<u8>>)> = conn
+        .prepare_cached(
+            "SELECT t.snapshot, c.snapshot FROM turns t \
+             LEFT JOIN conversations c ON c.id = t.conversation_id WHERE t.id = ?1",
+        )
+        .and_then(|mut s| {
+            s.query_row([&key], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()
+        })
+        .map_err(sql_err)?;
+    let Some((turn_snapshot, conversation_snapshot)) = row else {
+        return Ok(None);
+    };
+    let Some(conversation_snapshot) = conversation_snapshot else {
+        return Err(crate::sql::bad_column(
+            "turns",
+            "conversation_id",
+            format!("回合 {key} 指向的对话不在"),
+        ));
+    };
+    Ok(Some((
+        decode_turn(codec, &turn_snapshot)?,
+        decode_conversation(codec, &conversation_snapshot)?,
+    )))
+}

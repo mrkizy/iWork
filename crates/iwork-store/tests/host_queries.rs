@@ -198,6 +198,7 @@ fn turn_work_bindings_counts_and_snapshot_inputs() {
             },
             mode: Some(ApprovalMode::Auto),
             cause: ApprovalModeChangeCause::User,
+            released_approvals: None,
         }
         .into(),
     ]);

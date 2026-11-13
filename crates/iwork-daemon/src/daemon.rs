@@ -25,6 +25,7 @@ use crate::boot::{
 };
 use crate::dev;
 use crate::exit::{exited, process_status};
+use crate::gate::{GatedStore, SealGate};
 use crate::handler::lifecycle::autostart_handler;
 use crate::handler::{DaemonHandler, Gate, NotWired};
 use crate::instance::{self, LockOutcome, StandbyAction};
@@ -553,6 +554,12 @@ async fn serve_with<W: RunningWork>(
         return fail(&board, boot::injected(Step::Server));
     }
     let autostart = Arc::new(autostart_port(&id));
+    // E4：从这里起交出去的存储都是带封口闸的这一个（受理函数、各任务、outbox 投递）。裸的只留给组装处自己
+    // （装观察者、读 head、维护、关存储）与启动时的恢复（上面的第 8 步）
+    let gated = Arc::new(GatedStore::new(
+        store.clone(),
+        Arc::new(SealGate::default()),
+    ));
     let gate = Arc::new(Gate::default());
     let stop_switch = StopSwitch::new();
     let mut cfg = ServerConfig::new(VERSION);
@@ -561,7 +568,7 @@ async fn serve_with<W: RunningWork>(
         cfg,
         id.own.clone(),
         DaemonHandler::new(gate.clone(), NotWired, work.clone(), stop_switch.clone())
-            .with_autostart(autostart_handler(autostart.clone(), store.clone())),
+            .with_autostart(autostart_handler(autostart.clone(), gated.clone())),
         StoreSource::new(store.clone(), SnapshotNotWired),
     );
     let publishing = PublishState::new();
@@ -647,7 +654,7 @@ async fn serve_with<W: RunningWork>(
             move || signals::run(pre.take(), stop.clone())
         }),
         TaskSpec::restartable("outbox", {
-            let (store, routes, wake) = (store.clone(), routes.clone(), publishing.outbox.clone());
+            let (store, routes, wake) = (gated.clone(), routes.clone(), publishing.outbox.clone());
             move || {
                 outbox::run(
                     store.clone(),

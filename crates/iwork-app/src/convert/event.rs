@@ -121,6 +121,7 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
             target: Some(mode_target_to_proto(&e.target)),
             mode: e.mode.map(approval_mode_to_proto),
             cause: mode_change_cause_to_proto(e.cause),
+            released_approvals: e.released_approvals,
         }),
         DomainEvent::DmProjectSwitched(e) => P::DmProjectSwitched(pb::DmProjectSwitched {
             conversation_id: e.conversation_id.to_string(),
@@ -668,6 +669,7 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
                 .map(|m| approval_mode_from_proto("ApprovalModeChanged", "mode", m))
                 .transpose()?,
             cause: mode_change_cause_from_proto("ApprovalModeChanged", "cause", e.cause)?,
+            released_approvals: e.released_approvals,
         }
         .into(),
         P::DmProjectSwitched(e) => ev::DmProjectSwitched {

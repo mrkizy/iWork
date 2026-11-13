@@ -1327,7 +1327,12 @@ mod delivery_gate {
         let ask = w.b.ctl.ask_bash(r#"{"command":"npm test"}"#);
         let id = requested(&w.store).await;
         w.engine
-            .decide(id, allow_once(), Actor("user".into()))
+            .decide(
+                id,
+                allow_once(),
+                Actor("user".into()),
+                crate::support::command(),
+            )
             .await
             .unwrap();
         assert_eq!(ask.await.unwrap(), PermissionDecision::Allow);
@@ -1374,7 +1379,12 @@ mod delivery_gate {
         let ask = w.b.ctl.ask_bash(r#"{"command":"npm test"}"#);
         let id = requested(&w.store).await;
         w.engine
-            .decide(id, allow_once(), Actor("user".into()))
+            .decide(
+                id,
+                allow_once(),
+                Actor("user".into()),
+                crate::support::command(),
+            )
             .await
             .unwrap();
         // 单线程运行时：编排要等测试让出才动，交付那笔会停在入队门口

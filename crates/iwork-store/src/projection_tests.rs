@@ -531,6 +531,7 @@ fn approval_mode_three_targets() {
             target,
             mode,
             cause: ApprovalModeChangeCause::User,
+            released_approvals: None,
         }
         .into()
     };

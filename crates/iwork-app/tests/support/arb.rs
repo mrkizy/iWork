@@ -1048,11 +1048,15 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                         ApprovalModeChangeCause::ProjectSwitch,
                         ApprovalModeChangeCause::NewConversation,
                     ]),
+                    proptest::option::of(0u32..50),
                 )
-                    .prop_map(|(target, mode, cause)| ApprovalModeChanged {
-                        target,
-                        mode,
-                        cause,
+                    .prop_map(|(target, mode, cause, released_approvals)| {
+                        ApprovalModeChanged {
+                            target,
+                            mode,
+                            cause,
+                            released_approvals,
+                        }
                     }),
             ),
         ),

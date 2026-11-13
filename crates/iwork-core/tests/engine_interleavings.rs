@@ -506,7 +506,14 @@ impl Run {
                     },
                 };
                 self.tasks.spawn(async move {
-                    let _ = engine.decide(id, decision, Actor("user".into())).await;
+                    let _ = engine
+                        .decide(
+                            id,
+                            decision,
+                            Actor("user".into()),
+                            crate::support::command(),
+                        )
+                        .await;
                     Out::Other
                 });
             }
@@ -540,7 +547,14 @@ impl Run {
                     ),
                 };
                 self.tasks.spawn(async move {
-                    let _ = engine.switch_mode(target, mode, Actor("user".into())).await;
+                    let _ = engine
+                        .switch_mode(
+                            target,
+                            mode,
+                            Actor("user".into()),
+                            crate::support::command(),
+                        )
+                        .await;
                     Out::Other
                 });
             }
@@ -881,7 +895,12 @@ impl Run {
         let engine = self.engine.clone();
         let decide = self.tasks.spawn(async move {
             let _ = engine
-                .decide(id, UserDecision::Deny, Actor("user".into()))
+                .decide(
+                    id,
+                    UserDecision::Deny,
+                    Actor("user".into()),
+                    crate::support::command(),
+                )
                 .await;
             Out::Other
         });

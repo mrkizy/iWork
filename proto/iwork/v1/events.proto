@@ -226,6 +226,9 @@ message ApprovalModeChanged {
   // 未设置表示恢复跟随（成员不再单独设置）。
   optional ApprovalMode mode = 2;
   ApprovalModeChangeCause cause = 3;
+  // 这一笔提交里由这次切档放行的审批条数（T10a 方案 2.3，产品负责人 2026-11-13 定：切档提示里的放行数由后台给）。
+  // 切到更严的档位、没有可放行的为 0；加这个字段之前的旧事件没有它。
+  optional uint32 released_approvals = 4;
 }
 
 enum ApprovalModeChangeCause {

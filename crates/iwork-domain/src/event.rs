@@ -231,6 +231,8 @@ pub struct ApprovalModeChanged {
     /// `None` 表示恢复跟随（成员不再单独设置）
     pub mode: Option<ApprovalMode>,
     pub cause: ApprovalModeChangeCause,
+    /// 这一笔提交里由这次切档放行的审批条数（切档提示的「放行了几条」，T10a 方案 2.3）；加这个字段之前的旧事件为 `None`
+    pub released_approvals: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

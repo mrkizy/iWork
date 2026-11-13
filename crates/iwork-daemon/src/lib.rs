@@ -10,6 +10,7 @@ pub mod dev;
 #[cfg(all(unix, feature = "dev"))]
 mod dev_parts;
 pub mod exit;
+pub mod gate;
 pub mod handler;
 pub mod install;
 pub mod instance;

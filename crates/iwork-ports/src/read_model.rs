@@ -246,6 +246,11 @@ pub trait ReadModelPort: Send + Sync {
     ) -> impl Future<Output = Result<Vec<String>, StorageError>> + Send;
     /// 退出前要问的数（E1）。
     fn quit_counts(&self) -> impl Future<Output = Result<QuitCounts, StorageError>> + Send;
+    /// 受理回合命令要读的（T10a 方案 A5）：回合与它所在的对话，一个读事务。回合不存在为 `None`。
+    fn turn_with_conversation(
+        &self,
+        turn: TurnId,
+    ) -> impl Future<Output = Result<Option<(Turn, Conversation)>, StorageError>> + Send;
     /// 算会话快照的已提交输入（D8）。对话不存在时报 `NotFound`。
     fn snapshot_inputs(
         &self,

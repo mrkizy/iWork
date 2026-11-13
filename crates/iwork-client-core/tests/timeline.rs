@@ -338,6 +338,7 @@ fn mode_change_note_is_live_only() {
             }),
             mode: Some(pb::ApprovalMode::Auto as i32),
             cause: pb::ApprovalModeChangeCause::User as i32,
+            released_approvals: None,
         }),
     ));
     assert_eq!(row_ids(&s), ["note:10"]);

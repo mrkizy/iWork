@@ -539,6 +539,17 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
         self.query(|conn, _codec| crate::host_queries::quit_counts(conn))
     }
 
+    fn turn_with_conversation(
+        &self,
+        turn: TurnId,
+    ) -> impl Future<
+        Output = Result<Option<(Turn, iwork_domain::conversation::Conversation)>, StorageError>,
+    > + Send {
+        self.query(move |conn, codec| {
+            crate::host_queries::turn_with_conversation(conn, codec, turn)
+        })
+    }
+
     fn snapshot_inputs(
         &self,
         conversation: ConversationId,

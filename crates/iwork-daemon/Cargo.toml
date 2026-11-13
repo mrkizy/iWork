@@ -23,6 +23,7 @@ futures.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["registry"] }
 serde_json.workspace = true
+thiserror.workspace = true
 ulid = { workspace = true, features = ["std"] }
 # 出包前的核对把叶证书的 SHA-256 写成十六进制（install::package_check、examples/check-install）
 hex.workspace = true
@@ -35,8 +36,11 @@ libc.workspace = true
 # 开发开关 --dev-trust（跳过签名校验，同用户照查）。不是默认 feature；发布构建里不存在：
 # scripts/check-no-dev-trust.sh 查 feature 图、产物字符串与「发布进程收到 --dev-trust 拒绝启动」。
 dev = ["iwork-ipc/dev"]
+# 测试的可观测点（分发入口的屏障与通知），只给测试打开；发布构建没有（T10a 方案 7.2a 表下）
+test-hooks = []
 
 [dev-dependencies]
+iwork-daemon = { path = ".", features = ["test-hooks"] }
 tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
 # 存储的测试钩子（压住写线程、查回执入队的通知），只给测试打开；发布构建没有（T10a 方案 7.2a）
 iwork-store = { workspace = true, features = ["test-hooks"] }
@@ -45,6 +49,7 @@ dunce.workspace = true
 rusqlite.workspace = true
 libc.workspace = true
 pollster.workspace = true
+proptest.workspace = true
 # 不开 client-core 的 dev：开了会把 dev 带进工作区的 feature 图（check-no-dev-trust.sh 守着）
 iwork-client-core.workspace = true
 

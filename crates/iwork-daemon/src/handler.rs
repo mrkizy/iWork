@@ -1,7 +1,8 @@
 //! 请求入口（T04 方案 2.4 第 9 步、2.8 第 1 步、2.14）：每个请求开 `command` span；停机期间关门；
 //! 生命周期命令自己受理，其余交给注入的内层 handler。
 //!
-//! T04 注入的内层是 [`NotWired`]：一律回 `ERROR_CODE_UNAVAILABLE`「未接入」。真实的命令与查询受理归 T10。
+//! 内层是 [`dispatch::Dispatcher`]（T10a 方案 2.6：在途表、查回执、分发表；每条命令的外壳在 `turn`、
+//! `conversation`、`approval`、`settings`）。没装配时注入 [`NotWired`]：一律回 `ERROR_CODE_UNAVAILABLE`「未接入」。
 
 use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex};
@@ -14,7 +15,13 @@ use crate::logging;
 use crate::stop::StopSwitch;
 use crate::work::RunningWork;
 
+mod approval;
+mod conversation;
+pub mod dispatch;
+pub mod engine;
 pub mod lifecycle;
+mod settings;
+mod turn;
 
 /// 关门与在途计数。停机第 1 步：关门后新请求一律回「不可用、可重试」，再等已经进门的回完。
 #[derive(Default)]

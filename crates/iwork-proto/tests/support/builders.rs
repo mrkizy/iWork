@@ -1144,6 +1144,7 @@ pub fn ev_approval_mode_changed() -> DomainEvent {
         }),
         mode: Some(ApprovalMode::FullAccess.into()),
         cause: ApprovalModeChangeCause::ProjectSwitch.into(),
+        released_approvals: None,
     }))
 }
 
