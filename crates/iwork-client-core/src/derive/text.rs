@@ -23,8 +23,12 @@ pub const CONNECTING: &str = "正在连接后台服务";
 pub const QUERY_RETRYING: &str = "部分数据暂时没取到，稍后自动重试";
 pub const OVERLOADED: &str = "后台负载过高，稍后重试或重新打开 iWork";
 pub const DIAGNOSTICS_TITLE: &str = "连不上后台服务";
-/// 版本不一致页的说明（UI 审查 g3 2/F-1；措辞待设计窗口确认）。「重新打开 iWork」只重启客户端，后台不动。
-pub const VERSION_MISMATCH_MESSAGE: &str = "这个窗口和后台服务不是同一版，暂时连不上。通常是刚装了新版：重新打开 iWork 就会用上新装的那一版。后台照常运行，进行中的回合不会因此中断。";
+/// 版本不一致页的说明（ui-m1 2a 第 17 条）。两种成因都要说到：新装了新版（「重新打开 iWork」只重启客户端，
+/// 后台不动），和装回了旧版（后台正在重启，退避重连会自己连上）。升级降级时后台自己重启、回合按中断处理，
+/// 所以不能说回合不受影响。
+pub const VERSION_MISMATCH_MESSAGE: &str = "这个窗口和后台服务不是同一版，暂时连不上。通常是刚装了新版：重新打开 iWork 就会用上新装的那一版；\
+     刚装回旧版的话，等后台服务重启好就会自动连上。后台服务仍在运行，重启时被打断的回合可以点「继续」接着做，\
+     待你批准的事项都还在。";
 /// 不支持的环境整页的标题。
 pub const ENVIRONMENT_TITLE: &str = "iWork 暂时不能在这台电脑上运行";
 pub const NEWER_SCHEMA_HINT: &str = "装回更新的那一版可继续使用";

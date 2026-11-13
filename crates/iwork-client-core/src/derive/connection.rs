@@ -107,7 +107,18 @@ mod tests {
         assert_eq!(exits(Connection::Live), vec![]);
         let mut s = Store::default();
         s.set_connection(Connection::Waiting(WaitPrompt::VersionMismatch));
-        assert_eq!(connection(&s).message, text::VERSION_MISMATCH_MESSAGE);
+        // ui-m1 2a 第 17 条：两种成因都说到（新装了新版 → 重新打开；装回旧版 → 后台重启好自己连上），
+        // 被打断的回合点「继续」可接着做；不许说回合不受影响（升级时后台自己重启，回合按中断处理）。
+        let message = connection(&s).message;
+        assert_eq!(
+            message,
+            "这个窗口和后台服务不是同一版，暂时连不上。通常是刚装了新版：重新打开 iWork 就会用上新装的那一版；\
+             刚装回旧版的话，等后台服务重启好就会自动连上。后台服务仍在运行，重启时被打断的回合可以点「继续」接着做，\
+             待你批准的事项都还在。"
+        );
+        for banned in ["不会因此中断", "不受影响"] {
+            assert!(!message.contains(banned), "版本不一致页不许说「{banned}」：{message}");
+        }
         s.set_connection(Connection::Environment("M1 暂不支持 Windows".into()));
         let v = connection(&s);
         assert_eq!(
