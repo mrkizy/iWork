@@ -14,10 +14,14 @@ use iwork_core::approval::session::{
 use iwork_domain::action::{CanonicalPath, ToolRef};
 use iwork_domain::approval_mode::{ApprovalMode, ModeInputs, effective_mode};
 use iwork_domain::assistant::Assistant;
+use iwork_domain::common::{ModelSelection, ToolGroups};
 use iwork_domain::conversation::ConversationKind;
 use iwork_domain::id::ProjectId;
+use iwork_domain::id::{AssistantId, ConversationId, RuntimeId};
 use iwork_domain::project::{AiReviewSettings, Project};
+use iwork_domain::session::SessionToolSet;
 use iwork_domain::turn::Turn;
+use iwork_domain::turn::TurnKind;
 use iwork_ports::agent::SessionSpec;
 use iwork_ports::fs::PathResolver;
 use iwork_ports::read_model::SnapshotInputs;
@@ -140,32 +144,59 @@ pub struct Prepared {
     pub line_key: LineKey,
 }
 
-/// 会话线能不能沿用：这些都一样才沿用。
+/// 会话线能不能沿用：判定方持有的 [`SessionKeys`] 逐项都一样才沿用（D8）。唯一不比的是快照里记审计用的
+/// `lists_seq`：清单没变时它也会随别的 rule 流事件前进。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineKey {
+    conversation: ConversationId,
+    assistant: AssistantId,
+    runtime_id: RuntimeId,
+    assistant_version: u32,
+    project: Option<ProjectId>,
+    turn_kind: TurnKind,
+    /// `lists_seq` 置成默认值
     snapshot: SessionSnapshot,
-    keys_rest: String,
+    tool_set: SessionToolSet,
+    disabled_groups: ToolGroups,
+    cwd: CanonicalPath,
+    paths: EnvPaths,
+    ai_review: AiReviewSettings,
+    review_model: ModelSelection,
 }
 
+/// 穷尽解构（不写 `..`）：`SessionKeys` 加了字段这里编译不过，逼着决定新字段比不比（b45 1/F-3）。
 fn line_key(keys: &SessionKeys) -> LineKey {
-    let mut snapshot = (*keys.snapshot).clone();
-    // 记审计用的序号：清单没变时它也会随别的 rule 流事件前进
+    let SessionKeys {
+        conversation,
+        assistant,
+        runtime_id,
+        assistant_version,
+        project,
+        turn_kind,
+        snapshot,
+        tool_set,
+        disabled_groups,
+        cwd,
+        paths,
+        ai_review,
+        review_model,
+    } = keys;
+    let mut snapshot = (**snapshot).clone();
     snapshot.lists_seq = Default::default();
     LineKey {
+        conversation: *conversation,
+        assistant: *assistant,
+        runtime_id: *runtime_id,
+        assistant_version: *assistant_version,
+        project: *project,
+        turn_kind: *turn_kind,
         snapshot,
-        keys_rest: format!(
-            "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
-            keys.conversation,
-            keys.assistant,
-            keys.runtime_id,
-            keys.project,
-            keys.turn_kind,
-            keys.tool_set,
-            keys.disabled_groups,
-            keys.cwd,
-            keys.paths,
-            keys.ai_review
-        ),
+        tool_set: tool_set.clone(),
+        disabled_groups: disabled_groups.clone(),
+        cwd: cwd.clone(),
+        paths: paths.clone(),
+        ai_review: ai_review.clone(),
+        review_model: review_model.clone(),
     }
 }
 

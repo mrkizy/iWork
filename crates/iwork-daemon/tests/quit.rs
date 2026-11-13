@@ -411,3 +411,71 @@ async fn sealed_decide_returns_retryable() {
     );
     h.stop().await;
 }
+
+/// b45 1/F-4：封口闸被一笔在途入队短暂占着、会话的进程树清不掉。停机第 3 步的外层期限先到也好、宿主自己的
+/// 期限先到也好，状态文件里都照实记下没清空的条数（不是初值 0）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn abort_report_reaches_board_at_outer_deadline() {
+    use iwork_daemon::handler::Gate;
+    use iwork_daemon::status::{StatusBoard, StatusIdentity};
+    use iwork_daemon::stop::{StopHooks, stop};
+    use iwork_ipc::rendezvous::{ExeStamp, Phase, StopReason};
+    use iwork_ports::store::{StorageError, StoragePort};
+
+    struct NoHooks;
+    impl StopHooks for NoHooks {
+        async fn stop_tasks(&mut self) {}
+        async fn stop_ipc(&mut self) {}
+        async fn close_store(&mut self) -> Result<(), StorageError> {
+            Ok(())
+        }
+    }
+
+    let mut h = harness(Opts::default()).await;
+    h.agent.hold.store(true, Ordering::SeqCst);
+    h.agent.hang_terminate.store(true, Ordering::SeqCst);
+    h.start_host();
+    h.send(1, "跑着").await;
+    h.agent.wait_prompts(1).await;
+    // 一笔在途入队在闸的临界区里多待 80 毫秒：宿主封口要等它，自己的 3 秒从那之后才开始算
+    let at_gate = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify = at_gate.clone();
+    h.gate.on_enqueued(move |_| {
+        notify.notify_one();
+        std::thread::sleep(Duration::from_millis(80));
+    });
+    let gated = iwork_daemon::gate::GatedStore::new(h.raw.clone(), h.gate.clone());
+    let writer = std::thread::spawn(move || {
+        drop(gated.commit(support::fixtures::cmd(800, vec![])));
+    });
+    at_gate.notified().await;
+    let dir = tempfile::tempdir().unwrap();
+    let board = StatusBoard::create(
+        dir.path(),
+        StatusIdentity {
+            version: "t".into(),
+            protocol_major: 1,
+            exe_stamp: ExeStamp {
+                len: 0,
+                modified_unix_ns: 0,
+            },
+            log_dir: dir.path().into(),
+        },
+        Phase::Ready,
+    );
+    stop(
+        StopReason::Signal,
+        false,
+        &board,
+        &Gate::default(),
+        &h.host,
+        &mut NoHooks,
+    )
+    .await;
+    writer.join().unwrap();
+    assert!(
+        board.snapshot().not_cleared > 0,
+        "进程树没清空的条数要进状态文件"
+    );
+    h.stop().await;
+}

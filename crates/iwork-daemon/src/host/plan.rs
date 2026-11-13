@@ -53,13 +53,23 @@ pub enum JobEnd {
     Closed,
 }
 
+/// 这条线上一趟的结局。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastRun {
+    /// 交的是哪个回合的活（收线的活是 `None`）
+    pub turn: Option<TurnId>,
+    pub end: JobEnd,
+    /// 这一趟发过取消信号没有
+    pub cancel_sent: bool,
+}
+
 /// 这条会话线此刻的样子（宿主锁里的那一项的只读视图）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineView {
     /// 占着这条线的那一趟
     pub job: Option<JobView>,
-    /// 上一趟交的是哪个回合的活、怎么结束的
-    pub last: Option<(Option<TurnId>, JobEnd)>,
+    /// 上一趟
+    pub last: Option<LastRun>,
     /// 退避到时了没有（上一趟 `Broke` / `NotStarted` 之后才有退避）
     pub backoff_ready: bool,
 }
@@ -90,8 +100,13 @@ pub enum Action {
     Hand(JobKind),
     /// 给过了边界的那一趟发取消（D6）
     Cancel { turn: TurnId, run: RunTag },
-    /// 编排以错误收场，回合还占着进程：补账（D5）
-    Settle { turn: TurnId },
+    /// 编排以错误收场，回合还占着进程：补账（D5）。`reason` 是编排报的错；`cancel_requested` 是
+    /// [`cancel_counts`] 的结论，决定按取消收还是按失败收
+    Settle {
+        turn: TurnId,
+        reason: String,
+        cancel_requested: bool,
+    },
     /// 排着的或已中断的回合直接收成已取消（X2、A3 的另一头、E2 ③）
     Withdraw { turn: TurnId, from: TurnState },
     /// 删除的最后一笔（X4）
@@ -113,6 +128,20 @@ fn cancel_wanted(t: &OpenTurn) -> bool {
     }
 }
 
+/// 一趟编排的取消算不算数。发取消（D6）和补账（D5，按取消收还是按失败收）只看这一个判断（b45 1/F-1）。
+/// 任一成立就算：本趟已发过取消信号；对话在删；宿主完全退出；回合还占着进程、有比这一趟起点新的取消意图。
+/// `turn` 是这一趟的回合（已经到终态、不在没到终态的列表里时为 `None`）。
+pub fn cancel_counts(
+    w: &ConversationWork,
+    turn: Option<&OpenTurn>,
+    closing: Closing,
+    sent: bool,
+) -> bool {
+    sent || deleting(w)
+        || closing == Closing::Quit
+        || turn.is_some_and(|t| t.turn.state.holds_process() && cancel_wanted(t))
+}
+
 /// 有续接的依据（D7）：这次运行里落盘的批准还没交付（R6：批准的 seq 比启动时的 head 大，上一次运行里的批准不让回合
 /// 自己续接，产品负责人 2026-11-13 定），或这次运行里用户点过「继续」（R7）。两样都按启动时的 head 截。
 fn resume_wanted(t: &OpenTurn, r: &Round<'_>) -> bool {
@@ -132,7 +161,7 @@ fn resume_wanted(t: &OpenTurn, r: &Round<'_>) -> bool {
 fn waiting_backoff(t: &OpenTurn, line: Option<&LineView>) -> bool {
     line.is_some_and(|l| {
         !l.backoff_ready
-            && matches!(&l.last, Some((Some(turn), JobEnd::Broke(_) | JobEnd::NotStarted(_))) if *turn == t.turn.id)
+            && matches!(&l.last, Some(LastRun { turn: Some(turn), end: JobEnd::Broke(_) | JobEnd::NotStarted(_), .. }) if *turn == t.turn.id)
     })
 }
 
@@ -159,18 +188,22 @@ pub fn decide(w: &ConversationWork, line: Option<&LineView>, r: &Round<'_>) -> O
         let JobKind::Run { turn, .. } = j.kind else {
             return None;
         };
-        let wanted = deleting(w)
-            || r.closing == Closing::Quit
-            || (t.turn.id == turn && t.turn.state.holds_process() && cancel_wanted(t));
-        return (j.crossed && !j.cancel_sent && wanted)
+        let this_turn = w.open_turns.iter().find(|o| o.turn.id == turn);
+        return (j.crossed && !j.cancel_sent && cancel_counts(w, this_turn, r.closing, false))
             .then_some(Action::Cancel { turn, run: j.run });
     }
     let owner_gone = owner_alive(&t.owner).is_err();
     match t.turn.state {
         s if s.holds_process() => match line.and_then(|l| l.last.as_ref()) {
-            Some((Some(turn), JobEnd::Broke(_))) if *turn == t.turn.id => {
-                Some(Action::Settle { turn: t.turn.id })
-            }
+            Some(LastRun {
+                turn: Some(turn),
+                end: JobEnd::Broke(reason),
+                cancel_sent,
+            }) if *turn == t.turn.id => Some(Action::Settle {
+                turn: t.turn.id,
+                reason: reason.clone(),
+                cancel_requested: cancel_counts(w, Some(t), r.closing, *cancel_sent),
+            }),
             _ => Some(Action::Impossible(format!(
                 "回合 {} 是 {s:?}，本进程里没有一趟以出错结束的编排管它",
                 t.turn.id

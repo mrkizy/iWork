@@ -20,7 +20,7 @@ use iwork_ports::store::{CommitRequest, StoragePort};
 
 use super::plan::{Closing, JobKind};
 use super::ports::HostPorts;
-use super::{HOST_ACTOR, HOST_IO_LIMIT, TurnHost};
+use super::{Bounded, HOST_ACTOR, HOST_IO_LIMIT, TurnHost, bounded};
 use crate::work::{AbortReport, QUIT_COUNT_LIMIT, QuitCounts, RunningWork, ShutdownDecision};
 
 /// 封口后等各条线清完树、报回来，最多这么久（停机第 3 步的上限里）。
@@ -53,13 +53,18 @@ impl<P: HostPorts> TurnHost<P> {
     /// E2 ③：读一次库，每个对话里还排着、没交给过了边界的一趟的回合提交成已取消，一个对话一笔。
     /// 读或提交没做成：那些回合留在排着，下次启动会被派发（KA1，照实）。
     async fn withdraw_all_queued(&self) {
-        let work = match tokio::time::timeout(HOST_IO_LIMIT, self.ports.read().turn_work()).await {
-            Ok(Ok(w)) => w,
-            Ok(Err(e)) => {
+        let ports = self.ports.clone();
+        let read = bounded(&self.shared.withdraw_read_busy, HOST_IO_LIMIT, async move {
+            ports.read().turn_work().await
+        })
+        .await;
+        let work = match read {
+            Bounded::Done(Ok(w)) => w,
+            Bounded::Done(Err(e)) => {
                 tracing::warn!(error = %e, "完全退出时读排着的回合失败，它们下次启动会被派发（KA1）");
                 return;
             }
-            Err(_) => {
+            Bounded::Busy | Bounded::TimedOut => {
                 tracing::warn!("完全退出时读排着的回合没回来，它们下次启动会被派发（KA1）");
                 return;
             }
@@ -92,13 +97,22 @@ impl<P: HostPorts> TurnHost<P> {
                 events,
                 outbox: Vec::new(),
             };
-            match tokio::time::timeout(HOST_IO_LIMIT, self.ports.store().commit(req)).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
+            let ports = self.ports.clone();
+            let committed = bounded(
+                &self.shared.withdraw_commit_busy,
+                HOST_IO_LIMIT,
+                async move { ports.store().commit(req).await },
+            )
+            .await;
+            match committed {
+                Bounded::Done(Ok(_)) => {}
+                Bounded::Done(Err(e)) => {
                     tracing::warn!(error = %e, conversation = %w.conversation.id, "完全退出时取消排着的回合没记下（KA1）")
                 }
-                Err(_) => {
-                    tracing::warn!(conversation = %w.conversation.id, "完全退出时取消排着的回合没回来（KA1）")
+                Bounded::Busy | Bounded::TimedOut => {
+                    tracing::warn!(conversation = %w.conversation.id, "完全退出时取消排着的回合没回来（KA1）");
+                    // 上一笔还没回来就不再发后面的
+                    return;
                 }
             }
         }
@@ -117,19 +131,24 @@ impl<P: HostPorts> TurnHost<P> {
 
 impl<P: HostPorts> RunningWork for TurnHost<P> {
     async fn quit_counts(&self) -> Option<QuitCounts> {
-        match tokio::time::timeout(QUIT_COUNT_LIMIT, self.ports.read().quit_counts()).await {
-            Ok(Ok(c)) => Some(QuitCounts {
+        let ports = self.ports.clone();
+        let read = bounded(&self.shared.quit_read_busy, QUIT_COUNT_LIMIT, async move {
+            ports.read().quit_counts().await
+        })
+        .await;
+        match read {
+            Bounded::Done(Ok(c)) => Some(QuitCounts {
                 running_turns: c.running_turns,
                 queued_turns: c.queued_turns,
                 // 卡片那一半由 T10e 接上
                 executing_cards: 0,
             }),
-            Ok(Err(e)) => {
+            Bounded::Done(Err(e)) => {
                 tracing::warn!(error = %e, "退出前读数目失败，按「不知道」问");
                 None
             }
-            Err(_) => {
-                tracing::warn!("退出前读数目 2 秒没回来，按「不知道」问");
+            Bounded::Busy | Bounded::TimedOut => {
+                tracing::warn!("退出前读数目 2 秒没回来（或上一次还没回来），按「不知道」问");
                 None
             }
         }
@@ -194,13 +213,20 @@ impl<P: HostPorts> RunningWork for TurnHost<P> {
                 out.await;
             }
         };
-        let finished = tokio::time::timeout(ABORT_LIMIT, all_out).await.is_ok();
-        let mut report = *self.shared.abort.lock().unwrap_or_else(|e| e.into_inner());
-        if !finished {
-            let stuck = self.shared.live_lines.load(Ordering::SeqCst);
-            tracing::warn!(stuck, "封口后到点还有会话线没清完树");
-            report.not_cleared += u32::try_from(stuck).unwrap_or(u32::MAX);
+        if tokio::time::timeout(ABORT_LIMIT, all_out).await.is_err() {
+            tracing::warn!(
+                stuck = self.shared.live_lines.load(Ordering::SeqCst),
+                "封口后到点还有会话线没清完树"
+            );
         }
+        self.abort_snapshot()
+    }
+
+    /// 已报回来的照实记；还活着的会话线（还没清完树、没报回来）都算没清空。
+    fn abort_snapshot(&self) -> AbortReport {
+        let mut report = *self.shared.abort.lock().unwrap_or_else(|e| e.into_inner());
+        let stuck = self.shared.live_lines.load(Ordering::SeqCst);
+        report.not_cleared += u32::try_from(stuck).unwrap_or(u32::MAX);
         report
     }
 }

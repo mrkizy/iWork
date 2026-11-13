@@ -330,6 +330,9 @@ mod tests {
         async fn abort_all(&self) -> AbortReport {
             AbortReport::default()
         }
+        fn abort_snapshot(&self) -> AbortReport {
+            AbortReport::default()
+        }
     }
 
     fn ctx(kind: pb::ClientKind) -> ConnectionContext {

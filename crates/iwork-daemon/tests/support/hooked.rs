@@ -17,6 +17,8 @@ use tokio::sync::Notify;
 pub struct Stall {
     armed: AtomicBool,
     pub calls: AtomicUsize,
+    /// 被包的调用真正返回了的次数（停住又被放开的那一次，里面的调用返回之后才算）
+    pub returned: AtomicUsize,
     /// 正停在这里的调用数
     pub stuck: AtomicUsize,
     entered: Notify,
@@ -38,6 +40,11 @@ impl Stall {
         self.calls.load(Ordering::SeqCst)
     }
 
+    /// 进来过的调用都已经返回（包括停住又被放开的那一次）。
+    pub fn all_returned(&self) -> bool {
+        self.returned.load(Ordering::SeqCst) == self.calls()
+    }
+
     /// 等到至少有一个调用停在这里。
     pub async fn wait_stuck(&self) {
         loop {
@@ -49,21 +56,32 @@ impl Stall {
         }
     }
 
-    async fn pass(&self) {
+    /// 过这一处；返回的守卫在被包的调用返回之后丢弃，那时才记一次「已返回」。
+    async fn pass(&self) -> Returned<'_> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        let done = Returned(self);
         if !self.armed.load(Ordering::SeqCst) {
-            return;
+            return done;
         }
         let go = self.release.notified();
         tokio::pin!(go);
         go.as_mut().enable();
         if !self.armed.load(Ordering::SeqCst) {
-            return;
+            return done;
         }
         self.stuck.fetch_add(1, Ordering::SeqCst);
         self.entered.notify_waiters();
         go.await;
         self.stuck.fetch_sub(1, Ordering::SeqCst);
+        done
+    }
+}
+
+struct Returned<'a>(&'a Stall);
+
+impl Drop for Returned<'_> {
+    fn drop(&mut self) {
+        self.0.returned.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -123,10 +141,13 @@ impl<S: Clone> Clone for HookedStore<S> {
 impl<S: StoragePort> StoragePort for HookedStore<S> {
     async fn commit(&self, req: CommitRequest) -> Result<CommitReceipt, StorageError> {
         let k = &self.knobs.commit;
-        if k.picked(&req) {
-            k.stall.pass().await;
+        let _returned = if k.picked(&req) {
+            let g = k.stall.pass().await;
             k.passed_in.fetch_add(1, Ordering::SeqCst);
-        }
+            Some(g)
+        } else {
+            None
+        };
         self.inner.commit(req).await
     }
     async fn command_receipt(&self, id: CommandId) -> Result<Option<CommitReceipt>, StorageError> {
@@ -141,7 +162,7 @@ impl<S: StoragePort> StoragePort for HookedStore<S> {
         from: Seq,
         limit: usize,
     ) -> Result<Vec<StoredEvent>, StorageError> {
-        self.knobs.read_events.pass().await;
+        let _returned = self.knobs.read_events.pass().await;
         self.inner.read_events(filter, from, limit).await
     }
     async fn checkpoint_message(
@@ -228,7 +249,7 @@ impl<R: ReadModelPort> ReadModelPort for HookedRead<R> {
         self.inner.settings().await
     }
     async fn unsettled(&self) -> Result<Unsettled, StorageError> {
-        self.knobs.unsettled.pass().await;
+        let _returned = self.knobs.unsettled.pass().await;
         self.inner.unsettled().await
     }
     async fn summary_source(
@@ -240,14 +261,14 @@ impl<R: ReadModelPort> ReadModelPort for HookedRead<R> {
         self.inner.summary_source(turn, line, recent_limit).await
     }
     async fn turn_work(&self) -> Result<TurnWork, StorageError> {
-        self.knobs.turn_work.pass().await;
+        let _returned = self.knobs.turn_work.pass().await;
         self.inner.turn_work().await
     }
     async fn last_session_binding(
         &self,
         conversation: ConversationId,
     ) -> Result<Option<String>, StorageError> {
-        self.knobs.last_session_binding.pass().await;
+        let _returned = self.knobs.last_session_binding.pass().await;
         self.inner.last_session_binding(conversation).await
     }
     async fn session_ids_of(
@@ -257,7 +278,7 @@ impl<R: ReadModelPort> ReadModelPort for HookedRead<R> {
         self.inner.session_ids_of(conversation).await
     }
     async fn quit_counts(&self) -> Result<QuitCounts, StorageError> {
-        self.knobs.quit_counts.pass().await;
+        let _returned = self.knobs.quit_counts.pass().await;
         self.inner.quit_counts().await
     }
     async fn turn_request(
@@ -276,7 +297,7 @@ impl<R: ReadModelPort> ReadModelPort for HookedRead<R> {
         )>,
         StorageError,
     > {
-        self.knobs.turn_with_conversation.pass().await;
+        let _returned = self.knobs.turn_with_conversation.pass().await;
         self.inner.turn_with_conversation(turn).await
     }
     async fn snapshot_inputs(

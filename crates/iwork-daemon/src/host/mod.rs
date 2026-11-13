@@ -33,7 +33,7 @@ use iwork_ports::store::{CommitRequest, StorageError, StoragePort};
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinSet;
 
-use self::plan::{Action, Closing, JobEnd, JobKind, JobView, LineView, Round, decide};
+use self::plan::{Action, Closing, JobKind, JobView, LastRun, LineView, Round, decide};
 use self::ports::{HostEngine, HostPorts};
 
 /// 这些事件落盘就叫醒宿主（0a.6）。加一种 = 加一行。安全清单的增删不在这里：D8 每个回合开始前自己重读。
@@ -101,7 +101,7 @@ struct LineEntry {
     /// 趟数，只增；每一趟结束加一（D3、G8）
     runs: u64,
     /// 上一趟交的是哪个回合、怎么结束的、发过取消没有
-    last: Option<(Option<TurnId>, JobEnd, bool)>,
+    last: Option<LastRun>,
     /// 这条线此刻那个 `SessionLine` 的取消器：`begin_run` 时换成要跑的那一条的（换过线后旧的作废）
     canceller: Option<iwork_core::turn::TurnCanceller>,
     /// 叫醒这条线的任务去取活
@@ -132,7 +132,7 @@ impl LineEntry {
                 crossed: j.crossed,
                 cancel_sent: j.cancel_sent,
             }),
-            last: self.last.as_ref().map(|(t, e, _)| (*t, e.clone())),
+            last: self.last.clone(),
             backoff_ready: self.backoff.is_none_or(|b| now >= b.ready_at),
         }
     }
@@ -207,9 +207,14 @@ struct Shared {
     live_lines: std::sync::atomic::AtomicUsize,
     /// 封口时各条线报回来的
     abort: Mutex<crate::work::AbortReport>,
-    /// 宿主自己的读、提交各自至多一个在途（不变量 13）
+    /// 宿主自己每一种等存储的地方各自至多一个在途（不变量 13，b45 1/F-2）。对账的读与补账前的读先后做，共用一个
     read_busy: Arc<AtomicBool>,
     commit_busy: Arc<AtomicBool>,
+    catch_up_busy: Arc<AtomicBool>,
+    /// 退出前数目（E1）、完全退出时撤排着的回合（E2 ③）：和对账的读、提交分开，碰上对账正在读不白白回「不知道」
+    quit_read_busy: Arc<AtomicBool>,
+    withdraw_read_busy: Arc<AtomicBool>,
+    withdraw_commit_busy: Arc<AtomicBool>,
     #[cfg(any(test, feature = "test-hooks"))]
     counters: HostCounters,
 }
@@ -236,14 +241,16 @@ impl<P: HostPorts> Clone for TurnHost<P> {
 }
 
 /// 至多一个在途的一次读或提交：交给不随等的人被丢掉的小任务，在途标记跟着它，它真的结束才放（不变量 13）。
-enum Bounded<T> {
+/// 宿主与会话线里每一处等存储的地方都经它（b45 1/F-2）；唯一的例外是换线时补记绑定回退（`SessionLine::settle`），
+/// 见 `line.rs` 的 `settle_and_retire`。
+pub(crate) enum Bounded<T> {
     Done(T),
     /// 上一次还没真回来：这一次没发
     Busy,
     TimedOut,
 }
 
-async fn bounded<T, F>(flag: &Arc<AtomicBool>, limit: Duration, work: F) -> Bounded<T>
+pub(crate) async fn bounded<T, F>(flag: &Arc<AtomicBool>, limit: Duration, work: F) -> Bounded<T>
 where
     T: Send + 'static,
     F: std::future::Future<Output = T> + Send + 'static,
@@ -305,6 +312,10 @@ impl<P: HostPorts> TurnHost<P> {
                 abort: Mutex::default(),
                 read_busy: Arc::default(),
                 commit_busy: Arc::default(),
+                catch_up_busy: Arc::default(),
+                quit_read_busy: Arc::default(),
+                withdraw_read_busy: Arc::default(),
+                withdraw_commit_busy: Arc::default(),
                 #[cfg(any(test, feature = "test-hooks"))]
                 counters: HostCounters::default(),
             }),
@@ -414,18 +425,22 @@ impl<P: HostPorts> TurnHost<P> {
             .at(|h| h.after_round_read.clone())
             .await;
         // 3. 引擎追平了才用它的续接名单
-        let resume: BTreeMap<TurnId, Seq> =
-            match tokio::time::timeout(CATCH_UP_LIMIT, self.ports.engine().catch_up()).await {
-                Ok(Ok(())) => self.ports.engine().turns_to_resume(),
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "引擎没追平，这一轮不按批准续接");
-                    BTreeMap::new()
-                }
-                Err(_) => {
-                    tracing::warn!("引擎 5 秒没追平，这一轮不按批准续接");
-                    BTreeMap::new()
-                }
-            };
+        let ports = self.ports.clone();
+        let caught_up = bounded(&self.shared.catch_up_busy, CATCH_UP_LIMIT, async move {
+            ports.engine().catch_up().await
+        })
+        .await;
+        let resume: BTreeMap<TurnId, Seq> = match caught_up {
+            Bounded::Done(Ok(())) => self.ports.engine().turns_to_resume(),
+            Bounded::Done(Err(e)) => {
+                tracing::warn!(error = %e, "引擎没追平，这一轮不按批准续接");
+                BTreeMap::new()
+            }
+            Bounded::Busy | Bounded::TimedOut => {
+                tracing::warn!("引擎 5 秒没追平（或上一次还没回来），这一轮不按批准续接");
+                BTreeMap::new()
+            }
+        };
         // 4. 每个对话一件事；锁里的事（交活、发取消）当场做，要提交的收起来出锁做
         let mut commits: Vec<(ConversationWork, Action)> = Vec::new();
         let mut again = false;
@@ -525,25 +540,32 @@ impl<P: HostPorts> TurnHost<P> {
         let c = w.conversation.id;
         let deleting = w.conversation.state == ConversationState::Deleting;
         let (turn_id, events, scope) = match action {
-            Action::Settle { turn } => {
+            Action::Settle {
+                turn,
+                reason,
+                cancel_requested,
+            } => {
                 let Some(open) = w.open_turns.iter().find(|t| t.turn.id == turn) else {
                     return Ok(false);
                 };
-                let (reason, cancel_requested) = {
-                    let lines = self.shared.lock();
-                    match lines.by_conversation.get(&c).and_then(|e| e.last.as_ref()) {
-                        Some((_, JobEnd::Broke(why), sent)) => (why.clone(), *sent),
-                        _ => return Ok(false),
-                    }
-                };
-                let streaming = match self.ports.read().unsettled().await {
-                    Ok(u) => u
+                // 和对账的读共用在途标记：同一轮里先后做
+                let ports = self.ports.clone();
+                let read = bounded(&self.shared.read_busy, HOST_IO_LIMIT, async move {
+                    ports.read().unsettled().await
+                })
+                .await;
+                let streaming = match read {
+                    Bounded::Done(Ok(u)) => u
                         .streaming
                         .into_iter()
                         .filter(|m| m.turn_id == Some(turn))
                         .collect::<Vec<_>>(),
-                    Err(e) => {
+                    Bounded::Done(Err(e)) => {
                         tracing::warn!(error = %e, %turn, "补账前读流式消息失败");
+                        return Err(());
+                    }
+                    Bounded::Busy | Bounded::TimedOut => {
+                        tracing::error!(%turn, "补账前读流式消息的上一次还没回来，这一轮不发新的");
                         return Err(());
                     }
                 };

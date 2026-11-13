@@ -72,6 +72,8 @@ pub struct Ctl {
     pub open_hold: std::sync::atomic::AtomicBool,
     pub open_release: Notify,
     pub opening: Notify,
+    /// 为真时清树（`terminate`）永不返回：进程树清不掉
+    pub hang_terminate: std::sync::atomic::AtomicBool,
 }
 
 type Asker = Arc<
@@ -184,6 +186,9 @@ impl AgentSession for FakeSession {
         SandboxStatus::Enforced
     }
     async fn terminate(&self) -> Result<(), AgentError> {
+        if self.ctl.hang_terminate.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         Ok(())
     }
     async fn prompt(&self, blocks: Vec<ContentBlock>) -> Result<FakeUpdates, AgentError> {

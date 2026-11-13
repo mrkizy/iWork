@@ -12,6 +12,7 @@ use std::time::Duration;
 use iwork_daemon::host::{BACKSTOP, HOST_ACTOR, HOST_IO_LIMIT, LINE_BACKOFF_MAX};
 use iwork_domain::event::DomainEvent;
 use iwork_domain::turn::TurnState;
+use support::hooked::Stall;
 use support::turns::*;
 
 /// 暂停的时钟。暂停期间起一个一直让出执行权的任务：运行时从不空闲，tokio 就不会在宿主等真 IO（SQLite）时
@@ -54,6 +55,18 @@ async fn walk_past(h: &H, limit: Duration) {
     wait_for("宿主又跑了一轮", || rounds(h) > r).await;
 }
 
+/// 放开停住的那一次，等它真的返回（在途标记随之放掉），再拨一次钟让宿主接上，最后恢复真时间。
+/// 不等它返回就叫醒的话，宿主那一轮会看到「上一次还没回来」，之后要等保底（测试里就是 30 秒真时间）。
+async fn release_and_recover(h: &H, stall: &Stall, clock: PausedClock, walk: Duration) {
+    stall.release();
+    wait_for("停住的那一次真的返回了", || stall.all_returned()).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    walk_past(h, walk).await;
+    clock.resume();
+}
+
 fn rounds(h: &H) -> u64 {
     h.host.counters().rounds.load(Ordering::SeqCst)
 }
@@ -89,8 +102,7 @@ async fn abandoned_host_read_is_not_reissued() {
         before + 1,
         "上一次读没回来，之后的轮次不发新的读"
     );
-    clock.resume();
-    h.knobs.turn_work.release();
+    release_and_recover(&h, &h.knobs.turn_work, clock, BACKSTOP).await;
     let t = h.send(1, "放开之后").await;
     h.wait_state(t, |s| s == TurnState::Completed).await;
     h.stop().await;
@@ -120,8 +132,7 @@ async fn abandoned_host_commit_is_not_reissued() {
     );
     assert_eq!(h.knobs.commit.stall.calls(), 1, "上一笔没回来，补账不再发");
     assert_eq!(h.knobs.commit.passed_in.load(Ordering::SeqCst), 0);
-    clock.resume();
-    h.knobs.commit.stall.release();
+    release_and_recover(&h, &h.knobs.commit.stall, clock, BACKSTOP).await;
     h.wait_state(t, |s| s == TurnState::Failed).await;
     let failed = events(&h.raw)
         .await
@@ -165,9 +176,7 @@ async fn abandoned_line_read_is_not_reissued() {
         reads,
         "上一次准备的读没回来，之后的每一趟都不发新的读"
     );
-    clock.resume();
-    h.knobs.turn_with_conversation.release();
-    h.host.wake();
+    release_and_recover(&h, &h.knobs.turn_with_conversation, clock, LINE_BACKOFF_MAX).await;
     h.wait_state(t, |s| s == TurnState::Completed).await;
     h.stop().await;
 }
@@ -242,5 +251,70 @@ async fn settle_converges_after_busy() {
         count(&|e| matches!(e, DomainEvent::TurnFinished(f) if f.turn_id == t)),
         1
     );
+    h.stop().await;
+}
+
+/// b45 1/F-2（宿主补账前的读）：补账要先读流式消息，这次读永不返回，时钟走过几个 30 秒：宿主照样一轮轮对账，
+/// 这次读没有再发；放开之后补账落盘，回合到 `Failed`。
+#[tokio::test(flavor = "current_thread")]
+async fn unsettled_read_is_bounded() {
+    let mut h = harness(Opts::default()).await;
+    h.gate.refuse_when(|r| finishes(r, TurnState::Completed));
+    h.knobs.unsettled.arm();
+    h.start_host();
+    let t = h.send(1, "hi").await;
+    within("补账前的读停住", h.knobs.unsettled.wait_stuck()).await;
+    let clock = PausedClock::start();
+    let r0 = rounds(&h);
+    for _ in 0..4 {
+        walk_past(&h, HOST_IO_LIMIT.max(BACKSTOP)).await;
+    }
+    assert!(
+        rounds(&h) >= r0 + 3,
+        "宿主照样在对账：{} → {}",
+        r0,
+        rounds(&h)
+    );
+    assert_eq!(h.knobs.unsettled.calls(), 1, "上一次读没回来，不发新的");
+    release_and_recover(&h, &h.knobs.unsettled, clock, BACKSTOP).await;
+    h.wait_state(t, |s| s == TurnState::Failed).await;
+    h.wait_state(t, |s| s == TurnState::Failed).await;
+    h.stop().await;
+}
+
+/// b45 1/F-2（会话线取最后一条会话绑定）：这次读永不返回，时钟走过几个 30 秒：这一趟以「没开始」结束、
+/// 宿主之后照样交活，这次读只发过一次；放开之后回合跑完。
+#[tokio::test(flavor = "current_thread")]
+async fn last_binding_read_is_bounded() {
+    let mut h = harness(Opts::default()).await;
+    h.knobs.last_session_binding.arm();
+    h.start_host();
+    let t = h.send(1, "hi").await;
+    within(
+        "取最后一条绑定停住",
+        h.knobs.last_session_binding.wait_stuck(),
+    )
+    .await;
+    let clock = PausedClock::start();
+    let handed0 = handed(&h);
+    for _ in 0..30 {
+        if handed(&h) >= handed0 + 3 {
+            break;
+        }
+        walk_past(&h, HOST_IO_LIMIT.max(BACKSTOP).max(LINE_BACKOFF_MAX)).await;
+    }
+    assert!(
+        handed(&h) >= handed0 + 3,
+        "这条线没被占死，宿主照样在交活：{} → {}",
+        handed0,
+        handed(&h)
+    );
+    assert_eq!(
+        h.knobs.last_session_binding.calls(),
+        1,
+        "上一次读没回来，之后的每一趟都不发新的"
+    );
+    release_and_recover(&h, &h.knobs.last_session_binding, clock, LINE_BACKOFF_MAX).await;
+    h.wait_state(t, |s| s == TurnState::Completed).await;
     h.stop().await;
 }

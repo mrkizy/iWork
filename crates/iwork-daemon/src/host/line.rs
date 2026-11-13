@@ -19,7 +19,7 @@ use iwork_ports::read_model::{ReadModelPort, SnapshotInputs};
 use tokio::sync::Notify;
 
 use super::changes::ChangeReader;
-use super::plan::{Closing, Entry, JobEnd, JobKind};
+use super::plan::{Closing, Entry, JobEnd, JobKind, LastRun};
 use super::ports::{HostEngine, HostPorts};
 use super::prepare::{LineKey, prepare};
 use super::{
@@ -97,7 +97,11 @@ impl Shared {
             if matches!(end, JobEnd::Closed) {
                 lines.by_conversation.remove(&c);
             } else {
-                entry.last = Some((turn, end, sent));
+                entry.last = Some(LastRun {
+                    turn,
+                    end,
+                    cancel_sent: sent,
+                });
             }
         }
         #[cfg(any(test, feature = "test-hooks"))]
@@ -273,6 +277,11 @@ async fn one_run<P: HostPorts>(
 }
 
 /// D8a：丢掉一条线之前把它身上没落盘、没清掉的了结；做不到就留着这条线。
+///
+/// 这里的补记提交（`SessionLine::settle`）**有意不限时**、不进 [`bounded`]（supervisor 2026-11-14 定）：它在 core 里
+/// 借着 `&mut line` 做，每次都取新的 `command_id`；限时丢掉之后再补会换号重发，正好违反不变量 13 的另一半（上一次
+/// 没回来不发下一次）。方案 D8a 给它定的是 `Busy` 退避、不设次数上限，没有 30 秒时限。卡住时这条线不前进，封口照样
+/// 能把这一趟整个丢掉（E3）。
 async fn settle_and_retire<P: HostPorts>(ports: &P, line: &mut Line<P>) -> Result<(), String> {
     line.settle(turn_ports(ports))
         .await
@@ -339,9 +348,21 @@ async fn run_turn_job<P: HostPorts>(
             tracing::warn!(%why, "换线前旧线没了结，旧线留着，这个回合不开始");
             return JobEnd::NotStarted(why);
         }
-        let resume = match ports.read().last_session_binding(conversation).await {
-            Ok(r) => r,
-            Err(e) => return JobEnd::NotStarted(format!("取最后一条会话绑定失败：{e}")),
+        // 在 D8a 补完旧绑定之后再取（换线要用补完之后的那一条）；和准备的读共用这条线的在途标记，先后做
+        let p = ports.clone();
+        let read = bounded(read_busy, HOST_IO_LIMIT, async move {
+            p.read().last_session_binding(conversation).await
+        })
+        .await;
+        let resume = match read {
+            Bounded::Done(Ok(r)) => r,
+            Bounded::Done(Err(e)) => {
+                return JobEnd::NotStarted(format!("取最后一条会话绑定失败：{e}"));
+            }
+            Bounded::Busy => return JobEnd::NotStarted("这条线上一次取绑定的读还没回来".into()),
+            Bounded::TimedOut => {
+                return JobEnd::NotStarted("取最后一条会话绑定 30 秒没回来".into());
+            }
         };
         let decider = Arc::new(ports.engine().decider_for(prepared.keys.clone()));
         *bound = Some(Bound {

@@ -41,6 +41,9 @@ pub struct DevWork {
     cards: AtomicU32,
     uncleared: bool,
     sealed: AtomicBool,
+    /// 封口时要关的会话数、其中还没确认清空的（`abort_snapshot` 读）
+    aborting: AtomicU32,
+    unconfirmed: AtomicU32,
 }
 
 impl DevWork {
@@ -67,6 +70,8 @@ impl DevWork {
             cards: AtomicU32::new(cards),
             uncleared,
             sealed: AtomicBool::new(false),
+            aborting: AtomicU32::new(0),
+            unconfirmed: AtomicU32::new(0),
         };
         for _ in 0..turns {
             work.open_session().expect("起假会话");
@@ -130,20 +135,29 @@ impl RunningWork for DevWork {
         // 先封口，再关会话
         self.sealed.store(true, Ordering::SeqCst);
         let procs: Vec<_> = std::mem::take(&mut *self.procs.lock().unwrap());
-        let mut not_cleared = 0;
+        self.aborting.store(procs.len() as u32, Ordering::SeqCst);
+        self.unconfirmed.store(
+            procs.len() as u32 + u32::from(self.uncleared),
+            Ordering::SeqCst,
+        );
         for (p, _) in &procs {
             let cleared = p.kill_tree_and_wait().await && matches!(p.tree_is_empty(), Ok(true));
-            if !cleared {
-                not_cleared += 1;
+            if cleared {
+                self.unconfirmed.fetch_sub(1, Ordering::SeqCst);
             }
         }
-        if self.uncleared {
-            not_cleared += 1;
-        }
+        let not_cleared = self.unconfirmed.load(Ordering::SeqCst);
         tracing::info!(sessions = procs.len(), not_cleared, "dev work：abort_all");
         AbortReport {
             sessions: procs.len() as u32,
             not_cleared,
+        }
+    }
+
+    fn abort_snapshot(&self) -> AbortReport {
+        AbortReport {
+            sessions: self.aborting.load(Ordering::SeqCst),
+            not_cleared: self.unconfirmed.load(Ordering::SeqCst),
         }
     }
 }
@@ -294,6 +308,8 @@ mod tests {
             cards: AtomicU32::new(0),
             uncleared: false,
             sealed: AtomicBool::new(false),
+            aborting: AtomicU32::new(0),
+            unconfirmed: AtomicU32::new(0),
         };
         for _ in 0..turns {
             w.open_session().unwrap();

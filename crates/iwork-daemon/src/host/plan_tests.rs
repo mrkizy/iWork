@@ -203,23 +203,108 @@ fn cancel_only_crossed_runs() {
     );
 }
 
+fn broke(turn_n: u128, cancel_sent: bool) -> LineView {
+    LineView {
+        last: Some(LastRun {
+            turn: Some(tid(turn_n)),
+            end: JobEnd::Broke("写不进".into()),
+            cancel_sent,
+        }),
+        ..free()
+    }
+}
+
 /// D5：占着进程的回合，本进程里它的那一趟以出错结束 → 补账；从没有过 → 不可能（R3）。
 #[test]
 fn settle_after_broke_only() {
     let none = BTreeMap::new();
     let w = active(vec![open(1, TurnState::Running)]);
-    let broke = LineView {
-        last: Some((Some(tid(1)), JobEnd::Broke("写不进".into()))),
-        ..free()
-    };
     assert_eq!(
-        decide(&w, Some(&broke), &round(&none)),
-        Some(Action::Settle { turn: tid(1) })
+        decide(&w, Some(&broke(1, false)), &round(&none)),
+        Some(Action::Settle {
+            turn: tid(1),
+            reason: "写不进".into(),
+            cancel_requested: false,
+        })
     );
     assert!(matches!(
         decide(&w, Some(&free()), &round(&none)),
         Some(Action::Impossible(_))
     ));
+}
+
+/// b45 1/F-1：补账按取消收还是按失败收，和发取消（D6）是同一个判断。依据四样（发过信号、比这一趟起点新的意图、
+/// 在删、完全退出）各自成立就算；比起点旧的意图、什么都没有 → 按失败收。期望值按方案 D5、D6 逐格手写。
+#[test]
+fn settle_and_cancel_share_one_judgement() {
+    let none = BTreeMap::new();
+    let running = |intent: Option<u64>| {
+        let mut t = open(1, TurnState::Running);
+        t.run_started_seq = Some(Seq(200));
+        t.cancel_intent_seq = intent.map(Seq);
+        t
+    };
+    let quit = Round {
+        closing: Closing::Quit,
+        ..round(&none)
+    };
+    let cases: [(&str, ConversationWork, bool, Round<'_>, bool); 6] = [
+        (
+            "什么都没有",
+            active(vec![running(None)]),
+            false,
+            round(&none),
+            false,
+        ),
+        (
+            "比起点旧的意图",
+            active(vec![running(Some(190))]),
+            false,
+            round(&none),
+            false,
+        ),
+        (
+            "本趟发过信号",
+            active(vec![running(None)]),
+            true,
+            round(&none),
+            true,
+        ),
+        (
+            "比起点新的意图",
+            active(vec![running(Some(210))]),
+            false,
+            round(&none),
+            true,
+        ),
+        (
+            "对话在删",
+            work(ConversationState::Deleting, vec![running(None)]),
+            false,
+            round(&none),
+            true,
+        ),
+        ("完全退出", active(vec![running(None)]), false, quit, true),
+    ];
+    for (name, w, sent, r, want) in cases {
+        assert_eq!(
+            decide(&w, Some(&broke(1, sent)), &r),
+            Some(Action::Settle {
+                turn: tid(1),
+                reason: "写不进".into(),
+                cancel_requested: want,
+            }),
+            "补账：{name}"
+        );
+        // 同一组依据下，过了边界、还没发过信号的那一趟：要不要发取消，结论一样（发过信号那一格不再发）
+        let job = running_job(1, true);
+        let expect_cancel = want && !sent;
+        assert_eq!(
+            decide(&w, Some(&job), &r).is_some(),
+            expect_cancel,
+            "发取消：{name}"
+        );
+    }
 }
 
 /// D5a：上一趟没成，退避到时之前不再交。
@@ -228,9 +313,8 @@ fn backoff_after_failed_attempt() {
     let none = BTreeMap::new();
     let w = active(vec![open(1, TurnState::Queued)]);
     let waiting = LineView {
-        last: Some((Some(tid(1)), JobEnd::Broke("x".into()))),
         backoff_ready: false,
-        ..free()
+        ..broke(1, false)
     };
     assert_eq!(decide(&w, Some(&waiting), &round(&none)), None);
     let ready = LineView {

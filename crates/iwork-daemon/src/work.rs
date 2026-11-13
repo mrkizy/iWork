@@ -34,6 +34,9 @@ pub trait RunningWork: Send + Sync + 'static {
     fn cancel_all(&self) -> impl Future<Output = ()> + Send;
     /// 停机第 3 步（E3）：封口，再关闭全部会话、结束各进程树并逐个核对进程组已空。不提交任何事件。
     fn abort_all(&self) -> impl Future<Output = AbortReport> + Send;
+    /// 此刻的封口报告，同步、不等待：已经报回来的照实记，还没报回来的都算没清空。停机第 3 步的外层期限到了、
+    /// `abort_all` 还没回来时，停机流程读它写进状态文件（b45 1/F-4）；`abort_all` 自己到点时也交这一份。
+    fn abort_snapshot(&self) -> AbortReport;
 }
 
 /// 读 N 最多等这么久（E1）。
@@ -65,6 +68,9 @@ impl RunningWork for NoWork {
     }
     async fn cancel_all(&self) {}
     async fn abort_all(&self) -> AbortReport {
+        AbortReport::default()
+    }
+    fn abort_snapshot(&self) -> AbortReport {
         AbortReport::default()
     }
 }
@@ -126,6 +132,12 @@ impl<W: RunningWork> RunningWork for LateWork<W> {
     async fn abort_all(&self) -> AbortReport {
         match self.current() {
             Some(w) => w.abort_all().await,
+            None => AbortReport::default(),
+        }
+    }
+    fn abort_snapshot(&self) -> AbortReport {
+        match self.current() {
+            Some(w) => w.abort_snapshot(),
             None => AbortReport::default(),
         }
     }
