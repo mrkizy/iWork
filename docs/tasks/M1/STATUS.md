@@ -180,6 +180,8 @@
 
 ## 5 踩过的坑
 
+- **磁盘满（2026-11-13 15:10）**：系统盘只剩 1.8G，worker 连命令都起不来。四个活跃 worktree 的 target 各 20–30G；占地最大的是旧会话 worker 在 `/private/tmp/claude-501/<worktree 路径>/<会话>/scratchpad/` 下给变异、基准、全量各开的独立 `target`（组 B 一个会话就 18G）。按「13:10 之后没人碰过」确认后只删这些 `target`，日志和结果留着，腾到 27G。派活时写明：变异各批共用一个 CARGO_TARGET_DIR，临时副本跑完就删；换会话之后，旧会话 scratchpad 里的 target 可以直接清。
+
 - **换 supervisor 后联系不上旧 worker（2026-11-13）**：新开的 supervisor 终端不能给旧 supervisor 派出的 worker `send_message`（CAO 只允许自己派的、派自己的、兄弟终端），旧 worker 的回报也只能发给已退出的旧终端。所以每个在途 worker 都要随时把现场写进自己 worktree 的 `.cao-handoff/`（分支、HEAD、剩下的步骤、命令），换 supervisor 时按它给每张卡派新 worker；旧终端不删（删了清 worktree）。`report_outcome` 时把 `workflow_name` 设成任务 ID，retrospector 才按名字找得到。
 
 - **变异测试挂住、占着重测试锁（2026-11-11）**：T05 复审的 reviewer 在副本里做变异，被改坏的代码让 turn_runner 挂住 1.5 小时，一直占着 `/tmp/iwork-heavy-test.lock`，别的卡全排在后面。派 reviewer、developer 做变异时写明：测试命令外面套 `timeout`（如 120 秒），挂住按「测试抓住了」记。排查：`ps -o pid,etime,command` 看 lockf 进程，`lsof -p <pid> | grep cwd` 看是谁的副本。（调优窗口 T-2 期间不改 reviewer 项目提示词，先写在派活消息里。）
