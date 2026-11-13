@@ -8,13 +8,14 @@ use iwork_app::subscription::{
     CONVERSATION_SNAPSHOT_PAGE_SIZE, routes_for, scope_streams, snapshot_queries, stream_kind_name,
 };
 use iwork_domain::event::{DomainEvent, StreamKind};
+use iwork_domain::id::{ConversationId, RawUlid};
 use iwork_proto::pb;
 use iwork_proto::pb::query::Kind as Q;
 use iwork_proto::pb::subscription_scope::Kind as Scope;
 use iwork_proto::routing::StreamKey;
 use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::TestRunner;
-use support::arb::event_strategies;
+use support::arb::{event_strategies, with_conversation};
 use support::oneof_fields;
 
 /// 每种事件抽多少个样例。
@@ -209,12 +210,27 @@ fn routes_for_matches_domain_stream() {
     }
 }
 
-/// 载荷里已经带会话 ID 的回合 / 审批 / 卡片事件 → 那个会话。
+/// 载荷里带着所属对话的事件 → 那个对话：三种实体事件取实体上的，十二种后续事件取自己带的（G5，`None` = 旧事件）。
+/// 独立于实现：直接读字段，不经 `routes_for`。
 fn carried_conversation(event: &DomainEvent) -> Option<String> {
+    use DomainEvent as E;
+    let carried = |c: &Option<ConversationId>| c.map(|c| c.to_string());
     match event {
-        DomainEvent::TurnQueued(e) => Some(e.turn.conversation_id.to_string()),
-        DomainEvent::ApprovalRequested(e) => Some(e.approval.conversation_id.to_string()),
-        DomainEvent::UserActionProposed(e) => Some(e.card.conversation_id.to_string()),
+        E::TurnQueued(e) => Some(e.turn.conversation_id.to_string()),
+        E::ApprovalRequested(e) => Some(e.approval.conversation_id.to_string()),
+        E::UserActionProposed(e) => Some(e.card.conversation_id.to_string()),
+        E::TurnStateChanged(e) => carried(&e.conversation_id),
+        E::TurnFinished(e) => carried(&e.conversation_id),
+        E::TurnModelReported(e) => carried(&e.conversation_id),
+        E::TurnSessionBound(e) => carried(&e.conversation_id),
+        E::TurnIntentRecorded(e) => carried(&e.conversation_id),
+        E::ToolCallStarted(e) => carried(&e.conversation_id),
+        E::ToolCallFinished(e) => carried(&e.conversation_id),
+        E::ApprovalDelivered(e) => carried(&e.conversation_id),
+        E::ApprovalReviewUpdated(e) => carried(&e.conversation_id),
+        E::ApprovalDecided(e) => carried(&e.conversation_id),
+        E::ApprovalVoided(e) => carried(&e.conversation_id),
+        E::UserActionStateChanged(e) => carried(&e.conversation_id),
         _ => None,
     }
 }
@@ -238,29 +254,68 @@ fn routes_for_every_event_kind() {
                     "{kind} 应加会话副键"
                 );
             }
-            // 其余事件只有主键：主流本来就是会话的不重复加，其他流的不属于单个对话。
+            // 其余事件只有主键：主流本来就是会话的不重复加，其他流的不属于单个对话，旧事件没带所属对话。
             None => assert_eq!(routes.len(), 1, "{kind} 多出了副键 {conversation_routes:?}"),
         }
     }
-    // 对照：三种带会话 ID 的事件确实被抽到并检查过。
-    assert_eq!(with_conversation, 3 * SAMPLES_PER_KIND);
+    // 对照：三种实体事件的样例全带会话副键，十二种后续事件里也抽到了带着的
+    assert!(
+        with_conversation > 3 * SAMPLES_PER_KIND,
+        "{with_conversation}"
+    );
 }
 
-/// 方案 Q3：回合、审批、卡片流上的事件都要能被会话范围收到。
+/// 回合流、审批流上的每一种事件，带着所属对话时都进会话范围（方案 Q3、T10a 方案 2.7 G5）。
+/// 加一种回合或审批流的事件却没给它所属对话，这里红。
 #[test]
-#[ignore = "等 T10 给回合/审批/卡片事件加 conversation_id"]
-fn routes_for_turn_approval_card_events_include_conversation() {
+fn turn_scoped_events_route_to_conversation() {
+    let conversation = ConversationId::from_raw(RawUlid::from_u128(0xC0));
+    let key = StreamKey::one("conversation", conversation.to_string());
+    let mut kinds = std::collections::BTreeSet::new();
     for (kind, event) in sampled_events() {
         let (stream, _) = event.stream();
         if !matches!(stream, StreamKind::Turn | StreamKind::Approval) {
             continue;
         }
+        let event = with_conversation(event, Some(conversation));
         let routes = routes_for(&event);
-        assert!(
-            routes[1..]
-                .iter()
-                .any(|k| k.kind == "conversation" && k.id.is_some()),
-            "{kind} 缺会话副键：{routes:?}"
-        );
+        // 三种实体事件的对话在实体上（随机的），别的都是刚换上的这一个
+        let want = match carried_conversation(&event) {
+            Some(id) => StreamKey::one("conversation", id),
+            None => panic!("{kind} 在回合或审批流上，却没有所属对话"),
+        };
+        assert_eq!(routes, [expected_primary(&event), want], "{kind}");
+        if !matches!(
+            event,
+            DomainEvent::TurnQueued(_)
+                | DomainEvent::ApprovalRequested(_)
+                | DomainEvent::UserActionProposed(_)
+        ) {
+            assert_eq!(routes[1], key, "{kind}");
+        }
+        kinds.insert(kind);
     }
+    // 对照：十二种后续事件加三种实体事件都检查过
+    assert_eq!(kinds.len(), 15, "{kinds:?}");
+}
+
+/// 加字段之前落盘的旧事件（没有所属对话）：只走主流，不猜、不回填（T03 方案 Q3）。
+#[test]
+fn legacy_event_without_conversation_routes_primary_only() {
+    let mut checked = 0;
+    for (kind, event) in sampled_events() {
+        let legacy = with_conversation(event.clone(), None);
+        if legacy == event && carried_conversation(&event).is_some() {
+            // 三种实体事件：对话在实体上，没有「旧事件」一说
+            continue;
+        }
+        let (stream, _) = legacy.stream();
+        if !matches!(stream, StreamKind::Turn | StreamKind::Approval) {
+            continue;
+        }
+        assert_eq!(routes_for(&legacy), [expected_primary(&legacy)], "{kind}");
+        checked += 1;
+    }
+    // 对照：十二种都抽到了
+    assert_eq!(checked, 12 * SAMPLES_PER_KIND);
 }

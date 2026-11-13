@@ -86,6 +86,7 @@ fn history(store: &Store) {
         2,
         vec![
                 ApprovalDecided {
+                    conversation_id: Some(cid(10)),
                     approval_id: apid(41),
                     state: ApprovalState::Approved {
                         decider: Decider::AiReview,
@@ -94,6 +95,7 @@ fn history(store: &Store) {
                 }
                 .into(),
                 ApprovalVoided {
+                    conversation_id: Some(cid(10)),
                     approval_id: apid(42),
                     reason: VoidReason::TurnCancelled,
                 }

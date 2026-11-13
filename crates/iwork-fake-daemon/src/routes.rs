@@ -1,9 +1,9 @@
 //! 事件 → 路由键。
 //!
-//! 为什么不直接调 `iwork_app::subscription::routes_for`：它吃领域事件，而且回合、工具调用、审批决定、卡片状态
-//! 这几类事件的载荷里还没有 `conversation_id`，现在只走主流（T09 方案第 3 节 G5，归 T10）。假后台按 G5 落地后的
-//! 路由发：这些事件再加一个 `conversation:<id>`，对话 id 从折叠表里查。主键与 `routes_for` 第一个键相同，
-//! 由 `tests/routes_parity.rs` 对拍；G5 落地后假后台改为直接调 `routes_for`，删掉这张表。
+//! 为什么不直接调 `iwork_app::subscription::routes_for`：它吃领域事件，假后台的日志是 proto 事件。这里按同一规则算：
+//! 主流，加上（主流不是会话时）所属对话的 `conversation:<id>`。十二种后续事件现在自己带所属对话（G5，T10a 步 1b），
+//! 场景夹具不传，由 [`stamp_conversation`] 在追加时按折叠表填上，所以和真后台一样每条都带着。主键与 `routes_for`
+//! 第一个键相同，由 `tests/routes_parity.rs` 对拍。
 
 use iwork_proto::pb;
 use iwork_proto::pb::domain_event::Event as E;
@@ -119,6 +119,32 @@ pub fn routes(tables: &Tables, event: &E) -> Vec<StreamKey> {
         routes.push(StreamKey::one(CONVERSATION, conv));
     }
     routes
+}
+
+/// 十二种带所属对话的事件（G5）：场景夹具不传对话编号，追加时按折叠表填上，和真后台的构造点一样都带着它。
+/// 已经填了的不动；折叠表里查不到归属的留空（场景故意造的孤儿事件）。
+pub fn stamp_conversation(tables: &Tables, event: &mut E) {
+    let Some(conv) = tables.conversation_of(event) else {
+        return;
+    };
+    let slot = match event {
+        E::TurnStateChanged(x) => &mut x.conversation_id,
+        E::TurnFinished(x) => &mut x.conversation_id,
+        E::TurnModelReported(x) => &mut x.conversation_id,
+        E::TurnSessionBound(x) => &mut x.conversation_id,
+        E::TurnIntentRecorded(x) => &mut x.conversation_id,
+        E::ToolCallStarted(x) => &mut x.conversation_id,
+        E::ToolCallFinished(x) => &mut x.conversation_id,
+        E::ApprovalDelivered(x) => &mut x.conversation_id,
+        E::ApprovalReviewUpdated(x) => &mut x.conversation_id,
+        E::ApprovalDecided(x) => &mut x.conversation_id,
+        E::ApprovalVoided(x) => &mut x.conversation_id,
+        E::UserActionStateChanged(x) => &mut x.conversation_id,
+        _ => return,
+    };
+    if slot.is_empty() {
+        *slot = conv;
+    }
 }
 
 /// 流式增量的路由：消息增量落在消息所在对话；工具输出落在工具调用所在对话；克隆进度落在任务的项目键。

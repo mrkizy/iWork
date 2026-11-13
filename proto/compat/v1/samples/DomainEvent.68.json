@@ -1,0 +1,10 @@
+{
+  "turnModelReported": {
+    "turnId": "01JC0T0000000000000000TRN1",
+    "model": {
+      "modelId": "opus",
+      "effort": "high"
+    },
+    "conversationId": "01JC0C0000000000000000CNV1"
+  }
+}

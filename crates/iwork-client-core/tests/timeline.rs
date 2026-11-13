@@ -221,6 +221,7 @@ fn unknown_target_event_is_dropped() {
         11,
         &[PENDING],
         E::TurnFinished(pb::TurnFinished {
+            conversation_id: CID.into(),
             turn_id: "other".into(),
             state: pb::TurnState::Completed as i32,
             ..Default::default()
@@ -230,6 +231,7 @@ fn unknown_target_event_is_dropped() {
         12,
         &[PENDING],
         E::ApprovalDecided(pb::ApprovalDecided {
+            conversation_id: CID.into(),
             approval_id: "nope".into(),
             state: pb::ApprovalState::Approved as i32,
             ..Default::default()
@@ -307,6 +309,7 @@ fn approval_events_follow_terminal_contract() {
         11,
         &[CONV],
         E::ApprovalVoided(pb::ApprovalVoided {
+            conversation_id: CID.into(),
             approval_id: "ap".into(),
             reason: pb::VoidReason::TurnCancelled as i32,
         }),
@@ -519,6 +522,7 @@ fn trimming_also_trims_side_tables() {
             seq + 4,
             &[CONV],
             E::TurnFinished(pb::TurnFinished {
+                conversation_id: CID.into(),
                 turn_id: turn,
                 state: pb::TurnState::Completed as i32,
                 ..Default::default()

@@ -9,6 +9,7 @@ pub(super) fn plan_approval(
     mode_now: ApprovalMode,
 ) -> Result<Vec<DomainEvent>, ApprovalApplyError> {
     let id = current.id;
+    let conversation_id = Some(current.conversation_id);
     let mut approval = current.clone();
     let remember = match trigger {
         ApprovalTrigger::UserAllow { remember } => Some(remember),
@@ -21,6 +22,7 @@ pub(super) fn plan_approval(
                 events.push(
                     ApprovalReviewUpdated {
                         approval_id: id,
+                        conversation_id,
                         review: approval.review.clone(),
                     }
                     .into(),
@@ -30,11 +32,13 @@ pub(super) fn plan_approval(
                 events.push(match approval.state {
                     ApprovalState::Voided { reason } => ApprovalVoided {
                         approval_id: id,
+                        conversation_id,
                         reason,
                     }
                     .into(),
                     state => ApprovalDecided {
                         approval_id: id,
+                        conversation_id,
                         state,
                         remember,
                     }
@@ -183,6 +187,7 @@ pub(super) fn plan_voids(
                 events.push(
                     UserActionStateChanged {
                         card_id: card.id,
+                        conversation_id: Some(card.conversation_id),
                         state: card.state,
                         output_artifact: None,
                     }

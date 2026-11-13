@@ -7,7 +7,7 @@ use iwork_domain::approval::{
 use iwork_domain::event::{
     ApprovalDecided, ApprovalReviewUpdated, ApprovalVoided, DomainEvent, UserActionStateChanged,
 };
-use iwork_domain::id::{ApprovalId, RawUlid, ReviewId, TurnId, UserActionId};
+use iwork_domain::id::{ApprovalId, ConversationId, RawUlid, ReviewId, TurnId, UserActionId};
 use iwork_domain::user_action::{self, ExitStatus, UserActionState};
 
 fn aid() -> ApprovalId {
@@ -17,8 +17,14 @@ fn rid(n: u128) -> ReviewId {
     ReviewId(TurnId::from_raw(RawUlid::from_u128(n)))
 }
 
+/// 这组用例只看前提校验，事件归哪个对话不影响判断。
+fn conv() -> ConversationId {
+    ConversationId::from_raw(RawUlid::from_u128(9))
+}
+
 fn decided(state: ApprovalState) -> DomainEvent {
     ApprovalDecided {
+        conversation_id: Some(conv()),
         approval_id: aid(),
         state,
         remember: None,
@@ -28,6 +34,7 @@ fn decided(state: ApprovalState) -> DomainEvent {
 
 fn review(r: ReviewState) -> DomainEvent {
     ApprovalReviewUpdated {
+        conversation_id: Some(conv()),
         approval_id: aid(),
         review: r,
     }
@@ -43,6 +50,7 @@ fn approval_main_state_must_be_pending() {
         reason: VoidReason::TurnCancelled,
     };
     let void_event: DomainEvent = ApprovalVoided {
+        conversation_id: Some(conv()),
         approval_id: aid(),
         reason: VoidReason::TurnCancelled,
     }
@@ -130,6 +138,7 @@ fn review_edges_and_review_id() {
 
 fn card_event(state: UserActionState) -> DomainEvent {
     UserActionStateChanged {
+        conversation_id: Some(conv()),
         card_id: UserActionId::from_raw(RawUlid::from_u128(2)),
         state,
         output_artifact: None,
@@ -260,11 +269,13 @@ fn requires_owner_only_for_build_and_approve() {
         ended_at: None,
     };
     let id = turn.id;
+    let conversation = turn.conversation_id;
     assert!(requires_owner(
         &iwork_domain::event::TurnQueued { turn }.into()
     ));
     assert!(!requires_owner(
         &iwork_domain::event::TurnIntentRecorded {
+            conversation_id: Some(conversation),
             turn_id: id,
             intent: iwork_domain::turn::TurnIntentKind::Cancel,
         }

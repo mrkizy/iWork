@@ -272,6 +272,8 @@ pub struct TurnQueued {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnStateChanged {
     pub turn_id: TurnId,
+    /// 所属对话（G5）。`None` 只出现在加这个字段之前落盘的旧事件上；新构造的一律是 `Some`
+    pub conversation_id: Option<ConversationId>,
     pub from: TurnState,
     pub to: TurnState,
     /// 给人看的说明，如失败原因
@@ -282,6 +284,8 @@ pub struct TurnStateChanged {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnFinished {
     pub turn_id: TurnId,
+    /// 所属对话（G5）。`None` 只出现在加这个字段之前落盘的旧事件上；新构造的一律是 `Some`
+    pub conversation_id: Option<ConversationId>,
     pub state: TurnState,
     pub usage: Usage,
     pub celebrate: bool,
@@ -292,6 +296,8 @@ pub struct TurnFinished {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnModelReported {
     pub turn_id: TurnId,
+    /// 所属对话（G5）。`None` 只出现在加这个字段之前落盘的旧事件上；新构造的一律是 `Some`
+    pub conversation_id: Option<ConversationId>,
     pub model: ModelSelection,
 }
 
@@ -300,6 +306,8 @@ pub struct TurnModelReported {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnSessionBound {
     pub turn_id: TurnId,
+    /// 所属对话（G5）。`None` 只出现在加这个字段之前落盘的旧事件上；新构造的一律是 `Some`
+    pub conversation_id: Option<ConversationId>,
     pub runtime_session_id: String,
     /// 续接失败、换了一条新会话时记下被换掉的那条（需求第 12 章 v1.78 的审计；T06 方案 5.2a）
     pub replaced: Option<SessionReplaced>,
@@ -317,6 +325,8 @@ pub struct SessionReplaced {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalDelivered {
     pub approval_id: ApprovalId,
+    /// 所属对话（G5）。`None` 只出现在加这个字段之前落盘的旧事件上；新构造的一律是 `Some`
+    pub conversation_id: Option<ConversationId>,
     pub turn_id: TurnId,
 }
 
@@ -325,12 +335,16 @@ pub struct ApprovalDelivered {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnIntentRecorded {
     pub turn_id: TurnId,
+    /// 所属对话（G5）。`None` 只出现在加这个字段之前落盘的旧事件上；新构造的一律是 `Some`
+    pub conversation_id: Option<ConversationId>,
     pub intent: TurnIntentKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallStarted {
     pub turn_id: TurnId,
+    /// 所属对话（G5）。`None` 只出现在加这个字段之前落盘的旧事件上；新构造的一律是 `Some`
+    pub conversation_id: Option<ConversationId>,
     pub tool_call_id: ToolCallId,
     pub tool_name: String,
     pub action: Action,
@@ -340,6 +354,8 @@ pub struct ToolCallStarted {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallFinished {
     pub turn_id: TurnId,
+    /// 所属对话（G5）。`None` 只出现在加这个字段之前落盘的旧事件上；新构造的一律是 `Some`
+    pub conversation_id: Option<ConversationId>,
     pub tool_call_id: ToolCallId,
     pub ok: bool,
     pub output_artifact: Option<ArtifactRef>,
@@ -357,6 +373,8 @@ pub struct ApprovalRequested {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalReviewUpdated {
     pub approval_id: ApprovalId,
+    /// 所属对话（G5）。`None` 只出现在加这个字段之前落盘的旧事件上；新构造的一律是 `Some`
+    pub conversation_id: Option<ConversationId>,
     pub review: ReviewState,
 }
 
@@ -364,6 +382,8 @@ pub struct ApprovalReviewUpdated {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalDecided {
     pub approval_id: ApprovalId,
+    /// 所属对话（G5）。`None` 只出现在加这个字段之前落盘的旧事件上；新构造的一律是 `Some`
+    pub conversation_id: Option<ConversationId>,
     pub state: ApprovalState,
     pub remember: Option<RememberScope>,
 }
@@ -371,6 +391,8 @@ pub struct ApprovalDecided {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalVoided {
     pub approval_id: ApprovalId,
+    /// 所属对话（G5）。`None` 只出现在加这个字段之前落盘的旧事件上；新构造的一律是 `Some`
+    pub conversation_id: Option<ConversationId>,
     pub reason: VoidReason,
 }
 
@@ -445,6 +467,8 @@ pub struct UserActionProposed {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserActionStateChanged {
     pub card_id: UserActionId,
+    /// 所属对话（G5）。`None` 只出现在加这个字段之前落盘的旧事件上；新构造的一律是 `Some`
+    pub conversation_id: Option<ConversationId>,
     pub state: UserActionState,
     /// 进入 `Done` / `Unknown` 时带上已收到的输出，只给用户
     pub output_artifact: Option<ArtifactRef>,

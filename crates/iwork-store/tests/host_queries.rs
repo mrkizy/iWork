@@ -7,7 +7,7 @@ use iwork_domain::approval::{ConversationPresence, OwnerFacts, Presence};
 use iwork_domain::approval_mode::ApprovalMode;
 use iwork_domain::conversation::ConversationState;
 use iwork_domain::event::*;
-use iwork_domain::id::Seq;
+use iwork_domain::id::{ConversationId, Seq};
 use iwork_domain::rule::{RuleLayer, RuleScope};
 use iwork_domain::session::SessionLostReason;
 use iwork_domain::turn::{InterruptReason, Turn, TurnIntentKind, TurnState};
@@ -31,8 +31,19 @@ impl Feed<'_> {
     }
 }
 
+/// 这组用例的回合排在哪个对话（和下面造的世界一致）。
+fn conv_of(turn: u128) -> Option<ConversationId> {
+    Some(cid(match turn {
+        20 | 21 => 10,
+        22 => 11,
+        23 => 12,
+        other => panic!("用例里没有回合 {other}"),
+    }))
+}
+
 fn change(turn: u128, from: TurnState, to: TurnState) -> DomainEvent {
     TurnStateChanged {
+        conversation_id: conv_of(turn),
         turn_id: tid(turn),
         from,
         to,
@@ -43,6 +54,7 @@ fn change(turn: u128, from: TurnState, to: TurnState) -> DomainEvent {
 
 fn intent(turn: u128, intent: TurnIntentKind) -> DomainEvent {
     TurnIntentRecorded {
+        conversation_id: conv_of(turn),
         turn_id: tid(turn),
         intent,
     }
@@ -51,6 +63,7 @@ fn intent(turn: u128, intent: TurnIntentKind) -> DomainEvent {
 
 fn bound(turn: u128, id: &str, replaced: Option<&str>) -> DomainEvent {
     TurnSessionBound {
+        conversation_id: conv_of(turn),
         turn_id: tid(turn),
         runtime_session_id: id.into(),
         replaced: replaced.map(|old| SessionReplaced {
@@ -160,6 +173,7 @@ fn turn_work_bindings_counts_and_snapshot_inputs() {
     feed.ok(vec![
         change(23, TurnState::Running, TurnState::Completed),
         TurnFinished {
+            conversation_id: conv_of(23),
             turn_id: tid(23),
             state: TurnState::Completed,
             usage: Default::default(),

@@ -1,0 +1,21 @@
+{
+  "toolCallStarted": {
+    "turnId": "01JC0T0000000000000000TRN1",
+    "toolCallId": "tool-1",
+    "toolName": "Edit",
+    "action": {
+      "kind": "ACTION_KIND_WRITE",
+      "target": {
+        "paths": {
+          "paths": [
+            "/tmp/a.txt",
+            "/tmp/b.txt"
+          ]
+        }
+      },
+      "toolName": "Edit",
+      "rawSummary": "改两个文件"
+    },
+    "conversationId": "01JC0C0000000000000000CNV1"
+  }
+}

@@ -361,6 +361,7 @@ fn approval_terminal_states_online_and_rebuilt() {
         n += 1;
         let state = ApprovalState::Approved { decider };
         let ev = ApprovalDecided {
+            conversation_id: Some(cid(10)),
             approval_id: apid(n),
             state,
             remember: None,
@@ -369,6 +370,7 @@ fn approval_terminal_states_online_and_rebuilt() {
     }
     n += 1;
     let ev = ApprovalDecided {
+        conversation_id: Some(cid(10)),
         approval_id: apid(n),
         state: ApprovalState::Denied,
         remember: None,
@@ -377,6 +379,7 @@ fn approval_terminal_states_online_and_rebuilt() {
     for reason in VoidReason::all() {
         n += 1;
         let ev = ApprovalVoided {
+            conversation_id: Some(cid(10)),
             approval_id: apid(n),
             reason,
         };
@@ -409,6 +412,7 @@ fn approval_decided_sets_decided_at_from_envelope() {
     env.clock.set(T0 + 7_000);
     feed.ok(vec![
         ApprovalDecided {
+            conversation_id: Some(cid(10)),
             approval_id: apid(1),
             state: ApprovalState::Approved {
                 decider: Decider::User,
@@ -647,6 +651,7 @@ fn populate(feed: &Feed<'_>, conv: u128, turn_n: u128, k: u8) {
         }
         .into(),
         ToolCallStarted {
+            conversation_id: Some(cid(conv)),
             turn_id: tid(turn_n),
             tool_call_id: ToolCallId("tc".into()),
             tool_name: "Bash".into(),
@@ -654,6 +659,7 @@ fn populate(feed: &Feed<'_>, conv: u128, turn_n: u128, k: u8) {
         }
         .into(),
         ToolCallFinished {
+            conversation_id: Some(cid(conv)),
             turn_id: tid(turn_n),
             tool_call_id: ToolCallId("tc".into()),
             ok: true,
@@ -677,6 +683,7 @@ fn populate(feed: &Feed<'_>, conv: u128, turn_n: u128, k: u8) {
         }
         .into(),
         TurnFinished {
+            conversation_id: Some(cid(conv)),
             turn_id: tid(turn_n),
             state: TurnState::Completed,
             usage: Default::default(),
@@ -731,6 +738,7 @@ fn conversation_deleted_cascades() {
     // 级联删除要求名下回合都到终态（T10a X5）
     let cancel = |t: u128| -> DomainEvent {
         TurnStateChanged {
+            conversation_id: Some(cid(10)),
             turn_id: tid(t),
             from: TurnState::Queued,
             to: TurnState::Cancelled,
@@ -846,6 +854,7 @@ fn missing_row_is_projection_error() {
         }
         .into(),
         TurnStateChanged {
+            conversation_id: Some(cid(10)),
             turn_id: tid(999),
             from: TurnState::Queued,
             to: TurnState::Running,
@@ -853,6 +862,7 @@ fn missing_row_is_projection_error() {
         }
         .into(),
         ApprovalDecided {
+            conversation_id: Some(cid(10)),
             approval_id: apid(999),
             state: ApprovalState::Denied,
             remember: None,
@@ -918,12 +928,14 @@ fn session_bound_writes_runtime_session_id_only() {
     );
     feed.ok(vec![
         TurnSessionBound {
+            conversation_id: Some(cid(10)),
             turn_id: tid(20),
             runtime_session_id: "sess-a".into(),
             replaced: None,
         }
         .into(),
         TurnStateChanged {
+            conversation_id: Some(cid(10)),
             turn_id: tid(20),
             from: TurnState::Queued,
             to: TurnState::Running,
@@ -941,6 +953,7 @@ fn session_bound_writes_runtime_session_id_only() {
     };
     feed.ok(vec![
         TurnStateChanged {
+            conversation_id: Some(cid(10)),
             turn_id: tid(20),
             from: TurnState::Running,
             to: interrupted,
@@ -952,6 +965,7 @@ fn session_bound_writes_runtime_session_id_only() {
     let seq_before = scalar(&env.db(), q);
     feed.ok(vec![
         TurnSessionBound {
+            conversation_id: Some(cid(10)),
             turn_id: tid(20),
             runtime_session_id: "sess-b".into(),
             // 续接时记录用不了、用摘要新开（T06 方案 5.2a）：审计字段不影响投影
@@ -993,6 +1007,7 @@ fn updated_seq_tracks_last_event_touching_the_row() {
     assert_eq!(updated_seq(&env, "turns", "id", &t), 4);
     let s = feed.ok(vec![
         TurnStateChanged {
+            conversation_id: Some(cid(10)),
             turn_id: tid(20),
             from: TurnState::Queued,
             to: TurnState::Running,
@@ -1000,6 +1015,7 @@ fn updated_seq_tracks_last_event_touching_the_row() {
         }
         .into(),
         TurnStateChanged {
+            conversation_id: Some(cid(10)),
             turn_id: tid(20),
             from: TurnState::Running,
             to: TurnState::Interrupted {
@@ -1062,6 +1078,7 @@ fn unread_counts_messages_and_cards_and_recomputes_on_read() {
     ]);
     let read_to = feed.ok(vec![
         TurnStateChanged {
+            conversation_id: Some(cid(10)),
             turn_id: tid(20),
             from: TurnState::Queued,
             to: TurnState::Running,
@@ -1069,6 +1086,7 @@ fn unread_counts_messages_and_cards_and_recomputes_on_read() {
         }
         .into(),
         TurnStateChanged {
+            conversation_id: Some(cid(10)),
             turn_id: tid(20),
             from: TurnState::Running,
             to: TurnState::Interrupted {

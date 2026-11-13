@@ -17,7 +17,7 @@ use iwork_core::turn::{
 };
 use iwork_domain::approval::VoidReason;
 use iwork_domain::event::{ApprovalVoided, DomainEvent};
-use iwork_domain::id::{ApprovalId, RawUlid, TurnId};
+use iwork_domain::id::{ApprovalId, ConversationId, RawUlid, TurnId};
 use iwork_domain::turn::TurnState;
 use iwork_ports::agent::{PermissionDecision, PermissionRequest};
 use serde_json::json;
@@ -65,6 +65,10 @@ impl PermissionDecider for Gated {
         Ok((
             vec![
                 ApprovalVoided {
+                    // 虚构的审批，这个假判定方不知道回合在哪个对话；路由不在这组用例里
+                    conversation_id: Some(ConversationId::from_raw(RawUlid::from_u128(
+                        PENDING_APPROVAL,
+                    ))),
                     approval_id: ApprovalId::from_raw(RawUlid::from_u128(PENDING_APPROVAL)),
                     reason,
                 }
