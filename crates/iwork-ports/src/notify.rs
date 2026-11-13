@@ -22,11 +22,35 @@ pub enum PendingItemRef {
 impl PendingItemRef {
     /// 协议里的 `pending_item_id`（`GetOpenTargetResult`、锚点）：各种类自己的编号，不带种类。
     pub fn id_string(&self) -> String {
+        self.parts().1
+    }
+
+    /// 带种类的键（`approval:<编号>`），后台内部要从文字认回是哪一项时用（如 outbox 去向）。和 [`Self::parse_key`]
+    /// 互逆。
+    pub fn key(&self) -> String {
+        let (kind, id) = self.parts();
+        format!("{kind}:{id}")
+    }
+
+    /// [`Self::key`] 的逆；认不出时点名原文。
+    pub fn parse_key(key: &str) -> Result<Self, String> {
+        let bad = || format!("认不出待处理项的键：{key:?}");
+        let (kind, id) = key.split_once(':').ok_or_else(bad)?;
+        Ok(match kind {
+            "approval" => Self::Approval(id.parse().map_err(|_| bad())?),
+            "user_action" => Self::UserAction(id.parse().map_err(|_| bad())?),
+            "agents_md_draft" => Self::AgentsMdDraft(id.parse().map_err(|_| bad())?),
+            "resume" => Self::Resume(id.parse().map_err(|_| bad())?),
+            _ => return Err(bad()),
+        })
+    }
+
+    fn parts(&self) -> (&'static str, String) {
         match self {
-            Self::Approval(id) => id.to_string(),
-            Self::UserAction(id) => id.to_string(),
-            Self::AgentsMdDraft(id) => id.to_string(),
-            Self::Resume(id) => id.to_string(),
+            Self::Approval(id) => ("approval", id.to_string()),
+            Self::UserAction(id) => ("user_action", id.to_string()),
+            Self::AgentsMdDraft(id) => ("agents_md_draft", id.to_string()),
+            Self::Resume(id) => ("resume", id.to_string()),
         }
     }
 }
@@ -123,4 +147,36 @@ pub enum Viewing {
     Conversation(ConversationId),
     /// 「待你处理」页
     PendingList,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iwork_domain::id::RawUlid;
+
+    #[test]
+    fn key_roundtrips_for_every_kind() {
+        let raw = RawUlid::from_u128(7);
+        let all = [
+            PendingItemRef::Approval(ApprovalId::from_raw(raw)),
+            PendingItemRef::UserAction(UserActionId::from_raw(raw)),
+            PendingItemRef::AgentsMdDraft(JobId::from_raw(raw)),
+            PendingItemRef::Resume(TurnId::from_raw(raw)),
+        ];
+        let keys: std::collections::BTreeSet<String> = all.iter().map(|r| r.key()).collect();
+        assert_eq!(keys.len(), all.len(), "同一个编号、不同种类的键不同");
+        for r in all {
+            assert_eq!(PendingItemRef::parse_key(&r.key()), Ok(r));
+            assert_eq!(r.key().split_once(':').unwrap().1, r.id_string());
+        }
+        for bad in [
+            "",
+            "approval",
+            "approval:x",
+            "card:01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        ] {
+            let e = PendingItemRef::parse_key(bad).unwrap_err();
+            assert!(e.contains(bad), "{e}");
+        }
+    }
 }

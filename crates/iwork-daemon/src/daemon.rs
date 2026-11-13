@@ -45,6 +45,7 @@ use crate::tasks::{
 };
 use crate::time::{MonotonicIds, SystemClock};
 use crate::work::{NoWork, RunningWork};
+use iwork_host::notifier::LogNotifier;
 
 /// 第 2 步的结果。
 pub struct Places {
@@ -499,13 +500,24 @@ fn install_timing() -> install_watch::Timing {
     }
 }
 
+/// 查询、快照与 outbox 去向共用的读模型。
+type ReadModel = iwork_store::SqliteReadModel<iwork_app::codec::ProtoEventCodec>;
+
+/// outbox 去向登记表（T04 方案 2.11）：真实去向每个一行，开发构建另加假去向。
+fn outbox_routes(read: Arc<ReadModel>) -> Vec<OutboxRoute> {
+    // 系统通知：macOS 的系统通知接口接入前各平台都只记日志（iwork-host 的 LogNotifier）
+    let mut routes = vec![crate::routes::notify_route(read, Arc::new(LogNotifier))];
+    routes.extend(dev_outbox_routes());
+    routes
+}
+
 #[cfg(not(feature = "dev"))]
-fn outbox_routes() -> Vec<OutboxRoute> {
+fn dev_outbox_routes() -> Vec<OutboxRoute> {
     Vec::new()
 }
 
 #[cfg(feature = "dev")]
-fn outbox_routes() -> Vec<OutboxRoute> {
+fn dev_outbox_routes() -> Vec<OutboxRoute> {
     crate::dev_parts::outbox_routes()
 }
 
@@ -580,7 +592,7 @@ async fn serve_with<W: RunningWork>(
             stop_switch.clone(),
         )
         .with_autostart(autostart_handler(autostart.clone(), store.clone())),
-        StoreSource::new(store.clone(), ReadSnapshots::new(read)),
+        StoreSource::new(store.clone(), ReadSnapshots::new(read.clone())),
     );
     let publishing = PublishState::new();
     let observer = PublishObserver::new(Arc::new(publisher), publishing.clone());
@@ -623,8 +635,7 @@ async fn serve_with<W: RunningWork>(
         step: Step::Tasks,
         message,
     };
-    // T04 交付时登记表是空的（T10 登记真实去向）；开发构建可加假去向
-    let routes = outbox_routes();
+    let routes = outbox_routes(read.clone());
     if let Err(e) = outbox::validate(&routes) {
         return fail(&board, tasks_failed(e));
     }

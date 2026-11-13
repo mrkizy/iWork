@@ -17,6 +17,7 @@ pub mod instance;
 pub mod logging;
 pub mod publish;
 pub mod recovery;
+pub mod routes;
 pub mod snapshot;
 pub mod source;
 pub mod status;
