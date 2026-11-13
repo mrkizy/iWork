@@ -8,8 +8,8 @@ use iwork_domain::approval_mode::ApprovalMode;
 use iwork_domain::assistant::Assistant;
 use iwork_domain::attachment::Attachment;
 use iwork_domain::common::{ArtifactRef, Timestamp, Usage};
-use iwork_domain::event::{ChangeSummary, ToolCallId};
 use iwork_domain::conversation::Conversation;
+use iwork_domain::event::{ChangeSummary, ToolCallId};
 use iwork_domain::id::{
     AssistantId, ConversationId, JobId, MessageId, ProjectId, RuntimeId, Seq, TurnId,
 };
@@ -392,7 +392,10 @@ pub struct ConversationPage {
 pub enum ViewRefused {
     ConversationNotFound(ConversationId),
     /// 消息游标不在这个对话里
-    CursorNotInConversation { field: &'static str, id: String },
+    CursorNotInConversation {
+        field: &'static str,
+        id: String,
+    },
 }
 
 /// 「待你处理」的一项与它在时间线上的位置。
@@ -410,7 +413,11 @@ pub enum AnchorKind {
     UserMessage { message_id: MessageId, text: String },
     /// 审批 id、卡片 id 或回合 id
     Waiting { pending_item_id: String },
-    FailedTurn { turn_id: TurnId, reason: String, had_output: bool },
+    FailedTurn {
+        turn_id: TurnId,
+        reason: String,
+        had_output: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

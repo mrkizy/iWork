@@ -337,7 +337,10 @@ mod tests {
         assert!(!hits(&sidebar, &routes), "侧栏收到了增量：{routes:?}");
         assert!(hits(&open, &routes), "打开的对话收不到增量");
         assert!(!hits(&other, &routes), "别的对话收到了增量");
-        assert!(hits(&sidebar, &routes_for(&appended.event)), "对照：持久事件侧栏收得到");
+        assert!(
+            hits(&sidebar, &routes_for(&appended.event)),
+            "对照：持久事件侧栏收得到"
+        );
     }
 
     /// 提交了自启设置就叫醒对齐任务；别的设置变化不叫。

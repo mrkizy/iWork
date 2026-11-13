@@ -250,7 +250,12 @@ impl StoragePort for MemStore {
         // 新构造的事件一律带所属对话（G5，T10a 方案 2.7「怎么守住新构造的一律 Some」）：这组闭环用例经过的编排与
         // 引擎的每个构造点都在这里被查一遍
         for e in &req.events {
-            assert_ne!(e.carried_conversation(), Some(None), "{} 没带所属对话", e.kind());
+            assert_ne!(
+                e.carried_conversation(),
+                Some(None),
+                "{} 没带所属对话",
+                e.kind()
+            );
         }
         let mut events = self.events.lock().unwrap();
         let first = events.len() as u64 + 1;

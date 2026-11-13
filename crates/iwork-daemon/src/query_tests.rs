@@ -18,9 +18,9 @@ use iwork_app::convert::persisted_event_to_proto;
 use iwork_app::subscription::{routes_for, scope_streams};
 use iwork_domain::approval::{ApprovalState, Decider};
 use iwork_domain::event::{
-    ApprovalDecided, ApprovalRequested, ConversationCreated, DomainEvent, MessageAppended,
-    MessageCompleted, ProjectAdded, ToolCallFinished, ToolCallId, ToolCallStarted, TurnFinished,
-    TurnQueued, TurnStateChanged, AssistantCreated,
+    ApprovalDecided, ApprovalRequested, AssistantCreated, ConversationCreated, DomainEvent,
+    MessageAppended, MessageCompleted, ProjectAdded, ToolCallFinished, ToolCallId, ToolCallStarted,
+    TurnFinished, TurnQueued, TurnStateChanged,
 };
 use iwork_domain::message::{MessageBody, MessageStatus};
 use iwork_domain::turn::TurnState;
@@ -30,6 +30,7 @@ use iwork_proto::pb::query::Kind as Q;
 use iwork_proto::pb::query_result::Kind as RK;
 use iwork_store::SqliteReadModel;
 use proptest::prelude::*;
+use proptest::strategy::ValueTree;
 
 use crate::fixtures::*;
 use crate::handler::query::Queries;
@@ -68,7 +69,10 @@ impl World {
                 assistant: assistant(1, false),
             }
             .into(),
-            ProjectAdded { project: project(1) }.into(),
+            ProjectAdded {
+                project: project(1),
+            }
+            .into(),
         ];
         for c in CONVS {
             base.push(
@@ -125,7 +129,12 @@ impl World {
             }
             1 => {
                 let n = self.fresh();
-                self.commit(vec![TurnQueued { turn: turn(n, conv) }.into()]);
+                self.commit(vec![
+                    TurnQueued {
+                        turn: turn(n, conv),
+                    }
+                    .into(),
+                ]);
                 self.turns.push(SimTurn {
                     id: n,
                     conv,
@@ -157,7 +166,9 @@ impl World {
                 }
             }
             4 => {
-                if let Some(i) = pick(self, |_| true).filter(|i| !self.turns[*i].open_tools.is_empty()) {
+                if let Some(i) =
+                    pick(self, |_| true).filter(|i| !self.turns[*i].open_tools.is_empty())
+                {
                     let call = self.turns[i].open_tools.remove(0);
                     let t = &self.turns[i];
                     let e = ToolCallFinished {
@@ -182,7 +193,10 @@ impl World {
                         body: MessageBody::Inline(format!("回答 {n}")),
                         status: MessageStatus::Completed,
                     };
-                    self.commit(vec![MessageAppended { message: m }.into(), completed.into()]);
+                    self.commit(vec![
+                        MessageAppended { message: m }.into(),
+                        completed.into(),
+                    ]);
                 }
             }
             6 => {
@@ -297,7 +311,12 @@ fn snapshot_parts_share_one_seq() {
     // 侧栏 3 条 + 会话 2 条 + 待处理 1 条 + 设置 1 条
     assert_eq!(snap.results.len(), 7, "对照：每个查询都在");
     for r in &snap.results {
-        assert_eq!(r.seq, head, "{:?}", r.kind.as_ref().map(std::mem::discriminant));
+        assert_eq!(
+            r.seq,
+            head,
+            "{:?}",
+            r.kind.as_ref().map(std::mem::discriminant)
+        );
     }
 
     // 一边写一边取：快照里侧栏摘要的「最近一条消息首行」和同一快照里对话 10 那一页的最后一条消息总相同。
@@ -305,12 +324,15 @@ fn snapshot_parts_share_one_seq() {
     let store = w.store.clone();
     let writer = std::thread::spawn(move || {
         for k in 0..300u128 {
-            block(store.commit(cmd(100_000 + k, vec![
+            block(store.commit(cmd(
+                100_000 + k,
+                vec![
                 MessageAppended {
                     message: user_message(500_000 + k, 10, &format!("并发 {k}")),
                 }
                 .into(),
-            ])))
+            ],
+            )))
             .unwrap();
         }
     });
@@ -334,17 +356,22 @@ fn snapshot_parts_share_one_seq() {
                         .map(|c| c.last_message_first_line.clone());
                 }
                 Some(RK::GetConversation(g)) => {
-                    page_last = g.messages.last().map(|m| match m.body.as_ref().and_then(|b| b.content.as_ref()) {
-                        Some(pb::message_body::Content::InlineText(t)) => {
-                            t.lines().next().unwrap_or("").to_owned()
+                    page_last = g.messages.last().map(|m| {
+                        match m.body.as_ref().and_then(|b| b.content.as_ref()) {
+                            Some(pb::message_body::Content::InlineText(t)) => {
+                                t.lines().next().unwrap_or("").to_owned()
+                            }
+                            _ => String::new(),
                         }
-                        _ => String::new(),
                     });
                 }
                 _ => {}
             }
         }
-        assert_eq!(sidebar_line, page_last, "同一快照里两处对不上（head {head}）");
+        assert_eq!(
+            sidebar_line, page_last,
+            "同一快照里两处对不上（head {head}）"
+        );
         checked += 1;
     }
     writer.join().unwrap();
@@ -364,19 +391,28 @@ fn rows_of_page(g: &pb::GetConversationResult) -> Rows {
             Some(pb::message_body::Content::InlineText(t)) => t.clone(),
             _ => String::new(),
         };
-        rows.insert(format!("m:{}", m.id), (m.created_seq, format!("{} {text}", m.status)));
+        rows.insert(
+            format!("m:{}", m.id),
+            (m.created_seq, format!("{} {text}", m.status)),
+        );
     }
     for c in &g.tool_calls {
         rows.insert(
             format!("t:{}/{}", c.turn_id, c.tool_call_id),
-            (c.created_seq, format!("{} {}", c.finished, c.finished && c.ok)),
+            (
+                c.created_seq,
+                format!("{} {}", c.finished, c.finished && c.ok),
+            ),
         );
     }
     for a in &g.approvals {
         rows.insert(format!("a:{}", a.id), (a.created_seq, a.state.to_string()));
     }
     for t in &g.turns {
-        rows.insert(format!("turn:{}", t.id), (t.created_seq, t.state.to_string()));
+        rows.insert(
+            format!("turn:{}", t.id),
+            (t.created_seq, t.state.to_string()),
+        );
         if t.ended_seq != 0 {
             rows.insert(format!("end:{}", t.id), (t.ended_seq, t.state.to_string()));
         }
@@ -411,7 +447,10 @@ fn apply(rows: &mut Rows, seq: u64, e: &DomainEvent) {
             row.1 = format!("{} {text}", status(x.status));
         }
         DomainEvent::ToolCallStarted(x) => {
-            rows.insert(format!("t:{}/{}", x.turn_id, x.tool_call_id.0), (seq, "false false".into()));
+            rows.insert(
+                format!("t:{}/{}", x.turn_id, x.tool_call_id.0),
+                (seq, "false false".into()),
+            );
         }
         DomainEvent::ToolCallFinished(x) => {
             if let Some(row) = rows.get_mut(&format!("t:{}/{}", x.turn_id, x.tool_call_id.0)) {
@@ -419,7 +458,10 @@ fn apply(rows: &mut Rows, seq: u64, e: &DomainEvent) {
             }
         }
         DomainEvent::ApprovalRequested(x) => {
-            rows.insert(format!("a:{}", x.approval.id), (seq, (PA::Pending as i32).to_string()));
+            rows.insert(
+                format!("a:{}", x.approval.id),
+                (seq, (PA::Pending as i32).to_string()),
+            );
         }
         DomainEvent::ApprovalDecided(x) => {
             let s = match x.state {
@@ -433,7 +475,12 @@ fn apply(rows: &mut Rows, seq: u64, e: &DomainEvent) {
         DomainEvent::TurnQueued(x) => {
             rows.insert(
                 format!("turn:{}", x.turn.id),
-                (seq, iwork_app::convert::turn_state_to_proto(x.turn.state).0.to_string()),
+                (
+                    seq,
+                    iwork_app::convert::turn_state_to_proto(x.turn.state)
+                        .0
+                        .to_string(),
+                ),
             );
         }
         DomainEvent::TurnStateChanged(x) => {
@@ -446,7 +493,9 @@ fn apply(rows: &mut Rows, seq: u64, e: &DomainEvent) {
             }
         }
         DomainEvent::TurnFinished(x) => {
-            let s = iwork_app::convert::turn_state_to_proto(x.state).0.to_string();
+            let s = iwork_app::convert::turn_state_to_proto(x.state)
+                .0
+                .to_string();
             rows.insert(format!("end:{}", x.turn_id), (seq, s));
         }
         _ => {}
@@ -534,7 +583,8 @@ fn normalize(mut g: pb::GetConversationResult) -> pb::GetConversationResult {
 
 fn fake_tables(store: &Store) -> (iwork_fake_daemon::Tables, u64) {
     let mut tables = iwork_fake_daemon::Tables::default();
-    let events = block(store.read_events(EventFilter::All, iwork_domain::id::Seq(0), 1_000_000)).unwrap();
+    let events =
+        block(store.read_events(EventFilter::All, iwork_domain::id::Seq(0), 1_000_000)).unwrap();
     let mut head = 0;
     for e in &events {
         let p = persisted_event_to_proto(e).unwrap();
@@ -577,7 +627,10 @@ fn six_paging_ways_match_fake_daemon() {
     let queries = Queries::new(read(&w.store));
     let mut compared = 0;
     for c in CONVS {
-        let full = match real_answer(&queries, get(c, |g| g.limit = 1000)).unwrap().kind {
+        let full = match real_answer(&queries, get(c, |g| g.limit = 1000))
+            .unwrap()
+            .kind
+        {
             Some(RK::GetConversation(g)) => g,
             other => panic!("{other:?}"),
         };
@@ -613,7 +666,12 @@ fn six_paging_ways_match_fake_daemon() {
             after: 60,
         }));
         for kind in kinds {
-            let fake = tables.query(head, &pb::Query { kind: Some(kind.clone()) });
+            let fake = tables.query(
+                head,
+                &pb::Query {
+                    kind: Some(kind.clone()),
+                },
+            );
             let real = real_answer(&queries, kind.clone());
             match (real, fake) {
                 (Ok(r), Ok(f)) => {
@@ -650,7 +708,10 @@ fn after_last_message_page_is_empty() {
         w.step(op, a, b);
     }
     let queries = Queries::new(read(&w.store));
-    let full = match real_answer(&queries, get(10, |g| g.limit = 1000)).unwrap().kind {
+    let full = match real_answer(&queries, get(10, |g| g.limit = 1000))
+        .unwrap()
+        .kind
+    {
         Some(RK::GetConversation(g)) => g,
         other => panic!("{other:?}"),
     };

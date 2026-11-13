@@ -35,3 +35,7 @@ tracing-subscriber.workspace = true
 [[bench]]
 name = "write_commit"
 harness = false
+
+[[bench]]
+name = "view_queries"
+harness = false

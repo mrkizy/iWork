@@ -74,9 +74,11 @@ fn approval_from_proto_rejects_combinations_outside_the_table() {
             void_reason,
             ..ok.clone()
         };
-        let err = approval_from_proto(&p).expect_err(&format!("{state:?} {decider:?} {void_reason:?}"));
+        let err =
+            approval_from_proto(&p).expect_err(&format!("{state:?} {decider:?} {void_reason:?}"));
         let named = match &err {
-            ConvertError::MissingField { field: f, .. } | ConvertError::InvalidValue { field: f, .. } => *f,
+            ConvertError::MissingField { field: f, .. }
+            | ConvertError::InvalidValue { field: f, .. } => *f,
             other => panic!("{other:?}"),
         };
         assert_eq!(named, field, "{state:?} {decider:?} {void_reason:?}");

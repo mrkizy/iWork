@@ -393,11 +393,9 @@ pub fn anchors_to_proto(a: &Anchors) -> pb::ListAnchorsResult {
                             excerpt: excerpt(text),
                         })
                     }
-                    AnchorKind::Waiting { pending_item_id } => {
-                        Kind::Waiting(pb::WaitingAnchor {
-                            pending_item_id: pending_item_id.clone(),
-                        })
-                    }
+                    AnchorKind::Waiting { pending_item_id } => Kind::Waiting(pb::WaitingAnchor {
+                        pending_item_id: pending_item_id.clone(),
+                    }),
                     AnchorKind::FailedTurn {
                         turn_id,
                         reason,
@@ -533,6 +531,9 @@ mod tests {
             "before_seq",
         );
         bad(|g| g.after_seq = Some(3), "limit");
-        bad(|g| g.before_message_id = Some("不是编号".into()), "before_message_id");
+        bad(
+            |g| g.before_message_id = Some("不是编号".into()),
+            "before_message_id",
+        );
     }
 }

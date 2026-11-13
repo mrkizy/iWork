@@ -187,9 +187,9 @@ fn view<C: EventCodec + ?Sized>(tx: &ViewTx<'_, C>, kind: &Q) -> Result<R, Failu
             let project = match g.project_id.as_deref() {
                 None => None,
                 Some(p) => {
-                    let id = p
-                        .parse()
-                        .map_err(|_| views::invalid("project_id", format!("不是合法的编号：{p}")))?;
+                    let id = p.parse().map_err(|_| {
+                        views::invalid("project_id", format!("不是合法的编号：{p}"))
+                    })?;
                     let found = tx.project(id)?.ok_or_else(|| pb::Error {
                         code: pb::ErrorCode::NotFound.into(),
                         message: format!("项目不存在：{p}"),

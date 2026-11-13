@@ -1067,11 +1067,12 @@ fn approval_state_from_proto(a: &pb::Approval) -> R<ApprovalState> {
         field,
         reason: format!("{state} 的审批不该带这个字段"),
     };
-    let state = pb::ApprovalState::try_from(a.state).map_err(|_| ConvertError::UnsupportedEnum {
-        kind: K,
-        field: "state",
-        value: a.state,
-    })?;
+    let state =
+        pb::ApprovalState::try_from(a.state).map_err(|_| ConvertError::UnsupportedEnum {
+            kind: K,
+            field: "state",
+            value: a.state,
+        })?;
     match state {
         pb::ApprovalState::Approved => {
             if a.void_reason.is_some() {

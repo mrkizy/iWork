@@ -26,11 +26,11 @@ use crate::boot::{
 use crate::dev;
 use crate::exit::{exited, process_status};
 use crate::handler::lifecycle::autostart_handler;
+use crate::handler::query::{Queries, QueryOr};
 use crate::handler::{DaemonHandler, Gate, NotWired};
 use crate::instance::{self, LockOutcome, StandbyAction};
 use crate::logging::{self, AuditSignal, LogGuard};
 use crate::publish::{PublishObserver, PublishState};
-use crate::handler::query::{Queries, QueryOr};
 use crate::snapshot::ReadSnapshots;
 use crate::source::StoreSource;
 use crate::status::{StatusBoard, StatusIdentity};

@@ -75,8 +75,10 @@ struct PageBody {
 enum RowRef {
     Message(String),
     ToolCall(String, String),
-    Approval(String),
-    UserAction(String),
+    /// 审批 id、所属回合
+    Approval(String, String),
+    /// 卡片 id、所属回合
+    UserAction(String, String),
     TurnEnd(String),
 }
 
@@ -541,8 +543,15 @@ impl<C: EventCodec + ?Sized> ViewTx<'_, C> {
                     turn_ids.insert(turn.clone());
                     tool_keys.push((turn, call));
                 }
-                RowRef::Approval(id) => approval_ids.push(id),
-                RowRef::UserAction(id) => card_ids.push(id),
+                // 选中行所属的回合随页带上（T09 方案 2.9「结果里放什么」）
+                RowRef::Approval(id, turn) => {
+                    turn_ids.insert(turn);
+                    approval_ids.push(id);
+                }
+                RowRef::UserAction(id, turn) => {
+                    turn_ids.insert(turn);
+                    card_ids.push(id);
+                }
                 RowRef::TurnEnd(id) => {
                     turn_ids.insert(id);
                 }
@@ -1135,16 +1144,16 @@ fn lanes() -> [Lane; 5] {
             make: |r| Ok(RowRef::ToolCall(r.get(1)?, r.get(2)?)),
         },
         Lane {
-            sql: "SELECT requested_seq, id FROM approvals WHERE conversation_id = ?1 \
+            sql: "SELECT requested_seq, id, turn_id FROM approvals WHERE conversation_id = ?1 \
                   AND requested_seq {cmp} ?2 ORDER BY requested_seq {order} LIMIT ?3",
             turn_end: false,
-            make: |r| Ok(RowRef::Approval(r.get(1)?)),
+            make: |r| Ok(RowRef::Approval(r.get(1)?, r.get(2)?)),
         },
         Lane {
-            sql: "SELECT proposed_seq, id FROM user_actions WHERE conversation_id = ?1 \
+            sql: "SELECT proposed_seq, id, turn_id FROM user_actions WHERE conversation_id = ?1 \
                   AND proposed_seq {cmp} ?2 ORDER BY proposed_seq {order} LIMIT ?3",
             turn_end: false,
-            make: |r| Ok(RowRef::UserAction(r.get(1)?)),
+            make: |r| Ok(RowRef::UserAction(r.get(1)?, r.get(2)?)),
         },
         // 回合结束行：结束了、到了终态（中断的回合显示继续卡片，没有结束行）
         Lane {
