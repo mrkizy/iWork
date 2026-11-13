@@ -146,7 +146,10 @@ mod tests {
         );
         assert_eq!(opts[4].label, "头像配色 淡紫");
         let selected = |o: &[pb::AvatarColorOption]| {
-            o.iter().filter(|x| x.selected).map(|x| x.token.clone()).collect::<Vec<_>>()
+            o.iter()
+                .filter(|x| x.selected)
+                .map(|x| x.token.clone())
+                .collect::<Vec<_>>()
         };
         assert_eq!(selected(&opts), ["ch6"]);
         assert_eq!(selected(&avatar_color_options("#4F7DF3")), ["ch4"]);

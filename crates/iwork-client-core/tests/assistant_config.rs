@@ -215,18 +215,26 @@ async fn profile_panel_collapse_is_a_backend_setting() {
     let (_d, app, mut web, _dir) = start().await;
     ready(&app, &mut web).await;
     assert!(
-        !web.state.assistant.as_ref().unwrap().profile_panel_collapsed,
+        !web.state
+            .assistant
+            .as_ref()
+            .unwrap()
+            .profile_panel_collapsed,
         "对照：默认不收起"
     );
     let toggle = |on| I::SetProfilePanelCollapsed(pb::ToggleIntent { on });
     assert_eq!(act(&app, toggle(true)).await.error, None);
     until(&app, &mut web, "后台受理后视图变成收起", |s| {
-        s.assistant.as_ref().is_some_and(|a| a.profile_panel_collapsed)
+        s.assistant
+            .as_ref()
+            .is_some_and(|a| a.profile_panel_collapsed)
     })
     .await;
     assert_eq!(act(&app, toggle(false)).await.error, None);
     until(&app, &mut web, "再展开", |s| {
-        s.assistant.as_ref().is_some_and(|a| !a.profile_panel_collapsed)
+        s.assistant
+            .as_ref()
+            .is_some_and(|a| !a.profile_panel_collapsed)
     })
     .await;
 }
@@ -244,12 +252,14 @@ async fn avatar_color_saves_token_and_rejects_unknown() {
         Some("invalid_intent"),
         "ch3 不在 8 块里"
     );
-    assert_eq!(act(&app, field(F::AvatarColor("ch6".into()))).await.error, None);
+    assert_eq!(
+        act(&app, field(F::AvatarColor("ch6".into()))).await.error,
+        None
+    );
     until(&app, &mut web, "头像与色块换成淡紫", |s| {
         s.assistant.as_ref().is_some_and(|a| {
             a.avatar.as_ref().is_some_and(|v| v.color == "ch6")
-                && a
-                    .avatar_colors
+                && a.avatar_colors
                     .iter()
                     .filter(|c| c.selected)
                     .map(|c| c.token.as_str())
@@ -263,7 +273,11 @@ async fn avatar_color_saves_token_and_rejects_unknown() {
         Some("ch6".to_owned()),
         "后台存的是令牌名"
     );
-    assert_eq!(after.version, before.version + 1, "只落了一次（ch3 没发出去）");
+    assert_eq!(
+        after.version,
+        before.version + 1,
+        "只落了一次（ch3 没发出去）"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

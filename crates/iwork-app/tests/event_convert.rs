@@ -122,7 +122,10 @@ fn profile_panel_setting_is_refused_until_the_domain_has_it() {
         (err.kind(), err.field()),
         ("GlobalSettingsChanged", "profile_panel_collapsed")
     );
-    assert!(event_from_proto(changed(None)).is_ok(), "对照：不带这一项照常解");
+    assert!(
+        event_from_proto(changed(None)).is_ok(),
+        "对照：不带这一项照常解"
+    );
 }
 
 fn project_removed(id: &str) -> pb::DomainEvent {

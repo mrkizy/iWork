@@ -168,9 +168,7 @@ fn read(c: &pb::AssistantConfig, k: FieldKey) -> Field {
             group: g,
             enabled: !c.disabled_groups.contains(&g),
         },
-        FieldKey::AvatarColor => {
-            Field::AvatarColor(c.avatar.clone().unwrap_or_default().color)
-        }
+        FieldKey::AvatarColor => Field::AvatarColor(c.avatar.clone().unwrap_or_default().color),
     }
 }
 
