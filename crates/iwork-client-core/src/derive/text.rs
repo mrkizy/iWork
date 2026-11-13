@@ -334,17 +334,6 @@ pub fn size_label(bytes: u64) -> String {
     }
 }
 
-/// 相对时间：「刚刚」「N 分钟前」……
-pub fn relative_past(now: SystemTime, at: SystemTime) -> String {
-    let d = now.duration_since(at).unwrap_or(Duration::ZERO).as_secs();
-    match d {
-        0..60 => "刚刚".into(),
-        60..3600 => format!("{} 分钟前", d / 60),
-        3600..86_400 => format!("{} 小时前", d / 3600),
-        _ => format!("{} 天前", d / 86_400),
-    }
-}
-
 pub fn relative_future(now: SystemTime, at: SystemTime) -> String {
     let d = at.duration_since(now).unwrap_or(Duration::ZERO).as_secs();
     match d {
@@ -603,8 +592,9 @@ pub fn anchor_failure(had_output: bool, reason: &str) -> String {
     }
 }
 
-/// 锚点的时间：今天写时刻（14:05），今年更早写日期（11月3日），往年带年份（2025年11月3日）。按 `tz` 算日期。
-pub fn anchor_time(now: SystemTime, at: SystemTime, tz: &jiff::tz::TimeZone) -> String {
+/// 一个时刻怎么写（锚点、全部对话的最近活动，ui-m1 2a 第 5 条）：今天写时刻（14:05），今年更早写日期（11月3日），
+/// 往年带年份（2025年11月3日）。按 `tz` 算日期。
+pub fn clock_or_date(now: SystemTime, at: SystemTime, tz: &jiff::tz::TimeZone) -> String {
     let (Ok(now), Ok(at)) = (
         jiff::Timestamp::try_from(now),
         jiff::Timestamp::try_from(at),
@@ -632,13 +622,13 @@ mod anchor_text_tests {
         // 2026-11-12 10:00 +08:00
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_794_448_800);
         let at = |back: u64| now - Duration::from_secs(back);
-        assert_eq!(anchor_time(now, at(3600 + 15 * 60), &tz), "08:45");
+        assert_eq!(clock_or_date(now, at(3600 + 15 * 60), &tz), "08:45");
         assert_eq!(
-            anchor_time(now, at(11 * 3600), &tz),
+            clock_or_date(now, at(11 * 3600), &tz),
             "11月11日",
             "前一天（本地时区）"
         );
-        assert_eq!(anchor_time(now, at(400 * 86_400), &tz), "2025年10月8日");
+        assert_eq!(clock_or_date(now, at(400 * 86_400), &tz), "2025年10月8日");
     }
 
     #[test]

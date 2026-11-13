@@ -111,7 +111,7 @@ pub(crate) fn conversation_item(
         last_active_label: c
             .updated_at
             .as_ref()
-            .map(|t| text::relative_past(ctx.now, to_system_time(t)))
+            .map(|t| text::clock_or_date(ctx.now, to_system_time(t), &jiff::tz::TimeZone::system()))
             .unwrap_or_default(),
     }
 }
