@@ -408,10 +408,8 @@ async fn unwritable_error_self_cleans() {
 #[tokio::test(flavor = "multi_thread")]
 async fn stdout_full_still_self_cleans() {
     let marker_dir = tempfile::tempdir().unwrap();
-    let chunk = "x".repeat(8 * 1024);
-    let before: Vec<Value> = (0..64)
-        .map(|i| support::acp::text(&format!("m{i}"), &chunk))
-        .collect();
+    // 512 KiB 正文，远大于管道的缓冲
+    let before = vec![json!({ "step": "emit_texts", "count": 64, "bytes": 8 * 1024 })];
     let rig = Rig::new(fatal_script(&marker_dir.path().join("ran"), false, before));
     let (process, mut wire) = spawn_supervised(&rig);
     let session = wire.open(&rig).await;

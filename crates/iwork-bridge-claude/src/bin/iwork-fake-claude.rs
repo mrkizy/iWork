@@ -49,6 +49,11 @@ enum Step {
     EmitBig {
         bytes: usize,
     },
+    /// 连发 `count` 条助手正文，每条约 `bytes` 字节（桥接会逐条转给后台；用来写满桥接的 stdout）
+    EmitTexts {
+        count: usize,
+        bytes: usize,
+    },
     /// 照设置文件跑 PreToolUse hook 问一次（和真 CLI 一样：stdin 是 hook 输入），记下决定。允许时用改写后的输入
     /// （有的话）「执行」：输入里有 `marker`（路径字符串）就建这个文件
     Tool {
@@ -321,6 +326,14 @@ impl Fake {
                 writeln!(stdout, "{text}").expect("stdout 写得出去");
                 stdout.flush().expect("stdout 刷得出去");
                 self.log("emitted", json!({}));
+            }
+            Step::EmitTexts { count, bytes } => {
+                let text = "x".repeat(bytes);
+                for i in 0..count {
+                    self.out(&json!({ "type": "assistant",
+                        "message": { "id": format!("t{i}"), "content": [{ "type": "text", "text": text }] } }));
+                }
+                self.log("emitted", json!({ "count": count, "bytes": bytes }));
             }
             Step::EmitBig { bytes } => {
                 self.out(&json!({ "type": "system", "subtype": "big", "pad": "x".repeat(bytes) }));
