@@ -46,7 +46,8 @@ async fn run() {
         tracing::error!(%message, "桥接退出");
         eprintln!("iwork-bridge-claude: {message}");
     }
-    // ACP 连接结束（后台没了或关了我们），CLI 已经收拾过：最后对自己的进程组发 SIGKILL，连自己一起，
+    // 走到这里，要么 ACP 连接结束（后台没了、关了我们、写不出去），要么致命错误之后等满 TEARDOWN_WAIT 后台没来清；
+    // CLI 都已经收拾过：最后对自己的进程组发 SIGKILL，连自己一起，
     // CLI 直接起的、还留在组里的进程也一起结束（5.4a 第 5 条第二种）。不是组长时不发，免得杀到别人的组
     if leader {
         // SAFETY: killpg 只读两个整数参数；组号是自己的进程号

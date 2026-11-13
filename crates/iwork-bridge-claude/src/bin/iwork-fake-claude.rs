@@ -71,9 +71,12 @@ enum Step {
     },
     /// 一直读 stdin 到关掉（之后接着下一步）
     WaitStdinEof,
-    /// 另立会话跑一条 `sh -c` 命令，不等它（代表 CLI 起的 Bash 命令，k4：命令的 shell 自成会话）。记下它的进程号
+    /// 另立会话跑一条 `sh -c` 命令，不等它（代表 CLI 起的 Bash 命令，k4：命令的 shell 自成会话）。记下它的进程号。
+    /// `same_group` 为真时不另立会话、留在 CLI 的进程组里（代表 CLI 直接起、没脱组的子进程）
     Spawn {
         command: String,
+        #[serde(default)]
+        same_group: bool,
     },
     /// 不理 stdin，记下收到的 SIGHUP、SIGINT、SIGCONT（每收到一个记一笔 `signal`），收到 SIGTERM 记一笔后以 0
     /// 退出。`ignore_hup` 为真时 SIGHUP 照样记下、不退出；为假时记下后按默认动作退出（以 SIGHUP 结束自己）
@@ -149,6 +152,18 @@ fn spawn_detached(command: &str) -> u32 {
         });
     }
     cmd.spawn().expect("起得了命令").id()
+}
+
+/// 在 CLI 自己的进程组里起一条命令，不等它。
+fn spawn_in_group(command: &str) -> u32 {
+    Command::new("sh")
+        .args(["-c", command])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("起得了命令")
+        .id()
 }
 
 #[cfg(not(unix))]
@@ -323,8 +338,15 @@ impl Fake {
                 std::process::exit(0);
             }
             Step::SleepMs { ms } => std::thread::sleep(Duration::from_millis(ms)),
-            Step::Spawn { command } => {
-                let pid = spawn_detached(&command);
+            Step::Spawn {
+                command,
+                same_group,
+            } => {
+                let pid = if same_group {
+                    spawn_in_group(&command)
+                } else {
+                    spawn_detached(&command)
+                };
                 self.log("spawned", json!({ "pid": pid }));
             }
             Step::LogSignalsUntilTerm { ignore_hup } => log_signals_until_term(self, ignore_hup),

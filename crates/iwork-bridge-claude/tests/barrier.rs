@@ -66,8 +66,8 @@ impl<W: AsyncWrite + Unpin, R: AsyncRead + Unpin> Wire<W, R> {
         .expect("20 秒内有响应")
     }
 
-    /// 握手、开会话，然后发一个 prompt（id 3），返回它的响应。
-    async fn open_and_prompt(&mut self, rig: &Rig) -> Value {
+    /// 握手、开会话（id 1、2），返回会话 id。
+    async fn open(&mut self, rig: &Rig) -> Value {
         self.send(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": { "protocolVersion": 1, "clientCapabilities": {} } }))
             .await;
@@ -79,6 +79,12 @@ impl<W: AsyncWrite + Unpin, R: AsyncRead + Unpin> Wire<W, R> {
         let opened = self.response(2).await;
         let session = opened["result"]["sessionId"].clone();
         assert!(session.is_string(), "{opened}");
+        session
+    }
+
+    /// 握手、开会话，然后发一个 prompt（id 3），返回它的响应。
+    async fn open_and_prompt(&mut self, rig: &Rig) -> Value {
+        let session = self.open(rig).await;
         self.prompt(3, &session).await
     }
 
@@ -288,18 +294,23 @@ async fn fatal_stop_waits_for_daemon() {
     assert!(!alive(cli) && !alive(bridge));
 }
 
-/// 后台一直不来清：`TEARDOWN_WAIT` 之后桥接给 CLI 发 SIGTERM（它自己收拾、退出）。桥接不退出，下一次 prompt
-/// 照样拿到致命原因（带「会话已结束」）；后台关了连接，桥接就退出。
+/// 后台一直不来清：`TEARDOWN_WAIT` 之后桥接走自己收尾那条路（方案 5.4a 第 5 条第二种）：给 CLI 发 SIGTERM，
+/// 最多等 `BRIDGE_TERM_WAIT`，再对自己的进程组发 SIGKILL。CLI 直接起、留在组里的子进程跟着一起没了，桥接自己也退出。
 #[tokio::test(flavor = "multi_thread")]
 async fn fatal_stop_times_out_then_self_cleans() {
     let marker_dir = tempfile::tempdir().unwrap();
-    let rig = Rig::new(fatal_script(&marker_dir.path().join("ran"), false, vec![]));
+    let rig = Rig::new(fatal_script(
+        &marker_dir.path().join("ran"),
+        false,
+        vec![json!({ "step": "spawn", "command": "exec sleep 30", "same_group": true })],
+    ));
     let (process, mut wire) = spawn_supervised(&rig);
     let bridge = process.pid() as i32;
     let fatal_at = Instant::now();
     assert_fatal(&wire.open_and_prompt(&rig).await);
     let cli = pid_of(&logged(&rig, "started").await);
-    let _cleanup = Leftover(vec![cli]);
+    let child = pid_of(&logged(&rig, "spawned").await);
+    let _cleanup = Leftover(vec![child, cli, bridge]);
     let limit = TEARDOWN_WAIT + BRIDGE_TERM_WAIT + Duration::from_secs(5);
     wait_until("CLI 收到 SIGTERM", limit, || {
         signals(&rig).contains(&"SIGTERM".into())
@@ -310,16 +321,123 @@ async fn fatal_stop_times_out_then_self_cleans() {
         "等满了 TEARDOWN_WAIT 才动手"
     );
     assert_eq!(signals(&rig), ["SIGTERM"]);
-    wait_until("CLI 退出", Duration::from_secs(5), || !alive(cli)).await;
-    assert!(alive(bridge), "桥接留着回答请求");
-    let session = json!("whatever");
-    let again = wire.prompt(4, &session).await;
-    assert_fatal(&again);
-    wire.hang_up();
     assert!(
-        process.wait_exit(Duration::from_secs(10)).await.is_some(),
-        "连接断了就退出"
+        process
+            .wait_exit(BRIDGE_TERM_WAIT + Duration::from_secs(5))
+            .await
+            .is_some(),
+        "桥接自己退出，不等连接断"
     );
+    wait_until(
+        "CLI 和组里的子进程都没了",
+        Duration::from_secs(5),
+        || !alive(cli) && !alive(child),
+    )
+    .await;
+}
+
+/// 停放期里 CLI 的 stdin 一直开着：会读 stdin、读到结束就退出的 CLI 在后台来清之前不会自己走掉，它另立会话的
+/// 命令顺父链找得到，清树时一起清掉（审查 S6-5b 1/F-1）。
+#[tokio::test(flavor = "multi_thread")]
+async fn parked_cli_keeps_stdin_until_daemon_clears() {
+    let mut steps = opening();
+    steps.extend([
+        read_user(),
+        init(),
+        json!({ "step": "spawn", "command": "exec sleep 30" }),
+        emit(json!({ "type": "system", "subtype": "task_started", "task_id": "a", "is_backgrounded": true })),
+        support::acp::wait_eof(),
+        json!({ "step": "exit", "code": 0 }),
+    ]);
+    let rig = Rig::new(Value::Array(steps));
+    let (process, mut wire) = spawn_supervised(&rig);
+    assert_fatal(&wire.open_and_prompt(&rig).await);
+    let cli = pid_of(&logged(&rig, "started").await);
+    let cmd = pid_of(&logged(&rig, "spawned").await);
+    let _cleanup = Leftover(vec![cmd, cli]);
+    // 后台还没来（小于 TEARDOWN_WAIT）：CLI 没读到 stdin 结束，还活着
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(alive(cli), "停放期 CLI 的 stdin 没关，它没自己退出");
+    assert!(process.kill_tree_and_wait().await);
+    assert!(!alive(cmd), "另立会话的命令被清掉了");
+}
+
+/// 方案 5.4a 第 5 条「错误写不出去」：后台把读桥接输出的那一头关了（stdin 还开着），致命错误写不出去。桥接不等
+/// `TEARDOWN_WAIT`，当场走自己收尾那条路，CLI 跟着没了。改动前的代码这一格就是对的（连接写不出去就结束），
+/// 这条守着它。
+#[tokio::test(flavor = "multi_thread")]
+async fn unwritable_error_self_cleans() {
+    let marker_dir = tempfile::tempdir().unwrap();
+    // 致命事件之前等一会儿：测试先把读的那一头关掉
+    let rig = Rig::new(fatal_script(
+        &marker_dir.path().join("ran"),
+        false,
+        vec![json!({ "step": "sleep_ms", "ms": 500 })],
+    ));
+    let (process, mut wire) = spawn_supervised(&rig);
+    let session = wire.open(&rig).await;
+    wire.send(
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": { "sessionId": session, "prompt": [{ "type": "text", "text": "hi" }] } }),
+    )
+    .await;
+    let Wire { write, read } = wire;
+    drop(read);
+    let fatal_at = Instant::now();
+    let cli = pid_of(&logged(&rig, "started").await);
+    let _cleanup = Leftover(vec![cli, process.pid() as i32]);
+    assert!(
+        process
+            .wait_exit(TEARDOWN_WAIT + BRIDGE_TERM_WAIT + Duration::from_secs(5))
+            .await
+            .is_some(),
+        "桥接退出了"
+    );
+    assert!(
+        fatal_at.elapsed() < TEARDOWN_WAIT,
+        "写不出去当场收尾，不等 TEARDOWN_WAIT：{:?}",
+        fatal_at.elapsed()
+    );
+    // CLI 这时多半还在 sleep：收到 SIGTERM 按默认动作结束，来不及记，所以只看它没了
+    wait_until("CLI 没了", Duration::from_secs(5), || !alive(cli)).await;
+    drop(write);
+}
+
+/// 后台不读桥接的输出（管道写满，错误写不出去也报不了错，只是卡住）：`TEARDOWN_WAIT` 到了照样自己收尾，
+/// 不被卡住的写拖住。
+#[tokio::test(flavor = "multi_thread")]
+async fn stdout_full_still_self_cleans() {
+    let marker_dir = tempfile::tempdir().unwrap();
+    let chunk = "x".repeat(8 * 1024);
+    let before: Vec<Value> = (0..64)
+        .map(|i| support::acp::text(&format!("m{i}"), &chunk))
+        .collect();
+    let rig = Rig::new(fatal_script(&marker_dir.path().join("ran"), false, before));
+    let (process, mut wire) = spawn_supervised(&rig);
+    let session = wire.open(&rig).await;
+    // 发了 prompt 之后再也不读
+    wire.send(
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": { "sessionId": session, "prompt": [{ "type": "text", "text": "hi" }] } }),
+    )
+    .await;
+    let cli = pid_of(&logged(&rig, "started").await);
+    let _cleanup = Leftover(vec![cli, process.pid() as i32]);
+    logged(&rig, "watching_signals").await;
+    assert!(
+        process
+            .wait_exit(TEARDOWN_WAIT + BRIDGE_TERM_WAIT + Duration::from_secs(5))
+            .await
+            .is_some(),
+        "桥接退出了"
+    );
+    assert!(
+        signals(&rig).contains(&"SIGTERM".into()),
+        "{:?}",
+        signals(&rig)
+    );
+    wait_until("CLI 没了", Duration::from_secs(5), || !alive(cli)).await;
+    drop(wire);
 }
 
 // ---------- 后台没了 ----------

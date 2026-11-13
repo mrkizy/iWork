@@ -207,9 +207,26 @@ struct Slot {
     /// 会话为什么结束了：之后来的 prompt 拿到的就是它，不是泛泛的 `cli_exited`（审查 S6-3 1/F-5）
     ended: Option<SessionFatal>,
     /// 会话结束后停放的 CLI：桥接不杀它、不给它发信号，等后台来清树（5.4a 第 5 条）；等不到才自己收拾
-    parked: Option<CliProcess>,
+    parked: Option<Parked>,
     /// 会话任务结束、CLI 已停放时变成 `true`
     stopped: watch::Sender<bool>,
+}
+
+/// 停放着的 CLI，连同它的输入队列。输入队列留着就是 stdin 还开着：会读 stdin 的 CLI 读不到结束，不会在后台
+/// 扫描之前自己退出、拆掉父链，它另立会话的命令就还找得到（审查 S6-5b 1/F-1）。stdout 也留着、不再读：CLI 往里
+/// 写满了只会卡住，不会因为断管退出。
+struct Parked {
+    cli: CliProcess,
+    input: InputQueue,
+}
+
+impl Parked {
+    /// 桥接自己收拾：SIGTERM，等 [`BRIDGE_TERM_WAIT`] 让它结束自己的命令，再 SIGKILL（5.4a 第 5 条第二种）。
+    /// stdin 到这时才关。
+    async fn terminate(mut self) {
+        self.cli.terminate(BRIDGE_TERM_WAIT).await;
+        drop(self.input);
+    }
 }
 
 impl Default for Slot {
@@ -357,17 +374,14 @@ where
         r = &mut connection => Some(r),
         () = teardown_due => None,
     };
-    let result = match ended {
-        Some(r) => r,
-        None => {
-            // 后台没来清（多半是致命错误发生在回合外，没有请求能把错误带回去）：自己收拾 CLI，但不退出，
-            // 接着回答请求，下一次 prompt 照样拿到致命原因（带「会话已结束」，后台见到就清树）
-            tracing::warn!("收摊后后台没来清树，自己结束 CLI");
-            terminate_parked(&slot).await;
-            connection.await
-        }
+    let Some(result) = ended else {
+        // 后台接不了手（等满 TEARDOWN_WAIT 还没被杀）：自己收尾。收拾完 CLI 就返回，不再等连接；调用方最后对
+        // 自己的进程组发 SIGKILL，CLI 留在组里的进程一起结束（5.4a 第 5 条第二种）
+        tracing::warn!("收摊后后台没来清树，自己收尾");
+        terminate_parked(&slot).await;
+        return Err("致命错误之后后台没来清树".into());
     };
-    // 连接没了：后台没了或者关了我们。会话还在跑就让它收摊、把 CLI 停放好，再自己收拾（尽力而为）
+    // 连接没了：后台没了、关了我们，或者写不出去。会话还在跑就让它收摊、把 CLI 停放好，再自己收拾（尽力而为）
     let running = slot.lock().expect("锁没有中毒").commands.take().is_some();
     if running {
         let mut stopped = slot.lock().expect("锁没有中毒").stopped.subscribe();
@@ -379,9 +393,9 @@ where
 
 /// 桥接自己收拾停放的 CLI：SIGTERM，等 [`BRIDGE_TERM_WAIT`] 让它结束自己的命令，再 SIGKILL（5.4a 第 5 条第二种）。
 async fn terminate_parked(slot: &Mutex<Slot>) {
-    let cli = slot.lock().expect("锁没有中毒").parked.take();
-    if let Some(mut cli) = cli {
-        cli.terminate(BRIDGE_TERM_WAIT).await;
+    let parked = slot.lock().expect("锁没有中毒").parked.take();
+    if let Some(parked) = parked {
+        parked.terminate().await;
     }
 }
 
@@ -520,11 +534,11 @@ async fn open(
     let owner = Arc::clone(slot);
     // 不挂在连接上（`tokio::spawn`）：连接断了它还要接着跑完收摊，把 CLI 停放好，再由 `serve_with` 收拾
     tokio::spawn(async move {
-        let (ended, cli) = run_session(worker, session, rx).await;
+        let (ended, parked) = run_session(worker, session, rx).await;
         let mut slot = owner.lock().expect("锁没有中毒");
         slot.commands = None;
         slot.ended = ended;
-        slot.parked = Some(cli);
+        slot.parked = Some(parked);
         slot.stopped.send_replace(true);
     });
     Ok(())
@@ -696,13 +710,14 @@ fn isolation_kind(i: &IsolationBroken) -> &'static str {
 const BACKSTOP: SessionFatal = SessionFatal::code("approval_backstop");
 const CLI_EXITED: SessionFatal = SessionFatal::code("cli_exited");
 
-/// 会话任务：独占 CLI、hook 通道与映射，直到致命错误或连接断开。返回致命原因（连接断开为 `None`）和停放的 CLI。
+/// 会话任务：独占 CLI、hook 通道与映射，直到致命错误或连接断开。返回致命原因（连接断开为 `None`）和停放的 CLI
+/// （连同 stdin）。
 /// `s` 归它所有：它结束（或者这个 future 被丢掉）时 CLI 被杀、hook 通道停、会话目录删（`SessionDir` 自己负责）。
 async fn run_session(
     mut w: Worker,
     mut s: OpenSession,
     mut commands: mpsc::UnboundedReceiver<Command>,
-) -> (Option<SessionFatal>, CliProcess) {
+) -> (Option<SessionFatal>, Parked) {
     let (answered_tx, mut answered) = mpsc::unbounded_channel::<Answered>();
     // stdin 交给单独的写任务：写卡住时这里照样读 stdout、收 hook 事件（审查 1/F-1）
     let mut input = s.cli.input_queue();
@@ -738,11 +753,10 @@ async fn run_session(
         }
     }
     // 收摊（5.4a 第 5 条）：还在等的 hook 一律拒绝；hook 通道停掉、会话目录删掉，之后来的 hook 连不上，照样是拒。
-    // CLI 不杀、不发信号，交回去停放，等后台来清树：这时 CLI 还活着，它起的命令顺父链找得全
+    // CLI 不杀、不发信号、不关 stdin，交回去停放，等后台来清树：这时 CLI 还活着，它起的命令顺父链找得全
     s.pending.deny_all(REASON_NO_TURN);
-    drop(input);
     let OpenSession { cli, .. } = s;
-    (fatal, cli)
+    (fatal, Parked { cli, input })
 }
 
 impl Worker {
