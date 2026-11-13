@@ -2,10 +2,13 @@
 
 use std::future::Future;
 
+use iwork_domain::action::Action;
 use iwork_domain::approval::{Approval, OwnerFacts};
 use iwork_domain::approval_mode::ApprovalMode;
 use iwork_domain::assistant::Assistant;
-use iwork_domain::common::{ArtifactRef, Timestamp};
+use iwork_domain::attachment::Attachment;
+use iwork_domain::common::{ArtifactRef, Timestamp, Usage};
+use iwork_domain::event::{ChangeSummary, ToolCallId};
 use iwork_domain::conversation::Conversation;
 use iwork_domain::id::{
     AssistantId, ConversationId, JobId, MessageId, ProjectId, RuntimeId, Seq, TurnId,
@@ -15,7 +18,7 @@ use iwork_domain::project::Project;
 use iwork_domain::rule::RuleEntry;
 use iwork_domain::runtime::{QuotaWindow, Runtime};
 use iwork_domain::settings::GlobalSettings;
-use iwork_domain::turn::{InterruptReason, Turn};
+use iwork_domain::turn::{InterruptReason, Turn, TurnState};
 use iwork_domain::user_action::UserActionCard;
 
 use crate::store::StorageError;
@@ -256,4 +259,194 @@ pub trait ReadModelPort: Send + Sync {
         &self,
         r: &ArtifactRef,
     ) -> impl Future<Output = Result<bool, StorageError>> + Send;
+}
+
+// ---------- 视图查询（T10a 方案 2.6、T09 方案 2.2 行登记表与 2.9） ----------
+//
+// 给 `ViewQuery` 用的读类型：实体连同它在时间线上的排序字段（创建它的事件 seq）。排序字段是投影列，
+// 领域对象里没有，所以和实体并排放；转成协议时由应用服务填进 `created_seq`、`ended_seq` 等字段。
+
+/// `GetConversation` 的六种取法（T09 方案 G11、2.9）。前四种按消息条数取，后两种（行级游标）按行数取。
+/// `limit` 已由调用方校验、封顶。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationPaging {
+    /// 最新一页
+    Latest { limit: u32 },
+    /// 这条消息之前的一页
+    BeforeMessage { message: MessageId, limit: u32 },
+    /// 这条消息之后的一页
+    AfterMessage { message: MessageId, limit: u32 },
+    /// 以这个位置为中心：排序字段不大于它的消息取一半，其余往后补满；靠近两端时往另一边挪
+    Around { seq: Seq, limit: u32 },
+    /// 排序字段小于 `seq` 的各类行里紧挨着它的 `limit` 行
+    BeforeRow { seq: Seq, limit: u32 },
+    /// 排序字段大于 `seq` 的各类行里紧挨着它的 `limit` 行
+    AfterRow { seq: Seq, limit: u32 },
+}
+
+/// 一条消息与它的 `MessageAppended` seq。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageRow {
+    pub message: Message,
+    pub created_seq: Seq,
+}
+
+/// 回合结束时 `TurnFinished` 带的东西（没结束的回合没有）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnEnd {
+    /// `TurnFinished` 的 seq
+    pub seq: Seq,
+    pub usage: Usage,
+    pub celebrate: bool,
+    pub change_summary: Option<ChangeSummary>,
+}
+
+/// 一个回合与它在时间线上的两个位置。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnRow {
+    pub turn: Turn,
+    /// `TurnQueued` 的 seq
+    pub created_seq: Seq,
+    pub end: Option<TurnEnd>,
+    /// 最近一条 `TurnStateChanged` 的说明（如失败原因）
+    pub state_reason: Option<String>,
+}
+
+/// 一次工具调用（`ToolCallStarted` / `ToolCallFinished` 折叠而成）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallRow {
+    pub turn_id: TurnId,
+    pub tool_call_id: ToolCallId,
+    pub tool_name: String,
+    pub action: Action,
+    /// `None`：还没结束；`Some(ok)`：结束了
+    pub ok: Option<bool>,
+    pub output_artifact: Option<ArtifactRef>,
+    /// `ToolCallStarted` 的 seq
+    pub created_seq: Seq,
+}
+
+/// 一条审批（含终态）与它的 `ApprovalRequested` seq、决定时间。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalRow {
+    pub approval: Approval,
+    pub created_seq: Seq,
+    /// `ApprovalDecided` / `ApprovalVoided` 的信封时间；待审批为 `None`
+    pub decided_at: Option<Timestamp>,
+}
+
+/// 一张亲手执行卡片与它的 `UserActionProposed` seq。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserActionRow {
+    pub card: UserActionCard,
+    pub created_seq: Seq,
+}
+
+/// 对话标题从哪来（技术设计 9.0a）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitleSource {
+    /// 项目对话：首条用户消息定的自动标题
+    Auto,
+    /// 助手私聊：助手名
+    Fixed,
+}
+
+/// 对话连同只在查询里算出来的值（T09 方案 G1、G4、G8）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationListing {
+    pub conversation: Conversation,
+    pub unread: u32,
+    pub title: String,
+    pub title_source: TitleSource,
+    /// 最近一个回合（`created_seq` 最大）的状态；没有回合为 `None`
+    pub last_turn_state: Option<TurnState>,
+    /// 最近一条消息正文的首个非空行；没有消息、正文存成了制品时为空串
+    pub last_message_first_line: String,
+}
+
+/// `GetConversation` 的一页。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationPage {
+    pub conversation: ConversationListing,
+    /// 按排序字段从旧到新
+    pub messages: Vec<MessageRow>,
+    /// 本页涉及的回合，按 `created_seq` 升序
+    pub turns: Vec<TurnRow>,
+    pub tool_calls: Vec<ToolCallRow>,
+    pub approvals: Vec<ApprovalRow>,
+    pub user_actions: Vec<UserActionRow>,
+    /// 本页消息的附件
+    pub attachments: Vec<Attachment>,
+    /// 整个对话的累计用量；一个回合都没报过用量为 `None`
+    pub usage_total: Option<Usage>,
+    /// 还有更旧的
+    pub has_more: bool,
+    /// 还有更新的
+    pub has_newer: bool,
+}
+
+/// `ListConversations` 的过滤与分页（T09 方案 G8）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConversationFilter {
+    pub project: Option<ProjectId>,
+    /// 标题包含它（不区分大小写）
+    pub title_contains: Option<String>,
+    /// 上一批最后一条
+    pub before: Option<ConversationId>,
+    /// 0 = 不分页
+    pub limit: u32,
+}
+
+/// `ListConversations` 的一批。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationBatch {
+    /// 按最近活动倒序
+    pub conversations: Vec<ConversationListing>,
+    pub has_more: bool,
+}
+
+/// 「待你处理」的一项与它在时间线上的位置。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingEntry {
+    pub item: PendingItem,
+    /// 审批：`ApprovalRequested`；卡片：`UserActionProposed`；继续卡片：进入中断；草稿：提出草稿的 seq
+    pub created_seq: Seq,
+}
+
+/// 消息锚点的种类（T09 方案 2.9、G10）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnchorKind {
+    /// `excerpt`：正文开头，已截到 200 个字素簇
+    UserMessage { message_id: MessageId, excerpt: String },
+    /// 审批 id、卡片 id 或回合 id
+    Waiting { pending_item_id: String },
+    FailedTurn { turn_id: TurnId, reason: String, had_output: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Anchor {
+    pub created_seq: Seq,
+    /// 创建它的事件的信封时间
+    pub at: Timestamp,
+    pub kind: AnchorKind,
+}
+
+/// `ListAnchors` 的取法：以 `around` 为中心（`None` = 从最新往回），不大于它的取 `before` 条、大于它的取 `after` 条。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnchorWindow {
+    pub around: Option<Seq>,
+    pub before: u32,
+    pub after: u32,
+}
+
+/// `ListAnchors` 的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Anchors {
+    /// 按 `created_seq` 升序
+    pub anchors: Vec<Anchor>,
+    pub has_before: bool,
+    pub has_after: bool,
+    /// 整个对话里等你处理的、失败回合的锚点数
+    pub waiting_count: u32,
+    pub failed_count: u32,
 }
