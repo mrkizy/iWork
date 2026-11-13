@@ -707,3 +707,18 @@ async fn stale_empty_sample_does_not_stop_sampling() {
     tree.overtake_scans(false);
     assert_eq!(tree.sample(&mut system), super::Tick::Done);
 }
+
+/// 清空确认过、桥接回收了之后，再来的 `clear()`（取消那次清完，输出到头又补一次；丢弃时再补一次）直接答
+/// `true`，不再扫描：范围里记到的都已经死了、根也回收了，不会再长出我们的进程。要是照样扫，它的扫描会和调用方
+/// 「空没空」的查询撞上，查询看到有扫描在飞就答「不空」（S6-5b 在 CI 上撞到的）。
+#[tokio::test]
+async fn clear_after_confirmed_clear_does_not_scan() {
+    let f = Fixture::start("sleep 30");
+    assert!(f.process.kill_tree_and_wait().await);
+    let (tx, mut rx) = mpsc::unbounded_channel::<(GateStep, oneshot::Sender<()>)>();
+    let tree = f.process.unix_tree().clone();
+    tree.set_gate(tx);
+    let again = tokio::time::timeout(Duration::from_secs(5), tree.clear()).await;
+    assert_eq!(again.ok(), Some(true), "第二次 clear() 当场答 true");
+    assert!(rx.try_recv().is_err(), "第二次 clear() 没有走任何一步扫描");
+}
