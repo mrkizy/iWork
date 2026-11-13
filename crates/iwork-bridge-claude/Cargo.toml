@@ -9,8 +9,9 @@ publish.workspace = true
 [features]
 # 测试用的假 CLI（方案 15.1）：只在这个 feature 下编译，不进发布包。测试经 cargo 按需构建它（tests/support）
 fake-cli = ["dep:serde"]
-# 故障注入（方案 4.3）：开了才认环境变量 IWORK_BRIDGE_HOOK_TIMEOUT_SECS，把 hook 的 timeout 调短。非默认，
-# 发布构建不带（scripts/check-no-dev-trust.sh 查 feature 图）
+# 故障注入（方案 4.3）：开了才认环境变量 IWORK_BRIDGE_HOOK_TIMEOUT_SECS（把 hook 的 timeout 调短）与
+# IWORK_BRIDGE_FAULT_PANIC_ON（让会话任务 panic）。非默认，发布构建不带（scripts/check-no-dev-trust.sh 查 feature 图
+# 与 release 产物）
 fault-injection = []
 
 [[test]]
@@ -30,7 +31,7 @@ base64.workspace = true
 serde_json.workspace = true
 serde = { workspace = true, optional = true }
 getrandom.workspace = true
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["net", "signal"] }
 agent-client-protocol.workspace = true
 futures.workspace = true
 prost-types.workspace = true

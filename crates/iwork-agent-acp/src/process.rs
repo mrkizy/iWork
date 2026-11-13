@@ -82,12 +82,18 @@ pub struct SupervisedProcess {
     sampler: JoinHandle<()>,
 }
 
+/// 后台起运行时时设的环境变量：值是后台自己的进程号。
+pub const SUPERVISOR_PID_ENV: &str = "IWORK_SUPERVISOR_PID";
+
 impl SupervisedProcess {
     /// 启动进程并把它纳入监管。监管初始化任何一步失败，都先结束并回收已启动的进程再报错。
     pub fn spawn(launch: &RuntimeLaunch) -> io::Result<(Self, Pipes)> {
         let mut cmd = Command::new(&launch.program);
         cmd.args(&launch.args)
             .envs(launch.env.iter().map(|(k, v)| (k, v)))
+            // 告诉运行时谁是后台：它的父进程号一旦不是这个，就是后台没了（T06 方案 5.4a 第 5 条；审查 S6-5b
+            // 2/F-2：运行时自己看到的第一个父进程号不可信，后台可能在它进 main 之前就死了）
+            .env(SUPERVISOR_PID_ENV, std::process::id().to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
