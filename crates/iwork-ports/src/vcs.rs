@@ -3,6 +3,9 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+
+use iwork_domain::event::ChangeSummary;
 
 /// 实现自报的能力。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +82,35 @@ pub struct Diff {
     pub files: Vec<FileDiff>,
 }
 
+/// 一个路径在工作区里此刻的版本（T10a 方案 D10）。两个版本相等就当这个路径没变，口径和 `diff` 判两版相同
+/// 一致（要外部过滤程序的文件除外：不运行过滤程序，比的是文件原样的字节）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathVersion {
+    /// 工作区里没有它（含：上级目录是链接，不跟过去；设备、管道这类不算版本控制里的东西）
+    Absent,
+    /// 种类与执行位、内容的散列。内容：普通文件是文件字节，链接是目标文字，子模块引用是检出的提交
+    Present { kind: PathKind, digest: [u8; 32] },
+    /// 给不出可比的版本（超过上限不读全、读失败）
+    Unknown,
+}
+
+/// 版本控制认得的条目种类。执行位变了也算变了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PathKind {
+    File,
+    ExecutableFile,
+    Symlink,
+    Submodule,
+}
+
+/// 一趟回合编排自己的改动探针（T10a 方案 D10）：开始时的样子已经拍在里面，收尾时问它这一趟期间变了什么。
+/// 编排不知道版本控制：它只拿到一个摘要或者没有。
+pub trait ChangeProbe: Send + Sync {
+    /// 这一趟期间的改动摘要；给不出来（版本控制报错、读数额度用完）返回 `None`。调用方限时等，到时丢掉
+    /// 这个 future，所以实现不能把要收尾的工作挂在它上面。
+    fn summary(&self) -> Pin<Box<dyn Future<Output = Option<ChangeSummary>> + Send + '_>>;
+}
+
 /// 克隆进度。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloneProgress {
@@ -118,6 +150,14 @@ pub trait VcsProvider: Send + Sync {
         repo: &RepoRoot,
         range: DiffRange,
     ) -> impl Future<Output = Result<Diff, VcsError>> + Send;
+    /// 这些路径（相对仓库根）在工作区里此刻的版本，按传入的次序一一对应（T10a 方案 D10）。不运行任何外部程序，
+    /// 不跟随路径上任何一级目录链接：上级目录是链接的路径算 [`PathVersion::Absent`]。单个路径读不了记
+    /// [`PathVersion::Unknown`]；整体出错（仓库打不开）才返回错误。
+    fn worktree_versions(
+        &self,
+        repo: &RepoRoot,
+        paths: &[PathBuf],
+    ) -> impl Future<Output = Result<Vec<PathVersion>, VcsError>> + Send;
 }
 
 /// 版本控制错误。克隆地址可能带凭据，所以错误里一律不放地址。

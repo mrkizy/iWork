@@ -19,8 +19,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use iwork_core::turn::{
-    REQUEST_HEADER, ResumeReason, ResumeRequest, SUMMARY_HEADER, SUMMARY_RECENT_LIMIT, SessionLine,
-    TREE_NOT_CLEARED, TURN_GONE_MESSAGE, TurnEntry, TurnPlan, TurnPorts, TurnRunError, resume_note,
+    REQUEST_HEADER, ResumeReason, ResumeRequest, RunTag, SUMMARY_HEADER, SUMMARY_RECENT_LIMIT,
+    SessionLine, TREE_NOT_CLEARED, TURN_GONE_MESSAGE, TurnEntry, TurnPlan, TurnPorts, TurnRunError,
+    resume_note,
 };
 use iwork_domain::action::ToolRef;
 use iwork_domain::approval::ApprovalState;
@@ -95,6 +96,16 @@ struct Ctl {
     fresh_ids: Mutex<VecDeque<String>>,
     /// 下一次 prompt 一直不返回（测 future 被丢掉）
     hang_prompt: AtomicBool,
+    /// 下一次开会话停在这个闸门上（`opening` 为真时停着）
+    open_gate: Mutex<Option<Arc<Notify>>>,
+    opening: AtomicBool,
+    /// 下一次 prompt 收下请求之前停在这个闸门上（`prompting` 为真时停着）
+    prompt_gate: Mutex<Option<Arc<Notify>>>,
+    prompting: AtomicBool,
+    /// 每次调 prompt 时会话实例的编号（第几次开出来的会话，从 1 数），含没收下的
+    prompt_calls: Mutex<Vec<usize>>,
+    /// 真正收下 prompt 的会话实例编号
+    received: Mutex<Vec<usize>>,
 }
 
 impl Default for Ctl {
@@ -118,6 +129,12 @@ impl Default for Ctl {
             prompt_errors: Mutex::default(),
             fresh_ids: Mutex::default(),
             hang_prompt: AtomicBool::new(false),
+            open_gate: Mutex::default(),
+            opening: AtomicBool::new(false),
+            prompt_gate: Mutex::default(),
+            prompting: AtomicBool::new(false),
+            prompt_calls: Mutex::default(),
+            received: Mutex::default(),
         }
     }
 }
@@ -166,8 +183,8 @@ impl Ctl {
 }
 
 struct FakeAgent(Arc<Ctl>);
-/// 第二个字段是运行时会话 id。
-struct FakeSession(Arc<Ctl>, String);
+/// 第二个字段是运行时会话 id，第三个是会话实例编号（第几次开出来的，从 1 数）。
+struct FakeSession(Arc<Ctl>, String, usize);
 struct FakeUpdates(mpsc::UnboundedReceiver<AgentUpdate>);
 
 impl AgentPort for FakeAgent {
@@ -182,8 +199,14 @@ impl AgentPort for FakeAgent {
         spec: SessionSpec,
         on_permission: H,
     ) -> Result<FakeSession, AgentError> {
-        self.0.opens.fetch_add(1, Ordering::SeqCst);
+        let instance = self.0.opens.fetch_add(1, Ordering::SeqCst) + 1;
         self.0.specs.lock().unwrap().push(spec.clone());
+        let gate = self.0.open_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            self.0.opening.store(true, Ordering::SeqCst);
+            gate.notified().await;
+            self.0.opening.store(false, Ordering::SeqCst);
+        }
         if let Some(error) = self.0.open_errors.lock().unwrap().pop_front() {
             return Err(error);
         }
@@ -201,7 +224,7 @@ impl AgentPort for FakeAgent {
             Box::pin(async move { h.on_permission(req).await })
         });
         *self.0.handler.lock().unwrap() = Some(handler);
-        Ok(FakeSession(self.0.clone(), id))
+        Ok(FakeSession(self.0.clone(), id, instance))
     }
 }
 
@@ -221,13 +244,21 @@ impl AgentSession for FakeSession {
     }
 
     async fn prompt(&self, blocks: Vec<ContentBlock>) -> Result<FakeUpdates, AgentError> {
+        self.0.prompt_calls.lock().unwrap().push(self.2);
         if let Some(error) = self.0.prompt_errors.lock().unwrap().pop_front() {
             return Err(error);
+        }
+        let gate = self.0.prompt_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            self.0.prompting.store(true, Ordering::SeqCst);
+            gate.notified().await;
+            self.0.prompting.store(false, Ordering::SeqCst);
         }
         if self.0.hang_prompt.swap(false, Ordering::SeqCst) {
             return std::future::pending().await;
         }
         self.0.inputs.lock().unwrap().push(blocks);
+        self.0.received.lock().unwrap().push(self.2);
         let (tx, rx) = mpsc::unbounded_channel();
         *self.0.updates.lock().unwrap() = Some(tx);
         self.0.sent.store(0, Ordering::SeqCst);
@@ -331,6 +362,8 @@ impl<J: Judge> W<J> {
 
     fn plan(&self, turn: Turn) -> TurnPlan {
         TurnPlan {
+            changes: None,
+            run: RunTag(1),
             entry: TurnEntry::New,
             turn,
             assistant_name: "小助手".into(),
@@ -1023,6 +1056,13 @@ async fn resume_failure_fails_interrupted_turn() {
         iwork_domain::event::TurnStateChanged {
             turn_id: t,
             from: TurnState::Running,
+            to: TurnState::WaitingApproval,
+            reason: None,
+        }
+        .into(),
+        iwork_domain::event::TurnStateChanged {
+            turn_id: t,
+            from: TurnState::WaitingApproval,
             to: wait_limit(),
             reason: None,
         }
@@ -1045,7 +1085,7 @@ async fn resume_failure_fails_interrupted_turn() {
     let why = trail(&w.store, t);
     assert!(
         why.last().unwrap() == "finished Failed"
-            && why[2].starts_with("Interrupted { reason: ApprovalWaitLimit } -> Failed (上一棵"),
+            && why[3].starts_with("Interrupted { reason: ApprovalWaitLimit } -> Failed (上一棵"),
         "{why:?}"
     );
 }
@@ -2245,3 +2285,15 @@ fn message_endings(store: &MemStore) -> Vec<MessageStatus> {
         })
         .collect()
 }
+
+/// 交出 prompt 之前认取消（T10a 方案 D1a、7.2 第 ① 条）。
+#[path = "turn_barriers/pre_prompt_cancel.rs"]
+mod pre_prompt_cancel;
+
+/// 丢掉会话线之前先了结（T10a 方案 D8a、7.2 第 ② 条）。
+#[path = "turn_barriers/line_swap.rs"]
+mod line_swap;
+
+/// 回合状态两类写者撞车（T10a 方案 A4、G1；7.2a 的 K3）。
+#[path = "turn_barriers/a4_interleavings.rs"]
+mod a4_interleavings;

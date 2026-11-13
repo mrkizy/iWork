@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use history::FakeHistory;
 use iwork_agent_acp::AcpRuntime;
 use iwork_core::turn::{
-    Decided, PermissionDecider, SessionLine, TurnEntry, TurnPlan, TurnPorts, VoidPlanError,
+    Decided, PermissionDecider, RunTag, SessionLine, TurnEntry, TurnPlan, TurnPorts, VoidPlanError,
 };
 use iwork_domain::approval::VoidReason;
 use iwork_domain::event::{ApprovalVoided, DomainEvent};
@@ -125,6 +125,8 @@ fn start(fake: &Fake) -> Run {
     let canceller = line.canceller();
     let runtime = AcpRuntime::new(fake.launch.clone());
     let plan = TurnPlan {
+        changes: None,
+        run: RunTag(1),
         entry: TurnEntry::New,
         turn: queued_turn(&h.ids),
         assistant_name: "小助手".into(),
@@ -261,7 +263,7 @@ async fn cancel_while_waiting_voids_approval_and_answers_reject_before_cancel() 
     })
     .await;
 
-    run.canceller.cancel(run.turn_id);
+    run.canceller.cancel(run.turn_id, RunTag(1));
 
     assert_eq!(run.task.await.unwrap(), TurnState::Cancelled);
     assert_eq!(

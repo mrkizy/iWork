@@ -36,6 +36,8 @@ dev = ["iwork-ipc/dev"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
+# 存储的测试钩子（压住写线程、查回执入队的通知），只给测试打开；发布构建没有（T10a 方案 7.2a）
+iwork-store = { workspace = true, features = ["test-hooks"] }
 tempfile.workspace = true
 dunce.workspace = true
 rusqlite.workspace = true

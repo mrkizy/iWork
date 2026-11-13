@@ -1735,3 +1735,42 @@ pub fn ev_approval_delivered() -> DomainEvent {
         turn_id: s(TURN),
     }))
 }
+
+/// T10a A5：用户要取消在跑的回合。
+pub fn ev_turn_intent_recorded_cancel() -> DomainEvent {
+    ev(E::TurnIntentRecorded(TurnIntentRecorded {
+        turn_id: s(TURN),
+        intent: TurnIntentKind::Cancel as i32,
+    }))
+}
+/// T10a A5：用户要继续已中断的回合。
+pub fn ev_turn_intent_recorded_resume() -> DomainEvent {
+    ev(E::TurnIntentRecorded(TurnIntentRecorded {
+        turn_id: s(TURN),
+        intent: TurnIntentKind::Resume as i32,
+    }))
+}
+/// T10a X6：适配层按规则不删运行时的会话记录。
+pub fn ev_runtime_session_forget_refused() -> DomainEvent {
+    ev(E::RuntimeSessionForgetFailed(RuntimeSessionForgetFailed {
+        conversation_id: s(CONVERSATION),
+        runtime_session_id: s("sess-1"),
+        outcome: Some(runtime_session_forget_failed::Outcome::Refused(
+            ForgetRefused {
+                why: s("不是普通文件"),
+            },
+        )),
+    }))
+}
+/// T10a X6：删运行时的会话记录失败。
+pub fn ev_runtime_session_forget_failed() -> DomainEvent {
+    ev(E::RuntimeSessionForgetFailed(RuntimeSessionForgetFailed {
+        conversation_id: s(CONVERSATION),
+        runtime_session_id: s("sess-2"),
+        outcome: Some(runtime_session_forget_failed::Outcome::Failed(
+            ForgetFailed {
+                message: s("权限不足"),
+            },
+        )),
+    }))
+}

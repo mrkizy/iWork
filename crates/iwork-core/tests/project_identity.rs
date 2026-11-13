@@ -14,8 +14,8 @@ use iwork_domain::project::{PathStatus, Project, ProjectSettings, VcsKind};
 use iwork_ports::clock::IdGenerator;
 use iwork_ports::project_files::{ProjectFilesError, ProjectMarkerStore};
 use iwork_ports::vcs::{
-    BaselineRef, Detection, Diff, DiffRange, ProgressSink, RepoRoot, VcsCapabilities, VcsError,
-    VcsProvider, WorkspaceStatus,
+    BaselineRef, Detection, Diff, DiffRange, PathVersion, ProgressSink, RepoRoot, VcsCapabilities,
+    VcsError, VcsProvider, WorkspaceStatus,
 };
 use pollster::block_on;
 
@@ -83,6 +83,13 @@ impl VcsProvider for FakeVcs {
     }
     async fn diff(&self, _: &RepoRoot, _: DiffRange) -> Result<Diff, VcsError> {
         Err(unused("diff"))
+    }
+    async fn worktree_versions(
+        &self,
+        _: &RepoRoot,
+        _: &[PathBuf],
+    ) -> Result<Vec<PathVersion>, VcsError> {
+        Err(unused("worktree_versions"))
     }
 }
 

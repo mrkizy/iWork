@@ -94,11 +94,17 @@ fn approvals(n: u128, _flip: bool) -> Vec<DomainEvent> {
     ]
 }
 
-fn typical(n: u128, flip: bool) -> Vec<DomainEvent> {
-    let (from, to) = if flip {
-        (TurnState::Running, TurnState::WaitingApproval)
-    } else {
-        (TurnState::WaitingApproval, TurnState::Running)
+/// 典型的一笔：用户消息、助手消息、回合进出一次等审批。两条状态变化在同一笔里走完一个来回，
+/// 每笔提交前后回合都在 Running：并发提交任意先后都合回合的状态前提（T10a A4），每笔的工作量相同。
+fn typical(n: u128, _flip: bool) -> Vec<DomainEvent> {
+    let change = |from, to| -> DomainEvent {
+        TurnStateChanged {
+            turn_id: tid(20),
+            from,
+            to,
+            reason: None,
+        }
+        .into()
     };
     vec![
         MessageAppended {
@@ -109,13 +115,8 @@ fn typical(n: u128, flip: bool) -> Vec<DomainEvent> {
             message: assistant_message(n * 2 + 1, 10, 20),
         }
         .into(),
-        TurnStateChanged {
-            turn_id: tid(20),
-            from,
-            to,
-            reason: None,
-        }
-        .into(),
+        change(TurnState::Running, TurnState::WaitingApproval),
+        change(TurnState::WaitingApproval, TurnState::Running),
     ]
 }
 
@@ -145,6 +146,13 @@ fn run(scenario: &Scenario, fullfsync: Option<bool>, label: &str) {
             .into(),
             ConversationCreated { conversation: project_conversation(10, 1) }.into(),
             TurnQueued { turn: turn(20, 10) }.into(),
+            TurnStateChanged {
+                turn_id: tid(20),
+                from: TurnState::Queued,
+                to: TurnState::Running,
+                reason: None,
+            }
+            .into(),
         ],
     )))
     .unwrap();

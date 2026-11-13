@@ -22,6 +22,9 @@ pub struct FakeHistory {
     fail_next: Mutex<Option<StorageError>>,
     /// 每次读的参数：回合、会话线、条数上限
     pub calls: Mutex<Vec<(TurnId, Option<ProjectId>, u32)>>,
+    /// 下一次读停在这个闸门上（`reading` 为真时停着）
+    pub gate: Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
+    pub reading: std::sync::atomic::AtomicBool,
 }
 
 impl FakeHistory {
@@ -50,6 +53,13 @@ impl ReadModelPort for FakeHistory {
         recent_limit: u32,
     ) -> Result<SummarySource, StorageError> {
         self.calls.lock().unwrap().push((turn, line, recent_limit));
+        let gate = self.gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.reading.store(true, SeqCst);
+            gate.notified().await;
+            self.reading.store(false, SeqCst);
+        }
         if let Some(error) = self.fail_next.lock().unwrap().take() {
             return Err(error);
         }
@@ -98,6 +108,27 @@ impl ReadModelPort for FakeHistory {
         unimplemented!("{UNUSED}")
     }
     async fn artifact_is_referenced(&self, _r: &ArtifactRef) -> Result<bool, StorageError> {
+        unimplemented!("{UNUSED}")
+    }
+    async fn turn_work(&self) -> Result<iwork_ports::read_model::TurnWork, StorageError> {
+        unimplemented!("{UNUSED}")
+    }
+    async fn last_session_binding(
+        &self,
+        _c: ConversationId,
+    ) -> Result<Option<String>, StorageError> {
+        unimplemented!("{UNUSED}")
+    }
+    async fn session_ids_of(&self, _c: ConversationId) -> Result<Vec<String>, StorageError> {
+        unimplemented!("{UNUSED}")
+    }
+    async fn quit_counts(&self) -> Result<iwork_ports::read_model::QuitCounts, StorageError> {
+        unimplemented!("{UNUSED}")
+    }
+    async fn snapshot_inputs(
+        &self,
+        _c: ConversationId,
+    ) -> Result<iwork_ports::read_model::SnapshotInputs, StorageError> {
         unimplemented!("{UNUSED}")
     }
 }

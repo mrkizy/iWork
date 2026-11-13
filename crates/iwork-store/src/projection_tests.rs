@@ -97,10 +97,16 @@ fn rebuild(store: &Store, env: &Env) {
 }
 
 /// 一个项目 + 项目对话 + 回合，作为别的实体的上下文。
+/// 项目 1、助手 1、项目对话 10、回合 20（`turn()` 夹具用助手 1）。排新回合要查归属存续（T10a A3），
+/// 所以助手和对话都先建好。
 fn base(feed: &Feed<'_>) {
     feed.ok(vec![
         ProjectAdded {
             project: project(1),
+        }
+        .into(),
+        AssistantCreated {
+            assistant: assistant(1, false),
         }
         .into(),
         ConversationCreated {
@@ -108,17 +114,6 @@ fn base(feed: &Feed<'_>) {
         }
         .into(),
         TurnQueued { turn: turn(20, 10) }.into(),
-    ]);
-}
-
-/// `base` 里回合的助手（`turn()` 夹具用 `aid(1)`）。审批与卡片写入前要查归属存续（方案 2.6），
-/// 建它们的用例先调这个。
-fn owner_assistant(feed: &Feed<'_>) {
-    feed.ok(vec![
-        AssistantCreated {
-            assistant: assistant(1, false),
-        }
-        .into(),
     ]);
 }
 
@@ -132,7 +127,6 @@ fn snapshot_roundtrip_all_entities() {
     let rm = read_model(&store);
     let codec = ProtoEventCodec;
     base(&feed);
-    owner_assistant(&feed);
 
     // Project / Assistant / AssistantVersion
     let mut a = assistant(2, true);
@@ -152,7 +146,7 @@ fn snapshot_roundtrip_all_entities() {
     ]);
     a.current.version = 2;
     a.current.created_at = Timestamp(T0);
-    // 第二个是回合所属的助手（owner_assistant）
+    // 第二个是回合所属的助手（base 建的）
     assert_eq!(
         block(rm.assistants()).unwrap(),
         vec![a.clone(), assistant(1, false)]
@@ -342,7 +336,6 @@ fn approval_terminal_states_online_and_rebuilt() {
     let store = env.open();
     let feed = Feed::new(&store);
     base(&feed);
-    owner_assistant(&feed);
     let mut expected = Vec::new();
     let mut n = 50;
     let mut push = |state: ApprovalState, event: Option<DomainEvent>, n: u128| {
@@ -405,7 +398,6 @@ fn approval_decided_sets_decided_at_from_envelope() {
     let store = env.open();
     let feed = Feed::new(&store);
     base(&feed);
-    owner_assistant(&feed);
     feed.ok(vec![
         ApprovalRequested {
             approval: approval(1, 20, 10),
@@ -708,6 +700,7 @@ fn rows_for(env: &Env, conv: u128) -> i64 {
         "messages",
         "turns",
         "turn_usage",
+        "tool_calls",
         "approvals",
         "user_actions",
         "attachments",
@@ -723,7 +716,6 @@ fn conversation_deleted_cascades() {
     let store = env.open();
     let feed = Feed::new(&store);
     base(&feed);
-    owner_assistant(&feed);
     feed.ok(vec![
         ConversationCreated {
             conversation: project_conversation(11, 1),
@@ -736,6 +728,17 @@ fn conversation_deleted_cascades() {
     assert_eq!(refs(&env), 6, "对照：两个对话各 3 个引用");
     assert!(rows_for(&env, 10) > 0);
 
+    // 级联删除要求名下回合都到终态（T10a X5）
+    let cancel = |t: u128| -> DomainEvent {
+        TurnStateChanged {
+            turn_id: tid(t),
+            from: TurnState::Queued,
+            to: TurnState::Cancelled,
+            reason: None,
+        }
+        .into()
+    };
+    feed.ok(vec![cancel(20), cancel(100)]);
     feed.ok(vec![
         ConversationDeleted {
             conversation_id: cid(10),
@@ -780,10 +783,6 @@ fn assistant_deleted_removes_dm_but_keeps_project_messages() {
     let feed = Feed::new(&store);
     base(&feed);
     feed.ok(vec![
-        AssistantCreated {
-            assistant: assistant(1, false),
-        }
-        .into(),
         ConversationCreated {
             conversation: dm(30, 1),
         }
@@ -991,11 +990,18 @@ fn updated_seq_tracks_last_event_touching_the_row() {
     ]);
     assert_eq!(updated_seq(&env, "projects", "id", &p), s.0 as i64);
     let t = tid(20).to_string();
-    assert_eq!(updated_seq(&env, "turns", "id", &t), 3);
+    assert_eq!(updated_seq(&env, "turns", "id", &t), 4);
     let s = feed.ok(vec![
         TurnStateChanged {
             turn_id: tid(20),
             from: TurnState::Queued,
+            to: TurnState::Running,
+            reason: None,
+        }
+        .into(),
+        TurnStateChanged {
+            turn_id: tid(20),
+            from: TurnState::Running,
             to: TurnState::Interrupted {
                 reason: InterruptReason::Crash,
             },
@@ -1018,7 +1024,6 @@ fn unread_counts_messages_and_cards_and_recomputes_on_read() {
     let store = env.open();
     let feed = Feed::new(&store);
     base(&feed);
-    owner_assistant(&feed);
     let unread = || {
         block(read_model(&store).conversation(
             cid(10),
@@ -1056,6 +1061,13 @@ fn unread_counts_messages_and_cards_and_recomputes_on_read() {
         .into(),
     ]);
     let read_to = feed.ok(vec![
+        TurnStateChanged {
+            turn_id: tid(20),
+            from: TurnState::Queued,
+            to: TurnState::Running,
+            reason: None,
+        }
+        .into(),
         TurnStateChanged {
             turn_id: tid(20),
             from: TurnState::Running,

@@ -462,6 +462,13 @@ pub fn waiting_turn(
         TurnStateChanged {
             turn_id: t,
             from: TurnState::Queued,
+            to: TurnState::Running,
+            reason: None,
+        }
+        .into(),
+        TurnStateChanged {
+            turn_id: t,
+            from: TurnState::Running,
             to: TurnState::WaitingApproval,
             reason: None,
         }

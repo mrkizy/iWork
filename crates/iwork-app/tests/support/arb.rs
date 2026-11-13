@@ -32,7 +32,7 @@ use iwork_domain::runtime::{
 };
 use iwork_domain::security_list::SecurityList;
 use iwork_domain::session::SessionLostReason;
-use iwork_domain::turn::{Turn, TurnKind, TurnState};
+use iwork_domain::turn::{Turn, TurnIntentKind, TurnKind, TurnState};
 use iwork_domain::user_action::{ExitStatus, Proposal, UserActionCard, UserActionState};
 use proptest::prelude::*;
 use proptest::sample::select;
@@ -1197,6 +1197,16 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
             ),
         ),
         (
+            "turn_intent_recorded",
+            boxed(
+                (
+                    turn_id(),
+                    prop_oneof![Just(TurnIntentKind::Cancel), Just(TurnIntentKind::Resume)],
+                )
+                    .prop_map(|(turn_id, intent)| TurnIntentRecorded { turn_id, intent }),
+            ),
+        ),
+        (
             "approval_requested",
             boxed(approval().prop_map(|approval| ApprovalRequested { approval })),
         ),
@@ -1472,6 +1482,26 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                         usage,
                     }
                 }),
+            ),
+        ),
+        (
+            "runtime_session_forget_failed",
+            boxed(
+                (
+                    conversation_id(),
+                    text(),
+                    prop_oneof![
+                        text().prop_map(|why| ForgetFailure::Refused { why }),
+                        text().prop_map(|message| ForgetFailure::Failed { message }),
+                    ],
+                )
+                    .prop_map(|(conversation_id, runtime_session_id, outcome)| {
+                        RuntimeSessionForgetFailed {
+                            conversation_id,
+                            runtime_session_id,
+                            outcome,
+                        }
+                    }),
             ),
         ),
         (

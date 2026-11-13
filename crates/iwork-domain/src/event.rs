@@ -25,7 +25,7 @@ use crate::project::{PathStatus, Project, ProjectSettings};
 use crate::rule::{RuleEntry, RuleLayer, RuleSetVersion, Verdict};
 use crate::runtime::{LocalConfigItem, QuotaWindow, Runtime};
 use crate::session::SessionLostReason;
-use crate::turn::{Turn, TurnState};
+use crate::turn::{Turn, TurnIntentKind, TurnState};
 use crate::user_action::{UserActionCard, UserActionState};
 
 // ---------- 事件里用到、实体里没有的值对象 ----------
@@ -320,6 +320,14 @@ pub struct ApprovalDelivered {
     pub turn_id: TurnId,
 }
 
+/// 用户要取消在跑的回合、或要继续已中断的回合（T10a 方案 0a.3 第 A5 行）。只管它落盘时回合所在的那一段：
+/// 取消只对起点 seq 比它小的那一趟编排有效，继续只对 seq 比它小的那一次中断有效，都不跨后台重启。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnIntentRecorded {
+    pub turn_id: TurnId,
+    pub intent: TurnIntentKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallStarted {
     pub turn_id: TurnId,
@@ -491,6 +499,27 @@ pub struct UsageReported {
     pub usage: Usage,
 }
 
+/// 删对话时请适配层删运行时的会话记录，没删成（T10a 方案 0a.3 第 X6 行；T06 方案 5.5）。audit 流，投影不读。
+/// `Deleted`、`NotFound` 不记。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSessionForgetFailed {
+    pub conversation_id: ConversationId,
+    pub runtime_session_id: String,
+    pub outcome: ForgetFailure,
+}
+
+/// 删会话记录没成的两种结局。文字来自 iWork 自己的桥接，不是运行时的原文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForgetFailure {
+    /// 适配层按规则不删（比如定位到的不是普通文件）
+    Refused {
+        why: String,
+    },
+    Failed {
+        message: String,
+    },
+}
+
 // ---------- 载荷：导入 ----------
 
 /// 记下「已提示」，之后不再提示。
@@ -599,6 +628,7 @@ domain_events! {
     ToolCallFinished => "tool_call_finished",
     TurnSessionBound => "turn_session_bound",
     ApprovalDelivered => "approval_delivered",
+    TurnIntentRecorded => "turn_intent_recorded",
     ApprovalRequested => "approval_requested",
     ApprovalReviewUpdated => "approval_review_updated",
     ApprovalDecided => "approval_decided",
@@ -617,6 +647,7 @@ domain_events! {
     RuntimeUpdated => "runtime_updated",
     QuotaObserved => "quota_observed",
     UsageReported => "usage_reported",
+    RuntimeSessionForgetFailed => "runtime_session_forget_failed",
     LocalImportPrompted => "local_import_prompted",
     LocalConfigImported => "local_config_imported",
     McpSecretSet => "mcp_secret_set",
@@ -693,6 +724,7 @@ impl DomainEvent {
             Self::ToolCallStarted(e) => (K::Turn, StreamId::of(e.turn_id)),
             Self::ToolCallFinished(e) => (K::Turn, StreamId::of(e.turn_id)),
             Self::ApprovalDelivered(e) => (K::Turn, StreamId::of(e.turn_id)),
+            Self::TurnIntentRecorded(e) => (K::Turn, StreamId::of(e.turn_id)),
             Self::ApprovalRequested(e) => (K::Approval, StreamId::of(e.approval.id)),
             Self::ApprovalReviewUpdated(e) => (K::Approval, StreamId::of(e.approval_id)),
             Self::ApprovalDecided(e) => (K::Approval, StreamId::of(e.approval_id)),
@@ -713,6 +745,7 @@ impl DomainEvent {
             Self::RuntimeUpdated(e) => (K::Runtime, StreamId::of(e.runtime.id)),
             Self::QuotaObserved(e) => (K::Runtime, StreamId::of(e.runtime_id)),
             Self::UsageReported(e) => (K::Runtime, StreamId::of(e.runtime_id)),
+            Self::RuntimeSessionForgetFailed(e) => (K::Audit, StreamId::of(e.conversation_id)),
             Self::LocalImportPrompted(e) => (K::Runtime, StreamId::of(e.runtime_id)),
             Self::LocalConfigImported(e) => (K::Runtime, StreamId::of(e.runtime_id)),
             Self::McpSecretSet(e) => (K::Runtime, StreamId::of(&e.mcp_server_id.0)),

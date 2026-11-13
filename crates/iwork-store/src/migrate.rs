@@ -25,11 +25,18 @@ pub struct Migration {
 }
 
 /// 迁移登记表。加一个迁移 = `migrations/` 加一个文件 + 这里一行；只能往后加，不能改已发布的。
-pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial",
-    sql: include_str!("migrations/0001_initial.sql"),
-}];
+pub(crate) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial",
+        sql: include_str!("migrations/0001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "turn_runs",
+        sql: include_str!("migrations/0002_turn_runs.sql"),
+    },
+];
 
 /// `meta` 表的三个键。
 const KEY_SCHEMA_VERSION: &str = "schema_version";

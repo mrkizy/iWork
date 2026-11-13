@@ -178,3 +178,18 @@ impl Conversation {
         }
     }
 }
+
+/// 级联删除的前提（T10a 方案 0a.3 第 X5 行）：被级联掉的对话名下没有没到终态的回合。回合还在跑时
+/// 删掉它的记录，进程没了以后崩溃恢复就找不到它。`ConversationDeleted` 与连带删私聊的 `AssistantDeleted`
+/// 在写线程上过这一处。卡片那一半由 T10e 加参数。
+pub fn check_cascade(
+    conversation: ConversationId,
+    turns: &[(crate::id::TurnId, crate::turn::TurnState)],
+) -> Result<(), crate::approval::PreconditionFailed> {
+    match turns.iter().find(|(_, state)| !state.is_terminal()) {
+        None => Ok(()),
+        Some((turn, state)) => Err(crate::approval::PreconditionFailed::new(format!(
+            "对话 {conversation} 的回合 {turn} 还是 {state:?}，不能删掉它的记录"
+        ))),
+    }
+}
