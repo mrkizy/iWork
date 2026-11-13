@@ -47,6 +47,9 @@ libc.workspace = true
 pollster.workspace = true
 # 不开 client-core 的 dev：开了会把 dev 带进工作区的 feature 图（check-no-dev-trust.sh 守着）
 iwork-client-core.workspace = true
+# 查询对拍：真存储的事件折叠进假后台的表，六种取法两边比（T10a 方案 7.3）
+iwork-fake-daemon.workspace = true
+proptest.workspace = true
 
 # 真进程测试：测试进程不是受信映像，后台要带 --dev-trust（只在 dev feature 下存在）
 [[test]]

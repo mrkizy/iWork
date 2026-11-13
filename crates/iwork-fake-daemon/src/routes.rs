@@ -5,6 +5,7 @@
 //! 场景夹具不传，由 [`stamp_conversation`] 在追加时按折叠表填上，所以和真后台一样每条都带着。主键与 `routes_for`
 //! 第一个键相同，由 `tests/routes_parity.rs` 对拍。
 
+use iwork_app::subscription::LIVE_KIND;
 use iwork_proto::pb;
 use iwork_proto::pb::domain_event::Event as E;
 use iwork_proto::routing::StreamKey;
@@ -147,21 +148,22 @@ pub fn stamp_conversation(tables: &Tables, event: &mut E) {
     }
 }
 
-/// 流式增量的路由：消息增量落在消息所在对话；工具输出落在工具调用所在对话；克隆进度落在任务的项目键。
+/// 流式增量的路由：消息增量落在消息所在对话的 live 键，工具输出落在工具调用所在对话的 live 键（G6，键类取自
+/// `iwork_app::subscription::LIVE_KIND`）；克隆进度落在任务的项目键。
 pub fn transient_routes(tables: &Tables, event: &pb::TransientEvent) -> Vec<StreamKey> {
     use pb::transient_event::Event as T;
     match &event.event {
         Some(T::MessageDelta(d)) => tables
             .message_conversation
             .get(&d.message_id)
-            .map(|c| vec![StreamKey::one(CONVERSATION, c.clone())])
+            .map(|c| vec![StreamKey::one(LIVE_KIND, c.clone())])
             .unwrap_or_default(),
         Some(T::ToolOutputDelta(d)) => tables
             .tool_calls
             .values()
             .find(|c| c.tool_call_id == d.tool_call_id)
             .and_then(|c| tables.turns.get(&c.turn_id))
-            .map(|t| vec![StreamKey::one(CONVERSATION, t.conversation_id.clone())])
+            .map(|t| vec![StreamKey::one(LIVE_KIND, t.conversation_id.clone())])
             .unwrap_or_default(),
         Some(T::CloneProgress(p)) => vec![StreamKey::one(PROJECT, p.job_id.clone())],
         Some(T::SubscriptionLagging(_)) | None => Vec::new(),

@@ -15,6 +15,7 @@ use crate::stop::StopSwitch;
 use crate::work::RunningWork;
 
 pub mod lifecycle;
+pub mod query;
 
 /// 关门与在途计数。停机第 1 步：关门后新请求一律回「不可用、可重试」，再等已经进门的回完。
 #[derive(Default)]

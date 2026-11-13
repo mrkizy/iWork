@@ -16,6 +16,15 @@ use iwork_proto::pb::query::Kind as Q;
 use iwork_proto::pb::subscription_scope::Kind as Scope;
 use iwork_proto::routing::StreamKey;
 
+/// 流式增量（瞬时事件）专用的路由键类（T10a 方案 2.7 G6）：`live:<对话>`。不是领域的流，持久事件不会落在它上面；
+/// 只有会话范围订它，侧栏订的整类 `conversation` 盖不到它，所以侧栏收不到各个对话的增量。
+pub const LIVE_KIND: &str = "live";
+
+/// 一个对话的流式增量落在哪个键上。
+pub fn live_key(conversation: ConversationId) -> StreamKey {
+    StreamKey::one(LIVE_KIND, conversation.to_string())
+}
+
 /// 会话范围快照取的最新一页消息条数。更早的消息由客户端翻页查询（`before_message_id`）。
 pub const CONVERSATION_SNAPSHOT_PAGE_SIZE: u32 = 50;
 
@@ -67,11 +76,11 @@ fn scope_entry(scope: &Scope) -> Option<ScopeEntry> {
                 return None;
             }
             ScopeEntry {
-                // 回合、审批、卡片事件经 routes_for 的会话副键也落在这个键上（方案 Q3）。
-                streams: vec![StreamKey::one(
-                    stream_kind_name(K::Conversation),
-                    c.conversation_id.clone(),
-                )],
+                // 回合、审批、卡片事件经 routes_for 的会话副键也落在这个键上（方案 Q3）；流式增量走 live 键（G6）。
+                streams: vec![
+                    StreamKey::one(stream_kind_name(K::Conversation), c.conversation_id.clone()),
+                    StreamKey::one(LIVE_KIND, c.conversation_id.clone()),
+                ],
                 snapshot: vec![
                     Q::GetConversation(pb::GetConversation {
                         after_message_id: None,
@@ -99,9 +108,9 @@ fn scope_entry(scope: &Scope) -> Option<ScopeEntry> {
             streams: vec![all(K::Runtime)],
             snapshot: vec![Q::GetRuntimeStatus(pb::GetRuntimeStatus {})],
         },
-        // project：项目设置。
+        // project：项目设置；rule：记住的规则与安全清单（G5，T09 方案第 3 节）。
         Scope::Settings(_) => ScopeEntry {
-            streams: vec![all(K::Settings), all(K::Project)],
+            streams: vec![all(K::Settings), all(K::Project), all(K::Rule)],
             snapshot: vec![Q::GetSettings(pb::GetSettings { project_id: None })],
         },
     };
