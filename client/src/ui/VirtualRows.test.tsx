@@ -3,7 +3,7 @@
 // jsdom 没有布局、也不真滚：这里给行和容器一个固定布局，并记下每一次对 scrollTop 的写入（审查 4/F-10：
 // 只看高亮类名的话，删掉滚动那一行测试照样过）。
 import { render } from "@solidjs/testing-library";
-import { createSignal } from "solid-js";
+import { batch, createSignal } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VirtualRows } from "./VirtualRows";
 
@@ -190,8 +190,12 @@ describe("挂载时就有跳转指令", () => {
   });
   const frame = () => new Promise((r) => requestAnimationFrame(() => r(undefined)));
 
-  function mountWith(initialKeys: string[], jump?: { rowKey: string; token: bigint; highlightMs: number }) {
+  const jumpSetters = new WeakMap<HTMLElement, (j: { rowKey: string; token: bigint; highlightMs: number }) => void>();
+  const setJumpTo = (box: HTMLElement, j: { rowKey: string; token: bigint; highlightMs: number }) => jumpSetters.get(box)!(j);
+
+  function mountWith(initialKeys: string[], initialJump?: { rowKey: string; token: bigint; highlightMs: number }) {
     const [keys, setKeys] = createSignal(initialKeys);
+    const [jump, setJump] = createSignal(initialJump);
     const { container } = render(() => (
       <VirtualRows
         keys={keys()}
@@ -203,10 +207,12 @@ describe("挂载时就有跳转指令", () => {
         renderRow={(k) => <span>{k}</span>}
         onVisible={() => {}}
         onReachOldest={() => {}}
-        scrollTo={jump}
+        scrollTo={jump()}
       />
     ));
-    return { box: container.querySelector(".iw-vrows") as HTMLElement, setKeys };
+    const box = container.querySelector(".iw-vrows") as HTMLElement;
+    jumpSetters.set(box, setJump);
+    return { box, setKeys };
   }
 
   it("指令和行一起到：最终停在目标行居中，不被贴底盖掉", async () => {
@@ -221,6 +227,62 @@ describe("挂载时就有跳转指令", () => {
     setKeys(["a", "b", "c", "d", "e"]);
     await frame();
     expect(box.scrollTop).toBe(centered(3));
+  });
+
+  it("跳到离底部不到一屏的一行，之后来新行：停在那一行，不被「跟随最新」拉到底；用户自己滚到底才恢复跟随（UI g3b 2/F-1）", async () => {
+    const { box, setKeys } = mountWith(["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]);
+    await frame();
+    // 第 9 行（j）居中会落在最底附近：以前会被判成「在底部」
+    setJumpTo(box, { rowKey: "j", token: 7n, highlightMs: 1000 });
+    await frame();
+    const atTarget = box.scrollTop;
+    expect(atTarget).toBe(centered(9));
+    setKeys(["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"]);
+    await frame();
+    expect(box.scrollTop, "新行来了也停在目标行").toBe(atTarget);
+    // 用户自己滚到底：恢复跟随
+    box.dispatchEvent(new WheelEvent("wheel", { deltaY: 400 }));
+    box.scrollTop = 10 * ROW_GAP;
+    box.dispatchEvent(new Event("scroll"));
+    setKeys(["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]);
+    await frame();
+    expect(box.scrollTop, "用户滚到底以后照常贴底").toBe(10 * ROW_GAP);
+  });
+
+  it("同一批里 reset 与跳转都到：先回底再跳，结果与写入次序无关（g3b 2/F-4）", async () => {
+    for (const order of ["jumpFirst", "resetFirst"] as const) {
+      const [reset, setReset] = createSignal(0);
+      const [jump, setJump] = createSignal<{ rowKey: string; token: bigint; highlightMs: number }>();
+      const { container, unmount } = render(() => (
+        <VirtualRows
+          keys={["a", "b", "c", "d", "e"]}
+          ordinalOf={(k) => BigInt(k.charCodeAt(0))}
+          firstIndex={0}
+          total={5}
+          atTail={true}
+          hasOlder={false}
+          renderRow={(k) => <span>{k}</span>}
+          onVisible={() => {}}
+          onReachOldest={() => {}}
+          resetToken={reset()}
+          scrollTo={jump()}
+        />
+      ));
+      const box = container.querySelector(".iw-vrows") as HTMLElement;
+      await frame();
+      batch(() => {
+        if (order === "jumpFirst") {
+          setJump({ rowKey: "c", token: 11n, highlightMs: 1000 });
+          setReset(1);
+        } else {
+          setReset(1);
+          setJump({ rowKey: "c", token: 11n, highlightMs: 1000 });
+        }
+      });
+      await frame();
+      expect(box.scrollTop, order).toBe(centered(2));
+      unmount();
+    }
   });
 
   it("对照：没有指令时挂载贴底", async () => {

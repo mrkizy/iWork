@@ -6,6 +6,7 @@
 //   标题栏、输入框、窗口信息、整页说明每次随 patch 整份给；锚点列表与当前位置变了才给（没给就保留上一份），
 //   滚动指令只记最新一条（网页按 token 去重）；
 // - 跳转请求只记最新一条，由路由层按 seq 去重。
+import { batch } from "solid-js";
 import { createStore, produce, reconcile, type SetStoreFunction } from "solid-js/store";
 import type {
   AddProjectView,
@@ -77,7 +78,9 @@ export function createViewStore(): ViewStore {
   // 不是视图状态，放在 store 外。
   const textBytes = new Map<string, number>();
 
-  const applyPatch = (patch: ViewPatch) => {
+  // 一帧整份应用完再让组件看到：同一帧里的几处变化（如时间线 reset 与跳转指令）不因写入先后而得到不同结果
+  const applyPatch = (patch: ViewPatch) => batch(() => applyChanges(patch));
+  const applyChanges = (patch: ViewPatch) => {
     for (const { change } of patch.changes) {
       switch (change.case) {
         case "sidebar":

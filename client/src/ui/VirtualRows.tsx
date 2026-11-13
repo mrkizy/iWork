@@ -8,7 +8,9 @@
 //
 // 谁定滚动位置（优先级从高到低；高的在同一拍里最后写）：
 // 1. 用户自己滚动（之后 Rust 作废还在等的跳转）；
-// 2. 显式跳转（scrollTo）：挂载、reset 贴底、行变化保持位置之后才执行，所以是那一拍的最终结果；
+// 2. 显式跳转（scrollTo）：一次性意图由 Rust 唯一持有（锚点模块头的表），这里只执行，同一个 token 只用一次。
+//    与 reset 在同一个 effect 里按固定次序处理（先回底、再跳），和写入次序无关；挂载之后才执行。
+//    跳过去以后不再跟随最新：用户要看那一行，不因为它恰好离底部不到一屏就被新消息拉走；用户自己有滚动输入才恢复；
 // 3. 行变化时保持位置（restore：停在底部且接着最新就贴底，否则锚点行放回原处）；
 // 4. 首次挂载、时间线 reset 时贴底（默认位置）。
 import { createEffect, createSignal, For, on, onCleanup, onMount, type JSX } from "solid-js";
@@ -54,6 +56,10 @@ export function VirtualRows(props: VirtualRowsProps) {
   let scrolledToken: bigint | undefined;
   // 挂载贴底之前不执行跳转：先执行的话会被挂载时的贴底盖掉，token 又已经用掉（g3b 1/F-2）
   let mounted = false;
+  // 跳转之后暂停跟随最新，直到用户自己有滚动输入（UI g3b 2/F-1）
+  let followHeld = false;
+  // 上一次处理过的 reset（与跳转在同一个 effect 里按次序处理）
+  let seenReset = props.resetToken;
   let overflow: boolean | undefined;
   // 上一次报告以来有没有用户自己的滚动输入。程序改 scrollTop 也会触发 scroll 事件，所以看输入事件，不看 scroll
   let userInput = false;
@@ -66,7 +72,7 @@ export function VirtualRows(props: VirtualRowsProps) {
     rowEls().map((el) => ({ ordinal: BigInt(el.dataset.ordinal ?? "0"), top: el.offsetTop, height: el.offsetHeight }));
 
   const remember = () => {
-    stick = isAtBottom(box.scrollTop, box.clientHeight, box.scrollHeight);
+    stick = !followHeld && isAtBottom(box.scrollTop, box.clientHeight, box.scrollHeight);
     const first = rowEls().find((el) => el.offsetTop + el.offsetHeight > box.scrollTop);
     anchor = first ? { key: first.dataset.key ?? "", offset: first.offsetTop - box.scrollTop } : undefined;
   };
@@ -99,14 +105,15 @@ export function VirtualRows(props: VirtualRowsProps) {
 
   const onUserInput = () => {
     userInput = true;
+    followHeld = false;
   };
   const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
   const onKey = (e: KeyboardEvent) => {
-    if (SCROLL_KEYS.has(e.key)) userInput = true;
+    if (SCROLL_KEYS.has(e.key)) onUserInput();
   };
   // 只算点在容器本身上（滚动条）；点行里的按钮不是滚动
   const onPointer = (e: PointerEvent) => {
-    if (e.target === box) userInput = true;
+    if (e.target === box) onUserInput();
   };
 
   const onScroll = () => {
@@ -133,22 +140,17 @@ export function VirtualRows(props: VirtualRowsProps) {
     }
   };
 
-  createEffect(
-    on(
-      () => props.resetToken,
-      () => {
-        stick = true;
-        anchor = undefined;
-        askedOlderAt = undefined;
-        // Rust 重建时作废了它记的窗口（6/F-3）：去重缓存跟着失效，布局后重报一次，首尾行和 reset 前一样也报（审查 7/F-3）
-        reported = undefined;
-        box.scrollTop = box.scrollHeight;
-        applyJump();
-        if (frame === 0) frame = requestAnimationFrame(report);
-      },
-      { defer: true },
-    ),
-  );
+  // 时间线 reset（Rust 重建：打开对话、重连走快照、回到最新）：回到底部，跟随最新
+  const resetToBottom = () => {
+    stick = true;
+    followHeld = false;
+    anchor = undefined;
+    askedOlderAt = undefined;
+    // Rust 重建时作废了它记的窗口（6/F-3）：去重缓存跟着失效，布局后重报一次，首尾行和 reset 前一样也报（审查 7/F-3）
+    reported = undefined;
+    box.scrollTop = box.scrollHeight;
+    if (frame === 0) frame = requestAnimationFrame(report);
+  };
 
   createEffect(
     on(
@@ -168,6 +170,7 @@ export function VirtualRows(props: VirtualRowsProps) {
     const el = box.querySelector<HTMLElement>(`[data-vrow][data-key="${CSS.escape(s.rowKey)}"]`);
     if (el === null) return;
     scrolledToken = s.token;
+    followHeld = true;
     box.scrollTop = el.offsetTop - Math.max(0, (box.clientHeight - el.offsetHeight) / 2);
     remember();
     setHighlight(s.rowKey);
@@ -175,15 +178,23 @@ export function VirtualRows(props: VirtualRowsProps) {
     highlightTimer = setTimeout(() => setHighlight(undefined), s.highlightMs);
     if (frame === 0) frame = requestAnimationFrame(report);
   };
+  // reset 与跳转同一个 effect、固定次序：先回底，再执行还没用过的跳转（行随后面的帧到达时 keys 变，这里重跑）
   createEffect(() => {
+    const r = props.resetToken;
     void props.scrollTo;
     void props.keys;
+    if (!mounted) return;
+    if (r !== seenReset) {
+      seenReset = r;
+      resetToBottom();
+    }
     applyJump();
   });
 
   onMount(() => {
     box.scrollTop = box.scrollHeight;
     mounted = true;
+    seenReset = props.resetToken;
     applyJump();
     if (frame === 0) frame = requestAnimationFrame(report);
   });
