@@ -799,7 +799,7 @@ fn six_paging_ways_match_fake_daemon() {
     assert!(compared > 50, "对照：比了 {compared} 次");
 }
 
-/// 已登记的差异：往后翻到最后一条消息之后，这一页是空的；真后台不带任何实体（游标之前的行归游标所在那一页），
+/// 已登记的差异：往后翻到最后一条消息之后，这一页是空的；真后台不带任何实体，只带还没到终态的回合（游标之前的行归游标所在那一页），
 /// 假后台带上整个对话的回合、工具调用、审批。两边都说 `has_more`、没有 `has_newer`。
 #[test]
 fn after_last_message_page_is_empty() {
@@ -825,6 +825,11 @@ fn after_last_message_page_is_empty() {
         Some(RK::GetConversation(g)) => g,
         other => panic!("{other:?}"),
     };
-    assert!(page.messages.is_empty() && page.turns.is_empty() && page.tool_calls.is_empty());
+    assert!(page.messages.is_empty() && page.tool_calls.is_empty());
+    // 只带还没到终态的回合（每一页都带，见 `assemble`）：场景里那个回合还在跑
+    let open: Vec<&str> = page.turns.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(open, [w.turns[0].id].map(|n| tid(n).to_string()));
     assert!(page.has_more && !page.has_newer);
 }
+
+mod invariants;

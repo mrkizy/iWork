@@ -4,7 +4,7 @@
 //! - 只读、不提交、不改内存，被中止、重发、乱序到达都没事（Q2）；
 //! - 订阅快照（[`crate::snapshot`]）调的是同一个 [`answer_in`]，不另写一套（S1）。
 //!
-//! 还没接的查询（制品、模型、本机配置、安全清单、通知目标）回 `UNAVAILABLE`「未接入」，由各自的卡来换。
+//! 还没接的查询（制品、模型、本机配置、安全清单、通知目标、检查项目路径）回 `UNAVAILABLE`「未接入」，由各自的卡来换。
 
 use std::sync::Arc;
 
@@ -88,6 +88,7 @@ pub fn answer_outside(kind: &Q) -> Option<pb::Error> {
         Q::ListLocalConfig(_) => Some(unwired("本机配置（T10f）")),
         Q::ListSecurityLists(_) => Some(unwired("安全清单（T10e）")),
         Q::GetOpenTarget(_) => Some(unwired("通知目标（T10a 步 8）")),
+        Q::InspectProjectPath(_) => Some(unwired("检查项目路径（T10c）")),
         Q::GetConversation(_)
         | Q::ListConversations(_)
         | Q::ListProjects(_)
@@ -215,7 +216,8 @@ fn view<C: EventCodec + ?Sized>(tx: &ViewTx<'_, C>, kind: &Q) -> Result<R, Failu
         | Q::ListModels(_)
         | Q::ListLocalConfig(_)
         | Q::ListSecurityLists(_)
-        | Q::GetOpenTarget(_) => unreachable!("不是视图查询，由 answer_outside 答"),
+        | Q::GetOpenTarget(_)
+        | Q::InspectProjectPath(_) => unreachable!("不是视图查询，由 answer_outside 答"),
     };
     Ok(out)
 }

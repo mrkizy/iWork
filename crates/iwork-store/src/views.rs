@@ -465,6 +465,7 @@ impl<C: EventCodec + ?Sized> ViewTx<'_, C> {
             |r| r.get(0),
         )?;
         Ok(Ok(self.assemble(
+            conversation,
             messages,
             turn_ids,
             &tool_keys,
@@ -515,7 +516,8 @@ impl<C: EventCodec + ?Sized> ViewTx<'_, C> {
         }
         let beyond = candidates.len() > limit as usize;
         candidates.truncate(limit as usize);
-        let behind = self.any_row_on_other_side(conversation, side, s)?;
+        // 结果不空时另一侧从游标算起（游标那一行本身在另一侧）；结果为空时按严格比较（T09 方案 2.9「两个布尔值」）
+        let behind = self.any_row_on_other_side(conversation, side, s, candidates.is_empty())?;
         let (has_more, has_newer) = match side {
             RowSide::Before => (beyond, behind),
             RowSide::After => (behind, beyond),
@@ -558,6 +560,7 @@ impl<C: EventCodec + ?Sized> ViewTx<'_, C> {
             }
         }
         self.assemble(
+            conversation,
             messages,
             turn_ids,
             &tool_keys,
@@ -568,16 +571,20 @@ impl<C: EventCodec + ?Sized> ViewTx<'_, C> {
         )
     }
 
-    /// 游标另一侧（`Before` 时不小于游标、`After` 时不大于游标）还有没有任何一类行。
+    /// 游标另一侧（`Before` 时比游标新、`After` 时比游标旧）还有没有任何一类行。`strict`：游标那一行本身算不算
+    /// 在另一侧——结果不空时算（它不在结果里，在结果的另一侧），结果为空时不算（T09 方案 2.9「两个布尔值」）。
     fn any_row_on_other_side(
         &self,
         conversation: &str,
         side: RowSide,
         s: i64,
+        strict: bool,
     ) -> Result<bool, StorageError> {
-        let (cmp, ending_cmp) = match side {
-            RowSide::Before => (">=", ">="),
-            RowSide::After => ("<=", "<="),
+        let cmp = match (side, strict) {
+            (RowSide::Before, false) => ">=",
+            (RowSide::Before, true) => ">",
+            (RowSide::After, false) => "<=",
+            (RowSide::After, true) => "<",
         };
         let (ending_in, ending_states) = kinds_where(TurnState::is_terminal);
         let sql = format!(
@@ -586,7 +593,7 @@ impl<C: EventCodec + ?Sized> ViewTx<'_, C> {
              OR EXISTS (SELECT 1 FROM approvals WHERE conversation_id = ?1 AND requested_seq {cmp} ?2) \
              OR EXISTS (SELECT 1 FROM user_actions WHERE conversation_id = ?1 AND proposed_seq {cmp} ?2) \
              OR EXISTS (SELECT 1 FROM turns WHERE conversation_id = ?1 AND ended_seq != 0 \
-                        AND ended_seq {ending_cmp} ?2 AND state IN ({ending_in}))"
+                        AND ended_seq {cmp} ?2 AND state IN ({ending_in}))"
         );
         let mut args: Vec<rusqlite::types::Value> = vec![conversation.to_owned().into(), s.into()];
         args.extend(ending_states.iter().map(|t| (*t).to_owned().into()));
@@ -601,21 +608,20 @@ impl<C: EventCodec + ?Sized> ViewTx<'_, C> {
         clippy::too_many_arguments,
         reason = "一页的五路拼在一起，各路各自的列表"
     )]
+    /// 选好的行 → 一页。`turns` 在调用方给的（消息引用的、结束行被选中的、范围里开始或结束的）之外，再补两类：
+    /// 页里工具、审批、卡片所属的回合（行要读它）；这个对话所有还没到终态的回合（之后它们的状态变化、工具、
+    /// 结束事件到了，客户端要在 `turns` 里找得到，否则丢掉——审查 2026-11-13-m1-t10a-d7 1/F-1）。
     fn assemble(
         &self,
+        conversation: &str,
         messages: Vec<MessageRow>,
-        turn_ids: BTreeSet<String>,
+        mut turn_ids: BTreeSet<String>,
         tool_keys: &[(String, String)],
         approval_ids: &[String],
         card_ids: &[String],
         has_more: bool,
         has_newer: bool,
     ) -> Result<PageBody, StorageError> {
-        let mut turns = Vec::with_capacity(turn_ids.len());
-        for id in &turn_ids {
-            turns.push(self.turn_row(id)?);
-        }
-        turns.sort_by_key(|t| t.created_seq);
         let mut tool_calls = Vec::with_capacity(tool_keys.len());
         for (turn, call) in tool_keys {
             tool_calls.push(self.tool_call_row(turn, call)?);
@@ -631,6 +637,23 @@ impl<C: EventCodec + ?Sized> ViewTx<'_, C> {
             user_actions.push(self.user_action_row(id)?);
         }
         user_actions.sort_by_key(|c| c.created_seq);
+        turn_ids.extend(tool_calls.iter().map(|c| c.turn_id.to_string()));
+        turn_ids.extend(approvals.iter().map(|a| a.approval.turn_id.to_string()));
+        turn_ids.extend(user_actions.iter().map(|c| c.card.turn_id.to_string()));
+        let (open_in, open_states) = kinds_where(|t: TurnState| !t.is_terminal());
+        let mut args: Vec<rusqlite::types::Value> = vec![conversation.to_owned().into()];
+        args.extend(open_states.iter().map(|t| (*t).to_owned().into()));
+        turn_ids.extend(rows(
+            self.conn,
+            &format!("SELECT id FROM turns WHERE conversation_id = ? AND state IN ({open_in})"),
+            params_from_iter(args),
+            |r| r.get::<_, String>(0),
+        )?);
+        let mut turns = Vec::with_capacity(turn_ids.len());
+        for id in &turn_ids {
+            turns.push(self.turn_row(id)?);
+        }
+        turns.sort_by_key(|t| t.created_seq);
         let attachment_ids: Vec<AttachmentId> = messages
             .iter()
             .flat_map(|m| m.message.attachments.iter().copied())
