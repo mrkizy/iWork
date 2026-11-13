@@ -160,3 +160,47 @@ fn alive(pid: i32) -> bool {
     let stat = stat.trim();
     !stat.is_empty() && !stat.starts_with('Z')
 }
+
+/// stderr 写满、没人读的时候会话任务 panic（审查 S6-5b 2/F-3）：panic 的处理不先同步写 stderr，桥接照样立刻结束。
+#[tokio::test(flavor = "multi_thread")]
+async fn panic_with_stderr_full_still_ends_the_bridge() {
+    use support::procs::{Launch, Orphanable};
+    let mut steps = opening();
+    steps.extend([
+        read_user(),
+        init(),
+        result_ok(),
+        read_user(),
+        text("m1", "PANIC-HERE"),
+        json!({ "step": "log_signals_until_term" }),
+    ]);
+    let mut rig = Rig::new(Value::Array(steps));
+    rig.launch
+        .env
+        .push(("IWORK_BRIDGE_FAULT_PANIC_ON".into(), "PANIC-HERE".into()));
+    // 只留 error 级日志：stderr 填满之后，卡住桥接的只会是 panic 时的那次写
+    rig.launch
+        .env
+        .push(("IWORK_BRIDGE_LOG".into(), "error".into()));
+    let mut b = Orphanable::start_with(&rig, Launch::StderrFifo).await;
+    let session = b.wire.open(&rig).await;
+    assert!(b.wire.prompt(3, &session).await["result"].is_object());
+    let cli = pid_of(&rig, "started");
+    let _cleanup = support::procs::Leftover(vec![cli, b.bridge]);
+    b.fill_stderr();
+    // 第二轮：CLI 吐出标记，会话任务 panic
+    b.wire
+        .send(
+            json!({ "jsonrpc": "2.0", "id": 4, "method": "session/prompt",
+            "params": { "sessionId": session, "prompt": [{ "type": "text", "text": "again" }] } }),
+        )
+        .await;
+    let started = Instant::now();
+    while alive(b.bridge) {
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "3 秒内桥接结束（panic 处理不等 stderr）"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}

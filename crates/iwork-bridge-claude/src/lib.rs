@@ -8,10 +8,16 @@
 pub mod acp;
 pub mod cli;
 pub mod deadlines;
+/// 不等待的诊断输出（写 stderr 经队列和专门的写线程）
+#[cfg(unix)]
+pub mod diag;
 /// hook 通道的服务端。M1 不支持 Windows（AGENTS.md），命名管道那一半不做
 #[cfg(unix)]
 pub mod hook_server;
 pub mod launch;
+/// 收尾线程（5.4a 第 5 条第二种），和 ACP 端一样只在 unix 上
+#[cfg(unix)]
+pub mod reaper;
 pub mod rewrite;
 pub mod setup;
 /// 开会话（3.5 的次序），和 hook 通道一样只在 unix 上

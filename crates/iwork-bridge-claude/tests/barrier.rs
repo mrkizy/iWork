@@ -12,262 +12,14 @@
 mod support;
 
 use std::os::unix::process::CommandExt as _;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
-use iwork_agent_acp::process::SupervisedProcess;
 use iwork_bridge_claude::deadlines::{BRIDGE_TERM_WAIT, TEARDOWN_WAIT};
 
 use iwork_ports::agent::{AgentSession, ContentBlock, UpdateStream};
 use serde_json::{Value, json};
 use support::acp::{BRIDGE, Rig, emit, init, opening, read_user};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines};
-use tokio::net::unix::pipe;
-
-// ---------- 原始 ACP 行 ----------
-
-/// 一条 ACP 连接的两头：写请求、按 id 读响应。
-struct Wire<W, R> {
-    write: Option<W>,
-    read: Lines<BufReader<R>>,
-}
-
-impl<W: AsyncWrite + Unpin, R: AsyncRead + Unpin> Wire<W, R> {
-    fn new(write: W, read: R) -> Self {
-        Self {
-            write: Some(write),
-            read: BufReader::new(read).lines(),
-        }
-    }
-
-    async fn send(&mut self, v: Value) {
-        let w = self.write.as_mut().expect("还没关");
-        w.write_all(format!("{v}\n").as_bytes()).await.unwrap();
-        w.flush().await.unwrap();
-    }
-
-    async fn response(&mut self, id: u64) -> Value {
-        let deadline = Duration::from_secs(20);
-        tokio::time::timeout(deadline, async {
-            loop {
-                let line = self
-                    .read
-                    .next_line()
-                    .await
-                    .unwrap()
-                    .expect("桥接提前关了 stdout");
-                let v: Value = serde_json::from_str(&line).unwrap();
-                if v["id"] == id {
-                    return v;
-                }
-            }
-        })
-        .await
-        .expect("20 秒内有响应")
-    }
-
-    /// 握手、开会话（id 1、2），返回会话 id。
-    async fn open(&mut self, rig: &Rig) -> Value {
-        self.send(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": { "protocolVersion": 1, "clientCapabilities": {} } }))
-            .await;
-        assert!(self.response(1).await["result"].is_object());
-        let meta = iwork_agent_acp::convert::session_setup_meta(&rig.spec()).unwrap();
-        self.send(json!({ "jsonrpc": "2.0", "id": 2, "method": "session/new",
-            "params": { "cwd": rig.work.path(), "mcpServers": [], "_meta": meta } }))
-            .await;
-        let opened = self.response(2).await;
-        let session = opened["result"]["sessionId"].clone();
-        assert!(session.is_string(), "{opened}");
-        session
-    }
-
-    /// 握手、开会话，然后发一个 prompt（id 3），返回它的响应。
-    async fn open_and_prompt(&mut self, rig: &Rig) -> Value {
-        let session = self.open(rig).await;
-        self.prompt(3, &session).await
-    }
-
-    async fn prompt(&mut self, id: u64, session: &Value) -> Value {
-        self.send(
-            json!({ "jsonrpc": "2.0", "id": id, "method": "session/prompt",
-            "params": { "sessionId": session, "prompt": [{ "type": "text", "text": "hi" }] } }),
-        )
-        .await;
-        self.response(id).await
-    }
-
-    /// 关掉写的那一头：桥接读到 stdin 结束（后台没了）。
-    fn hang_up(&mut self) {
-        drop(self.write.take());
-    }
-}
-
-/// 这一轮因为后台任务事件按致命错误收掉，错误里带「会话已结束」。
-fn assert_fatal(response: &Value) {
-    assert_eq!(
-        response["error"]["data"]["iwork"],
-        json!({ "code": "cli_error", "reason": "background_task", "session_ended": true }),
-        "{response}"
-    );
-}
-
-// ---------- 假 CLI 与进程 ----------
-
-/// 一轮开头（`init` 之后先做 `before`）就报后台任务（致命），等 300 毫秒（桥接收摊）后再起一次工具调用（看 hook
-/// 是不是被拒），然后记信号。
-fn fatal_script(marker: &Path, ignore_hup: bool, before: Vec<Value>) -> Value {
-    let mut steps = opening();
-    steps.extend([read_user(), init()]);
-    steps.extend(before);
-    steps.extend([
-        emit(json!({ "type": "system", "subtype": "task_started", "task_id": "a", "is_backgrounded": true })),
-        json!({ "step": "sleep_ms", "ms": 300 }),
-        json!({ "step": "tool", "id": "toolu_late", "name": "Bash",
-            "input": { "command": "touch", "marker": marker.display().to_string() } }),
-    ]);
-    steps.push(json!({ "step": "log_signals_until_term", "ignore_hup": ignore_hup }));
-    Value::Array(steps)
-}
-
-/// 等假 CLI 的记录里出现 `kind` 这一笔。
-async fn logged(rig: &Rig, kind: &str) -> Value {
-    for _ in 0..2000 {
-        if let Some(v) = rig.log().into_iter().find(|v| v["kind"] == kind) {
-            return v;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("20 秒内假 CLI 没记 {kind}：{:?}", rig.log());
-}
-
-fn signals(rig: &Rig) -> Vec<String> {
-    rig.log()
-        .iter()
-        .filter(|v| v["kind"] == "signal")
-        .map(|v| v["signal"].as_str().unwrap().to_owned())
-        .collect()
-}
-
-fn pid_of(v: &Value) -> i32 {
-    v["pid"].as_i64().unwrap() as i32
-}
-
-/// 进程的状态：`'T'` 停着、`'Z'` 僵尸、`'R'` 别的活着的状态；没了为 `None`。
-#[cfg(target_os = "macos")]
-fn state(pid: i32) -> Option<char> {
-    let size = std::mem::size_of::<libc::proc_bsdinfo>();
-    // SAFETY: 全零是这个纯数据结构体的合法初值；指针与长度描述同一个结构体
-    let info = unsafe {
-        let mut info: libc::proc_bsdinfo = std::mem::zeroed();
-        let n = libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            (&raw mut info).cast(),
-            size as i32,
-        );
-        if n as usize != size {
-            // 僵尸在 macOS 上读不到：看进程号还占不占着
-            // SAFETY: 信号 0 只检查进程号
-            return (libc::kill(pid, 0) == 0).then_some('Z');
-        }
-        info
-    };
-    Some(match info.pbi_status {
-        libc::SSTOP => 'T',
-        libc::SZOMB => 'Z',
-        _ => 'R',
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn state(pid: i32) -> Option<char> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let c = stat[stat.rfind(')')? + 1..]
-        .split_whitespace()
-        .next()?
-        .chars()
-        .next()?;
-    Some(match c {
-        'T' | 't' => 'T',
-        'Z' | 'X' => 'Z',
-        _ => 'R',
-    })
-}
-
-/// 父进程号；没了为 `None`。
-#[cfg(target_os = "macos")]
-fn ppid(pid: i32) -> Option<i32> {
-    let size = std::mem::size_of::<libc::proc_bsdinfo>();
-    // SAFETY: 全零是这个纯数据结构体的合法初值；指针与长度描述同一个结构体
-    unsafe {
-        let mut info: libc::proc_bsdinfo = std::mem::zeroed();
-        let n = libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            (&raw mut info).cast(),
-            size as i32,
-        );
-        (n as usize == size).then_some(info.pbi_ppid as i32)
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn ppid(pid: i32) -> Option<i32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat[stat.rfind(')')? + 1..]
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
-}
-
-fn alive(pid: i32) -> bool {
-    matches!(state(pid), Some('R' | 'T'))
-}
-
-async fn wait_until(what: &str, limit: Duration, mut done: impl FnMut() -> bool) {
-    let started = Instant::now();
-    while !done() {
-        assert!(started.elapsed() < limit, "{limit:?} 内没等到：{what}");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-fn signal(pid: i32, sig: libc::c_int) {
-    // SAFETY: 只发信号；进程号是本测试起的进程
-    unsafe { libc::kill(pid, sig) };
-}
-
-/// 本测试起的进程：结束时亲手收掉（停着的先放开，再杀）。
-struct Leftover(Vec<i32>);
-
-impl Drop for Leftover {
-    fn drop(&mut self) {
-        for pid in &self.0 {
-            if alive(*pid) {
-                signal(*pid, libc::SIGKILL);
-            }
-        }
-    }
-}
-
-/// 后台以 `SupervisedProcess` 起桥接（和产品一样），在它的管道上说原始 ACP。stderr 读掉不管。
-fn spawn_supervised(
-    rig: &Rig,
-) -> (
-    SupervisedProcess,
-    Wire<tokio::process::ChildStdin, tokio::process::ChildStdout>,
-) {
-    let (process, pipes) = SupervisedProcess::spawn(&rig.launch).unwrap();
-    let mut stderr = pipes.stderr;
-    tokio::spawn(async move {
-        let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
-    });
-    (process, Wire::new(pipes.stdin, pipes.stdout))
-}
+use support::procs::*;
 
 // ---------- 后台还在 ----------
 
@@ -439,77 +191,6 @@ async fn stdout_full_still_self_cleans() {
 }
 
 // ---------- 后台没了 ----------
-
-/// 桥接经一个中间 shell 起：后台（中间 shell）死掉时，桥接被系统收养，它的组成了孤儿组。管道是两个 FIFO，
-/// 测试拿着另一头。
-struct Orphanable {
-    dir: tempfile::TempDir,
-    shell: std::process::Child,
-    wire: Wire<pipe::Sender, pipe::Receiver>,
-    bridge: i32,
-}
-
-impl Orphanable {
-    async fn start(rig: &Rig) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        for name in ["in", "out"] {
-            let path = std::ffi::CString::new(dir.path().join(name).to_str().unwrap()).unwrap();
-            // SAFETY: 路径是以 0 结尾的字符串
-            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
-        }
-        let shell = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(r#""$B" acp <"$D/in" >"$D/out" 2>"$D/err" & echo $! >"$D/b.pid"; while [ ! -e "$D/die" ]; do sleep 0.01; done"#)
-            .envs(rig.launch.env.iter().map(|(k, v)| (k, v)))
-            .env("B", BRIDGE)
-            .env("D", dir.path())
-            .env("IWORK_BRIDGE_LOG", "debug")
-            .spawn()
-            .unwrap();
-        let (inp, out) = (dir.path().join("in"), dir.path().join("out"));
-        let write =
-            tokio::task::spawn_blocking(move || std::fs::OpenOptions::new().write(true).open(inp));
-        let read = tokio::task::spawn_blocking(move || std::fs::File::open(out));
-        let (write, read) = (write.await.unwrap().unwrap(), read.await.unwrap().unwrap());
-        let pid_file = dir.path().join("b.pid");
-        let mut bridge = 0;
-        for _ in 0..1000 {
-            if let Ok(s) = std::fs::read_to_string(&pid_file)
-                && let Ok(p) = s.trim().parse()
-            {
-                bridge = p;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(bridge > 0, "桥接起来了");
-        Self {
-            dir,
-            shell,
-            wire: Wire::new(
-                pipe::Sender::from_file(write).unwrap(),
-                pipe::Receiver::from_file(read).unwrap(),
-            ),
-            bridge,
-        }
-    }
-
-    /// 后台死掉：中间 shell 退出，桥接被收养。
-    fn daemon_dies(&mut self) {
-        std::fs::write(self.dir.path().join("die"), b"").unwrap();
-        self.shell.wait().unwrap();
-    }
-
-    fn stderr(&self) -> String {
-        std::fs::read_to_string(self.dir.path().join("err")).unwrap_or_default()
-    }
-
-    /// 桥接的进程组里一个进程都没有了（僵尸也没有：被 init 回收了）。
-    fn group_gone(&self) -> bool {
-        // SAFETY: 信号 0 只检查组在不在
-        unsafe { libc::killpg(self.bridge, 0) != 0 }
-    }
-}
 
 /// 后台死在冻结中途（CLI 停着）：系统给桥接的组发 SIGHUP、SIGCONT。桥接没被 SIGHUP 杀掉，读到 stdin 结束后
 /// 给 CLI 发 SIGTERM、对自己的组发 SIGKILL，整个组没了。CLI 对 SIGHUP 分两格：默认动作（被 SIGHUP 结束）与忽略。
@@ -802,6 +483,7 @@ async fn inherited_stdin_copy_does_not_keep_bridge_alive() {
     assert!(copy > 2, "{}", std::io::Error::last_os_error());
     let mut other = std::process::Command::new(BRIDGE)
         .arg("acp")
+        .env("IWORK_SUPERVISOR_PID", std::process::id().to_string())
         .envs(rig.launch.env.iter().map(|(k, v)| (k, v)))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -878,5 +560,158 @@ async fn daemon_dies_while_stdin_is_held_elsewhere() {
         signals(&rig).contains(&"SIGTERM".into()),
         "桥接给 CLI 发了 SIGTERM：{:?}",
         signals(&rig)
+    );
+}
+
+// ---------- 收尾不经过可能等待的路径（审查 S6-5b 第 2 轮） ----------
+
+/// 后台在起桥接之后、桥接进 main 之前就死了（2/F-2）：桥接进 main 时父进程已经不是后台告诉它的那个号，当场退出，
+/// 不把收养它的进程当成后台。测试一直拿着它的 stdin，它读不到结束。
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_dies_before_bridge_main() {
+    let rig = Rig::new(Value::Array(opening()));
+    let b = Orphanable::start_with(&rig, Launch::AfterSupervisorDied).await;
+    let _cleanup = Leftover(vec![b.bridge]);
+    wait_until("桥接退出", Duration::from_secs(2), || !alive(b.bridge)).await;
+    drop(b);
+}
+
+/// 没有 `IWORK_SUPERVISOR_PID`（不是后台起的）：拒绝启动，退出码 2。失败即关闭，不去猜谁是后台。
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_supervisor_pid_refuses_to_start() {
+    let rig = Rig::new(Value::Array(opening()));
+    let mut child = std::process::Command::new(BRIDGE)
+        .arg("acp")
+        .envs(rig.launch.env.iter().map(|(k, v)| (k, v)))
+        .env_remove("IWORK_SUPERVISOR_PID")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let _cleanup = Leftover(vec![child.id() as i32]);
+    let started = Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "5 秒内退出");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(status.code(), Some(2), "{status:?}");
+}
+
+/// 正常回合里（没有致命错误）后台死了，桥接的 stdout 早已写满、读端还被拿着不读（2/F-1）：收尾不等 ACP 把
+/// 输出排空，CLI 收到 SIGTERM，整组在时限内没了。
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_dies_while_stdout_is_full() {
+    let mut steps = opening();
+    steps.extend([
+        read_user(),
+        init(),
+        json!({ "step": "emit_texts", "count": 64, "bytes": 8 * 1024 }),
+        json!({ "step": "log_signals_until_term" }),
+    ]);
+    let rig = Rig::new(Value::Array(steps));
+    let mut b = Orphanable::start(&rig).await;
+    let session = b.wire.open(&rig).await;
+    b.wire
+        .send(
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+            "params": { "sessionId": session, "prompt": [{ "type": "text", "text": "hi" }] } }),
+        )
+        .await;
+    let cli = pid_of(&logged(&rig, "started").await);
+    let _cleanup = Leftover(vec![cli, b.bridge]);
+    logged(&rig, "watching_signals").await;
+    // 等桥接把输出写到卡住
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    b.daemon_dies();
+    wait_until(
+        "整个组没了",
+        BRIDGE_TERM_WAIT + Duration::from_secs(5),
+        || b.group_gone(),
+    )
+    .await;
+    assert!(
+        signals(&rig).contains(&"SIGTERM".into()),
+        "桥接给 CLI 发了 SIGTERM：{:?}",
+        signals(&rig)
+    );
+}
+
+/// stderr 写满、没人读（2/F-3 那一类：先打印再收尾）。后台死了，桥接照样收尾，不被日志卡住。
+#[tokio::test(flavor = "multi_thread")]
+async fn stderr_full_daemon_dies_still_self_cleans() {
+    let mut steps = opening();
+    steps.extend([
+        read_user(),
+        init(),
+        support::acp::result_ok(),
+        json!({ "step": "log_signals_until_term" }),
+    ]);
+    let rig = Rig::new(Value::Array(steps));
+    let mut b = Orphanable::start_with(&rig, Launch::StderrFifo).await;
+    let session = b.wire.open(&rig).await;
+    assert!(b.wire.prompt(3, &session).await["result"].is_object());
+    let cli = pid_of(&logged(&rig, "started").await);
+    let _cleanup = Leftover(vec![cli, b.bridge]);
+    logged(&rig, "watching_signals").await;
+    b.fill_stderr();
+    b.daemon_dies();
+    wait_until(
+        "整个组没了",
+        BRIDGE_TERM_WAIT + Duration::from_secs(5),
+        || b.group_gone(),
+    )
+    .await;
+    assert!(
+        signals(&rig).contains(&"SIGTERM".into()),
+        "{:?}",
+        signals(&rig)
+    );
+}
+
+/// stderr 写满、没人读，后台还在：致命错误之后等满 `TEARDOWN_WAIT`，桥接照样自己收尾。
+#[tokio::test(flavor = "multi_thread")]
+async fn stderr_full_fatal_still_self_cleans() {
+    let marker_dir = tempfile::tempdir().unwrap();
+    // 致命事件之前等一会儿：测试先把 stderr 填满
+    let rig = Rig::new(fatal_script(
+        &marker_dir.path().join("ran"),
+        false,
+        vec![json!({ "step": "sleep_ms", "ms": 500 })],
+    ));
+    let mut b = Orphanable::start_with(&rig, Launch::StderrFifo).await;
+    let session = b.wire.open(&rig).await;
+    b.fill_stderr();
+    b.wire
+        .send(
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+            "params": { "sessionId": session, "prompt": [{ "type": "text", "text": "hi" }] } }),
+        )
+        .await;
+    let cli = pid_of(&logged(&rig, "started").await);
+    let _cleanup = Leftover(vec![cli, b.bridge]);
+    wait_until(
+        "整个组没了",
+        TEARDOWN_WAIT + BRIDGE_TERM_WAIT + Duration::from_secs(5),
+        || b.group_gone(),
+    )
+    .await;
+    assert!(
+        signals(&rig).contains(&"SIGTERM".into()),
+        "{:?}",
+        signals(&rig)
+    );
+}
+
+/// 后台设的环境变量和桥接读的是同一个名字（两边各写一份字符串，桥接不依赖 `iwork-agent-acp`）。
+#[test]
+fn supervisor_pid_env_names_match() {
+    assert_eq!(
+        iwork_bridge_claude::reaper::ENV_SUPERVISOR_PID,
+        iwork_agent_acp::process::SUPERVISOR_PID_ENV
     );
 }

@@ -10,15 +10,31 @@ const ENV_LOG: &str = "IWORK_BRIDGE_LOG";
 
 #[cfg(unix)]
 fn main() {
-    abort_on_panic();
-    // 最先记下父进程（后台）：之后它一换，就是后台没了（5.4a 第 5 条，审查 S6-5b 1/F-3）
-    // SAFETY: getppid 不读写任何内存
-    let parent = unsafe { libc::getppid() };
-    // 先于运行时：运行时会开自己的句柄，关的时候不能把它们一起关掉
+    use iwork_bridge_claude::{diag, reaper};
+    // 1. 后台是谁：后台起桥接时经环境变量告诉它（审查 S6-5b 2/F-2）。读完就从环境里去掉：之后起 CLI 的环境取自
+    //    桥接自己的环境，这个号不能带给 CLI 和它的子进程
+    let supervisor = take_supervisor();
+    // 2. 先于任何线程和运行时：它们会开自己的句柄，关的时候不能把它们一起关掉
     let inherited = close_inherited_fds();
+    // 3. 诊断输出走队列和写线程，任何地方写日志都不会被 stderr 卡住（2/F-3）
+    let _ = diag::start();
     init_logging();
+    abort_on_panic();
     if let Err(e) = inherited {
         tracing::warn!(error = %e, "列不出继承来的句柄，没有关");
+    }
+    // 4. 不是后台起的：不起来（失败即关闭，不去猜谁是后台）
+    let Some(supervisor) = supervisor else {
+        refuse(&format!(
+            "没有合法的 {}：不是后台起的，拒绝启动",
+            reaper::ENV_SUPERVISOR_PID
+        ));
+    };
+    // 5. 收尾线程：一起来就先比一次父进程，后台在桥接进 main 之前就没了的话当场收尾（2/F-2）；之后后台没了、
+    //    输入结束、致命错误后等满 TEARDOWN_WAIT，都由它收尾（5.4a 第 5 条第二种）
+    let leader = become_group_leader();
+    if let Err(e) = reaper::start(supervisor, leader) {
+        refuse(&format!("起不来收尾线程：{e}"));
     }
     // 一个 CLI、一条 ACP 连接、少量并发的 hook 连接，不需要线程池（方案第 14 节）
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -26,53 +42,62 @@ fn main() {
         .build()
     {
         Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("iwork-bridge-claude: 起不来异步运行时：{e}");
-            std::process::exit(2);
-        }
+        Err(e) => refuse(&format!("起不来异步运行时：{e}")),
     };
-    runtime.block_on(run(parent));
+    runtime.block_on(run());
 }
 
 #[cfg(unix)]
-async fn run(parent: libc::pid_t) {
-    let leader = become_group_leader();
+async fn run() {
+    use iwork_bridge_claude::reaper::{self, Event};
     watch_hangup();
     let sub = std::env::args().nth(1);
-    let result = match sub.as_deref() {
+    let message = match sub.as_deref() {
         None | Some("acp") => match iwork_bridge_claude::acp::BridgeConfig::from_process() {
-            Ok(config) => iwork_bridge_claude::acp::serve_stdio(config, parent).await,
-            Err(e) => Err(e),
+            Ok(config) => iwork_bridge_claude::acp::serve_stdio(config).await,
+            Err(e) => e,
         },
-        Some(other) => Err(format!("不认识的子命令：{other}")),
+        Some(other) => format!("不认识的子命令：{other}"),
     };
-    if let Err(message) = &result {
-        tracing::error!(%message, "桥接退出");
-        eprintln!("iwork-bridge-claude: {message}");
-    }
-    // 走到这里，要么 ACP 连接结束（后台没了、关了我们、写不出去），要么致命错误之后等满 TEARDOWN_WAIT 后台没来清；
-    // CLI 都已经收拾过：最后对自己的进程组发 SIGKILL，连自己一起，
-    // CLI 直接起的、还留在组里的进程也一起结束（5.4a 第 5 条第二种）。不是组长时不发，免得杀到别人的组
-    if leader {
-        // SAFETY: killpg 只读两个整数参数；组号是自己的进程号
-        unsafe { libc::killpg(libc::getpid(), libc::SIGKILL) };
-    }
-    if result.is_err() {
-        std::process::exit(2);
-    }
+    // 起不来（还没有 CLI）：交给收尾线程结束进程
+    tracing::error!(%message, "桥接退出");
+    reaper::notify(Event::Ended("桥接起不来"));
+    std::future::pending::<()>().await;
 }
 
-/// 任何线程、任何任务 panic 都让整个桥接立刻结束（先照默认的样子把 panic 信息写到 stderr）。会话任务是单独起的
-/// 任务，默认它 panic 只结束它自己：手里的 CLI 被丢掉（kill_on_drop 杀掉 CLI，父链断了，CLI 另立会话的命令就清不到），
-/// 收摊的状态也永远到不了，`TEARDOWN_WAIT` 兜底不会触发。abort 之后走「桥接崩了」那条路：后台看到输出到头就清树，
-/// 这时 CLI 还活着，范围找得全（5.4a 第 5 条，审查 S6-5b 停放期第 12 条）。
+/// 读出后台的进程号并从环境里去掉。缺失、不是正整数、是 1 都算不合法。
+#[cfg(unix)]
+fn take_supervisor() -> Option<libc::pid_t> {
+    use iwork_bridge_claude::reaper::ENV_SUPERVISOR_PID;
+    let value = std::env::var(ENV_SUPERVISOR_PID).ok();
+    // SAFETY: 这时还是单线程，没有别人在读写环境
+    unsafe { std::env::remove_var(ENV_SUPERVISOR_PID) };
+    value?.parse::<libc::pid_t>().ok().filter(|p| *p > 1)
+}
+
+/// 不起来：记一行，有上限地等它写出去，退出码 2。这时还没有 CLI，不用收尾。
+#[cfg(unix)]
+fn refuse(message: &str) -> ! {
+    tracing::error!(message, "桥接拒绝启动");
+    iwork_bridge_claude::diag::flush(std::time::Duration::from_millis(500));
+    std::process::exit(2);
+}
+
+/// 任何线程、任何任务 panic 都让桥接立刻结束（会话任务是单独起的任务，默认它 panic 只结束它自己：手里的 CLI 被
+/// 丢掉，父链断了，收摊也永远到不了；停放期第 12 条）。不调默认的 panic 处理：它同步写 stderr，管道满了就卡在那里，
+/// 到不了下一步（2/F-3）。诊断只往队列里放一行，放不进就丢。
+///
+/// - 后台还在：abort，走「桥接崩了」那条路，后台看到输出到头就清树，这时 CLI 还活着，范围找得全；
+/// - 后台已经没了：没人会来清，就地收尾（和收尾线程是同一个函数，两边同时做也没关系）。
 #[cfg(unix)]
 fn abort_on_panic() {
-    let report = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        report(info);
-        eprintln!("iwork-bridge-claude: panic，桥接立刻结束（abort）");
-        std::process::abort();
+    use iwork_bridge_claude::{diag, reaper};
+    std::panic::set_hook(Box::new(|info| {
+        diag::line(&format!("iwork-bridge-claude: panic，桥接立刻结束：{info}"));
+        if reaper::daemon_alive() {
+            std::process::abort();
+        }
+        reaper::self_clean();
     }));
 }
 
@@ -111,7 +136,7 @@ fn become_group_leader() -> bool {
 }
 
 /// 给 SIGHUP 装处理函数（不是忽略：忽略会被 CLI 继承，处理函数不会）。后台死在冻结中途时系统给这一组发
-/// SIGHUP、SIGCONT，桥接要活下来，接着从 stdin 读到结束、走自己收尾那条路（5.4a 第 5 条）。
+/// SIGHUP、SIGCONT，桥接要活下来，由收尾线程看到父进程变了、走自己收尾那条路（5.4a 第 5 条）。
 #[cfg(unix)]
 fn watch_hangup() {
     use tokio::signal::unix::{SignalKind, signal};
@@ -119,7 +144,7 @@ fn watch_hangup() {
         Ok(mut hup) => {
             tokio::spawn(async move {
                 while hup.recv().await.is_some() {
-                    tracing::warn!("收到 SIGHUP：后台可能没了，等 stdin 读到结束后自己收尾");
+                    tracing::warn!("收到 SIGHUP：后台可能没了，收尾线程会看到");
                 }
             });
         }
@@ -136,7 +161,7 @@ fn init_logging() {
         .and_then(|v| v.parse::<tracing::Level>().ok())
         .unwrap_or(tracing::Level::INFO);
     tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
+        .with_writer(|| iwork_bridge_claude::diag::Writer)
         .with_ansi(false)
         .with_max_level(level)
         .init();

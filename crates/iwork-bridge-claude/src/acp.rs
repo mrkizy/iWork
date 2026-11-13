@@ -33,21 +33,20 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use iwork_proto::pb;
 use prost::Message as _;
 use serde_json::{Map, Value, json};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::cli::errors::TurnEnd;
 use crate::cli::facts::{IsolationBroken, SessionExpect};
 use crate::cli::input::{InputBlock, control_request_line, user_line};
 use crate::cli::map::{Fatal, Out, Report, StreamMapper};
 use crate::cli::process::{CliProcess, InputError, InputQueue, ReadError};
-use crate::deadlines::{
-    BRIDGE_TERM_WAIT, CANCEL_TERM_AFTER, PARENT_POLL, TEARDOWN_WAIT, deadlines,
-};
+use crate::deadlines::{CANCEL_TERM_AFTER, deadlines};
 use crate::hook_server::HookEvent;
 use crate::hook_server::input::{self as hook_input, HookInput};
 use crate::hook_server::pending::{BackendAnswer, CallId, Delivery};
 use crate::hook_server::reconcile::Reconciler;
 use crate::launch::{BridgeEnv, Opening, Start};
+use crate::reaper::{self, Event};
 use crate::rewrite::{CommandRewriter, NoRewrite};
 use crate::setup;
 use crate::startup::{self, OpenRequest, OpenSession};
@@ -219,45 +218,24 @@ enum Command {
 
 /// 桥接进程里那一条会话。会话任务是它的唯一写入方（开会话时放进发送端，结束时记下原因、拿走发送端、把 CLI
 /// 停放在这里）。
+#[derive(Default)]
 struct Slot {
     /// 会话任务在跑时有值
     commands: Option<mpsc::UnboundedSender<Command>>,
     opened: bool,
     /// 会话为什么结束了：之后来的 prompt 拿到的就是它，不是泛泛的 `cli_exited`（审查 S6-3 1/F-5）
     ended: Option<SessionFatal>,
-    /// 会话结束后停放的 CLI：桥接不杀它、不给它发信号，等后台来清树（5.4a 第 5 条）；等不到才自己收拾
+    /// 会话结束后停放的 CLI：桥接不杀它、不给它发信号，等后台来清树（5.4a 第 5 条）；等不到由收尾线程收拾
+    /// （[`crate::reaper`]）
     parked: Option<Parked>,
-    /// 会话任务结束、CLI 已停放时变成 `true`
-    stopped: watch::Sender<bool>,
 }
 
 /// 停放着的 CLI，连同它的输入队列。输入队列留着就是 stdin 还开着：会读 stdin 的 CLI 读不到结束，不会在后台
 /// 扫描之前自己退出、拆掉父链，它另立会话的命令就还找得到（审查 S6-5b 1/F-1）。stdout 也留着、不再读：CLI 往里
-/// 写满了只会卡住，不会因为断管退出。
+/// 写满了只会卡住，不会因为断管退出。只是拿着，不再用：桥接被杀时它们跟着没了。
 struct Parked {
-    cli: CliProcess,
-    input: InputQueue,
-}
-
-impl Parked {
-    /// 桥接自己收拾：SIGTERM，等 [`BRIDGE_TERM_WAIT`] 让它结束自己的命令，再 SIGKILL（5.4a 第 5 条第二种）。
-    /// stdin 到这时才关。
-    async fn terminate(mut self) {
-        self.cli.terminate(BRIDGE_TERM_WAIT).await;
-        drop(self.input);
-    }
-}
-
-impl Default for Slot {
-    fn default() -> Self {
-        Self {
-            commands: None,
-            opened: false,
-            ended: None,
-            parked: None,
-            stopped: watch::Sender::new(false),
-        }
-    }
+    _cli: CliProcess,
+    _input: InputQueue,
 }
 
 impl Slot {
@@ -382,80 +360,63 @@ where
             agent_client_protocol::on_receive_notification!(),
         )
         .connect_to(transport);
-    tokio::pin!(connection);
-    // 收摊（5.4a 第 5 条）：会话结束、CLI 停放之后等后台来清树，最多 TEARDOWN_WAIT
-    let mut stopped = slot.lock().expect("锁没有中毒").stopped.subscribe();
-    let teardown_due = async move {
-        let _ = stopped.wait_for(|s| *s).await;
-        tokio::time::sleep(TEARDOWN_WAIT).await;
-    };
-    let ended = tokio::select! {
-        r = &mut connection => Some(r),
-        () = teardown_due => None,
-    };
-    let Some(result) = ended else {
-        // 后台接不了手（等满 TEARDOWN_WAIT 还没被杀）：自己收尾。收拾完 CLI 就返回，不再等连接；调用方最后对
-        // 自己的进程组发 SIGKILL，CLI 留在组里的进程一起结束（5.4a 第 5 条第二种）
-        tracing::warn!("收摊后后台没来清树，自己收尾");
-        terminate_parked(&slot).await;
-        return Err("致命错误之后后台没来清树".into());
-    };
-    // 连接没了：后台没了、关了我们，或者写不出去。会话还在跑就让它收摊、把 CLI 停放好，再自己收拾（尽力而为）
-    let running = slot.lock().expect("锁没有中毒").commands.take().is_some();
-    if running {
-        let mut stopped = slot.lock().expect("锁没有中毒").stopped.subscribe();
-        let _ = stopped.wait_for(|s| *s).await;
-    }
-    terminate_parked(&slot).await;
+    let result = connection.await;
+    // 连接没了（后台没了、关了我们、写不出去）：收尾归收尾线程（调用方已经通知了它），这里只让还在跑的会话任务
+    // 停下来、把 CLI 停放好（stdin 照旧开着），不等它，也不给 CLI 发信号
+    slot.lock().expect("锁没有中毒").commands.take();
     result.map_err(|e| format!("ACP 连接出错：{e}"))
 }
 
-/// 桥接自己收拾停放的 CLI：SIGTERM，等 [`BRIDGE_TERM_WAIT`] 让它结束自己的命令，再 SIGKILL（5.4a 第 5 条第二种）。
-async fn terminate_parked(slot: &Mutex<Slot>) {
-    let parked = slot.lock().expect("锁没有中毒").parked.take();
-    if let Some(parked) = parked {
-        parked.terminate().await;
-    }
-}
-
-/// 在 stdin / stdout 上说 ACP（`acp` 子命令）。`parent` 是启动时的父进程号（后台）。
+/// 在 stdin / stdout 上说 ACP（`acp` 子命令），不返回：桥接最后由收尾线程（[`crate::reaper`]）结束。
 ///
-/// 「后台没了」有两个信号，哪个先到算哪个，后面走同一条路（输入到头，5.4a 第 5 条第二种）：stdin 读到结束；父进程
-/// 号变了。只靠 stdin 不够：macOS 上后台并发起子进程时，别的子进程可能继承到 stdin 的写端，后台死了它还拿着，桥接
-/// 就读不到结束（审查 S6-5b 1/F-3）。父进程号不会因为谁拿着什么句柄而不变。
-pub async fn serve_stdio(config: BridgeConfig, parent: libc::pid_t) -> Result<(), String> {
-    use futures::StreamExt as _;
+/// 输入读到结束（或读出错）、输出写不出去、连接结束，都只是告诉收尾线程，不在这里收拾：这里的每一步都可能被管道
+/// 卡住（比如连接结束之前要排空 stdout），收尾不能等它们（审查 S6-5b 2/F-1）。会话的状态（停放着的 CLI 和它的
+/// stdin）一直拿到进程结束。
+pub async fn serve_stdio(config: BridgeConfig) -> ! {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    let daemon_gone = async move {
-        parent_gone(parent).await;
-        tracing::warn!(parent, "父进程（后台）没了，当作输入到头");
-    };
     let incoming = futures::stream::unfold(
         BufReader::new(tokio::io::stdin()).lines(),
         |mut lines| async move {
             match lines.next_line().await {
                 Ok(Some(line)) => Some((Ok(line), lines)),
-                Ok(None) => None,
-                Err(e) => Some((Err(e), lines)),
+                Ok(None) => {
+                    reaper::notify(Event::Ended("stdin 读到结束"));
+                    None
+                }
+                Err(e) => {
+                    reaper::notify(Event::Ended("stdin 读出错"));
+                    Some((Err(e), lines))
+                }
             }
         },
-    )
-    .take_until(Box::pin(daemon_gone));
+    );
     let outgoing = futures::sink::unfold(tokio::io::stdout(), |mut w, line: String| async move {
-        w.write_all(line.as_bytes()).await?;
-        w.write_all(b"\n").await?;
-        w.flush().await?;
+        let wrote = async {
+            w.write_all(line.as_bytes()).await?;
+            w.write_all(b"\n").await?;
+            w.flush().await
+        }
+        .await;
+        if let Err(e) = wrote {
+            reaper::notify(Event::Ended("stdout 写不出去"));
+            return Err(e);
+        }
         Ok::<_, std::io::Error>(w)
     });
-    serve(config, Lines::new(Box::pin(outgoing), Box::pin(incoming))).await
-}
-
-/// 等到父进程号不再是 `parent`：父进程退出后，系统（或别的收养进程）接过去，号就变了，之后不会再变回来。
-async fn parent_gone(parent: libc::pid_t) {
-    // SAFETY: getppid 不读写任何内存
-    while unsafe { libc::getppid() } == parent {
-        tokio::time::sleep(PARENT_POLL).await;
+    let slot = Arc::new(Mutex::new(Slot::default()));
+    let result = serve_with(
+        config,
+        Lines::new(Box::pin(outgoing), Box::pin(incoming)),
+        Arc::clone(&slot),
+    )
+    .await;
+    if let Err(message) = &result {
+        tracing::error!(%message, "ACP 连接出错");
     }
+    reaper::notify(Event::Ended("ACP 连接结束"));
+    // 拿着会话的状态等收尾线程来结束进程：丢掉它会让 kill_on_drop 不经 SIGTERM 就杀掉 CLI
+    let _keep = slot;
+    std::future::pending().await
 }
 
 fn initialize_response(config: &BridgeConfig) -> InitializeResponse {
@@ -569,14 +530,17 @@ async fn open(
     let (tx, rx) = mpsc::unbounded_channel();
     slot.lock().expect("锁没有中毒").commands = Some(tx);
     let owner = Arc::clone(slot);
-    // 不挂在连接上（`tokio::spawn`）：连接断了它还要接着跑完收摊，把 CLI 停放好，再由 `serve_with` 收拾
+    // 不挂在连接上（`tokio::spawn`）：连接断了它还要接着跑完收摊，把 CLI 停放好
     tokio::spawn(async move {
         let (ended, parked) = run_session(worker, session, rx).await;
-        let mut slot = owner.lock().expect("锁没有中毒");
-        slot.commands = None;
-        slot.ended = ended;
-        slot.parked = Some(parked);
-        slot.stopped.send_replace(true);
+        {
+            let mut slot = owner.lock().expect("锁没有中毒");
+            slot.commands = None;
+            slot.ended = ended;
+            slot.parked = Some(parked);
+        }
+        // 从这一刻起等后台来清，最多 TEARDOWN_WAIT（5.4a 第 5 条）
+        reaper::notify(Event::Parked);
     });
     Ok(())
 }
@@ -797,7 +761,13 @@ async fn run_session(
     // CLI 不杀、不发信号、不关 stdin，交回去停放，等后台来清树：这时 CLI 还活着，它起的命令顺父链找得全
     s.pending.deny_all(REASON_NO_TURN);
     let OpenSession { cli, .. } = s;
-    (fatal, Parked { cli, input })
+    (
+        fatal,
+        Parked {
+            _cli: cli,
+            _input: input,
+        },
+    )
 }
 
 impl Worker {
