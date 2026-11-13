@@ -4,7 +4,7 @@ import { create } from "@bufbuild/protobuf";
 import { fireEvent, render, screen } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AnchorKind, AnchorsViewSchema, type AnchorsView } from "../gen/iwork/v1/view_pb";
+import { AnchorKind, AnchorsViewSchema, EdgeLandingSchema, type AnchorsView } from "../gen/iwork/v1/view_pb";
 import { loadScenario, noFixtures } from "../test-fixtures";
 import { AnchorRail, CLOSE_DELAY_MS } from "./AnchorRail";
 import { BROWSE_EDGE, LIST_PAD, LOADING_DOT_DELAY_MS, PITCH } from "./list";
@@ -169,10 +169,10 @@ describe.skipIf(noFixtures)("锚点导轨（宽形态，列表式）", () => {
     const first = create(AnchorsViewSchema, { ...anchors, items: [...earliest, ...anchors.items.slice(0, 20)], hasBefore: false, hasAfter: true });
     a.setView(first);
     expect(a.previewed()?.getAttribute("aria-label"), "窗口到了但没有落点：不落到最早一处").not.toBe(label(earliest[0]));
-    a.setView(create(AnchorsViewSchema, { ...first, edgeLanding: { token: 41n, latest: false } }));
+    a.setView(create(AnchorsViewSchema, { ...first, edgeLanding: create(EdgeLandingSchema, { token: 41n, latest: false }) }));
     expect(a.previewed()?.getAttribute("aria-label")).toBe(label(earliest[0]));
     fireEvent.mouseEnter(a.ticks()[3]);
-    a.setView(create(AnchorsViewSchema, { ...first, edgeLanding: { token: 41n, latest: false } }));
+    a.setView(create(AnchorsViewSchema, { ...first, edgeLanding: create(EdgeLandingSchema, { token: 41n, latest: false }) }));
     expect(a.previewed()?.getAttribute("aria-label"), "同一个 token 不再用").toBe(label(first.items[3]));
     // 已经到了最新一头：End 不请 Rust，直接移到最后一条
     a.setView(create(AnchorsViewSchema, { ...anchors }));
