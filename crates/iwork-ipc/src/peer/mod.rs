@@ -131,11 +131,20 @@ pub struct SelfIdentity {
 }
 
 impl SelfIdentity {
-    /// 算出本进程的身份，并在无证书时读一次安装清单。只在进程启动时调用一次。
+    /// 算出本进程的身份，并在无证书时读一次安装清单；清单审计当场记下。只在进程启动时调用一次。
     ///
     /// 算不出自己是谁（取不到可执行文件、自己的签名完整性坏了）返回错误：不知道自己是谁就没法判断别人，
     /// 调用方应拒绝启动。清单缺失或解析失败不算错误，记一条日志、`manifest = None`，结果是无证书的对端都连不上。
+    ///
+    /// 当场记要求调用前已装好日志订阅者；装不了的（后台要先拿单实例锁才写文件日志）用 [`Self::detect_deferred`]。
     pub fn detect() -> Result<SelfIdentity, PeerError> {
+        let (own, audit) = Self::detect_deferred()?;
+        audit.record();
+        Ok(own)
+    }
+
+    /// 同 [`Self::detect`]，但清单审计不当场记，交给调用方在日志就绪后 [`StartupAudit::record`]。
+    pub fn detect_deferred() -> Result<(SelfIdentity, StartupAudit), PeerError> {
         let user = platform::current_user()?;
         let (signer, exe) = platform::own_image()?;
         if let SignerIdentity::Unavailable { reason } = &signer {
@@ -149,30 +158,85 @@ impl SelfIdentity {
                 PeerError::SelfIdentity(format!("可执行文件没有所在目录：{}", exe.display()))
             })?
             .to_path_buf();
-        let manifest = match signer {
-            SignerIdentity::Certificate { .. } => None,
+        let (manifest, audit) = match signer {
+            SignerIdentity::Certificate { .. } => (None, StartupAudit(ManifestOutcome::NotRead)),
             _ => load_manifest_at_start(&exe_dir, &signer),
         };
-        Ok(SelfIdentity {
-            user,
-            signer,
-            exe_dir,
-            manifest,
-        })
+        Ok((
+            SelfIdentity {
+                user,
+                signer,
+                exe_dir,
+                manifest,
+            },
+            audit,
+        ))
     }
 }
 
-fn load_manifest_at_start(exe_dir: &Path, own: &SignerIdentity) -> Option<Manifest> {
+/// 启动时读安装清单的结果，等日志就绪后记成审计（T03 方案 2.12：清单审计启动时记一次）。
+///
+/// 为什么要留着：tracing 不缓存、不重放事件，没有订阅者时发出的审计直接丢。后台算身份（启动表第 1 步）时文件日志
+/// 还没装（拿到单实例锁才装），当场记就丢了。记的是启动那一刻的快照，不重读清单，信任根也不受影响。
+#[must_use = "启动时的清单审计要在日志就绪后 record()，丢掉就没有记录了"]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupAudit(ManifestOutcome);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ManifestOutcome {
+    /// 有证书的构建不读清单，没有要记的。
+    NotRead,
+    Loaded {
+        path: PathBuf,
+        app_version: String,
+        entries: usize,
+        self_listed: bool,
+    },
+    Unavailable {
+        path: PathBuf,
+        reason: String,
+    },
+}
+
+impl StartupAudit {
+    /// 把启动时的清单快照记成审计。按值取走：一次启动只记一次。
+    pub fn record(self) {
+        match self.0 {
+            ManifestOutcome::NotRead => {}
+            ManifestOutcome::Loaded {
+                path,
+                app_version,
+                entries,
+                self_listed,
+            } => crate::audit::manifest_loaded(&path, &app_version, entries, self_listed),
+            ManifestOutcome::Unavailable { path, reason } => {
+                crate::audit::manifest_unavailable(&path, &reason)
+            }
+        }
+    }
+}
+
+fn load_manifest_at_start(
+    exe_dir: &Path,
+    own: &SignerIdentity,
+) -> (Option<Manifest>, StartupAudit) {
     let path = exe_dir.join(MANIFEST_FILE);
     match Manifest::load(&path) {
         Ok(m) => {
-            let self_listed = matches!(own, SignerIdentity::Image(id) if m.contains(id));
-            crate::audit::manifest_loaded(&path, &m, self_listed);
-            Some(m)
+            let outcome = ManifestOutcome::Loaded {
+                app_version: m.app_version.clone(),
+                entries: m.entries(),
+                self_listed: matches!(own, SignerIdentity::Image(id) if m.contains(id)),
+                path,
+            };
+            (Some(m), StartupAudit(outcome))
         }
         Err(e) => {
-            tracing::warn!(target: crate::audit::TARGET, event = crate::audit::EVENT_MANIFEST_UNAVAILABLE, path = %path.display(), reason = %e);
-            None
+            let outcome = ManifestOutcome::Unavailable {
+                path,
+                reason: e.to_string(),
+            };
+            (None, StartupAudit(outcome))
         }
     }
 }
