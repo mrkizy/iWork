@@ -140,9 +140,36 @@ fn world() -> Vec<DomainEvent> {
             }
             .into(),
         );
-        events.push(state(t, TurnState::Queued, TurnState::WaitingApproval));
+        events.extend(walk(t, TurnState::Queued, TurnState::WaitingApproval));
     }
     events
+}
+
+/// 扮演编排把回合从 `from` 带到 `to`：沿转换表里最短的一串边走（存储在提交时只收表里的边，T10a A4）。
+/// `from == to` 或到不了时为空。
+fn walk(t: u8, from: TurnState, to: TurnState) -> Vec<DomainEvent> {
+    use iwork_domain::turn::TURN_TRANSITIONS;
+    let mut prev: std::collections::HashMap<TurnState, TurnState> = Default::default();
+    let mut queue = std::collections::VecDeque::from([from]);
+    while let Some(at) = queue.pop_front() {
+        if at == to {
+            break;
+        }
+        for &(a, _, b) in TURN_TRANSITIONS {
+            if a == at && b != from && !prev.contains_key(&b) {
+                prev.insert(b, a);
+                queue.push_back(b);
+            }
+        }
+    }
+    let mut steps = Vec::new();
+    let mut at = to;
+    while let Some(&p) = prev.get(&at) {
+        steps.push(state(t, p, at));
+        at = p;
+    }
+    steps.reverse();
+    steps
 }
 
 fn state(t: u8, from: TurnState, to: TurnState) -> DomainEvent {
@@ -442,7 +469,7 @@ impl Run {
                 if let Some(from) = self.turn_state(turn)
                     && !from.is_terminal()
                 {
-                    self.commit_task(vec![state(turn, from, TurnState::WaitingApproval)]);
+                    self.commit_task(walk(turn, from, TurnState::WaitingApproval));
                 }
             }
             Op::Decide { nth, kind } => {
@@ -612,8 +639,8 @@ impl Run {
                     && !from.is_terminal()
                     && !matches!(from, TurnState::WaitingApproval)
                 {
-                    self.commit_task(vec![
-                        state(turn, from, TurnState::Cancelled),
+                    let mut events = walk(turn, from, TurnState::Cancelled);
+                    events.push(
                         TurnFinished {
                             turn_id: tid(turn),
                             state: TurnState::Cancelled,
@@ -622,7 +649,8 @@ impl Run {
                             change_summary: None,
                         }
                         .into(),
-                    ]);
+                    );
+                    self.commit_task(events);
                 }
             }
             Op::DeleteConversation { conv } => {
@@ -669,7 +697,7 @@ impl Run {
             Op::NewConversationTurn => {
                 if !self.new_conversation {
                     self.new_conversation = true;
-                    self.commit_task(vec![
+                    let mut events = vec![
                         ConversationCreated {
                             conversation: conversation_entity(2),
                         }
@@ -678,8 +706,9 @@ impl Run {
                             turn: turn_entity(3),
                         }
                         .into(),
-                        state(3, TurnState::Queued, TurnState::WaitingApproval),
-                    ]);
+                    ];
+                    events.extend(walk(3, TurnState::Queued, TurnState::WaitingApproval));
+                    self.commit_task(events);
                 }
             }
             Op::UserMessage { conv } => {
@@ -795,9 +824,9 @@ impl Run {
                 };
                 let mut events = Vec::new();
                 if !matches!(from, TurnState::Interrupted { .. }) {
-                    events.push(state(turn, from, interrupted));
+                    events.extend(walk(turn, from, interrupted));
                 }
-                events.push(state(turn, interrupted, TurnState::WaitingApproval));
+                events.extend(walk(turn, interrupted, TurnState::WaitingApproval));
                 let keys = Arc::new((*self.keys[&turn]).clone());
                 let store = self.store.clone();
                 let k = keys.clone();

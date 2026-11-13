@@ -36,8 +36,8 @@ use iwork_ports::exec::{
 };
 use iwork_ports::notify::{Notifier, NotifyError, SystemNotification};
 use iwork_ports::read_model::{
-    ConversationSummary, ConversationView, MessagePage, PendingItem, ProjectSummary, ReadModelPort,
-    RuntimeQuota, SummarySource, Unsettled,
+    ConversationSummary, ConversationView, MessagePage, PendingItem, ProjectSummary, QuitCounts,
+    ReadModelPort, RuntimeQuota, SnapshotInputs, SummarySource, TurnWork, Unsettled,
 };
 use iwork_ports::secret::{SecretError, SecretName, SecretStore, SecretValue};
 use iwork_ports::store::{
@@ -46,8 +46,8 @@ use iwork_ports::store::{
     StorageError, StoragePort, StoredEvent,
 };
 use iwork_ports::vcs::{
-    BaselineRef, Detection, Diff, DiffRange, ProgressSink, RepoRoot, VcsCapabilities, VcsError,
-    VcsProvider, WorkspaceStatus,
+    BaselineRef, Detection, Diff, DiffRange, PathVersion, ProgressSink, RepoRoot, VcsCapabilities,
+    VcsError, VcsProvider, WorkspaceStatus,
 };
 
 // ---------- 时钟与 ID ----------
@@ -287,6 +287,24 @@ impl<C: EventCodec, P: Projector<Tx = InMemoryTables>> StoragePort for InMemoryS
     ) -> impl Future<Output = Result<CommitReceipt, StorageError>> + Send {
         let result = self.commit_now(req);
         async move { result }
+    }
+
+    /// 提交在 `commit` 调用的那一下就同步做完（`commit_now`），所以查到的是之前调用过的每一笔。
+    fn command_receipt(
+        &self,
+        command_id: CommandId,
+    ) -> impl Future<Output = Result<Option<CommitReceipt>, StorageError>> + Send {
+        let found = self
+            .state
+            .lock()
+            .unwrap()
+            .commands
+            .get(&command_id)
+            .map(|r| CommitReceipt {
+                replayed: true,
+                ..*r
+            });
+        async move { Ok(found) }
     }
 
     fn head_seq(&self) -> impl Future<Output = Result<Seq, StorageError>> + Send {
@@ -599,6 +617,13 @@ impl VcsProvider for FakeVcs {
     async fn diff(&self, _repo: &RepoRoot, _range: DiffRange) -> Result<Diff, VcsError> {
         Ok(Diff::default())
     }
+    async fn worktree_versions(
+        &self,
+        _repo: &RepoRoot,
+        paths: &[PathBuf],
+    ) -> Result<Vec<PathVersion>, VcsError> {
+        Ok(vec![PathVersion::Absent; paths.len()])
+    }
 }
 
 struct FakeArtifacts;
@@ -765,6 +790,30 @@ impl ReadModelPort for FakeReadModel {
     async fn artifact_is_referenced(&self, _r: &ArtifactRef) -> Result<bool, StorageError> {
         Ok(false)
     }
+    async fn turn_work(&self) -> Result<TurnWork, StorageError> {
+        Ok(TurnWork {
+            head: Seq(0),
+            conversations: vec![],
+        })
+    }
+    async fn last_session_binding(
+        &self,
+        _c: ConversationId,
+    ) -> Result<Option<String>, StorageError> {
+        Ok(None)
+    }
+    async fn session_ids_of(&self, _c: ConversationId) -> Result<Vec<String>, StorageError> {
+        Ok(vec![])
+    }
+    async fn quit_counts(&self) -> Result<QuitCounts, StorageError> {
+        Ok(QuitCounts::default())
+    }
+    async fn snapshot_inputs(&self, c: ConversationId) -> Result<SnapshotInputs, StorageError> {
+        Err(StorageError::NotFound {
+            entity: "conversation",
+            id: c.to_string(),
+        })
+    }
 }
 
 // ---------- Send 编译期断言（第 8 节 S6） ----------
@@ -834,6 +883,39 @@ fn fakes_are_callable() {
 }
 
 // ---------- 行为测试 ----------
+
+/// `StoragePort::commit` 的契约「调用返回时已经入队」（T10a 方案 2.8 第 0 步）：调用之后不推进返回的
+/// future、直接丢掉，这一笔照样落盘、查得到回执。真存储上的同名用例在 `iwork-store` 的 `receipt_tests.rs`。
+#[test]
+fn commit_lands_without_polling_its_future() {
+    let store = InMemoryStore::new(ProjectOnlyCodec, ProjectsProjector::default());
+    let id = CommandId::from_raw(RawUlid::from_u128(9));
+    let event: DomainEvent = ProjectAdded {
+        project: demo_project(ProjectId::from_raw(RawUlid::from_u128(42)), "demo"),
+    }
+    .into();
+    drop(store.commit(CommitRequest {
+        command_id: id,
+        actor: Actor("user".into()),
+        events: vec![event],
+        outbox: vec![],
+    }));
+    assert_eq!(
+        pollster::block_on(store.command_receipt(id)).unwrap(),
+        Some(CommitReceipt {
+            first_seq: Seq(1),
+            last_seq: Seq(1),
+            replayed: true,
+        })
+    );
+    assert_eq!(store.tables().projects.len(), 1);
+    // 没提交过的：None
+    let other = CommandId::from_raw(RawUlid::from_u128(10));
+    assert_eq!(
+        pollster::block_on(store.command_receipt(other)).unwrap(),
+        None
+    );
+}
 
 /// 同一非空事件走在线提交与历史重建两条路径：表相同、projector 各调一次、重建不写 outbox。
 #[test]

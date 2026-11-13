@@ -59,6 +59,7 @@ message DomainEvent {
     ToolCallFinished tool_call_finished = 85;
     TurnSessionBound turn_session_bound = 86;
     ApprovalDelivered approval_delivered = 87;
+    TurnIntentRecorded turn_intent_recorded = 88;
 
     // 审批 110–129
     ApprovalRequested approval_requested = 110;
@@ -88,6 +89,7 @@ message DomainEvent {
     RuntimeUpdated runtime_updated = 170;
     QuotaObserved quota_observed = 171;
     UsageReported usage_reported = 172;
+    RuntimeSessionForgetFailed runtime_session_forget_failed = 173;
 
     // 导入 190–199
     LocalImportPrompted local_import_prompted = 190;
@@ -321,6 +323,20 @@ message ApprovalDelivered {
   string turn_id = 2;
 }
 
+// 流：turn（turn_id）。用户要取消在跑的回合、或要继续已中断的回合（T10a 方案 0a.3 A5）。只管它落盘时
+// 回合所在的那一段，不跨后台重启。客户端认得它、不画它。新事件种类（2026-11-13 加），旧程序读不了。
+message TurnIntentRecorded {
+  string turn_id = 1;
+  TurnIntentKind intent = 2;
+}
+
+// 名字带 Kind：view.proto 已有界面意图 TurnIntent。
+enum TurnIntentKind {
+  TURN_INTENT_KIND_UNSPECIFIED = 0;
+  TURN_INTENT_KIND_CANCEL = 1;
+  TURN_INTENT_KIND_RESUME = 2;
+}
+
 // 流：turn（turn_id）。ui-m1.md 第 04 页「工具活动」。
 message ToolCallStarted {
   string turn_id = 1;
@@ -506,6 +522,26 @@ message UsageReported {
   string runtime_id = 1;
   string turn_id = 2;
   Usage usage = 3;
+}
+
+// 流：audit（conversation_id）。删对话时请适配层删运行时的会话记录，没删成（T10a 方案 0a.3 X6；T06 方案 5.5）。
+// 删掉了、本来就没有的不记。文字来自 iWork 自己的桥接，不是运行时的原文。新事件种类（2026-11-13 加）。
+message RuntimeSessionForgetFailed {
+  string conversation_id = 1;
+  string runtime_session_id = 2;
+  oneof outcome {
+    // 适配层按规则不删（如定位到的不是普通文件）
+    ForgetRefused refused = 3;
+    ForgetFailed failed = 4;
+  }
+}
+
+message ForgetRefused {
+  string why = 1;
+}
+
+message ForgetFailed {
+  string message = 1;
 }
 
 // ---------- 导入（流：runtime） ----------

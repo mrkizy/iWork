@@ -631,7 +631,7 @@ pub struct PreconditionFailed {
 }
 
 impl PreconditionFailed {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
@@ -755,12 +755,15 @@ pub fn void_reason_for(gone: OwnerGone) -> VoidReason {
     }
 }
 
-/// 这条事件写入前要不要查归属存续（建审批、建卡片、批准、卡片启动）。拒绝、作废、关闭、审查更新不查：
-/// 孤儿要能被清掉。存储与引擎共用这一处。
+/// 这条事件写入前要不要查归属存续（排新回合、建审批、建卡片、批准、卡片启动）。拒绝、作废、关闭、审查更新
+/// 不查：孤儿要能被清掉。存储与引擎共用这一处。
+///
+/// `TurnQueued` 的回合由事件自己带来，「回合有记录」一项按在算（T10a 方案 0a.3 第 A3 行）：对话在删、
+/// 已删或助手没了时排不进新回合。
 pub fn requires_owner(event: &crate::event::DomainEvent) -> bool {
     use crate::event::DomainEvent as E;
     match event {
-        E::ApprovalRequested(_) | E::UserActionProposed(_) => true,
+        E::TurnQueued(_) | E::ApprovalRequested(_) | E::UserActionProposed(_) => true,
         E::ApprovalDecided(e) => matches!(e.state, ApprovalState::Approved { .. }),
         E::UserActionStateChanged(e) => {
             matches!(e.state, crate::user_action::UserActionState::Starting)

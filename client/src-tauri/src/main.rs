@@ -134,7 +134,9 @@ fn options() -> Options {
 }
 
 fn main() {
-    let dialer = effects::dialer().unwrap_or_else(|e| panic!("找不到后台服务的端点：{e}"));
+    // 建不成拨号器（身份取不到、端点目录不安全）不在这里 panic：第一次拨号回 Environment，窗口照常开、整页显示原因、
+    // 留「重试」，修好后重试能连上（T04p 方案 4.7）
+    let dialer = effects::dialer();
     #[allow(unused_mut, reason = "只有 e2e 构建改上下文")]
     let mut context = tauri::generate_context!();
     #[cfg(feature = "e2e")]

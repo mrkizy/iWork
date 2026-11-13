@@ -617,6 +617,22 @@ S0 合计 PASS 506、FAIL 46、INCONCLUSIVE 217、INFO 19。FAIL 里 34 个是 G
 - **临时钥匙串自动上锁**：`security create-keychain` 建的钥匙串默认 `lock-on-sleep timeout=300s`。脚本开头解锁后，几分钟后才签名的话，codesign 会弹框找人要钥匙串密码。现在的做法是：建好后 `security set-keychain-settings "$KC"`（不带 `-l`、`-t`，实测变成 `no-timeout`），每次签名前再 `security unlock-keychain`，签名都带 `--keychain`。被 timeout 掐断时照样走 cleanup 删掉钥匙串（bash 3.2 收到 TERM、INT 也会跑 EXIT trap，实测）。
 - **`sfltool dumpbtm`**：读后台项目数据库要管理员授权，会弹 SecurityAgent 授权框（用 CGWindowList 抓到了屏幕上的对话框）。脚本里不再调用。
 
+### 7.7 T04p 真包复核：P3 的后台一半（2026-11-13）
+
+T04p 方案 8.1 的 P3 问：`file_signer`（`check-install` 的第 2、3 件靠它）在磁盘上取的叶证书，等不等于程序跑起来之后系统认的那张。握手成功证不了它（握手只比两端运行时彼此相等），所以逐个角色把三样直接对拍。这里做后台这一半；客户端这一半要起真的客户端窗口，放在步 9 的专用账号里做。
+
+环境：macOS 27.2 arm64，main 308430c 经 `pnpm -C client tauri build` 打的形态 B 真包（自签证书，叶证书由 `scripts/test-signing-identity.sh` 建在临时钥匙串里；打包与核对见任务卡 `docs/tasks/M1/T04p.md` 完成记录）。后台从包里直接起：`HOME`、`IWORK_DATA_DIR` 都指向临时目录，不经 launchd、不注册自启；等到端点出现再取证，取完 SIGTERM。
+
+| 样 | 怎么取 | SHA-256 |
+| --- | --- | --- |
+| ① 磁盘上取的 | `check-install <包>/Contents/MacOS` 打出的 `iwork-daemon=certificate:…`（即 `peer::file_signer`） | `d7cd929aba9d1d41633858b870b7afaa98e1d9b2198e78cc18003a9330cb3d29` |
+| ② 运行起来之后的 | 后台跑着时 `codesign -d --extract-certificates=<前缀> <pid>`，对导出的第一张（叶证书）算 SHA-256 | 同上 |
+| ③ 预期的 | 建证书时 `openssl x509 -outform der` 算的叶证书摘要 | 同上 |
+
+结果 **PASS**：三样全等；`ps -o comm=` 是包里的 `Contents/MacOS/iwork-daemon`；后台收到 SIGTERM 以 0 退出；之后 `launchctl print gui/<uid>/com.iwork.daemon` 退出 113（没注册）、没有 `~/Library/LaunchAgents/com.iwork.daemon.plist`、没有残留进程。只导出、只打印公开证书的摘要，不读私钥、不改产品日志。同一程序在 T04p 合入前（审查之前的代码、另一张自签证书）量过一次，同样三样全等。
+
+还没做的（步 9）：客户端这一角色的 ①②③；②的第二种取法（探针 `iwork-t04-ipcprobe.rs` 用同一张证书签、放进包里同一位置，打出自己的 `SelfIdentity` 与握手时读到的对端叶证书）；两格对照（真后台与探针真握一次手成功；探针换一张证书签后握手以 `SignerMismatch` 被拒）。有一组不等就回 architect（方案 8.1）。
+
 ## 附：T06 S0 实测运行说明（给产品负责人；2026-11-11，developer 按 Claude Code 2.1.322 校对）
 
 T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。脚本都在 `tools/t0/`，在仓库根目录下跑。跑出来的结论写进本文 2.4 节（新加），一项一行，注明 CLI 版本。
@@ -686,7 +702,7 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 - 产品的永久禁用工具名单：`cargo run -p iwork-core --example dump-disabled-tools > disabled-tools.json`（现在 11 个：RemoteTrigger、CronCreate、CronDelete、CronList、ScheduleWakeup，加 P13 定的 DesignSync、PushNotification、SendMessage、Workflow、EnterWorktree、ExitWorktree）。名单从 T07 的工具登记表导出，和产品启动参数是同一个函数的结果，脚本里不另抄。
 
 **环境变量**（P14，产品负责人 2026-11-12 定：不筛选；方案 16.1「交给脚本的」）：
-- 脚本起每个实例时环境原样继承，不删任何变量，只设上 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`（覆盖继承来的值）；每个实例的设置里都带 `autoMemoryDirectory`，把自动记忆改到本次根目录里的一个空目录。只有 G5 里写明「不设开关」「只改道」的格子不照这个做。
+- 脚本起每个实例时环境原样继承，不删任何变量，只设上产品的两个开关 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`、`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`（覆盖继承来的值；后一个是 2026-11-13 script6 加的，D5）；每个实例的设置里都带 `autoMemoryDirectory`，把自动记忆改到本次根目录里的一个空目录。有意不设的格子在脚本里写明理由：G5 里写明「不设开关」「只改道」的格子不设记忆开关；`g7-bg` 与 R2X `n1` 不设后台开关（只记厂商默认行为，M2 开放后台任务时用）。
 - **同一时间只跑一个**：脚本启动时对 `/tmp/iwork-t0g.lock` 加排他锁，实测和 `--selftest` 都拿，拿不到就打印「不跑：另一次 iwork-t0g 正在跑（…pid=…）」并以非零退出码结束，等那一次结束再跑。`--selftest` 的根目录默认建在系统临时目录下，不和实测的根目录、结果包放在家目录同一处；原有文件核对的变化要是全落在别的运行的根目录里，说明里会点明（仍不算 PASS）。
 - **R2、R3 都要从普通终端起，不要从 Claude Code 里起**：Claude Code 会把用户 `settings.json` 的 `env` 块放进自己的环境，从它里面起的实例会带上用户的插件（S0 第一轮就是这样，量的不是产品配置，以 R2、R3 为准）。脚本开头看一眼环境里有没有 `CLAUDE_CODE_PLUGIN_DIRS`（只看有没有，不读值），有就拒绝运行，`summary.txt` 里写一行「拒绝运行」和原因，换一个普通终端再跑。
 - 每个实例的 `system/init.plugins` 都过方案 3.5 那条核对（`@builtin` 之外的都报）。报了东西，`summary.txt` 里多一行「环境不干净」，那一格记 `INCONCLUSIVE`，不下别的结论；出现这种行就交 supervisor。
@@ -704,7 +720,7 @@ T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。
 | 4 | `python3 tools/t0/iwork-t0g.py --only G7` | 16 | `G7c'` 两行（只发 initialize 时 `current_permission_mode` 是 `dontAsk`；设置校验不过时的取值）；`G7e`、`G7f` 对前台命令的结论；后台命令一行 |
 | 5 | `python3 tools/t0/iwork-t0g.py --only G1` | 10 | `G1d`；`g1-Agent-stream.jsonl` 里子代理是不是后台跑、有没有第二个 `result`；`G1c`、`G1f` |
 | 6 | `python3 tools/t0/iwork-t0g.py --only G8` | 8 | `G8g`（白名单里写了不存在的工具名时 `init.tools` 只剩存在的）；`G8 MCP 阳性对照`、`G8f`、`G8e` |
-| 7 | `python3 tools/t0/iwork-t0g.py --only G5` | 11 | **访问观测带空白对照**（方案 a69016f）：这台机器上家目录里的文件一改时间戳，几秒内就会被别的进程（多半是 Spotlight 或杀毒软件）读一次，所以观测多半总是无效（说明里会写「空白对照被读过」）。那样记忆读一行只靠「甲」：m2 报的就是改道目录，或者 m2 的 `init` 里没有 `memory_paths` 这个键而 m0 有并报了路径（2.1.322 上产品配置拿到的是后一种）；都没有就是 `INCONCLUSIVE`（P15）；子代理记忆一行观测无效就是 `INCONCLUSIVE`（P15）。脚本不为凑有效的观测重跑。看什么：方案 16.1 的 G5 各行（日常账号下仓库设置那几行一定是 `INCONCLUSIVE`，正常）：`G5 环境行` `PASS`（带着插件变量时核对报得出测试插件，干净时不误报）；`G5 记忆读` `PASS`（`INCONCLUSIVE` 且说明里写 P15 的，是改道没生效或产品配置那一格没有结构化证据，交 supervisor）；`G5 守卫预检` 一行写着两个预检过没过：没过的那一行（记忆写、子代理记忆）记「守卫没证实」，不在日常账号起，到 R3 再跑；`G5 记忆写` `PASS`；`G5 子代理记忆` `PASS`，或者 `INFO`「这条路不存在」。测试子代理经 `--agents` 给（带 `memory: user`；产品参数下工作目录 `.claude/agents/` 里的不加载）；`G5 守卫预检` 一行写着子代理预检那一格的 `init.agents` 里有没有它，没有 → `G5 子代理记忆` 记 `INCONCLUSIVE`「测试子代理没加载」，和「守卫没证实」分开报。任何一行 `FAIL` 回 architect（S6 那一组合入之前要这几行过）。**这几格会在 `~/.claude/` 下建自己的目录**：本次工作目录对应的 `projects/<…g5-work>/memory/`、`agent-memory/iwork-t0g-probe-<随机>/`，跑完连同这几个实例的会话记录一起删掉，只动这几个 |
+| 7 | `python3 tools/t0/iwork-t0g.py --only G5` | 11 | **访问观测带空白对照**（方案 a69016f）：这台机器上家目录里的文件一改时间戳，几秒内就会被别的进程（多半是 Spotlight 或杀毒软件）读一次，所以观测多半总是无效（说明里会写「空白对照被读过」）。那样记忆读一行只靠「甲」：m2 报的就是改道目录，或者 m2 的 `init` 里没有 `memory_paths` 这个键而 m0 有并报了路径（2.1.322 上产品配置拿到的是后一种）；都没有就是 `INCONCLUSIVE`（P15）；子代理记忆一行观测无效就是 `INCONCLUSIVE`（P15）。脚本不为凑有效的观测重跑。看什么：方案 16.1 的 G5 各行（日常账号下仓库设置那几行一定是 `INCONCLUSIVE`，正常）：`G5 环境行` `PASS`（带着插件变量时核对报得出测试插件，干净时不误报）；`G5 记忆读` `PASS`（`INCONCLUSIVE` 且说明里写 P15 的，是改道没生效或产品配置那一格没有结构化证据，交 supervisor）；`G5 守卫预检` 一行写着两个预检过没过：没过的那一行（记忆写、子代理记忆）记「守卫没证实」，不在日常账号起，到 R3 再跑；`G5 记忆写` `PASS`；`G5 子代理记忆` `PASS`，或者 `INFO`「这条路不存在」。测试子代理经 `--agents` 给（带 `memory: user`；产品参数下工作目录 `.claude/agents/` 里的不加载）；`G5 守卫预检` 一行写着子代理预检那一格的 `init.agents` 里有没有它，没有 → `G5 子代理记忆` 记 `INCONCLUSIVE`「测试子代理没加载」，和「守卫没证实」分开报。任何一行 `FAIL` 回 architect（S6 那一组合入之前要这几行过）。**这几格会在 `~/.claude/` 下建自己的目录**：本次工作目录对应的 `projects/<…g5-work>/memory/`、`agent-memory/iwork-t0g-probe-<随机>/`，**脚本不删用户配置目录里的东西**（2026-11-13 定）：收尾时列进 `leftovers.json`，怎么核、删哪几个见上面「脚本不删用户配置目录」一段 |
 
 R2 合计约 120 个实例，加 6 个探查（每条命令 1 个）。
 
@@ -721,6 +737,63 @@ R2 合计约 120 个实例，加 6 个探查（每条命令 1 个）。
 | 7 | `python3 tools/t0/iwork-t0g.py --only R2X --cell k3` | 1 | 带产品设置重记 k3、k4（和第 6 条一起跑）。2026-11-12 起 R2X 的 k1–k3、b1、b2、n1、工具清单几格都带产品那样的设置（`dontAsk`、`allowedDomains: ["*"]`、`allowLocalBinding` 的沙箱，hook 的 `timeout` 与 `onFailure: block`），和 net、①c′ ①d′ 一样；之前那次 `--part d` 不带，`init` 报 `default`、命令不在沙箱里跑。看 `R2X k3` 一行：「停 CLI 5 秒后 sleep 还在」「CLI 30 秒内退出了」，以及 `k4` 里 `sleep`、它的父进程、CLI 的父进程号、进程组号、会话号（命令进了沙箱之后，`sleep` 的父进程可能是沙箱的包装进程而不是 shell，照实记）。k、b、n 几格的探针只放行登记的那条命令、沙箱外重试一律拒绝；流里出现过带 `dangerouslyDisableSandbox` 的 Bash（哪怕被拒了），那一格记 `INCONCLUSIVE`（缺「流里没有带 dangerouslyDisableSandbox 的 Bash 调用」），不当成带沙箱的证据。`--cell` 收逗号分隔的格名，只跑这几格；拼错、空项（如 `k3,`）、重复的格名在启动时（拿锁之前）就报错退出 |
 
 R2 补测合计约 35 个实例，加 4 个探查与 K2c 的 1 个预检。第 2 条先跑，别的可以晚一点。
+
+**脚本不删用户配置目录（`~/.claude` 下）里的东西**（2026-11-13 定）：G5、RC6 会在那里建目录、放文件，CLI 也会写会话记录与记忆。收尾时出一份清单进结果包的 `leftovers.json`，`summary.txt` 与终端末尾也列一遍。**这是收尾时的快照，删除前逐项核对**：只删「清理候选」那几个目录——本次独占新建、建出时为空、名字带本次随机名（G5 的随机项目目录、RC6 与 G5 的随机子代理记忆目录）、从配置目录起逐级核过路径，而且它下面（递归）每一项都有本次的确定来源（本次 O_EXCL 建的，或本次会话编号的会话记录）、每个子目录也都核得上；只要有一项来源未核实（CLI 运行期间写的记忆就是）或某个子目录核不出来，这个目录和它的上级都不是候选，标「本次碰过、名字带本次随机名、含来源未核实的内容，删除前请打开逐个确认」，G5 的记忆目录多半就是这样；共享的上一级（`agent-memory`、`projects` 这一层）不是候选，若是本次新建、现在为空可以删这一级，**别对它递归删**；文件不单独给删除建议，只作为「目录里有什么」的附注，CLI 运行期间出现的标成「运行期间出现、来源未核实」。脚本自己的临时根目录照旧整个删。
+
+**结论按哪个版本**：script6 的格子与从程序字样读出的结论（`mcp list` 的格式、`CLAUDE_SECURESTORAGE_CONFIG_DIR`、`.claude.json` 的路径规则等）都是对着 Claude Code **2.1.322** 的。脚本开跑时在隔离的环境里问一次版本，写进结果包 `claude-version.json`，`summary.txt` 里有「Claude Code 版本」一行；版本不是 2.1.322 时那一行写着提示。本机的 Claude Code 会自动更新（2026-11-13 已经到 2.1.323），要用 2.1.322 跑就加 `--claude-cli ~/.local/share/claude/versions/2.1.322`（要绝对路径；也可以用环境变量 `IWORK_CLAUDE_CLI`）。脚本不改你的自动更新设置。
+
+### 早上照着跑：script6（2026-11-13，三批合入 main 之后）
+
+下面这一组合计 **67 个模型实例**。每一步跑完终端最后会打印结果包的路径，**一步跑完再跑下一步**（脚本同一时间只许跑一份，撞上会打印「不跑：另一次 iwork-t0g 正在跑」退出，不会互相弄坏）。各行要看什么在后面「script6 第一批」那张表里，这里只写怎么跑。
+
+**开跑前（一次）**
+
+1. 打开一个**普通终端**（不要从 Claude Code 里开的终端：那里环境带着你的插件，脚本看到 `CLAUDE_CODE_PLUGIN_DIRS` 会直接拒绝运行），`cd` 到仓库根目录，`git pull` 到合入后的 main。
+2. 确认 Claude Code 是登录着的（平时能用就行）。脚本不会让你另外登录，专用目录那一组也是沿用这份登录（见第 7 步）。
+3. 定用哪个版本跑：`claude --version`。格子是对着 **2.1.322** 写的，本机已经自动更新到 2.1.323。**建议用 2.1.322 跑**，下面每条命令末尾都加 `--claude-cli ~/.local/share/claude/versions/2.1.322`（本机还留着这个版本；要绝对路径，`~` 由终端展开没问题）。不加也能跑，`summary.txt` 里「Claude Code 版本」那一行会写着「不是 2.1.322」，结论要对着这个差别读。脚本不改你的自动更新设置。
+
+**按顺序跑**（括号里是模型实例数）
+
+| 步 | 命令（都在仓库根目录；按上面第 3 条在末尾加 `--claude-cli …`） | 实例 |
+| --- | --- | --- |
+| 1 | `python3 tools/t0/iwork-t0g.py --selftest` | 0，最后一行是 `selftest ok` 才往下 |
+| 2 | `python3 tools/t0/iwork-t0g.py --only R2X --part cfgdir` | 0（四次 `claude mcp list`，HOME 换成临时目录，不用你的账号） |
+| 3 | `python3 tools/t0/iwork-t0g.py --only R2X --part p4` | 2（只在 macOS 上有意义） |
+| 4 | `python3 tools/t0/iwork-t0g.py --only R2X --part recheck` | 27（G1 10、G8 8、G7 9） |
+| 5 | `python3 tools/t0/iwork-t0g.py --only R2X --cell k3` | 1 |
+| 6 | `python3 tools/t0/iwork-t0g.py --only R2X --part repo` | 15（RC6 会在 `~/.claude` 下建目录，见下面「leftovers」） |
+| 7 | `python3 tools/t0/iwork-t0g.py --only R2X --part vdir` | 22（另有不起模型的 `auth status`、插件与 MCP 的增删查、只发控制请求的会话） |
+
+**第 7 步（vdir）先看一行**：`R2X vdir V1a/V9`。专用目录是脚本每次在本次根目录里新建、跑完就删的，**没法事先在里面登录**；脚本先试着沿用你平时的登录（安全存储设成空串，不行再设成默认位置的路径）。这一行是 `INFO` 就说明沿用成功，后面各格照常跑。要是 `INCONCLUSIVE`「登不上」，后面各格都不起实例、记 `INCONCLUSIVE`，**不要自己去登录**，把结果包交过来，换办法再跑。中途要是弹出钥匙串授权框，那是 `claude` 读它自己的登录项；拿不准就点拒绝，这一组会记「登不上」，不影响别的。
+
+**跑完交结果包**
+
+- 每一步终端最后打印 `完成，结果包：~/iwork-t0g-results-<时间>-<随机>.tar.gz`。把这几个文件名（按步骤）发给 supervisor 就行，文件留在本机，developer 从本机读。
+- **不要外传**：结果包里有你的本机登录名（路径里的 `/Users/<登录名>`），脚本不脱敏；账号信息、MCP 配置原文、形状三那几格的标准错误原文都不在包里。
+- 脚本自己的临时根目录 `~/iwork-t0g-<随机>/` 跑完自己删；专用目录（`vendor-claude-*`）和 CLI 在里面写的日志都在这个根目录里，一起删掉，不进结果包。
+
+**`~/.claude` 下的 leftovers：怎么看、怎么删**
+
+- 只有第 6 步（RC6）会在 `~/.claude` 下建东西（R2 跑 G5 时也会）。脚本不删用户配置目录里的任何东西，收尾时把清单打在**终端末尾**和 `summary.txt` 里，结果包里另有 `leftovers.json`。
+- 清单里只有标着**「清理候选」**的目录可以删：它们是本次新建、名字带本次随机名、里面每一项都核得上来源的。逐个核对路径后用 `rm -r <那个路径>` 一个一个删。
+- 标着「含来源未核实的内容」的目录（多半是记忆目录），先打开看一眼里面是什么再决定。
+- **别对上一级目录递归删**（`~/.claude/agent-memory`、`~/.claude/projects` 这一层是共享的，里面有你自己的东西）。清单是收尾那一刻的快照，隔了一段时间再删前再看一眼。
+- 另外，第 3–6 步每个实例 CLI 都会在 `~/.claude/projects/` 下按工作目录名留会话记录，目录名大多带 `iwork-t0g-<本次随机名>`（路径里的 `/` 换成 `-` 连起来的那一长串）。这是 CLI 自己写的、不在清单里，留着无害；想清理就只删名字里带本次随机名的那几个目录。第 2 步不起会话；第 7 步的会话记录在专用目录里，随根目录删掉。
+
+**有异常时**：某一步中途报错退出（不是 `FAIL`、`INCONCLUSIVE`，而是 Python 报错或「中止：…」），把终端最后几十行和那一步的结果包（有的话）一起交过来，先别跑后面的步骤。
+
+**script6 第一批**（2026-11-13，architect 47737e78 的格子表；日常账号、普通终端；「产品设置」= `dontAsk` + 产品那样的沙箱 + 两个环境开关，跑命令的格探针只放行登记的那条、沙箱外重试一律拒绝）
+
+| 序 | 命令 | 约几个实例 | 看什么 |
+| --- | --- | --- | --- |
+| 1 | `python3 tools/t0/iwork-t0g.py --selftest` | 0 | 最后一行 `selftest ok` |
+| 2 | `python3 tools/t0/iwork-t0g.py --only R2X --part recheck` | 27（G1 10、G8 8、G7 9） | G1、G8、G7 带产品设置重跑，各行看什么同上面 R2 的 G1、G7、G8。新加三行：`G1d′`（先要子代理真跑了：子代理里的目标命令结果不是报错、哨兵出现；再看一个 `init`、一个 `result`、`is_backgrounded` 不为真，要 `PASS`；模型没起子代理或子代理被拒记 `INCONCLUSIVE`）；`G1 BashBg`（只记录：`run_in_background` 被拒的报错原文、每次调用进没进 hook、输入里的字段名）；`G1a′`（只记录：产品设置下 `init.tools` 的个数，预期 24）。复核要盯：`G1d` 在 `dontAsk` 加沙箱下仍是 `PASS`；`G8e`、`G8g` 在 `dontAsk` 下成立（P11 d2）；`G7e` 里 shell 的父进程号、进程组号、会话号和 R2X `k3`、`k4` 对得上。G7 的 `g7-bg`、`g7c2-bad`、`g7-cfg-*` 这里不跑（有意不带产品设置，理由写在脚本里） |
+| 3 | `python3 tools/t0/iwork-t0g.py --only R2X --part p4` | 2（加 1 个不经 claude 的预检） | macOS 上「沙箱起不来时 CLI 会不会停」（T06 方案第 8 节 F 格）。`R2X P4 预检`：外层全放行的 `sandbox-exec` 自己起得来、里面再套一层失败，预检没过两格都记 `INCONCLUSIVE`（造法不成立，回 architect 换替身的造法）。`R2X P4 F1`（带 `failIfUnavailable: true`）：要 `PASS`。`PASS` 要有沙箱不可用的原文（程序字样：启动时 `sandbox_required_unavailable` / 「Set sandbox.failIfUnavailable=false …」，会话中途「Sandbox is required (sandbox.failIfUnavailable) …」），而且要么 CLI 没开会话，要么目标命令每一次都是探针答了允许、CLI 以这句拒掉；认证失败、崩溃、外层包装起不来都只能是 `INCONCLUSIVE`；`FAIL` = 工作区外的文件写进去了，这个键拦不住。`R2X P4 F2`（去掉这个键，对照）：要 `PASS`（文件写进去了，证明沙箱确实没起）。两行的说明里另记 stderr 提没提 sandbox、`init` 的顶层键与 `capabilities` 的键（只有键名） |
+| 4 | `python3 tools/t0/iwork-t0g.py --only R2X --cell k3` | 1 | 同上面 R2 补测第 7 行；k1–k3 的命令开头先用 `/usr/bin/touch` 写一笔工作区（对照）、再写一笔工作区外，说明里「沙箱在场」要是真：对照写进去了，工作区外那一笔退出码非 0、文件没出现、错误原文是 `Operation not permitted`（Linux 是 `Read-only file system`）。原文也记在说明里。不是真这一格记 `INCONCLUSIVE` |
+| — | （判据收紧，影响已有的几组；supervisor 2026-11-13） | — | 「命令失败就算被挡」改严了，下面几处的 `PASS` 可能降成 `INCONCLUSIVE`，不会放宽：① **G4「该失败」的格**（①b、①c、①d、①f、①h、①c′、①d′、⑨b、⑨c）与用同一个判据的 G2「清单内」预检里那条别的命令、G5 的「沙箱仍在」、G7j 的严格那一边：命令前面先跑一条同一个程序（`touch` / `cat`）写或读工作区的对照，观测文件里另存 `.ctl.rc`、`.ctl.out`；`PASS` 要对照成功、命令退出码非 0、输出里有 `Operation not permitted`（Linux 是 `Read-only file system`）；命令不存在、目录不存在、`Permission denied`、对照失败都是 `INCONCLUSIVE`，输出原文在 `obs/` 的 `.out` 里。② **`外层保护 [...]` 一行里的 `bash-write`、`bash-read`**：同样要拦截原文；读那一项另加一条读工作区文件的对照。原文看 `obs/` 里 `guard-*-2.err`、`-3.err` |
+| 6 | `python3 tools/t0/iwork-t0g.py --only R2X --part repo` | 15（RC1 2、RC2 1、RC3 3、RC4 3、RC5 2、RC6 2、RC7 1、RC8 1） | T06 方案 3.1c 的 RC1–RC8（仓库内容由 iWork 送进会话，定稿前的实测）。都带产品设置；探针默认对一切答拒绝，暗号只能来自上下文（来源只认调用证据）。只有两行会 `FAIL`：**`RC5`**（技能文件头的 hook 答允许、iWork 的探针答拒绝时命令执行了 → 回 architect；对照是探针答允许时命令执行，对照没成立降成 `INCONCLUSIVE`；技能的 hook 跑了几次只记录）；**`RC8`**（复制件放在只读区：参考文件读不到或脚本跑不了 → `FAIL`，复制件的位置要重选；`run/h` 里那份 `settings.json` 被 `cat` 出了内容、被追加写入，或者内容、修改时间有一样变了 → `FAIL`；四样分开记；环境不干净 → `INCONCLUSIVE`）。别的只记录（`INFO`），看说明里的结论：`RC1`/`RC1′` 产品参数下 AGENTS.md 加载不加载（工作目录放在家目录之外的系统临时目录里，开跑前逐级查上级目录，有 CLAUDE.md、AGENTS.md、`.claude` 就不跑；`InstructionsLoaded` hook 只记文件名与是不是那份合成的 AGENTS.md；记到别的说明文件 → 污染、`INCONCLUSIVE`，这一格的原始 stream 与 stderr 不进结果包）；`RC2` 系统提示通道送不送得到；`RC3` 续接时用旧系统提示还是新的；`RC4a` init 里技能、命令、子代理报的名字（带不带 `repo:` 前缀），`RC4b`、`RC4c` 斜杠命令调技能、起子代理答暗号；`RC7` 内联命令在不在沙箱里（先跑无沙箱对照，原文写在说明里）。**`RC6` 会在 `~/.claude/agent-memory/` 下建两个带随机名的目录**（不带前缀和带 `repo:` 前缀两种，因为不知道 CLI 用哪个），放暗号，不删：收尾时和 G5 一样出清单（两个随机目录是清理候选，`agent-memory` 不是），怎么核见上面「脚本不删用户配置目录」一段。本来就存在、路径上有链接 → 不碰，记 `INCONCLUSIVE` |
+| 7 | `python3 tools/t0/iwork-t0g.py --only R2X --part vdir` | 22 个模型实例（V1b、V1c、V4a–V4d、V5、V7、V10 十一格、V12a、V12b、V13a），另有不起模型的：`auth status` 3 次、`plugin install` 3 次、`plugin disable`/`enable` 各 1 次、`plugin list --json` 2 次、`mcp add` 2 次；V2 四次、V10 停用与再启用四次只发控制请求、不发用户消息 | T06 方案 3.1d 第五小节的日常账号格。每个父格用本次根目录里新建的专用目录（`CLAUDE_CONFIG_DIR` 指过去），不碰你自己的 `~/.claude`；里面的 `settings.json` 由脚本写；`--setting-sources user`（候选甲）。**`R2X vdir V1a/V9` 先看**：三种安全存储设法下专用目录登不登得上（只记 `loggedIn`；没登录时 CLI 退出码是 1、JSON 照样完整，记成「假」）；都登不上，后面各格记 `INCONCLUSIVE`、不起实例（专用目录每次新建，没法事先登录；交 supervisor 换办法）。各子格 `PASS` / `FAIL` / `INCONCLUSIVE`，被对照的格在对照没过时一律 `INCONCLUSIVE`：`V1b`（装进专用目录的插件进得来，路径在专用目录之下；对照 `V1c` 是 `--setting-sources ""` 时插件不在）；`V2a`–`V2d`（都只发 `initialize`、读权限模式；`V2a` 用户层写 `bypassPermissions`、iWork 给全，报 `dontAsk` 才过，报 `default` 也是 `FAIL`；对照 `V2b` 用户层写 `acceptEdits`、iWork 只拿掉 `defaultMode`，报 `acceptEdits`；`V2c` 用户层 `bypassPermissions`、iWork 只拿掉 `defaultMode`，报的不是 `bypassPermissions` 才过，另记标准错误里有没有「Bypass permissions mode was disabled by settings」；对照 `V2d` 两样都拿掉，报 `bypassPermissions`）；`V4a`（用户层写 `sandbox.enabled: false`，沙箱照样写不出、读不到；对照 `V4b`）；`V4c`（F 格的造法让沙箱起不来、用户层写 `failIfUnavailable: false`，iWork 的 `true` 盖得住；对照 `V4d`，判法同 P4 的 F1、F2）；`V5`（打开用户来源后 iWork 给的 `imports` 读得到、数据目录别处读不到；另记用户那条 `allowWrite` 生效没有）；`V7` 只记事实，两个开关各一行（用户层 `env` 把两个开关写成 0 时谁赢；这一格不给自动记忆改道，记忆目录落在本次的专用目录里）；`V13a`（成员的命令写不进放在假数据目录里的专用目录：`touch` 与往 `settings.json` 追加一行各自要有探针的「允许」、工作区里同一个程序的对照成功、沙箱拦截的原文，才 `PASS`）。`V10`（看测试 MCP 启动时写的标记，不看 `init` 里的清单；每格一个新的标记目录）：`V10p`/`V10q` 仓库级阳性对照（`--setting-sources project`，iWork 的 `--settings` 里写 `enableAllProjectMcpServers: true` 批掉 `.mcp.json`，正常握手与握手前退出两个变体），哪个对照没起来，对应变体的格记 `INCONCLUSIVE`；`V10a` 形状一（现在的 `--strict-mcp-config` 加空配置）三个标记都不出现；`V10b`–`V10e` 形状二（去掉 `--strict-mcp-config`）、形状三（把专用目录的 `.claude.json` 路径交给 `--mcp-config`，脚本不读它）各两个变体：用户级 U1 起来、仓库的不起来；然后用控制请求 `mcp_toggle` 停用 U2（不发用户消息，下一条会话里 `mcp_status` 报 `disabled` 才算停成），`V10f`/`V10g` U1 起来、U2 不起来，再启用后 `V10h`/`V10i` U2 起来；停用没成立，`V10f`–`V10i` 都不跑、全记 `INCONCLUSIVE`（回 architect）；再启用没成立，`V10h`/`V10i` 不跑，`V10f`/`V10g` 的对照记 `INCONCLUSIVE`。这几条不发用户消息的控制会话（含 V2 的 `initialize`）不存原始流，只存 `-control.json`：每条请求成没成、带没带报错，`initialize` 只留权限模式与键名，`mcp_status` 只留 `t0g-` 开头那几个测试服务的名字与状态；报错原文与服务配置不进结果包。`V12a`（专用目录里装两个带 SessionStart hook 的测试插件，`claude plugin disable` 停用一个：停用的那个的 hook 不跑）；对照 `V12b`（`plugin enable` 之后两个都跑；`plugin disable` 没成功时 `V12a`、`V12b` 都不跑，`plugin enable` 没成功时 `V12b` 不跑，都记 `INCONCLUSIVE`）；`V12c` 停用前后各一次 `plugin list --json`，只记每个插件那一项有哪些键、布尔值、有没有专用目录之下的路径，原文不留。`V12x`（候选乙）不跑。形状三那四格（V10d、V10e、V10g、V10i）把专用目录的 `.claude.json` 交给 `--mcp-config`，校验不过时 CLI 会把「路径: 消息」原样打到标准错误、也写进它自己的日志，消息里可能带值：这四格的标准错误不存原文，只存 `-stderr-facts.json`（字数、有没有 `Invalid MCP configuration`、报了几条错）；CLI 自己的日志在专用目录里，结果包不收（只打 `out/`），跑完随本次根目录一起删掉。另外，环境里要是有 `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE`、`CLAUDE_CODE_REMOTE_MEMORY_DIR`（能把记忆根改回真实的 `~/.claude`），脚本起所有实例时都按名字去掉，去掉了哪些名字记在 `env-names.json` 的 `dropped_for_instances`。一次性环境的 29 个子格（V4e–j、V6、V11、V13b–d）只登记，各记一行 `INCONCLUSIVE`，排 R3 |
+| 5 | `python3 tools/t0/iwork-t0g.py --only R2X --part cfgdir` | 0（四次 `claude mcp list`，不起模型） | T10f A 审查 1/F-2：CLI 找 `.claude.json` 是按 `CLAUDE_CONFIG_DIR` 设没设分支，还是按值。只选这一组时，开跑前除了在隔离的环境里问一次 `--version`（HOME 换成临时目录、去掉 `CLAUDE*`、`ANTHROPIC*` 变量），帮助、g0 探针、工具清单都跳过，不用真实账号起任何 claude。隔离：HOME 换成本次根目录里的临时目录（不碰真实的 `~/.claude`、`~/.claude.json`）；`CLAUDE_SECURESTORAGE_CONFIG_DIR` 指到本次的另一个临时目录（2.1.322 程序：它只决定凭据文件目录与钥匙串条目名，碰不到原来的登录；`.claude.json` 的路径不看它）；继承来的 `CLAUDE*`、`ANTHROPIC*` 与几个云厂商认证变量一律去掉（只看名字）。三份合成配置各带一个名字不同的 MCP 条目（命令 `/usr/bin/true`）。输出严格解析：只有空行与「Checking MCP server health…」可以忽略，别的每一行都得是「名字: 命令 - 状态」的服务行，按精确服务名判；有认不出的行、一条服务行都没有 → `INCONCLUSIVE`。出现三个合成名之外的服务（还登录着、带进了别的配置）→ 记污染、`INCONCLUSIVE`，脚本当场停下，剩下的格记「没跑」，不再起 claude；这时回报 supervisor，不在日常账号上再跑。四行 `R2X cfgdir`：没设 → 读家目录那份；设成空串 → 读家目录那份（iWork 把空串当没设）；显式设成默认目录 → 读默认目录里那份；自定义 → 读自定义那份。每行要 `PASS`，说明里记命中哪几份、几份、退出码。`FAIL`（特别是空串那一行）回 supervisor；命令报错或输出认不出是 `INCONCLUSIVE` |
 
 **R3：一次性环境**（16.2 第 5 项，搭法见下一小节）
 

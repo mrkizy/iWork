@@ -171,10 +171,22 @@ pub struct RebuildReport {
 pub trait StoragePort: Send + Sync {
     /// 一次命令一个事务：编码 → 写 events → 投影（同一事务）→ 写 outbox → 记 `command_id` → 提交。
     /// 同一 `command_id` 重发返回上次的序号且 `replayed = true`。
+    ///
+    /// **契约：调用返回时这一笔已经入队**（或已经确定入不了队，返回的 future 会给出这个错误）；返回的 future
+    /// 只等回执。不推进它、直接丢掉，这一笔照样落盘。后台的封口闸靠这一条：它在自己的锁里调 `commit`，
+    /// 出锁时入没入队已经定了（T10a 方案 2.8 第 0 步、E4）。所以实现不能写成 `async fn` 把入队拖到第一次被推进时。
     fn commit(
         &self,
         req: CommitRequest,
     ) -> impl Future<Output = Result<CommitReceipt, StorageError>> + Send;
+    /// 按 `command_id` 取那一笔提交的回执（`replayed = true`），没提交过为 `None`。
+    ///
+    /// **排在写队列里执行**：它看得到在它之前入队的每一笔提交，包括调用方已经放手、还在路上的那一笔
+    /// （T10a 方案 A2：同一个 `command_id` 前一份受理被中止后，后一份靠它查到前一份的结果）。走读连接做不到。
+    fn command_receipt(
+        &self,
+        command_id: CommandId,
+    ) -> impl Future<Output = Result<Option<CommitReceipt>, StorageError>> + Send;
     fn head_seq(&self) -> impl Future<Output = Result<Seq, StorageError>> + Send;
     /// 读 `from` 之后（不含）的事件，最多 `limit` 条，已用同一个 codec 解码。
     fn read_events(

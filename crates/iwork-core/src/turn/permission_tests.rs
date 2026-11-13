@@ -89,7 +89,7 @@ struct Bench {
 impl Bench {
     fn new() -> Self {
         let slot = Arc::new(TurnSlot::default());
-        let _cancels = slot.open(turn());
+        let _cancels = slot.open(turn(), RunTag(1));
         let decider = Arc::new(Scripted::default());
         let gate = Arc::new(PermissionGate {
             slot: slot.clone(),
@@ -290,6 +290,7 @@ fn stop_while_sender_is_inside_the_lock() {
         let mut guard = b.slot.lock();
         let t = stopper(&b, &wire);
         let (registered, _waker) = guard
+            .handoff
             .as_mut()
             .expect("回合在")
             .register(0)
@@ -312,6 +313,7 @@ fn stop_while_sender_is_inside_the_lock() {
     let mut guard = b.slot.lock();
     let t = stopper(&b, &wire);
     let (acked, _waker) = guard
+        .handoff
         .as_mut()
         .expect("回合在")
         .submit(turn(), registered.ticket, None)

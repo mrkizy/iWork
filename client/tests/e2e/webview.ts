@@ -1,6 +1,7 @@
 // 真实 WebView 测试（T09 方案第 7 节「真实 WebView」；R7 的四道与传输路径的证据在这里取）。
 // 用法：pnpm -C client e2e:webview [用例名…]（只在 macOS 跑；会开窗口，跑完自动关）。
-//   1. 构建：带 e2e feature 的客户端（经 pnpm tauri build --debug --no-bundle，发布层配置与 CSP）、带 dev 的假后台；
+//   1. 构建：带 e2e feature 的客户端（经 pnpm tauri build --debug --no-bundle，发布层配置与 CSP；包装脚本把
+//      --debug 与 --no-bundle 同时在的 build 当测试构建，不装配、不出包，见 scripts/release-build.ts）、带 dev 的假后台；
 //   2. 每条用例：起假后台跑场景 → 起客户端（初始化脚本 = prelude.js + 用例脚本）→ 等页面报 done 与壳的计数 → 断言。
 // 测试构建与发布构建的差别只在 client/src-tauri/src/e2e.rs（初始化脚本、标题回报、可换 CSP）。
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";

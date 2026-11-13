@@ -19,6 +19,8 @@ use iwork_ipc::{LocalConnector, LocalEndpoint};
 use iwork_proto::pb;
 
 pub const DAEMON: &str = env!("CARGO_BIN_EXE_iwork-daemon");
+/// [`Sandbox::wait_ready`] 的总上限是没进展时限的几倍。
+const WAIT_READY_TOTAL_FACTOR: u32 = 3;
 
 /// 拷一个之后要被执行的文件。写交给子进程（`cp`）做：本进程若开着它的写句柄，同一时刻别的测试线程 fork
 /// 出的子进程会继承这个句柄直到它 exec，期间执行这个文件在 Linux 上报 ETXTBSY（CI 实测）。
@@ -161,19 +163,39 @@ impl Sandbox {
     }
 
     /// 等状态文件变成 `Ready` 且是 `pid` 写的。
-    pub fn wait_ready(&self, pid: u32, limit: Duration) {
-        let deadline = Instant::now() + limit;
+    ///
+    /// 时限按进展算：状态文件里的（pid, 阶段）一变就重新计时，`stall` 内毫无变化才算卡住；慢机器上启动步骤
+    /// 一步步在走就接着等，直到总上限 `stall × WAIT_READY_TOTAL_FACTOR`。失败时打印每次变化的时间点，
+    /// 分得清是「停在某一步」还是「一直在走、只是慢」。
+    pub fn wait_ready(&self, pid: u32, stall: Duration) {
+        let started = Instant::now();
+        let total = stall * WAIT_READY_TOTAL_FACTOR;
+        let stage = |s: &Option<StartupStatus>| s.as_ref().map(|s| (s.pid, s.phase.clone()));
+        let mut last = stage(&self.status());
+        let mut last_change = started;
+        let mut history = vec![(Duration::ZERO, last.clone())];
         loop {
-            if let Some(s) = self.status()
+            let now = self.status();
+            if let Some(s) = &now
                 && s.pid == pid
                 && s.phase == Phase::Ready
             {
                 return;
             }
+            if stage(&now) != last {
+                last = stage(&now);
+                last_change = Instant::now();
+                history.push((started.elapsed(), last.clone()));
+            }
+            let stalled = last_change.elapsed() >= stall;
             assert!(
-                Instant::now() < deadline,
-                "{limit:?} 内没等到 pid {pid} 就绪；状态：{:?}",
-                self.status()
+                !stalled && started.elapsed() < total,
+                "没等到 pid {pid} 就绪（{}）；(pid, 阶段) 的变化：{history:#?}；最终状态：{now:?}",
+                if stalled {
+                    format!("{stall:?} 内状态没有任何变化")
+                } else {
+                    format!("一直在变，但超过总上限 {total:?}")
+                }
             );
             std::thread::sleep(Duration::from_millis(20));
         }

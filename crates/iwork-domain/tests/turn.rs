@@ -286,3 +286,92 @@ fn interrupted_can_fail() {
     // 对照：中断之后不能直接「完成」
     assert!(turn::next(S::Interrupted { reason: Crash }, T::Completed).is_err());
 }
+
+// ---------- 提交时校验（T10a 方案 0a.3 第 A4 行）----------
+
+use iwork_domain::event::TurnStateChanged;
+use iwork_domain::turn::{TurnIntentKind, check_intent_committed, check_turn_committed};
+
+/// 转换表里有的「从 → 到」，手写一份当独立的期望值（不从 TURN_TRANSITIONS 推）。
+fn legal_edges() -> Vec<(TurnState, TurnState)> {
+    let ic = S::Interrupted { reason: Crash };
+    let iw = S::Interrupted {
+        reason: ApprovalWaitLimit,
+    };
+    let mut edges = vec![
+        (S::Queued, S::Running),
+        (S::Queued, S::Cancelled),
+        (S::Queued, S::Failed),
+        (S::Running, S::WaitingApproval),
+        (S::Running, S::Cancelling),
+        (S::Running, S::Completed),
+        (S::Running, S::Failed),
+        (S::Running, ic),
+        (S::WaitingApproval, S::Running),
+        (S::WaitingApproval, S::Cancelling),
+        (S::WaitingApproval, S::Failed),
+        (S::WaitingApproval, ic),
+        (S::WaitingApproval, iw),
+        (S::Cancelling, S::Cancelled),
+    ];
+    for i in [ic, iw] {
+        edges.extend([(i, S::Running), (i, S::Cancelled), (i, S::Failed)]);
+    }
+    edges
+}
+
+fn changed(from: TurnState, to: TurnState) -> TurnStateChanged {
+    TurnStateChanged {
+        turn_id: TurnId::from_raw(RawUlid::from_u128(1)),
+        from,
+        to,
+        reason: None,
+    }
+}
+
+/// 现在的状态 × 事件的 from × 事件的 to 全部穷举：只有「现在 == from 且是表里的边」放行。
+#[test]
+fn check_turn_committed_matches_transition_table() {
+    let edges = legal_edges();
+    assert_eq!(edges.len(), 20, "对照：手写的边数");
+    let mut accepted = 0;
+    for current in TurnState::all() {
+        for from in TurnState::all() {
+            for to in TurnState::all() {
+                let expect = current == from && edges.contains(&(from, to));
+                let got = check_turn_committed(current, &changed(from, to));
+                assert_eq!(
+                    got.is_ok(),
+                    expect,
+                    "现在 {current:?}，事件 {from:?} → {to:?}：{got:?}"
+                );
+                accepted += usize::from(expect);
+            }
+        }
+    }
+    assert_eq!(accepted, 20, "每条边恰好在现在 == from 时放行一次");
+    // 拒绝时点名两边的状态
+    let err = check_turn_committed(S::Cancelled, &changed(S::Queued, S::Running)).unwrap_err();
+    assert!(
+        err.message.contains("Queued") && err.message.contains("Cancelled"),
+        "{err}"
+    );
+}
+
+#[test]
+fn intent_lands_only_on_its_states() {
+    for state in TurnState::all() {
+        let cancel = matches!(state, S::Running | S::WaitingApproval);
+        let resume = matches!(state, S::Interrupted { .. });
+        assert_eq!(
+            check_intent_committed(state, TurnIntentKind::Cancel).is_ok(),
+            cancel,
+            "取消意图落在 {state:?}"
+        );
+        assert_eq!(
+            check_intent_committed(state, TurnIntentKind::Resume).is_ok(),
+            resume,
+            "继续意图落在 {state:?}"
+        );
+    }
+}

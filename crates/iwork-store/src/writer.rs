@@ -164,9 +164,21 @@ impl WriterHandle {
 
     /// 入队一条要等结果的操作；入队失败时直接返回已带错误的应答。
     pub(crate) fn request<T>(&self, build: impl FnOnce(Responder<T>) -> WriteOp) -> Reply<T> {
+        self.request_then(build, || {})
+    }
+
+    /// 同 [`Self::request`]；入队成功之后、返回之前调 `enqueued`（测试通知用，入队失败不调）。
+    pub(crate) fn request_then<T>(
+        &self,
+        build: impl FnOnce(Responder<T>) -> WriteOp,
+        enqueued: impl FnOnce(),
+    ) -> Reply<T> {
         let (tx, rx) = reply::channel(WRITER_GONE);
         match self.submit(build(tx)) {
-            Ok(()) => rx,
+            Ok(()) => {
+                enqueued();
+                rx
+            }
             Err(e) => Reply::ready(Err(e)),
         }
     }
@@ -177,13 +189,25 @@ impl WriterHandle {
         T: Send + 'static,
         F: FnMut(&Connection, Timestamp) -> Result<T, StorageError> + Send + 'static,
     {
-        self.request(|reply| {
-            WriteOp::Sql(Box::new(FnOp {
-                f,
-                value: None,
-                reply,
-            }))
-        })
+        self.sql_then(f, || {})
+    }
+
+    /// 同 [`Self::sql`]，入队成功后调 `enqueued`。
+    pub(crate) fn sql_then<T, F>(&self, f: F, enqueued: impl FnOnce()) -> Reply<T>
+    where
+        T: Send + 'static,
+        F: FnMut(&Connection, Timestamp) -> Result<T, StorageError> + Send + 'static,
+    {
+        self.request_then(
+            |reply| {
+                WriteOp::Sql(Box::new(FnOp {
+                    f,
+                    value: None,
+                    reply,
+                }))
+            },
+            enqueued,
+        )
     }
 
     /// 独占操作：`f` 自己开事务、自己收尾，结果经它捕获的发送端送出。
@@ -214,6 +238,29 @@ impl WriterHandle {
             message: WRITER_GONE.into(),
         })
     }
+}
+
+/// 这个 `command_id` 记过的回执（`replayed = true`）。提交时去重与排在写队列里的查回执共用这一条语句。
+pub(crate) fn recorded_receipt(
+    conn: &Connection,
+    command_id: CommandId,
+) -> Result<Option<CommitReceipt>, StorageError> {
+    let previous: Option<(i64, i64)> = conn
+        .prepare_cached("SELECT first_seq, last_seq FROM commands WHERE command_id = ?1")
+        .and_then(|mut s| {
+            s.query_row([command_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()
+        })
+        .map_err(sql_err)?;
+    previous
+        .map(|(first, last)| {
+            Ok(CommitReceipt {
+                first_seq: seq_col("commands", "first_seq", first)?,
+                last_seq: seq_col("commands", "last_seq", last)?,
+                replayed: true,
+            })
+        })
+        .transpose()
 }
 
 /// 起写线程。`conn` 已设好 PRAGMA、跑完迁移。
@@ -567,24 +614,10 @@ where
         req: &CommitRequest,
         now: Timestamp,
     ) -> Result<CommitReceipt, StorageError> {
-        let command_id = req.command_id.to_string();
-        let previous: Option<(i64, i64)> = self
-            .tx
-            .conn
-            .query_row(
-                "SELECT first_seq, last_seq FROM commands WHERE command_id = ?1",
-                [&command_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .map_err(sql_err)?;
-        if let Some((first, last)) = previous {
-            return Ok(CommitReceipt {
-                first_seq: seq_col("commands", "first_seq", first)?,
-                last_seq: seq_col("commands", "last_seq", last)?,
-                replayed: true,
-            });
+        if let Some(previous) = recorded_receipt(&self.tx.conn, req.command_id)? {
+            return Ok(previous);
         }
+        let command_id = req.command_id.to_string();
 
         let head = self.next_seq - 1;
         self.tx.envelope = Envelope {

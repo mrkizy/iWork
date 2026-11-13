@@ -1,9 +1,7 @@
 //! 壳的副作用：选端点、Dock 角标与跳动、打开外链、系统文件选择框、「iWork」菜单的两种退出、退出。
 //! 系统通知由后台发（T09 方案 2.8），客户端不发。
 
-use iwork_client_core::{App, DirectDialer, Effect, ShellEvent};
-use iwork_ipc::LocalEndpoint;
-use iwork_ipc::peer::SelfIdentity;
+use iwork_client_core::{App, AppDialer, DesktopParts, Effect, ShellEvent};
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Manager};
 
@@ -16,20 +14,11 @@ const QUIT_CLIENT_ID: &str = "quit-client";
 const QUIT_FULLY_ID: &str = "quit-fully";
 const QUIT_FULLY_TITLE: &str = "完全退出 iWork";
 
-/// 连哪：发布构建只认当前用户的默认端点；`dev` feature 下可用 `IWORK_DEV_ENDPOINT` 指向假后台（R8）。
-pub fn dialer() -> Result<DirectDialer, String> {
-    let own = SelfIdentity::detect().map_err(|e| e.to_string())?;
-    #[cfg(feature = "dev")]
-    if let Some(path) = std::env::var_os("IWORK_DEV_ENDPOINT") {
-        let ep = iwork_ipc::transport::Endpoint::Unix(path.into());
-        return Ok(DirectDialer::new(ep, own, env!("CARGO_PKG_VERSION")).dev_trust());
-    }
-    let ep = LocalEndpoint::for_current_user().map_err(|e| e.to_string())?;
-    Ok(DirectDialer::new(
-        ep.endpoint().clone(),
-        own,
-        env!("CARGO_PKG_VERSION"),
-    ))
+/// 客户端的拨号器（T04p 方案 4.7）：发布构建连不上就拉起包里的后台（`Launcher`）；`dev` 构建只连不拉
+/// （设了 `IWORK_DEV_ENDPOINT` 连那个假后台并走开发信任，没设连当前用户的默认端点）。不会失败：取身份、建拨号器
+/// 都在第一次拨号时做，失败就是那一次拨号的 `Environment`。
+pub fn dialer() -> AppDialer<DesktopParts> {
+    AppDialer::new(DesktopParts::new(env!("CARGO_PKG_VERSION")))
 }
 
 /// 菜单与效果循环。

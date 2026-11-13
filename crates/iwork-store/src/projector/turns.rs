@@ -2,26 +2,32 @@
 
 use iwork_domain::common::Usage;
 use iwork_domain::event::{
-    ToolCallFinished, ToolCallStarted, TurnModelReported, TurnQueued, TurnSessionBound,
-    TurnStateChanged,
+    DomainEvent, ToolCallFinished, ToolCallStarted, TurnFinished, TurnIntentRecorded,
+    TurnModelReported, TurnQueued, TurnSessionBound, TurnStateChanged,
 };
 use iwork_domain::id::TurnId;
-use iwork_domain::turn::{Turn, TurnState};
+use iwork_domain::turn::{
+    Turn, TurnIntentKind, TurnState, check_intent_committed, check_turn_committed,
+};
 use iwork_ports::store::{EventCodec, StorageError};
 use rusqlite::{OptionalExtension, params};
 
 use super::Cx;
+use super::owner::{precondition, require_owner};
 use crate::snapshot::{decode_turn, encode_turn};
 use crate::sql::{ColumnText, sha_text, sql_err, u64_val};
 
+/// 排新回合：先过归属存续（对话在、不在删，助手在；T10a A3），再记 `created_seq`。
 pub(super) fn queued<C: EventCodec + ?Sized>(
     cx: &Cx<'_, C>,
     e: &TurnQueued,
+    event: &DomainEvent,
 ) -> Result<(), StorageError> {
     let t = &e.turn;
+    require_owner(cx, event, "新回合", t.id)?;
     cx.exec(
         "INSERT INTO turns(id, conversation_id, state, started_at, ended_at, interrupted_seq, \
-         snapshot, updated_seq) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         snapshot, updated_seq, created_seq, ended_seq) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 0)",
         params![
             t.id.to_string(),
             t.conversation_id.to_string(),
@@ -62,20 +68,76 @@ fn store<C: EventCodec + ?Sized>(
     )
 }
 
-/// 直接写事件里的目标状态（不跑状态机）。进入终态记 `ended_at`（信封时间，与 `Turn::apply` 一致）；
-/// 进入中断记下这条事件的 seq（未读计数用），离开中断清空。
+/// 写事件里的目标状态。先过状态前提（T10a A4 ①：库里现在的状态等于 `from`，且是转换表里的边）。
+/// 进入终态记 `ended_at`（信封时间，与 `Turn::apply` 一致）；进入中断记下这条事件的 seq（未读计数用、
+/// 继续意图按它比先后），并清掉上一次中断的继续意图；离开中断清空。从 `Queued` 或已中断进 `Running`
+/// 是一趟编排的起点，记 `run_started_seq`（取消意图按它比先后）。
 pub(super) fn state_changed<C: EventCodec + ?Sized>(
     cx: &Cx<'_, C>,
     e: &TurnStateChanged,
 ) -> Result<(), StorageError> {
     let id = e.turn_id.to_string();
     let mut t = load(cx, &id)?;
+    precondition(cx, &format!("回合 {id}"), check_turn_committed(t.state, e))?;
     t.state = e.to;
     if e.to.is_terminal() {
         t.ended_at = Some(cx.env.at);
     }
-    let interrupted_seq = matches!(e.to, TurnState::Interrupted { .. }).then(|| cx.seq());
-    store(cx, &id, &t, interrupted_seq)
+    let interrupted = matches!(e.to, TurnState::Interrupted { .. });
+    store(cx, &id, &t, interrupted.then(|| cx.seq()))?;
+    if interrupted {
+        cx.exec(
+            "UPDATE turns SET resume_intent_seq = NULL WHERE id = ?1",
+            [&id],
+        )?;
+    }
+    let run_starts = matches!(e.from, TurnState::Queued | TurnState::Interrupted { .. })
+        && e.to == TurnState::Running;
+    if run_starts {
+        cx.exec(
+            "UPDATE turns SET run_started_seq = ?1 WHERE id = ?2",
+            params![cx.seq(), id],
+        )?;
+    }
+    Ok(())
+}
+
+/// 回合结束：记用量与 `ended_seq`。
+pub(super) fn finished<C: EventCodec + ?Sized>(
+    cx: &Cx<'_, C>,
+    e: &TurnFinished,
+) -> Result<(), StorageError> {
+    usage(cx, e.turn_id, &e.usage)?;
+    let id = e.turn_id.to_string();
+    cx.exec_hit(
+        "UPDATE turns SET ended_seq = ?1, updated_seq = ?1 WHERE id = ?2",
+        params![cx.seq(), id],
+        "turns",
+        &id,
+    )
+}
+
+/// 回合意图：先过状态前提（T10a A4 ②③），再记下这条意图的 seq（每种只留最近一条）。
+pub(super) fn intent_recorded<C: EventCodec + ?Sized>(
+    cx: &Cx<'_, C>,
+    e: &TurnIntentRecorded,
+) -> Result<(), StorageError> {
+    let id = e.turn_id.to_string();
+    let t = load(cx, &id)?;
+    precondition(
+        cx,
+        &format!("回合 {id}"),
+        check_intent_committed(t.state, e.intent),
+    )?;
+    let sql = match e.intent {
+        TurnIntentKind::Cancel => {
+            "UPDATE turns SET cancel_intent_seq = ?1, updated_seq = ?1 WHERE id = ?2"
+        }
+        TurnIntentKind::Resume => {
+            "UPDATE turns SET resume_intent_seq = ?1, updated_seq = ?1 WHERE id = ?2"
+        }
+    };
+    cx.exec_hit(sql, params![cx.seq(), id], "turns", &id)
 }
 
 pub(super) fn model_reported<C: EventCodec + ?Sized>(
@@ -157,10 +219,24 @@ pub(super) fn tool_call_started<C: EventCodec + ?Sized>(
     cx: &Cx<'_, C>,
     e: &ToolCallStarted,
 ) -> Result<(), StorageError> {
+    let turn = e.turn_id.to_string();
+    let conversation_id: String = cx
+        .conn
+        .prepare_cached("SELECT conversation_id FROM turns WHERE id = ?1")
+        .and_then(|mut s| s.query_row([&turn], |r| r.get(0)).optional())
+        .map_err(sql_err)?
+        .ok_or_else(|| cx.missing("turns", &turn))?;
     cx.exec(
         "INSERT INTO tool_calls(turn_id, tool_call_id, tool_name, ok, output_sha256, output_area, \
-         output_size, started_seq, updated_seq) VALUES (?1, ?2, ?3, NULL, NULL, NULL, NULL, ?4, ?4)",
-        params![e.turn_id.to_string(), e.tool_call_id.0, e.tool_name, cx.seq()],
+         output_size, started_seq, updated_seq, conversation_id) \
+         VALUES (?1, ?2, ?3, NULL, NULL, NULL, NULL, ?4, ?4, ?5)",
+        params![
+            turn,
+            e.tool_call_id.0,
+            e.tool_name,
+            cx.seq(),
+            conversation_id
+        ],
     )?;
     Ok(())
 }

@@ -1626,7 +1626,10 @@ async fn conversation_deleted_drops_bindings() {
         .await
         .unwrap();
     assert_eq!(b.engine.binding_count(), 0, "作废时随答复删掉");
+    // 删除流程先把回合收到终态，存储才让级联删掉它（T10a X5）
     b.external(vec![
+        state_changed(turn(1), TurnState::WaitingApproval, TurnState::Cancelling),
+        state_changed(turn(1), TurnState::Cancelling, TurnState::Cancelled),
         ConversationDeleted {
             conversation_id: conversation(),
         }

@@ -1,0 +1,6 @@
+{
+  "turnIntentRecorded": {
+    "turnId": "01JC0T0000000000000000TRN1",
+    "intent": "TURN_INTENT_KIND_CANCEL"
+  }
+}
