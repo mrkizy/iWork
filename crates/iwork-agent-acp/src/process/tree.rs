@@ -57,6 +57,10 @@ struct Faults {
     fail: bool,
     /// 下一次读表先睡这么久（只一次）
     delay_once: Option<Duration>,
+    /// 下一批「复核 + 发送」先睡这么久（只一次）：代表复核时读出生时间卡住
+    signal_delay_once: Option<Duration>,
+    /// 每一遍扫描提交之前，先有另一遍提交落下（这一遍因此被超过去）
+    overtake: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +145,18 @@ impl ProcessTree {
         lock(&self.faults).delay_once = Some(d);
     }
 
+    /// 测试用：之后每一遍扫描提交之前都先被别的提交超过去（`false` 恢复）。
+    #[cfg(test)]
+    pub fn overtake_scans(&self, on: bool) {
+        lock(&self.faults).overtake = on;
+    }
+
+    /// 测试用：下一批「复核 + 发送」先睡 `d`（只一次）。
+    #[cfg(test)]
+    pub fn delay_next_signals(&self, d: Duration) {
+        lock(&self.faults).signal_delay_once = Some(d);
+    }
+
     /// 测试用：范围的一份拷贝。
     #[cfg(test)]
     pub fn scope_copy(&self) -> Scope {
@@ -168,9 +184,10 @@ impl ProcessTree {
         let _ = step;
     }
 
-    /// 扫一遍、复核见证、交给范围。阻塞的系统调用，调用方放在阻塞线程里。扫描失败（列不出进程表、读出说不清的
-    /// 错误）时报错，**范围不动**：已记下的身份一个不丢，之后可以重试（审查 S6-5 1/F-4）。迟到的扫描（它所属的
-    /// `clear()` 已经放弃）照常交给范围：它只会加记到的进程或照见证规则作废会话，碰不到根组。
+    /// 扫一遍、复核见证、提交到范围。阻塞的系统调用，调用方放在阻塞线程里。扫描失败（列不出进程表、读出说不清的
+    /// 错误）时报错，**范围不动**：已记下的身份一个不丢，之后可以重试（审查 S6-5 1/F-4）。几遍扫描可以同时在跑
+    /// （采样、清理、上一次放弃的清理留下的迟到扫描）：提交按代次（[`Scope::commit`]），被超过去的那一遍只加不删、
+    /// 返回的成员标成旧的（审查 S6-5 2/F-1）。没有哪一遍等别的扫描。
     fn observe_blocking(&self) -> io::Result<Members> {
         #[cfg(test)]
         {
@@ -182,10 +199,18 @@ impl ProcessTree {
                 return Err(io::Error::other("测试注入的扫描失败"));
             }
         }
+        // 次序固定（方案 5.4a「扫描怎么提交到范围」）：锁里取快照 → 放锁读表 → 复核快照里的见证 → 算 → 拿锁提交
+        let snapshot = lock(&self.scope).clone();
         let table = scan::read_table()?;
-        let witnesses = lock(&self.scope).witness_pids();
-        let recheck = scan::recheck(&witnesses)?;
-        Ok(lock(&self.scope).observe(&table, &recheck))
+        let recheck = scan::recheck(&snapshot.witness_pids())?;
+        let pass = Scope::compute(&snapshot, &table, &recheck);
+        let mut scope = lock(&self.scope);
+        #[cfg(test)]
+        if lock(&self.faults).overtake {
+            let other = Scope::compute(&scope.clone(), &table, &recheck);
+            scope.commit(other);
+        }
+        Ok(scope.commit(pass))
     }
 
     /// 记一次范围（采样、取消一开始）。最多等 [`TREE_CLEAR_LIMIT`]。
@@ -197,7 +222,11 @@ impl ProcessTree {
         let tree = self.clone();
         let scan = tokio::task::spawn_blocking(move || tree.observe_blocking());
         match tokio::time::timeout_at(deadline, scan).await {
-            Ok(Ok(Ok(m))) => Some(m),
+            Ok(Ok(Ok(m))) if !m.stale => Some(m),
+            Ok(Ok(Ok(_))) => {
+                tracing::debug!(root = self.root, "这一遍被别的扫描超过去了，不拿来下结论");
+                None
+            }
             Ok(Ok(Err(e))) => {
                 tracing::warn!(root = self.root, error = %e, "扫描进程表失败，这一遍不算");
                 None
@@ -211,7 +240,7 @@ impl ProcessTree {
     /// 答「不空」。
     pub fn is_empty(&self) -> bool {
         match self.observe_blocking() {
-            Ok(m) => m.is_empty(),
+            Ok(m) => !m.stale && m.is_empty(),
             Err(e) => {
                 tracing::warn!(root = self.root, error = %e, "扫描进程表失败，按不空答");
                 false
@@ -234,7 +263,7 @@ impl ProcessTree {
             return Tick::Done;
         }
         let pids: Vec<SPid> = members
-            .0
+            .list
             .iter()
             .map(|m| SPid::from_u32(m.pid as u32))
             .collect();
@@ -244,27 +273,66 @@ impl ProcessTree {
         Tick::Sample(ResourceSample {
             rss_bytes: live.iter().map(|p| p.memory()).sum(),
             cpu_percent: live.iter().map(|p| p.cpu_usage()).sum(),
-            processes: members.0.len(),
+            processes: members.list.len(),
         })
     }
 
-    /// 给桥接本身发信号（`shutdown` 请它退出）。只在它还归我们时发：句柄还在（没回收；回收要拿同一把锁）、根组没
-    /// 作废，并且按身份发（审查 S6-5 1/F-2）。返回发了没有。
-    pub fn signal_root(&self, sig: libc::c_int) -> bool {
-        let child = lock(&self.child);
-        if child.is_none() || !lock(&self.scope).root_valid() {
-            return false;
+    /// 在阻塞线程里做 `f`，最多等到 `deadline`；到时没做完返回 `None`（结果丢掉）。复核出生时间、看桥接退没退、
+    /// 回收都是同步的系统调用，不在异步线程上做，期限才管得到（审查 S6-5 2/F-2）。
+    async fn blocking<T: Send + 'static>(
+        &self,
+        deadline: Instant,
+        f: impl FnOnce(&Self) -> T + Send + 'static,
+    ) -> Option<T> {
+        let tree = self.clone();
+        let task = tokio::task::spawn_blocking(move || f(&tree));
+        match tokio::time::timeout_at(deadline, task).await {
+            Ok(Ok(v)) => Some(v),
+            Ok(Err(_)) | Err(_) => None,
         }
-        let Some(birth) = self.root_birth else {
-            return false;
-        };
-        signal_member(
-            Ident {
-                pid: self.root,
-                birth,
-            },
-            sig,
-        )
+    }
+
+    /// 一批「复核 + 发送」：每个成员的复核与发送在同一个阻塞任务里挨着做，中间不让出。每发一个之前看一眼期限，
+    /// 到了就不再发：任务迟到了（调用侧已经不等它）也不会再发出信号。返回这一批在期限内发完了没有。
+    async fn send_batch(&self, who: Vec<Ident>, sig: libc::c_int, deadline: Instant) -> bool {
+        let until = deadline.into_std();
+        #[cfg(test)]
+        let delay = lock(&self.faults).signal_delay_once.take();
+        self.blocking(deadline, move |_| {
+            #[cfg(test)]
+            if let Some(d) = delay {
+                std::thread::sleep(d);
+            }
+            for w in who {
+                if std::time::Instant::now() >= until {
+                    return false;
+                }
+                signal_member(w, sig, Some(until));
+            }
+            true
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    /// 给桥接本身发信号（`shutdown` 请它退出）。只在它还归我们时发：句柄还在（没回收；回收要拿同一把锁）、根组没
+    /// 作废，并且按身份发（审查 S6-5 1/F-2）。复核与发送在阻塞线程里做，最多等 [`TREE_CLEAR_LIMIT`]。返回发了没有。
+    pub async fn signal_root(&self, sig: libc::c_int) -> bool {
+        let deadline = Instant::now() + TREE_CLEAR_LIMIT;
+        let until = deadline.into_std();
+        self.blocking(deadline, move |t| {
+            let child = lock(&t.child);
+            if child.is_none() || !lock(&t.scope).root_valid() || std::time::Instant::now() >= until
+            {
+                return false;
+            }
+            let Some(birth) = t.root_birth else {
+                return false;
+            };
+            signal_member(Ident { pid: t.root, birth }, sig, Some(until))
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// 清掉范围里的全部进程并确认，最多 [`TREE_CLEAR_LIMIT`]。`true` 之后桥接已被回收、根组作废；`false` 时什么都
@@ -274,8 +342,12 @@ impl ProcessTree {
         let deadline = Instant::now() + TREE_CLEAR_LIMIT;
         let cleared = self.clear_until(deadline).await;
         self.gate(GateStep::BeforeReap).await;
-        // 确认清空之后当场回收：拿到了退出状态才算，拿不到改判没清成
-        let cleared = cleared && self.reap_now();
+        // 确认清空之后当场回收：拿到了退出状态才算，拿不到（含到了期限）改判没清成
+        let cleared = cleared
+            && self
+                .blocking(deadline, |t| t.reap_now())
+                .await
+                .unwrap_or(false);
         tracing::debug!(root = self.root, cleared, "clear");
         cleared
     }
@@ -293,17 +365,18 @@ impl ProcessTree {
                 continue;
             };
             let pids = m.pids();
-            let running: Vec<Ident> =
-                m.0.iter()
-                    .filter(|x| x.run == Run::Running)
-                    .filter_map(ident)
-                    .collect();
+            let running: Vec<Ident> = m
+                .list
+                .iter()
+                .filter(|x| x.run == Run::Running)
+                .filter_map(ident)
+                .collect();
             if running.is_empty() && seen.as_ref().is_some_and(|s| s.is_superset(&pids)) {
                 break;
             }
             self.gate(GateStep::BeforeStop(round)).await;
-            for who in running {
-                signal_member(who, libc::SIGSTOP);
+            if !self.send_batch(running, libc::SIGSTOP, deadline).await {
+                return false;
             }
             seen = Some(pids);
         }
@@ -312,13 +385,18 @@ impl ProcessTree {
         loop {
             self.gate(GateStep::Kill).await;
             if let Some(m) = self.observe_until(deadline).await {
-                if m.is_empty() && self.root_exited() {
+                if m.is_empty()
+                    && self
+                        .blocking(deadline, |t| t.root_exited())
+                        .await
+                        .unwrap_or(false)
+                {
                     return true;
                 }
                 let witnesses = lock(&self.scope).witnesses(&m);
                 let mut release: BTreeSet<Pid> = BTreeSet::new();
                 for (sid, w) in &witnesses {
-                    let others = m.0.iter().any(|x| x.sid == Some(*sid) && x.pid != *w);
+                    let others = m.list.iter().any(|x| x.sid == Some(*sid) && x.pid != *w);
                     let n = quiet.entry(*sid).or_default();
                     *n = if others { 0 } else { *n + 1 };
                     if *n >= QUIET_SCANS {
@@ -330,12 +408,14 @@ impl ProcessTree {
                     .filter(|(sid, _)| !release.contains(sid))
                     .map(|(_, w)| *w)
                     .collect();
-                for who in
-                    m.0.iter()
-                        .filter(|x| !keep.contains(&x.pid))
-                        .filter_map(ident)
-                {
-                    signal_member(who, libc::SIGKILL);
+                let victims: Vec<Ident> = m
+                    .list
+                    .iter()
+                    .filter(|x| !keep.contains(&x.pid))
+                    .filter_map(ident)
+                    .collect();
+                if !self.send_batch(victims, libc::SIGKILL, deadline).await {
+                    return false;
                 }
                 let mut scope = lock(&self.scope);
                 for sid in release {
@@ -349,7 +429,7 @@ impl ProcessTree {
         }
     }
 
-    /// 桥接自己已经退出了没有（不回收地看一眼）。句柄已经交出去（回收过）算退出。
+    /// 桥接自己已经退出了没有（不回收地看一眼）。句柄已经交出去（回收过）算退出。同步的系统调用：只在阻塞线程里调。
     fn root_exited(&self) -> bool {
         if lock(&self.child).is_none() {
             return true;
@@ -381,7 +461,7 @@ impl ProcessTree {
         }
     }
 
-    /// 当场回收桥接：拿到了退出状态才让根组作废并返回 `true`；它还没退、或者回收失败而它按身份还在 → 句柄留着，
+    /// 当场回收桥接（同步，只在阻塞线程里调）：拿到了退出状态才让根组作废并返回 `true`；它还没退、或者回收失败而它按身份还在 → 句柄留着，
     /// 根组照旧有效，返回 `false`。
     fn reap_now(&self) -> bool {
         let mut slot = lock(&self.child);
@@ -419,8 +499,8 @@ impl ProcessTree {
             }
             Err(_) => {
                 if let Ok(members) = self.observe_blocking() {
-                    for who in members.0.iter().filter_map(ident) {
-                        signal_member(who, libc::SIGKILL);
+                    for who in members.list.iter().filter_map(ident) {
+                        signal_member(who, libc::SIGKILL, None);
                     }
                 }
             }

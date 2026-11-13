@@ -9,6 +9,11 @@
 //!   `kill`。两步之间的窗口是待产品负责人确认的已知限制（方案「剩下的窗口」）。
 //!
 //! 对不上、读不到 → 不发，当它已经没了；下一遍扫描照实际情况来。
+//!
+//! 读出生时间是同步的系统调用，可能卡住：调用方把「复核 + 发送」放在阻塞线程里，带上这次清理的绝对期限
+//! `until`；读完出生时间之后、发信号之前再看一眼期限，过了就不发（审查 S6-5 2/F-2）。
+
+use std::time::Instant;
 
 use super::scan;
 use super::scope::{Birth, Pid};
@@ -42,18 +47,28 @@ impl Os for RealOs {
     }
 }
 
-/// 给范围里的一个成员发信号。返回发了没有。
-pub fn signal_member(who: Ident, sig: libc::c_int) -> bool {
+/// 给范围里的一个成员发信号。`until`：过了这个时刻就不发（`None` 不限）。返回发了没有。
+pub fn signal_member(who: Ident, sig: libc::c_int, until: Option<Instant>) -> bool {
     #[cfg(target_os = "linux")]
-    if let Some(sent) = pidfd::signal(who, sig) {
+    if let Some(sent) = pidfd::signal(who, sig, until) {
         return sent;
     }
-    verify_then_kill(&RealOs, who, sig)
+    verify_then_kill(&RealOs, who, sig, until)
 }
 
-/// 没有句柄可用时：当场再读一次出生时间，对上紧接着发。
-pub fn verify_then_kill(os: &impl Os, who: Ident, sig: libc::c_int) -> bool {
-    if who.pid <= 1 || os.birth_of(who.pid) != Some(who.birth) {
+/// 期限还没到。
+fn in_time(until: Option<Instant>) -> bool {
+    until.is_none_or(|u| Instant::now() < u)
+}
+
+/// 没有句柄可用时：当场再读一次出生时间，对上、期限也没过，紧接着发。
+pub fn verify_then_kill(
+    os: &impl Os,
+    who: Ident,
+    sig: libc::c_int,
+    until: Option<Instant>,
+) -> bool {
+    if who.pid <= 1 || os.birth_of(who.pid) != Some(who.birth) || !in_time(until) {
         return false;
     }
     os.kill(who.pid, sig);
@@ -62,10 +77,12 @@ pub fn verify_then_kill(os: &impl Os, who: Ident, sig: libc::c_int) -> bool {
 
 #[cfg(target_os = "linux")]
 mod pidfd {
-    use super::{Ident, scan};
+    use std::time::Instant;
+
+    use super::{Ident, in_time, scan};
 
     /// 按句柄发。`None`：这台机器用不了 `pidfd_open`，调用方改走复核再发；`Some(sent)`：走过句柄这条路了。
-    pub fn signal(who: Ident, sig: libc::c_int) -> Option<bool> {
+    pub fn signal(who: Ident, sig: libc::c_int, until: Option<Instant>) -> Option<bool> {
         if who.pid <= 1 {
             return Some(false);
         }
@@ -82,6 +99,7 @@ mod pidfd {
         }
         let fd = fd as libc::c_int;
         let sent = scan::birth_of(who.pid) == Some(who.birth)
+            && in_time(until)
             // SAFETY: fd 是刚打开的 pidfd；info 为空、flags 为 0
             && unsafe {
                 libc::syscall(
@@ -130,11 +148,19 @@ mod tests {
             birth: Birth(birth),
         };
         // 对得上 → 发一次
-        assert!(verify_then_kill(&os, who(10, 5), libc::SIGSTOP));
+        assert!(verify_then_kill(&os, who(10, 5), libc::SIGSTOP, None));
         // 号被别人拿了（出生时间不同）→ 不发
-        assert!(!verify_then_kill(&os, who(11, 8), libc::SIGKILL));
+        assert!(!verify_then_kill(&os, who(11, 8), libc::SIGKILL, None));
         // 读不到 → 不发
-        assert!(!verify_then_kill(&os, who(12, 1), libc::SIGKILL));
+        assert!(!verify_then_kill(&os, who(12, 1), libc::SIGKILL, None));
+        // 对得上，但读完时期限已过 → 不发
+        let past = Instant::now() - std::time::Duration::from_millis(1);
+        assert!(!verify_then_kill(
+            &os,
+            who(10, 5),
+            libc::SIGKILL,
+            Some(past)
+        ));
         assert_eq!(*os.sent.borrow(), vec![(10, libc::SIGSTOP)]);
     }
 
@@ -149,7 +175,7 @@ mod tests {
         let birth = scan::birth_of(pid).expect("活着读得到");
         child.kill().unwrap();
         child.wait().unwrap();
-        assert!(!signal_member(Ident { pid, birth }, libc::SIGKILL));
+        assert!(!signal_member(Ident { pid, birth }, libc::SIGKILL, None));
     }
 
     /// Linux 句柄那条路：句柄打开之后进程退出并被回收，经句柄发信号得到 `ESRCH`，到不了后来拿到这个号的进程。

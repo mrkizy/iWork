@@ -485,7 +485,7 @@ async fn no_signal_to_root_after_reap() {
     let f = Fixture::start("sleep 30");
     let tree = f.process.unix_tree().clone();
     assert!(f.process.kill_tree_and_wait().await);
-    assert!(!tree.signal_root(libc::SIGTERM), "回收之后不发");
+    assert!(!tree.signal_root(libc::SIGTERM).await, "回收之后不发");
     f.process.shutdown().await;
 }
 
@@ -501,7 +501,58 @@ async fn shutdown_after_reaped_elsewhere_sends_nothing() {
     let rc = unsafe { libc::waitpid(root, std::ptr::null_mut(), 0) };
     assert_eq!(rc, root);
     let tree = f.process.unix_tree().clone();
-    assert!(!tree.signal_root(libc::SIGTERM), "号码不归我们了，不发");
+    assert!(
+        !tree.signal_root(libc::SIGTERM).await,
+        "号码不归我们了，不发"
+    );
     assert!(f.process.kill_tree_and_wait().await);
     assert!(!tree.scope_copy().root_valid());
+}
+
+/// 2/F-2：「复核 + 发送」卡住（读出生时间被注入 3 秒阻塞）时，`clear()` 照样在期限内返回 `false`，单线程运行时上
+/// 的定时器没被堵住；迟到的那一批醒来后一个信号都不发（根既没被停住也没被杀）。之后再清，清得掉。
+#[tokio::test(flavor = "current_thread")]
+async fn blocked_verify_does_not_overrun_the_deadline() {
+    let f = Fixture::start("sleep 30");
+    let tree = f.process.unix_tree().clone();
+    tree.delay_next_signals(Duration::from_secs(3));
+    let started = std::time::Instant::now();
+    let cleared = f.process.kill_tree_and_wait().await;
+    let took = started.elapsed();
+    assert!(!cleared);
+    assert!(
+        took < TREE_CLEAR_LIMIT + Duration::from_millis(300),
+        "clear 用了 {took:?}，超过期限"
+    );
+    // 等那一批醒来：它看到期限过了，不发
+    tokio::time::sleep(
+        Duration::from_secs(3) - took.min(Duration::from_secs(3)) + Duration::from_millis(300),
+    )
+    .await;
+    let state = scan::read_table().unwrap().0.get(&f.root()).map(|p| p.run);
+    assert_eq!(
+        state,
+        Some(super::scope::Run::Running),
+        "迟到的那一批没发信号"
+    );
+    assert!(f.process.kill_tree_and_wait().await);
+}
+
+/// 2/F-1：被超过去的那一遍不拿来下结论。桥接已退出、范围里没有活成员时，那一遍成员是空的，`is_empty()` 照样答
+/// 「不空」；每一遍都被超过去时 `clear()` 下不了结论，返回 `false`、不回收。不再被超过去之后照常清得掉。
+#[tokio::test]
+async fn stale_scan_is_not_a_conclusion() {
+    let f = Fixture::start("exit 0");
+    f.process.exited().await;
+    let tree = f.process.unix_tree().clone();
+    tree.overtake_scans(true);
+    assert!(!f.process.tree_is_empty().unwrap(), "旧的那一遍答「不空」");
+    assert!(!f.process.kill_tree_and_wait().await);
+    assert!(tree.holds_child());
+    tree.overtake_scans(false);
+    assert!(
+        f.process.tree_is_empty().unwrap(),
+        "对照：不旧的那一遍是空的"
+    );
+    assert!(f.process.kill_tree_and_wait().await);
 }

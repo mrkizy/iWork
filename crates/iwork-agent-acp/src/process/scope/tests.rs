@@ -284,14 +284,14 @@ fn run(steps: &[Step]) -> Result<(), String> {
                 let members = scope.observe(&table, &recheck);
                 // 清理照这次求出的范围发信号，发的时候是读表之后、中间那些事都发生过了的世界（5.4a「发信号按身份」）。
                 // 每个信号按它发出那一刻的世界断言：落在我们的进程上，或者根本没发
-                for m in &members.0 {
+                for m in &members.list {
                     let Some(birth) = m.birth else { continue };
                     let os = WorldOs {
                         world: &w,
                         landed: std::cell::RefCell::default(),
                     };
                     let who = Ident { pid: m.pid, birth };
-                    verify_then_kill(&os, who, libc::SIGKILL);
+                    verify_then_kill(&os, who, libc::SIGKILL, None);
                     for pid in os.landed.into_inner() {
                         if !w.procs[&pid].ours {
                             return Err(format!(
@@ -351,8 +351,110 @@ fn run(steps: &[Step]) -> Result<(), String> {
     Ok(())
 }
 
+/// 两遍扫描（编号 0、1）各自走四步（锁里取快照 → 读进程表 → 复核快照里的见证 → 算、拿锁提交，走完再从头来），
+/// 和世界里的事任意穿插（方案 5.4a「扫描怎么提交到范围」）。
+#[derive(Debug, Clone)]
+enum Staged {
+    World(Op),
+    /// 第 k 遍扫描往前走一步
+    Advance(usize),
+}
+
+fn staged() -> impl Strategy<Value = Staged> {
+    prop_oneof![
+        2 => op().prop_map(Staged::World),
+        3 => (0..2usize).prop_map(Staged::Advance),
+    ]
+}
+
+/// 一遍扫描走到哪一步了。
+#[derive(Default, Clone)]
+struct Scan {
+    snapshot: Option<Scope>,
+    table: Option<Table>,
+    recheck: Option<Recheck>,
+}
+
+fn run_staged(steps: &[Staged]) -> Result<(), String> {
+    let mut w = World::new();
+    let bridge_birth = w.procs[&BRIDGE].birth;
+    let mut scope = Scope::new(BRIDGE, Some(Birth(bridge_birth)), DAEMON);
+    let mut scans = [Scan::default(), Scan::default()];
+    for (n, s) in steps.iter().enumerate() {
+        match s {
+            Staged::World(op) => w.apply(op, &mut scope),
+            Staged::Advance(k) => {
+                let scan = &mut scans[*k];
+                if scan.snapshot.is_none() {
+                    scan.snapshot = Some(scope.clone());
+                    continue;
+                }
+                if scan.table.is_none() {
+                    scan.table = Some(w.table());
+                    continue;
+                }
+                if scan.recheck.is_none() {
+                    let pids = scan.snapshot.as_ref().unwrap().witness_pids();
+                    scan.recheck = Some(w.recheck(&pids));
+                    continue;
+                }
+                let Scan {
+                    snapshot: Some(snap),
+                    table: Some(table),
+                    recheck: Some(recheck),
+                } = std::mem::take(scan)
+                else {
+                    unreachable!("三样都有了");
+                };
+                let before = scope.clone();
+                let pass = Scope::compute(&snap, &table, &recheck);
+                let members = scope.commit(pass);
+                // 记到过的、此刻还活着（同一个身份）的，提交之后都还在
+                for (pid, r) in &before.recorded {
+                    let alive = w.procs.get(pid).is_some_and(|p| p.birth == r.birth.0);
+                    if alive && !scope.recorded.contains_key(pid) {
+                        return Err(format!(
+                            "第 {n} 步的提交删掉了还活着的记到过的进程 {pid}（旧={}）",
+                            members.stale
+                        ));
+                    }
+                }
+                // 被超过去的那一遍不作废会话
+                if members.stale && !before.sessions.is_subset(&scope.sessions) {
+                    return Err(format!("第 {n} 步：旧的那一遍作废了会话"));
+                }
+                // 认下的都是读表那一刻桥接的后代（读表时的世界里）
+                for m in &members.list {
+                    let wp = table.0.get(&m.pid).expect("成员来自这张表");
+                    if wp.birth.is_none() {
+                        continue;
+                    }
+                    if let Some(p) = w
+                        .procs
+                        .get(&m.pid)
+                        .filter(|p| Some(Birth(p.birth)) == wp.birth)
+                        && !p.ours
+                    {
+                        return Err(format!("第 {n} 步认下了外人 {}", m.pid));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(3000))]
+
+    /// 两遍扫描的四步任意穿插：被某一遍已经提交的扫描记下、此刻还活着的进程，不管之后的提交以什么次序落下，都还在
+    /// 范围里；被超过去的那一遍不作废会话（审查 S6-5 2/F-1）。
+    #[test]
+    fn interleaved_scans_never_lose_live_recorded(steps in prop::collection::vec(staged(), 0..80)) {
+        if let Err(e) = run_staged(&steps) {
+            prop_assert!(false, "{}", e);
+        }
+    }
 
     /// 任意的 fork、另立会话、换组、退出、号码重用、回收桥接，和「读表 → 中间有事 → 复核」任意交错：
     /// 范围里只有桥接的后代（不误杀），连得到桥接的、上一遍认过的都在（不漏）。
@@ -646,6 +748,166 @@ fn witness_is_the_stopped_member_closest_to_the_root() {
     let m = s.observe(&tt, &r);
     assert_eq!(s.witnesses(&m), BTreeMap::from([(20, 21)]));
     // 从叶子到根：21（深 3）在 20 之前，桥接 10 在最后
-    let order: Vec<Pid> = m.0.iter().map(|m| m.pid).collect();
+    let order: Vec<Pid> = m.list.iter().map(|m| m.pid).collect();
     assert_eq!(order, vec![21, 20, 11, 10]);
+}
+
+// ---------- 扫描按代次提交（审查 S6-5 2/F-1） ----------
+
+fn recheck_of(table: &[Proc], pids: &[Pid]) -> Recheck {
+    pids.iter()
+        .map(|pid| {
+            let now = table
+                .iter()
+                .find(|p| p.pid == *pid)
+                .and_then(|p| Some((p.birth?, p.sid?)));
+            (*pid, now)
+        })
+        .collect()
+}
+
+/// 一遍扫描，四步分开做：快照取自 `snap`、表是 `table`、复核照 `now`（复核那一刻的世界）。
+fn pass(snap: &Scope, table: Vec<Proc>, now: &[Proc]) -> Pass {
+    let recheck = recheck_of(now, &snap.witness_pids());
+    Scope::compute(snap, &Table::from_procs(table), &recheck)
+}
+
+/// reviewer 的探针：旧表只有桥接和 CLI；新表提交后范围里有会话 20 与后代 21；再照旧表提交。21 仍在范围里、会话 20
+/// 没作废；21 的父进程退出后的下一遍扫描仍然认领 21。
+#[test]
+fn stale_scan_commit_only_adds() {
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
+    let old: Vec<Proc> = base_table().into_iter().filter(|p| p.pid < 20).collect();
+    let snap_a = s.clone();
+    // 乙：新表，完整提交
+    observe(&mut s, base_table());
+    assert_eq!(s.witness_pids(), vec![20, 21]);
+    // 甲：照旧表提交（复核时 20、21 都活着）
+    let got = s.commit(pass(&snap_a, old, &base_table()));
+    assert!(got.stale);
+    assert_eq!(s.witness_pids(), vec![20, 21], "21 还在，会话 20 没作废");
+    // 20 退出、21 被收养
+    let mut later: Vec<Proc> = base_table().into_iter().filter(|p| p.pid != 20).collect();
+    later.iter_mut().find(|p| p.pid == 21).unwrap().ppid = 1;
+    assert!(observe(&mut s, later).contains(&21));
+}
+
+/// 甲的表里有 X 和它的孩子 Y；乙的表里 X 没了、Y 被收养（乙认不出 Y）。乙先提交、甲后提交：Y 被记下。
+#[test]
+fn stale_scan_still_contributes_what_it_saw() {
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
+    // X = 30 是 CLI 的孩子、自成会话 30；Y = 31 是 X 的孩子
+    let mut a_table = base_table();
+    a_table.push(proc(30, 11, 30, 30, 30));
+    a_table.push(proc(31, 30, 30, 30, 31));
+    let snap_a = s.clone();
+    let mut b_table: Vec<Proc> = base_table();
+    b_table.push(proc(31, 1, 30, 30, 31));
+    let b = observe(&mut s, b_table.clone());
+    assert!(!b.contains(&31), "对照：乙认不出 Y");
+    let got = s.commit(pass(&snap_a, a_table, &b_table));
+    assert!(got.stale && got.pids().contains(&31));
+    assert!(observe(&mut s, b_table).contains(&31), "Y 被记下了");
+}
+
+/// 被超过去的那一遍返回「旧的」，哪怕成员是空的：调用方不拿它下结论。
+#[test]
+fn stale_scan_is_not_a_conclusion() {
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
+    let snap = s.clone();
+    observe(&mut s, base_table());
+    let got = s.commit(pass(&snap, vec![proc(1, 1, 1, 1, 1)], &[]));
+    assert!(got.stale && got.is_empty());
+}
+
+/// 迟到但没被超过去的那一遍照常完整提交：删掉已经退出的记到过的进程。
+#[test]
+fn late_scan_without_overtake_commits_fully() {
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
+    observe(&mut s, base_table());
+    let snap = s.clone();
+    let without_21: Vec<Proc> = base_table().into_iter().filter(|p| p.pid != 21).collect();
+    let got = s.commit(pass(&snap, without_21.clone(), &without_21));
+    assert!(!got.stale);
+    assert_eq!(s.witness_pids(), vec![20], "21 删掉了");
+}
+
+/// 读表期间别的扫描新记下的成员，不当这一遍的见证：这一遍复核的是快照里的见证。
+#[test]
+fn witnesses_come_from_the_snapshot() {
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
+    observe(&mut s, base_table());
+    let snap = s.clone();
+    // 别的扫描记下了会话 20 里的新成员 22
+    let mut with_22 = base_table();
+    with_22.push(proc(22, 20, 20, 20, 22));
+    observe(&mut s, with_22.clone());
+    assert!(s.witness_pids().contains(&22));
+    assert!(!snap.witness_pids().contains(&22));
+    // 这一遍：快照里的见证 20、21 复核时都没了，只有 22 活着；22 不算这一遍的见证 → 会话 20 照这一遍算是作废的
+    let now: Vec<Proc> = base_table()
+        .into_iter()
+        .filter(|p| p.pid < 20)
+        .chain([proc(22, 1, 20, 20, 22)])
+        .collect();
+    let p = pass(&snap, with_22, &now);
+    assert!(!p.next.sessions.contains(&20));
+}
+
+/// 完整提交里，表里有这个号但这一遍没读到出生时间的：不删，这一遍也不凭身份算它是成员。
+#[test]
+fn unread_birth_keeps_the_record() {
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
+    observe(&mut s, base_table());
+    let mut t = base_table();
+    let shell = t.iter_mut().find(|p| p.pid == 20).unwrap();
+    shell.birth = None;
+    shell.ppid = 1;
+    // 21 也断了父链、会话 20 的见证复核不过（20 读不到、21 不在）：20 不凭身份进范围
+    t.retain(|p| p.pid != 21 && p.pid != 11);
+    let tt = Table::from_procs(t.clone());
+    let recheck = recheck_of(&t, &s.witness_pids());
+    let got = s.observe(&tt, &recheck);
+    assert!(!got.pids().contains(&20));
+    assert!(s.recorded.contains_key(&20), "没读到出生时间的不删");
+}
+
+/// 属性测试找到的：一遍扫描取快照时根组还有效，之后桥接被回收、号码被外人重用并建成同号的组；这一遍照快照里的
+/// 「根组有效」把外人认成根组成员。提交时发现根组在快照之后作废了，整遍丢掉，什么都不并进来。
+#[test]
+fn scan_spanning_a_reap_is_discarded() {
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
+    let snap = s.clone();
+    s.mark_reaped();
+    // 号码 10 被外人拿到、自成一组
+    let table = vec![
+        proc(1, 1, 1, 1, 1),
+        proc(2, 1, 2, 2, 2),
+        proc(10, 1, 10, 1, 99),
+    ];
+    let got = s.commit(pass(&snap, table.clone(), &table));
+    assert!(got.stale && got.is_empty());
+    assert!(
+        !s.recorded.contains_key(&10) || s.recorded[&10].birth == Birth(10),
+        "外人没被记下"
+    );
+}
+
+/// reviewer 探针在四步模型里的样子：甲取快照、读表；桥接 fork 出一个孩子；乙走完四步、把孩子记下；甲复核、提交。
+/// 孩子还活着，甲的旧表里却没有它：甲的提交不能删掉它。
+#[test]
+fn staged_probe_keeps_the_child() {
+    use Staged::{Advance, World as W};
+    let steps = vec![
+        Advance(0), // 甲：快照
+        Advance(0), // 甲：读表
+        W(Op::Fork(2, false)),
+        Advance(1), // 乙：快照
+        Advance(1), // 乙：读表
+        Advance(1), // 乙：复核
+        Advance(1), // 乙：提交
+        Advance(0), // 甲：复核
+        Advance(0), // 甲：提交
+    ];
+    assert_eq!(run_staged(&steps), Ok(()));
 }

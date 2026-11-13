@@ -221,7 +221,7 @@ impl SupervisedProcess {
     pub async fn shutdown(&self) {
         let pid = self.pid();
         tracing::debug!(pid, "shutdown: enter");
-        self.tree.terminate();
+        self.tree.terminate().await;
         let exited = self.wait_exit(GRACE_PERIOD).await.is_some();
         tracing::debug!(pid, exited, "shutdown: waited for exit");
         let cleared = self.kill_tree_and_wait().await;
@@ -340,8 +340,8 @@ fn adopt(child: Child, exit: watch::Sender<Option<ExitInfo>>) -> io::Result<Proc
 #[cfg(unix)]
 impl ProcessTree {
     /// 请桥接退出：只发给桥接自己，它的后代由之后的清理收拾。它的进程号已经不归我们（回收了、根作废了）就不发。
-    fn terminate(&self) {
-        self.0.signal_root(libc::SIGTERM);
+    async fn terminate(&self) {
+        self.0.signal_root(libc::SIGTERM).await;
     }
 
     fn kill(&self) {
@@ -407,7 +407,7 @@ impl ProcessTree {
     }
 
     /// Windows 没有可靠的「请退出」信号，直接结束。
-    fn terminate(&self) {
+    async fn terminate(&self) {
         self.job.terminate();
     }
 
