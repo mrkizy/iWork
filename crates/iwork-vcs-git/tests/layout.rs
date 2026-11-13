@@ -527,6 +527,12 @@ async fn empty_dot_git_does_not_fall_back_to_root() {
             "不该读出根下 HEAD 指的提交：{text}"
         );
         assert!(!text.contains(&mark), "{text}");
+        // 被「打开的不是查过的那个目录」挡下，说明 gix 已经退回去开了根目录、读过根下的 HEAD：开完再核只是
+        // 额外断言，挡不住读（变异「打开根目录而不是 <根>/.git」）
+        assert!(
+            !text.contains("打开的 git 目录和检查过的不是同一个"),
+            "gix 不该退回去开没查过的根目录：{text}"
+        );
         // 先读了根下 HEAD 的实现在不可读那一格会撞上权限错误
         assert!(
             !text.contains("ermission denied"),
