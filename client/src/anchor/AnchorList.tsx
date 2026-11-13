@@ -16,6 +16,9 @@ import {
   visibleRange,
 } from "./list";
 
+/** 列表外框的边框宽，与 AnchorRail.css 的 .iw-anchor__frame 一致。 */
+const FRAME_BORDER = 1;
+
 export const KIND_CLASS: Record<AnchorKind, string> = {
   [AnchorKind.UNSPECIFIED]: "",
   [AnchorKind.USER]: "iw-tick--user",
@@ -202,45 +205,48 @@ export function AnchorList(props: {
     return fadeSides(s.top, s.client, s.height, props.anchors.hasBefore, props.anchors.hasAfter);
   };
   const seekingKey = () => props.anchors.jumpLoadingKey;
-  // 信息卡的竖直中心对齐预览那一条刻度
-  const cardY = () => LIST_PAD + props.browse.index() * PITCH + PITCH / 2 - scroll().top;
+  // 信息卡的竖直中心对齐预览那一条刻度（外框的 1px 边框也算上）
+  const cardY = () => FRAME_BORDER + LIST_PAD + props.browse.index() * PITCH + PITCH / 2 - scroll().top;
 
   return (
     <div class="iw-anchor__open">
-      <div
-        ref={mount}
-        class="iw-anchor__list"
-        classList={{
-          "iw-anchor__list--fade-top": fade().top,
-          "iw-anchor__list--fade-bottom": fade().bottom,
-          "iw-anchor__list--seeking": seekingKey() !== "",
-        }}
-        style={{ height: `${LIST_PAD * 2 + items().length * PITCH}px` }}
-        onScroll={measure}
-      >
-        <Show when={loadingSide() === "start"}>
-          <i class="iw-anchor__more iw-anchor__more--start" aria-hidden="true" />
-        </Show>
-        <For each={items()}>
-          {(a, i) => (
-            <button
-              type="button"
-              class={`iw-tick ${KIND_CLASS[a.kind]}${distanceClass(Math.abs(i() - props.browse.index()))}`}
-              classList={{
-                "iw-tick--current": a.key === props.currentKey,
-                "iw-tick--seeking": a.key === seekingKey(),
-              }}
-              aria-label={anchorLabel(a)}
-              aria-current={i() === props.browse.index() ? "true" : undefined}
-              onMouseEnter={() => props.browse.preview(a.key)}
-              onFocus={() => props.browse.preview(a.key)}
-              onClick={() => props.onJump(a.key)}
-            />
-          )}
-        </For>
-        <Show when={loadingSide() === "end"}>
-          <i class="iw-anchor__more iw-anchor__more--end" aria-hidden="true" />
-        </Show>
+      {/* 外框画边框与底色，里面的滚动区才渐隐：渐隐不能把外框也淡掉 */}
+      <div class="iw-anchor__frame">
+        <div
+          ref={mount}
+          class="iw-anchor__list"
+          classList={{
+            "iw-anchor__list--fade-top": fade().top,
+            "iw-anchor__list--fade-bottom": fade().bottom,
+            "iw-anchor__list--seeking": seekingKey() !== "",
+          }}
+          style={{ height: `${LIST_PAD * 2 + items().length * PITCH}px` }}
+          onScroll={measure}
+        >
+          <Show when={loadingSide() === "start"}>
+            <i class="iw-anchor__more iw-anchor__more--start" aria-hidden="true" />
+          </Show>
+          <For each={items()}>
+            {(a, i) => (
+              <button
+                type="button"
+                class={`iw-tick ${KIND_CLASS[a.kind]}${distanceClass(Math.abs(i() - props.browse.index()))}`}
+                classList={{
+                  "iw-tick--current": a.key === props.currentKey,
+                  "iw-tick--seeking": a.key === seekingKey(),
+                }}
+                aria-label={anchorLabel(a)}
+                aria-current={i() === props.browse.index() ? "true" : undefined}
+                onMouseEnter={() => props.browse.preview(a.key)}
+                onFocus={() => props.browse.preview(a.key)}
+                onClick={() => props.onJump(a.key)}
+              />
+            )}
+          </For>
+          <Show when={loadingSide() === "end"}>
+            <i class="iw-anchor__more iw-anchor__more--end" aria-hidden="true" />
+          </Show>
+        </div>
       </div>
       <Show when={props.browse.previewed()}>
         {(a) => (

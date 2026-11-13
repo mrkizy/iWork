@@ -53,20 +53,23 @@
   position: relative;
   padding-left: 4px;
 }
+.iw-anchor__frame {
+  width: 36px;
+  overflow: hidden;
+  border: 1px solid var(--bd);
+  border-radius: 10px;
+  background: var(--surf);
+  box-shadow: var(--shadow-seg);
+}
 .iw-anchor__list {
   position: relative;
   box-sizing: border-box;
-  width: 36px;
-  /* 高度 = 条数 × 11 + 上下各 8（组件给），最高 360px 且不超过主区域高度的 60%；超出可滚动，不显示滚动条 */
+  /* 高度 = 条数 × 11 + 上下各 8（组件给），最高 360px 且不超过主区域（= 窗口）高度的 60%；超出可滚动，不显示滚动条 */
   max-height: min(var(--anchor-list-max-h), 60vh);
   padding: 8px 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: none;
-  border: 1px solid var(--bd);
-  border-radius: 10px;
-  background: var(--surf);
-  box-shadow: var(--shadow-seg);
 }
 .iw-anchor__list::-webkit-scrollbar {
   display: none;
@@ -298,10 +301,12 @@
 .iw-anchor-panel .iw-anchor__open {
   padding-left: 0;
 }
-.iw-anchor-panel .iw-anchor__list {
-  max-height: min(258px, calc(100vh - 142px));
+.iw-anchor-panel .iw-anchor__frame {
   border: none;
   box-shadow: none;
+}
+.iw-anchor-panel .iw-anchor__list {
+  max-height: min(258px, calc(100vh - 142px));
 }
 .iw-anchor-panel .iw-anchor__card {
   left: 44px;

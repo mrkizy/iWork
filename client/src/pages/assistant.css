@@ -118,11 +118,12 @@
   outline-offset: 2px;
 }
 
-/* 放不下时的浮层：从右边盖在对话上（ui-m1 2a 第 18 条 d），同弹出菜单的阴影 */
+/* 放不下时的浮层：从右边盖在对话上（ui-m1 2a 第 18 条 d），同弹出菜单的阴影。从标题栏下面开始（.iw-conv-header 高 52px），
+   不盖住标题栏里打开它的「助手资料」按钮 */
 .iw-profile--overlay {
   position: absolute;
   z-index: 15;
-  top: 0;
+  top: 52px;
   right: 0;
   bottom: 0;
   border-left: 1px solid var(--bd2);
