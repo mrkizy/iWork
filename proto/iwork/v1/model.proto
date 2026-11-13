@@ -700,4 +700,6 @@ message GlobalSettings {
   bool playful_ui = 1;
   bool autostart = 2;
   string projects_root = 3;
+  // 助手私聊页的资料栏：窗口够宽、本可常驻时用户手动收起了（全局一个值；ui-m1 2a 第 18 条 d）。
+  bool profile_panel_collapsed = 4;
 }

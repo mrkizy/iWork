@@ -77,6 +77,7 @@ pub fn command_name(command: &Kind) -> &'static str {
         Kind::SetAutostart(_) => "set_autostart",
         Kind::ShutdownDaemon(_) => "shutdown_daemon",
         Kind::ReportPresence(_) => "report_presence",
+        Kind::SetProfilePanelCollapsed(_) => "set_profile_panel_collapsed",
     }
 }
 

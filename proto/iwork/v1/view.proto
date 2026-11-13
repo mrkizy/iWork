@@ -720,6 +720,9 @@ message AssistantProfileView {
   optional string save_error = 18;
   // 配置页「头像配色」的 8 个色块（ui-m1 2a 第 18 条 a），按显示顺序；选中即保存。
   repeated AvatarColorOption avatar_colors = 19;
+  // 资料栏本可常驻（主区域够宽）时用户手动收起了：全局偏好 GlobalSettings.profile_panel_collapsed。
+  // 常驻还是收起由网页按主区域宽度判（ui-m1 2a 第 18 条 d，布局事实），这个值只管够宽时。
+  bool profile_panel_collapsed = 20;
 }
 
 message AvatarColorOption {
@@ -982,6 +985,8 @@ message UiIntent {
     UpdateAssistantFieldIntent update_assistant_field = 88;
     // 连接类整页的「重新打开 iWork」：壳重启客户端进程，不碰后台。
     RelaunchIntent relaunch = 89;
+    // 助手资料栏常驻时点「助手资料」手动收起（on = 收起）/ 展开：全局一个偏好，发 SetProfilePanelCollapsed。
+    ToggleIntent set_profile_panel_collapsed = 97;
   }
 }
 

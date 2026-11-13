@@ -208,6 +208,29 @@ async fn empty_name_is_rejected_by_backend_and_reported() {
     .await;
 }
 
+/// 资料栏手动收起是全局偏好（ui-m1 2a 第 18 条 d）：意图变成 SetProfilePanelCollapsed，后台受理后经
+/// GlobalSettingsChanged 回到资料栏视图；再展开也一样。
+#[tokio::test(flavor = "multi_thread")]
+async fn profile_panel_collapse_is_a_backend_setting() {
+    let (_d, app, mut web, _dir) = start().await;
+    ready(&app, &mut web).await;
+    assert!(
+        !web.state.assistant.as_ref().unwrap().profile_panel_collapsed,
+        "对照：默认不收起"
+    );
+    let toggle = |on| I::SetProfilePanelCollapsed(pb::ToggleIntent { on });
+    assert_eq!(act(&app, toggle(true)).await.error, None);
+    until(&app, &mut web, "后台受理后视图变成收起", |s| {
+        s.assistant.as_ref().is_some_and(|a| a.profile_panel_collapsed)
+    })
+    .await;
+    assert_eq!(act(&app, toggle(false)).await.error, None);
+    until(&app, &mut web, "再展开", |s| {
+        s.assistant.as_ref().is_some_and(|a| !a.profile_panel_collapsed)
+    })
+    .await;
+}
+
 /// 头像配色（ui-m1 2a 第 18 条 a）：选一块，令牌名存进后台的配置，资料栏的头像和色块跟着变；
 /// 不是 8 块之一的值在意图入口就拒，后台不动。
 #[tokio::test(flavor = "multi_thread")]

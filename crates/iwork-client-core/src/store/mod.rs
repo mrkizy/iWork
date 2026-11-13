@@ -923,6 +923,10 @@ impl Store {
                 if let Some(v) = &e.projects_root {
                     s.projects_root.clone_from(v);
                 }
+                if let Some(v) = e.profile_panel_collapsed {
+                    s.profile_panel_collapsed = v;
+                    self.dirty.mark(ViewKey::Assistant);
+                }
                 self.dirty.mark(ViewKey::Settings);
                 self.mark_rows(|r| matches!(r, Row::TurnEnd(_)));
             }

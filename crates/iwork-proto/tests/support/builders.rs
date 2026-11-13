@@ -1454,6 +1454,7 @@ pub fn ev_global_settings_changed() -> DomainEvent {
         playful_ui: Some(false),
         autostart: Some(true),
         projects_root: Some(s("/Users/me/code")),
+        profile_panel_collapsed: None,
     }))
 }
 
@@ -1547,6 +1548,15 @@ pub fn command_rename_conversation() -> Command {
             conversation_id: s(CONVERSATION),
             title: s("登录页深色"),
         })),
+    }
+}
+
+pub fn command_set_profile_panel_collapsed() -> Command {
+    Command {
+        command_id: s("01JC0K0000000000000000CMDA"),
+        kind: Some(command::Kind::SetProfilePanelCollapsed(
+            SetProfilePanelCollapsed { collapsed: true },
+        )),
     }
 }
 

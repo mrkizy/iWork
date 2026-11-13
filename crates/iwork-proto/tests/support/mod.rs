@@ -62,6 +62,7 @@ sample_types! {
         b::command_add_security_list_entry,
         b::command_create_assistant,
         b::command_rename_conversation,
+        b::command_set_profile_panel_collapsed,
     ],
     CommandAccepted => [b::command_accepted],
     Query => [b::query_get_conversation, b::query_list_conversations_page],

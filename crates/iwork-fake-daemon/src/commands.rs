@@ -307,6 +307,13 @@ pub fn decide(
                     ..Default::default()
                 })))
         }
+        C::SetProfilePanelCollapsed(x) => {
+            d.events
+                .push(ev(E::GlobalSettingsChanged(pb::GlobalSettingsChanged {
+                    profile_panel_collapsed: Some(x.collapsed),
+                    ..Default::default()
+                })))
+        }
         C::SetProjectsRoot(x) => {
             d.events
                 .push(ev(E::GlobalSettingsChanged(pb::GlobalSettingsChanged {

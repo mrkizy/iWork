@@ -78,6 +78,8 @@ message Command {
     // 163 预留给 T04「升级重启」若需要命令；用到时再定义。
     // 桌面客户端报「用户现在看得到什么」（T09 方案 2.8）。
     ReportPresence report_presence = 164;
+    // 助手资料栏常驻时手动收起 / 展开（ui-m1 2a 第 18 条 d）。
+    SetProfilePanelCollapsed set_profile_panel_collapsed = 165;
   }
 }
 
@@ -332,6 +334,11 @@ message SetPlayfulUi {
 
 message SetAutostart {
   bool enabled = 1;
+}
+
+// 助手资料栏的手动收起是全局一个偏好（ui-m1 2a 第 18 条 d）：能力与界面分离，偏好走命令与查询，不只记在客户端。
+message SetProfilePanelCollapsed {
+  bool collapsed = 1;
 }
 
 // 桌面客户端报「用户现在看得到什么」，供后台决定要不要发系统通知（T09 方案 2.8）。

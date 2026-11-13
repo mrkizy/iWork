@@ -104,6 +104,27 @@ fn compat_samples_decode_into_domain() {
     assert_eq!(kinds, expected, "样本应覆盖全部事件种类");
 }
 
+/// 资料栏偏好（T09 组 3b 加的协议字段）在领域层与存储里还没有落点：带着它的事件拒收并点名字段，不悄悄丢掉；
+/// 不带它的照常解（T10a 接上领域层后改成正常转换，并补 DomainEvent 金样本）。
+#[test]
+fn profile_panel_setting_is_refused_until_the_domain_has_it() {
+    let changed = |collapsed: Option<bool>| pb::DomainEvent {
+        event: Some(pb::domain_event::Event::GlobalSettingsChanged(
+            pb::GlobalSettingsChanged {
+                playful_ui: Some(true),
+                profile_panel_collapsed: collapsed,
+                ..Default::default()
+            },
+        )),
+    };
+    let err = event_from_proto(changed(Some(true))).unwrap_err();
+    assert_eq!(
+        (err.kind(), err.field()),
+        ("GlobalSettingsChanged", "profile_panel_collapsed")
+    );
+    assert!(event_from_proto(changed(None)).is_ok(), "对照：不带这一项照常解");
+}
+
 fn project_removed(id: &str) -> pb::DomainEvent {
     pb::DomainEvent {
         event: Some(pb::domain_event::Event::ProjectRemoved(

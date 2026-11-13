@@ -62,6 +62,10 @@ pub fn assistant(store: &Store, id: &str) -> Option<pb::AssistantProfileView> {
             },
         )),
         save_error: store.assistant_edits.error(id).map(str::to_owned),
+        profile_panel_collapsed: store
+            .settings
+            .as_ref()
+            .is_some_and(|s| s.profile_panel_collapsed),
         avatar_colors: avatar_color_options(c.avatar.as_ref().map_or("", |a| a.color.as_str())),
     })
 }

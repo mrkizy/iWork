@@ -594,6 +594,7 @@ message GlobalSettingsChanged {
   optional bool playful_ui = 1;
   optional bool autostart = 2;
   optional string projects_root = 3;
+  optional bool profile_panel_collapsed = 4;
 }
 
 // 流：system。崩溃恢复完成（设计 4）。

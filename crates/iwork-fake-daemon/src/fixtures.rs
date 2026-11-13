@@ -592,5 +592,6 @@ pub fn settings(playful: bool) -> pb::DomainEvent {
         playful_ui: Some(playful),
         autostart: Some(false),
         projects_root: Some("~/iWork/projects".into()),
+        profile_panel_collapsed: Some(false),
     }))
 }

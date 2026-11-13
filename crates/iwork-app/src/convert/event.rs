@@ -354,6 +354,8 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
                     .as_deref()
                     .map(|p| path_to_proto("GlobalSettingsChanged", "projects_root", p))
                     .transpose()?,
+                // 资料栏偏好还没进领域层与存储（真后台受理归 T10a），领域事件里没有它
+                profile_panel_collapsed: None,
             })
         }
         DomainEvent::RecoveryCompleted(e) => P::RecoveryCompleted(pb::RecoveryCompleted {
@@ -994,12 +996,23 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
             key_name: e.key_name,
         }
         .into(),
-        P::GlobalSettingsChanged(e) => ev::GlobalSettingsChanged {
-            playful_ui: e.playful_ui,
-            autostart: e.autostart,
-            projects_root: e.projects_root.as_deref().map(path_from_proto),
+        P::GlobalSettingsChanged(e) => {
+            // 资料栏偏好（T09 组 3b 加的协议字段）在领域层与存储里还没有落点（真后台受理归 T10a）：
+            // 带着它的事件拒收，不悄悄丢掉这一项
+            if e.profile_panel_collapsed.is_some() {
+                return Err(ConvertError::InvalidValue {
+                    kind: "GlobalSettingsChanged",
+                    field: "profile_panel_collapsed",
+                    reason: "后台还不支持这项设置（T10a 接入）".into(),
+                });
+            }
+            ev::GlobalSettingsChanged {
+                playful_ui: e.playful_ui,
+                autostart: e.autostart,
+                projects_root: e.projects_root.as_deref().map(path_from_proto),
+            }
+            .into()
         }
-        .into(),
         P::RecoveryCompleted(e) => ev::RecoveryCompleted {
             interrupted_turn_ids: parse_ids(
                 "RecoveryCompleted",

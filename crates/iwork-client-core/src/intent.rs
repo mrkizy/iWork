@@ -392,6 +392,9 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
         I::SetAutostart(x) => {
             Action::Command(Cmd::SetAutostart(pb::SetAutostart { enabled: x.on }))
         }
+        I::SetProfilePanelCollapsed(x) => Action::Command(Cmd::SetProfilePanelCollapsed(
+            pb::SetProfilePanelCollapsed { collapsed: x.on },
+        )),
         I::RevokeRule(x) => Action::Command(Cmd::RevokeRule(pb::RevokeRule { rule_id: x.rule_id })),
         I::Quit(x) => Action::Local(Local::Quit { confirm: x.confirm }),
         I::Relaunch(_) => Action::Effect(Effect::Relaunch),
