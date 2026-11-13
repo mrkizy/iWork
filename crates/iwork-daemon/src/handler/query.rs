@@ -265,6 +265,7 @@ impl<C: EventCodec + 'static> Queries<C> {
     fn answer_in_memory(&self, kind: &Q) -> R {
         match kind {
             Q::GetOpenTarget(_) => R::GetOpenTarget(iwork_app::notify::open_target_to_proto(
+                self.attention.boot_id(),
                 self.attention.open_target().as_ref(),
             )),
             other => unreachable!("不是读内存的查询：{other:?}"),

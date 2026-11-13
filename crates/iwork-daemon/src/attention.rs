@@ -4,7 +4,8 @@
 //!   时没有任何连接报过，按「没人在看」算。`notify` 任务决定发不发系统通知时读它（N1）。
 //! - 点了哪条通知：后台进程里只存一份，带一个递增的 `token`，新的一次点击覆盖旧的；连接断开**不**清——用户点
 //!   通知时客户端往往还没开，被叫起来的是一条新连接，它要问得到（supervisor 2026-11-14 定，方案 S5 行随之改）。
-//!   桌面客户端被叫到前台后用 `GetOpenTarget` 来问，拿 `token` 判断是不是新的。
+//!   桌面客户端被叫到前台后用 `GetOpenTarget` 来问。`token` 只在这一次运行里递增，后台重启后从 1 重新数，所以
+//!   答案里另带这一次运行的 `boot_id`，客户端按 (boot_id, token) 认新旧（审查 2026-11-14-m1-t10a-8a 1/F-1）。
 //!
 //! 这两份状态只由这里改：在看哪经 [`Attention::report`] 与 [`Attention::connection_closed`]，目标经
 //! [`Attention::record_open`]（系统通知的点击回调调它）。
@@ -16,13 +17,28 @@ use iwork_domain::common::Timestamp;
 use iwork_ports::notify::{OpenRecord, OpenTarget, Presence};
 use iwork_proto::pb;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Attention {
+    /// 这一次运行的标识，启动时生成，进程里不变
+    boot_id: String,
     presences: Mutex<HashMap<u64, Presence>>,
     open: Mutex<Option<OpenRecord>>,
 }
 
 impl Attention {
+    /// `boot_id`：这一次运行的标识，每次启动都要不同。
+    pub fn new(boot_id: String) -> Self {
+        Self {
+            boot_id,
+            presences: Mutex::default(),
+            open: Mutex::default(),
+        }
+    }
+
+    pub fn boot_id(&self) -> &str {
+        &self.boot_id
+    }
+
     /// 记下连接 `connection_id`（桌面客户端）此刻在看哪。只收桌面客户端：别的种类返回 `false`，什么都不记。
     pub fn report(&self, connection_id: u64, kind: pb::ClientKind, presence: Presence) -> bool {
         if kind != pb::ClientKind::Desktop {
@@ -85,7 +101,7 @@ mod tests {
     /// 在看哪按连接记、后报的覆盖先报的；连接断开只删它自己的；只收桌面客户端。
     #[test]
     fn presence_is_per_desktop_connection_and_cleared_on_close() {
-        let a = Attention::default();
+        let a = Attention::new("boot-1".into());
         assert!(a.presences().is_empty(), "刚起来没人报过");
         assert!(a.report(1, pb::ClientKind::Desktop, presence(true)));
         assert!(a.report(2, pb::ClientKind::Desktop, presence(true)));
@@ -111,7 +127,7 @@ mod tests {
     /// 点通知记下的目标：进程里一份，新点击覆盖、`token` 递增；连接断开不清。
     #[test]
     fn open_target_is_process_wide_and_survives_disconnect() {
-        let a = Attention::default();
+        let a = Attention::new("boot-1".into());
         assert_eq!(a.open_target(), None);
         let first = a.record_open(target(1), Timestamp(5));
         assert_eq!(first.token, 1);

@@ -347,6 +347,11 @@ fn usage(used: u64) -> iwork_domain::common::Usage {
 /// 操作的种类数（`World::step` 的 `match`）。
 const OPS: u8 = 11;
 
+/// 查询要的内存状态（在看哪、点通知记下的目标）；这些用例的后台只运行一次。
+fn attention() -> Arc<crate::attention::Attention> {
+    Arc::new(crate::attention::Attention::new("boot-test".into()))
+}
+
 fn read(store: &Store) -> Arc<SqliteReadModel<ProtoEventCodec>> {
     Arc::new(read_model(store))
 }
@@ -462,7 +467,7 @@ fn query_seq_is_transaction_head() {
         w.step(i % OPS, i, i);
     }
     let head = block(w.store.head_seq()).unwrap().0;
-    let q = Queries::new(read(&w.store), Default::default());
+    let q = Queries::new(read(&w.store), attention());
     for kind in [
         get(10, |_| {}),
         Q::ListPendingItems(pb::ListPendingItems {}),
@@ -789,7 +794,7 @@ fn six_paging_ways_match_fake_daemon() {
         "场景里没有失败的回合"
     );
     let (tables, head) = fake_tables(&w.store);
-    let queries = Queries::new(read(&w.store), Default::default());
+    let queries = Queries::new(read(&w.store), attention());
     let mut compared = 0;
     for c in CONVS {
         let full = match real_answer(&queries, get(c, |g| g.limit = 1000))
@@ -876,7 +881,7 @@ fn after_last_message_page_is_empty() {
     for (op, a, b) in [(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0), (0, 0, 0)] {
         w.step(op, a, b);
     }
-    let queries = Queries::new(read(&w.store), Default::default());
+    let queries = Queries::new(read(&w.store), attention());
     let full = match real_answer(&queries, get(10, |g| g.limit = 1000))
         .unwrap()
         .kind
@@ -908,7 +913,7 @@ fn open_target_query_reads_memory() {
     use iwork_ports::notify::{OpenTarget, PendingItemRef};
     let env = Env::new();
     let w = World::new(&env);
-    let attention: Arc<crate::attention::Attention> = Default::default();
+    let attention = attention();
     let q = Queries::new(read(&w.store), attention.clone());
     let ask = || real_answer(&q, Q::GetOpenTarget(pb::GetOpenTarget {})).unwrap();
     let none = ask();
@@ -916,7 +921,11 @@ fn open_target_query_reads_memory() {
     assert_eq!(none.seq, 0, "读的是内存，不对应库的任何一刻");
     assert_eq!(
         none.kind,
-        Some(RK::GetOpenTarget(pb::GetOpenTargetResult::default()))
+        Some(RK::GetOpenTarget(pb::GetOpenTargetResult {
+            boot_id: "boot-test".into(),
+            ..Default::default()
+        })),
+        "没点过：token 为 0，boot_id 照带"
     );
     let rec = attention.record_open(
         OpenTarget {
@@ -930,6 +939,7 @@ fn open_target_query_reads_memory() {
             assert_eq!(t.token, rec.token);
             assert_eq!(t.pending_item_id, apid(30).to_string());
             assert_eq!(t.conversation_id, Some(cid(10).to_string()));
+            assert_eq!(t.boot_id, "boot-test");
         }
         other => panic!("{other:?}"),
     }

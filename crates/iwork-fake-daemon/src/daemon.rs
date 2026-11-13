@@ -491,6 +491,20 @@ impl FakeDaemon {
         );
     }
 
+    /// 只给测试用：像换了一个后台进程那样忘掉点过的通知、换一个 boot_id（真后台把目标记在进程内存里，重启后从头
+    /// 数 token）。
+    /// 连接不动；要断开另调 `disconnect_all`。
+    pub fn forget_open_target(&self) {
+        self.mutate_tables(|t| {
+            // 新的一次运行：换一个 boot_id，token 从 0 起
+            let boot_id = format!("{}+", t.open_target.boot_id);
+            t.open_target = pb::GetOpenTargetResult {
+                boot_id,
+                ..Default::default()
+            };
+        });
+    }
+
     /// 同上，指定点击时刻（测过期用）。
     pub fn set_open_target_at(
         &self,
@@ -501,6 +515,7 @@ impl FakeDaemon {
         let since = at.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         self.mutate_tables(|t| {
             t.open_target = pb::GetOpenTargetResult {
+                boot_id: t.open_target.boot_id.clone(),
                 token: t.open_target.token + 1,
                 pending_item_id: pending_item_id.into(),
                 conversation_id: conversation_id.map(Into::into),

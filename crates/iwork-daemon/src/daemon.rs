@@ -581,7 +581,12 @@ async fn serve_with<W: RunningWork>(
     // 查询与订阅快照共用一个读模型（和存储共用读线程池）；命令受理归组 B 的分发入口，没接时是 NotWired
     let read = Arc::new(store.read_model(boot::read_defaults()));
     // 在看哪、点通知记下的目标（内存）：查询读它，连接断开清在看哪；ReportPresence 与 notify 任务等组 B 合入后接
-    let attention = Arc::new(Attention::default());
+    // boot_id 每次启动新生成：点通知的 token 只在这一次运行里递增，客户端靠它认出换了后台（1/F-1）
+    let boot_id = format!(
+        "{:032x}",
+        iwork_ports::clock::IdGenerator::next(&MonotonicIds::new(SystemClock::new())).to_u128()
+    );
+    let attention = Arc::new(Attention::new(boot_id));
     let (server, publisher) = Server::new(
         cfg,
         id.own.clone(),

@@ -31,16 +31,20 @@ pub fn presence_from_proto(p: &pb::ReportPresence) -> Result<Presence, pb::Error
     })
 }
 
-/// `GetOpenTarget` 的答案：没点过通知时是 `token = 0` 的空结果（协议的约定）。
-pub fn open_target_to_proto(r: Option<&OpenRecord>) -> pb::GetOpenTargetResult {
+/// `GetOpenTarget` 的答案。没点过通知时是 `token = 0` 的空结果（协议的约定）；`boot_id` 总是带上。
+pub fn open_target_to_proto(boot_id: &str, r: Option<&OpenRecord>) -> pb::GetOpenTargetResult {
     let Some(r) = r else {
-        return pb::GetOpenTargetResult::default();
+        return pb::GetOpenTargetResult {
+            boot_id: boot_id.to_owned(),
+            ..Default::default()
+        };
     };
     pb::GetOpenTargetResult {
         token: r.token,
         pending_item_id: r.target.item.id_string(),
         conversation_id: r.target.conversation_id.map(|c| c.to_string()),
         at: Some(timestamp_to_proto(r.at)),
+        boot_id: boot_id.to_owned(),
     }
 }
 
@@ -78,8 +82,11 @@ mod tests {
     #[test]
     fn open_target_to_proto_fills_fields() {
         assert_eq!(
-            open_target_to_proto(None),
-            pb::GetOpenTargetResult::default()
+            open_target_to_proto("b1", None),
+            pb::GetOpenTargetResult {
+                boot_id: "b1".into(),
+                ..Default::default()
+            }
         );
         let draft = JobId::from_raw(RawUlid::from_u128(40));
         let r = OpenRecord {
@@ -90,10 +97,15 @@ mod tests {
             },
             at: Timestamp(1_000),
         };
-        let p = open_target_to_proto(Some(&r));
+        let p = open_target_to_proto("b1", Some(&r));
         assert_eq!(
-            (p.token, p.pending_item_id.as_str(), p.conversation_id),
-            (3, draft.to_string().as_str(), None)
+            (
+                p.token,
+                p.pending_item_id.as_str(),
+                p.conversation_id,
+                p.boot_id.as_str()
+            ),
+            (3, draft.to_string().as_str(), None, "b1")
         );
         assert!(p.at.is_some());
     }

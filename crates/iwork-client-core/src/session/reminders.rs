@@ -126,11 +126,11 @@ impl<D: Dialer> Session<D> {
         let Some(t) = result else {
             return;
         };
-        // token 只记在内存里：比上次处理过的新、而且是 30 秒内点的，才跳（方案 2.8；后台拿不到就不记，不猜）
-        if t.token == 0 || t.token <= self.open_target_seen {
+        // 比上次处理过的新、而且是 30 秒内点的，才跳（方案 2.8；后台拿不到就不记，不猜）
+        if !is_new_open_target(self.open_target_seen.as_ref(), &t) {
             return;
         }
-        self.open_target_seen = t.token;
+        self.open_target_seen = Some((t.boot_id.clone(), t.token));
         let fresh =
             t.at.as_ref()
                 .map(crate::derive::to_system_time)
@@ -148,6 +148,57 @@ impl<D: Dialer> Session<D> {
     pub(super) fn pending_replaced(&mut self) {
         for e in self.attention.on_pending_replaced(&self.store) {
             let _ = self.effects.send(e);
+        }
+    }
+}
+
+/// 后台答的目标是不是还没处理过的一次点击。token 只在后台的同一次运行（`boot_id`）里递增，后台重启后从头数，
+/// 所以按 (boot_id, token) 比：同一次运行里比上次大才算新；换了一次运行，任何非零 token 都算新。token 为 0 是没点过。
+/// 断线重连不清 `seen`：同一个后台重连时答的还是那一个，不能再跳（审查 2026-11-14-m1-t10a-8a 1/F-1）。
+pub(super) fn is_new_open_target(
+    seen: Option<&(String, u64)>,
+    t: &pb::GetOpenTargetResult,
+) -> bool {
+    if t.token == 0 {
+        return false;
+    }
+    match seen {
+        Some((boot, token)) if *boot == t.boot_id => t.token > *token,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod open_target_tests {
+    use super::*;
+
+    fn target(boot: &str, token: u64) -> pb::GetOpenTargetResult {
+        pb::GetOpenTargetResult {
+            token,
+            boot_id: boot.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn new_open_target_by_boot_and_token() {
+        let seen = ("b1".to_owned(), 3);
+        let cases = [
+            (None, target("b1", 0), false, "没点过"),
+            (None, target("b1", 1), true, "第一次"),
+            (
+                Some(&seen),
+                target("b1", 3),
+                false,
+                "同一个后台、同一次点击（重连后再问到）",
+            ),
+            (Some(&seen), target("b1", 2), false, "同一个后台、更早的"),
+            (Some(&seen), target("b1", 4), true, "同一个后台、新的一次"),
+            (Some(&seen), target("b2", 1), true, "后台重启后的第一次"),
+            (Some(&seen), target("b2", 0), false, "后台重启后还没点过"),
+        ];
+        for (seen, t, want, name) in cases {
+            assert_eq!(is_new_open_target(seen, &t), want, "{name}");
         }
     }
 }
