@@ -221,19 +221,21 @@ mod unix {
     }
 
     /// 在锚点录像后面接一帧：锚点视图里正在跳第一处（jump_loading 与 jump_loading_key，同 derive::anchors 给的）。
+    /// 接的是全量里那份对话 patch 的副本、只改锚点：网页按整份 patch 覆盖标题、输入框等，只带锚点会把它们清空。
     fn with_anchor_seeking(base: &record::Recording) -> record::Recording {
         use prost::Message as _;
         let full = pb::ViewPatch::decode(base.full.as_slice()).expect("自己写的全量帧解得开");
-        let (conversation_id, mut anchors) = full
+        let mut patch = full
             .changes
             .iter()
             .find_map(|c| match &c.change {
-                Some(pb::view_change::Change::Conversation(p)) => {
-                    Some((p.conversation_id.clone(), p.anchors.clone()?))
+                Some(pb::view_change::Change::Conversation(p)) if p.anchors.is_some() => {
+                    Some(p.clone())
                 }
                 _ => None,
             })
-            .expect("anchors-unloaded 的全量帧里有锚点");
+            .expect("anchors-unloaded 的全量帧里有带锚点的对话 patch");
+        let anchors = patch.anchors.as_mut().expect("上面挑的就是带锚点的");
         anchors.jump_loading =
             Some(iwork_client_core::derive::text::ANCHOR_JUMP_LOADING.to_owned());
         anchors.jump_loading_key = anchors
@@ -244,13 +246,7 @@ mod unix {
         append_change(
             base,
             pb::ViewChange {
-                change: Some(pb::view_change::Change::Conversation(
-                    pb::ConversationPatch {
-                        conversation_id,
-                        anchors: Some(anchors),
-                        ..Default::default()
-                    },
-                )),
+                change: Some(pb::view_change::Change::Conversation(patch)),
             },
         )
     }
