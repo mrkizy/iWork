@@ -306,3 +306,42 @@ fn delta_appends_to_its_own_row_only() {
     assert!(d.rows.is_empty(), "流式追加不整行重发别的行");
     assert_eq!(d.appended.keys().collect::<Vec<_>>(), ["m2"]);
 }
+
+/// 设置换了值，读设置的视图都要失效，不管新值是事件带来的还是查询 / 快照整份替换的（g3b 1/F-4）：设置页、
+/// 助手主页（资料栏的收起偏好）、回合结束行（「轻松元素」决定印章）。只标设置页，助手主页与印章会停在旧值。
+#[test]
+fn settings_replaced_by_snapshot_marks_every_reader() {
+    use iwork_client_core::store::{ScopeKind, ViewKey};
+    const SETTINGS: u32 = 77;
+    let mut s = rich();
+    s.register_subscription(SETTINGS, ScopeKind::Settings);
+    let _ = s.take_dirty();
+    s.apply(snapshot(
+        SETTINGS,
+        20,
+        vec![pb::QueryResult {
+            seq: 20,
+            kind: Some(pb::query_result::Kind::GetSettings(pb::GetSettingsResult {
+                global: Some(pb::GlobalSettings {
+                    playful_ui: true,
+                    profile_panel_collapsed: true,
+                    ..Default::default()
+                }),
+                project: None,
+            })),
+        }],
+    ));
+    let d = s.take_dirty();
+    for v in [ViewKey::Settings, ViewKey::Assistant] {
+        assert!(
+            d.views.contains(&v),
+            "快照换了设置，{v:?} 没失效：{:?}",
+            d.views
+        );
+    }
+    assert!(
+        d.conversation.rows.contains("end:t1"),
+        "回合结束行读「轻松元素」：{:?}",
+        d.conversation.rows
+    );
+}

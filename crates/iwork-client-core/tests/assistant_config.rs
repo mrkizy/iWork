@@ -212,7 +212,7 @@ async fn empty_name_is_rejected_by_backend_and_reported() {
 /// GlobalSettingsChanged 回到资料栏视图；再展开也一样。
 #[tokio::test(flavor = "multi_thread")]
 async fn profile_panel_collapse_is_a_backend_setting() {
-    let (_d, app, mut web, _dir) = start().await;
+    let (d, app, mut web, _dir) = start().await;
     ready(&app, &mut web).await;
     assert!(
         !web.state
@@ -229,6 +229,40 @@ async fn profile_panel_collapse_is_a_backend_setting() {
             .as_ref()
             .is_some_and(|a| a.profile_panel_collapsed)
     })
+    .await;
+    // 后台的查询与快照也是新值（g3b 1/F-3）：后连上的客户端走快照，也看到收起
+    let settings = d.query(&pb::Query {
+        kind: Some(pb::query::Kind::GetSettings(pb::GetSettings::default())),
+    });
+    assert!(
+        matches!(&settings.kind, Some(pb::query_result::Kind::GetSettings(r))
+            if r.global.as_ref().is_some_and(|g| g.profile_panel_collapsed)),
+        "GetSettings 还是旧值：{settings:?}"
+    );
+    let dialer = DirectDialer::new(d.endpoint(), self_trusting_identity().unwrap(), "test");
+    let (later, _later_effects) = App::start(dialer, Options::default());
+    let mut later_web = Web::new(later.attach().await.unwrap());
+    act(
+        &later,
+        I::SetVisible(pb::SetVisible {
+            sidebar: true,
+            settings: true,
+            conversation_id: Some(DM.into()),
+            assistant_id: Some(ID.into()),
+            ..Default::default()
+        }),
+    )
+    .await;
+    until(
+        &later,
+        &mut later_web,
+        "后连上的客户端看到收起",
+        |s| {
+            s.assistant
+                .as_ref()
+                .is_some_and(|a| a.profile_panel_collapsed)
+        },
+    )
     .await;
     assert_eq!(act(&app, toggle(false)).await.error, None);
     until(&app, &mut web, "再展开", |s| {

@@ -526,6 +526,9 @@ impl Tables {
                 if let Some(v) = &e.projects_root {
                     self.settings.projects_root = v.clone();
                 }
+                if let Some(v) = e.profile_panel_collapsed {
+                    self.settings.profile_panel_collapsed = v;
+                }
             }
             E::RecoveryCompleted(_) => {}
         }

@@ -560,6 +560,14 @@ impl Store {
         }
     }
 
+    /// 全局设置换了值（事件带来的、或查询与快照整份替换的，两条路一样）：读设置的视图都失效。加一个读设置的视图
+    /// 就在这里加一行：设置页；助手主页（资料栏的收起偏好）；回合结束行（「轻松元素」决定印章）。
+    fn settings_changed(&mut self) {
+        self.dirty.mark(ViewKey::Settings);
+        self.dirty.mark(ViewKey::Assistant);
+        self.mark_rows(|r| matches!(r, Row::TurnEnd(_)));
+    }
+
     /// 网页翻看到了离窗口边缘不远的一处：以它为中心重取（不跳转）。
     pub fn anchor_browse(&mut self, conversation_id: &str, key: &str) {
         if let Some(t) = self
@@ -936,10 +944,8 @@ impl Store {
                 }
                 if let Some(v) = e.profile_panel_collapsed {
                     s.profile_panel_collapsed = v;
-                    self.dirty.mark(ViewKey::Assistant);
                 }
-                self.dirty.mark(ViewKey::Settings);
-                self.mark_rows(|r| matches!(r, Row::TurnEnd(_)));
+                self.settings_changed();
             }
             E::CloneFinished(e) => {
                 let error = (!e.ok).then(|| {
@@ -1351,7 +1357,7 @@ impl Store {
             }
             (_, K::GetSettings(s)) => {
                 self.settings = s.global;
-                self.dirty.mark(ViewKey::Settings);
+                self.settings_changed();
             }
             (_, K::ListRules(l)) => {
                 self.rules = Some(l.rules);
