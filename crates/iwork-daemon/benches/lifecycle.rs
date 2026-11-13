@@ -34,7 +34,6 @@ use iwork_store::{DataDir, SqliteProjector, SqliteStore, StoreConfig};
 const DAEMON: &str = env!("CARGO_BIN_EXE_iwork-daemon");
 
 #[path = "../../iwork-store/tests/support/fixtures.rs"]
-#[allow(dead_code)]
 mod fixtures;
 
 fn median(mut v: Vec<f64>) -> f64 {

@@ -36,7 +36,6 @@ use iwork_store::{DataDir, ReadDefaults, SqliteProjector, SqliteStore, StoreConf
 type Store = SqliteStore<ProtoEventCodec>;
 
 #[path = "../../iwork-store/tests/support/fixtures.rs"]
-#[allow(dead_code)]
 mod fixtures;
 
 const N: usize = 2000;

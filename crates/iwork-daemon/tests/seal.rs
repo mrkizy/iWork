@@ -98,7 +98,7 @@ enum Wait {
     /// 换线里补记旧编号的那一笔（入队之前）
     RebindCommit,
     /// 换线里等旧进程树清空
-    RetireWait,
+    Retire,
     /// 取这个对话最后一条会话绑定
     LastBinding,
     /// 拍开始那份改动
@@ -110,7 +110,7 @@ fn stall_of(h: &H, wait: Wait) -> Option<&Stall> {
     match wait {
         Wait::SnapshotRead => Some(&h.knobs.turn_with_conversation),
         Wait::RebindCommit => Some(&h.knobs.commit.stall),
-        Wait::RetireWait => Some(&h.agent.terminate_stall),
+        Wait::Retire => Some(&h.agent.terminate_stall),
         Wait::LastBinding => Some(&h.knobs.last_session_binding),
         Wait::ChangeCapture => None,
     }
@@ -130,7 +130,7 @@ async fn seal_at(wait: Wait) {
             line_with_pending_rebind(&mut h).await;
             h.knobs.commit.select(|r| rebinds_to(r, "rt-0"));
         }
-        Wait::RetireWait => {
+        Wait::Retire => {
             h.start_host();
             let a = h.send(1, "一").await;
             h.wait_state(a, |s| s == TurnState::Completed).await;
@@ -142,7 +142,7 @@ async fn seal_at(wait: Wait) {
         Some(s) => s.arm(),
         None => h.vcs.hang.store(true, Ordering::SeqCst),
     }
-    if matches!(wait, Wait::RebindCommit | Wait::RetireWait) {
+    if matches!(wait, Wait::RebindCommit | Wait::Retire) {
         change_list(&h, 82).await;
     }
     let _t = h.send(3, "停住").await;
@@ -171,7 +171,7 @@ async fn seal_at(wait: Wait) {
             tokio::time::timeout(Duration::from_secs(3), host.abort_all()).await
         })
     };
-    if let (Wait::RetireWait, Some(s)) = (wait, stall) {
+    if let (Wait::Retire, Some(s)) = (wait, stall) {
         s.release();
     }
     let report = within("封口回来", abort)
@@ -180,7 +180,7 @@ async fn seal_at(wait: Wait) {
         .expect("封口 3 秒内回来");
     let enqueued = count_enqueues(&h);
     match (wait, stall) {
-        (Wait::RetireWait, _) => tokio::time::sleep(Duration::from_millis(300)).await,
+        (Wait::Retire, _) => tokio::time::sleep(Duration::from_millis(300)).await,
         (_, Some(s)) => release(s).await,
         (_, None) => {
             h.vcs.hang.store(false, Ordering::SeqCst);
@@ -217,7 +217,7 @@ async fn seal_at_each_prepare_wait() {
     for wait in [
         Wait::SnapshotRead,
         Wait::RebindCommit,
-        Wait::RetireWait,
+        Wait::Retire,
         Wait::LastBinding,
         Wait::ChangeCapture,
     ] {
