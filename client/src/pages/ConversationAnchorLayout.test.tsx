@@ -1,9 +1,11 @@
 // 对话页里消息锚点的两种形态（ui-m1.md 2a 第 11 条「窄窗口与让位」）：按主区域宽度选宽形态（左边距里的导轨，
 // 对话区左边留 --anchor-gutter）或窄形态（标题栏按钮），有回差；⌥↑ / ⌥↓ 两种形态都可用。
 // jsdom 不排版：给对话页一个假的 ResizeObserver 报宽度，给时间线一个「内容超出一屏」的布局（锚点只在超出时显示）。
+import { create } from "@bufbuild/protobuf";
 import { fireEvent, screen } from "@solidjs/testing-library";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { noFixtures, renderScenario, userActs } from "../test-fixtures";
+import { AnchorsViewSchema, ViewPatchSchema } from "../gen/iwork/v1/view_pb";
+import { loadScenario, noFixtures, renderScenario, userActs } from "../test-fixtures";
 
 const pages = new Set<{ cb: ResizeObserverCallback; el: Element }>();
 const realRO = globalThis.ResizeObserver;
@@ -77,6 +79,32 @@ describe.skipIf(noFixtures)("锚点的两种形态", () => {
     await frame();
     expect(rail(), "620 切回宽形态").not.toBeNull();
     expect(headerButton()).toBeNull();
+  });
+
+  it("点了还没载入的消息：对话区顶端出 2px 进度线，读屏读 Rust 给的那句；跳完收掉", async () => {
+    const { store } = renderScenario("anchors-basic");
+    resizePage(728);
+    await frame();
+    expect(document.querySelector(".iw-seek-line"), "对照：没在跳").toBeNull();
+    const conv = loadScenario("anchors-basic").state.conversation!;
+    const patch = (anchors: Parameters<typeof create<typeof AnchorsViewSchema>>[1]) =>
+      store.applyPatch(
+        create(ViewPatchSchema, {
+          changes: [
+            {
+              change: {
+                case: "conversation",
+                value: { conversationId: conv.id, anchors: create(AnchorsViewSchema, anchors) },
+              },
+            },
+          ],
+        }),
+      );
+    patch({ ...conv.anchors!, jumpLoading: "正在定位到所选消息", jumpLoadingKey: conv.anchors!.items[0].key });
+    expect(document.querySelector(".iw-timeline .iw-seek-line")).not.toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("正在定位到所选消息");
+    patch({ ...conv.anchors!, jumpLoading: undefined, jumpLoadingKey: "" });
+    expect(document.querySelector(".iw-seek-line")).toBeNull();
   });
 
   it("窄形态下 ⌥↑ / ⌥↓ 照样直接发相对跳转", async () => {

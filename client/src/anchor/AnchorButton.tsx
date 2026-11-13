@@ -1,10 +1,11 @@
 // 消息锚点，窄形态（ui-m1.md 2a 第 11 条「窄形态」）：主区域窄到放不下导轨时，锚点进对话标题栏最右端的 32×32 按钮。
 // 图标是三条短线，静止态的状态点画在按钮右上角（规则同导轨静止态）。点按钮在它下方弹出面板（右对齐，约 312px：
-// 左边刻度滚轮，右边信息卡），滚轮、点击跳转、翻看规则与宽形态的展开态完全相同（同一份 AnchorWheel）。
+// 左边刻度列表，右边信息卡；高度上限 min(280px, 可用高度)），列表、悬停预览、点击跳转、滚动与续载规则与宽形态的
+// 展开态完全相同（同一份 AnchorList）。
 // Esc、点面板外面、跳转之后都收起，焦点回到按钮。窄形态下不靠悬停展开。
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import type { AnchorsView } from "../gen/iwork/v1/view_pb";
-import { AnchorRest, AnchorWheel, createAnchorBrowse } from "./AnchorWheel";
+import { AnchorList, AnchorRest, createAnchorBrowse } from "./AnchorList";
 import "./AnchorRail.css";
 
 export interface AnchorButtonProps {
@@ -12,6 +13,7 @@ export interface AnchorButtonProps {
   currentKey?: string;
   onJump: (key: string) => void;
   onBrowse: (key: string) => void;
+  onBrowseEdge: (latest: boolean) => void;
 }
 
 export function AnchorButton(props: AnchorButtonProps) {
@@ -22,7 +24,6 @@ export function AnchorButton(props: AnchorButtonProps) {
 
   const close = () => {
     setOpen(false);
-    browse.clearBounce();
     button.focus();
   };
   const toggle = () => {
@@ -76,15 +77,14 @@ export function AnchorButton(props: AnchorButtonProps) {
         <AnchorRest anchors={props.anchors} class="iw-anchor-btn__icon" />
       </button>
       <Show when={open()}>
-        <div ref={panel} class="iw-anchor-panel" role="dialog" aria-label="消息锚点" onWheel={(e) => browse.onWheel(e)}>
-          <AnchorWheel browse={browse} onJump={jump} />
-          <Show when={props.anchors.jumpLoading}>
-            {(t) => (
-              <div class="iw-anchor__loading" role="status">
-                {t()}
-              </div>
-            )}
-          </Show>
+        <div ref={panel} class="iw-anchor-panel" role="dialog" aria-label="消息锚点">
+          <AnchorList
+            browse={browse}
+            anchors={props.anchors}
+            currentKey={props.currentKey}
+            onJump={jump}
+            onBrowse={props.onBrowse}
+          />
         </div>
       </Show>
     </div>

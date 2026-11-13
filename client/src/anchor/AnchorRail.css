@@ -1,12 +1,12 @@
-/* 消息锚点（画布 16-Anchor-*）：宽形态贴着侧栏右边缘、在对话区左边距里，上下居中。展开态刻度以中间为准上下排，
-   越远越短越淡。导轨在主区域里定位，left: 0 就是侧栏右边缘，随侧栏宽度移动（ui-m1 2a 第 11 条：不写死 296px）。 */
+/* 消息锚点（ui-m1 2a 第 11 条，列表式，画布 18、19、20）。导轨在主区域里定位，left: 0 就是主区域左边缘，随侧栏宽度
+   移动（不写死 296px）。只有导轨自己这一块响应鼠标：高度随状态变化、上下居中，不是整条竖带。 */
 .iw-anchor {
   position: absolute;
   z-index: 5;
-  top: 0;
-  bottom: 0;
+  top: 50%;
   left: 0;
   width: var(--anchor-rail-w);
+  transform: translateY(-50%);
   outline: none;
 }
 .iw-anchor:focus-visible .iw-anchor__rest {
@@ -15,16 +15,14 @@
   border-radius: var(--r-xs);
 }
 
-/* 静止态：三条短线，下面按需的状态点 */
+/* 静止态：三条短线，下面按需的状态点；感应区约 44×36 */
 .iw-anchor__rest {
-  position: absolute;
-  top: 50%;
-  left: 14px;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  justify-content: center;
   gap: 4px;
-  transform: translateY(-50%);
+  min-height: 36px;
+  padding-left: 14px;
 }
 .iw-anchor__rest span {
   display: block;
@@ -50,59 +48,136 @@
   background: var(--acc);
 }
 
-/* 展开态：刻度按离中间的距离排，越远越短、越淡 */
-.iw-anchor__wheel {
-  position: absolute;
-  top: 50%;
-  left: 12px;
-  width: 0;
-  height: 0;
+/* 展开态：列表外框宽 36px，左边距里居中（距主区域左边缘 4px）；信息卡在它右边 */
+.iw-anchor__open {
+  position: relative;
+  padding-left: 4px;
 }
+.iw-anchor__list {
+  position: relative;
+  box-sizing: border-box;
+  width: 36px;
+  /* 高度 = 条数 × 11 + 上下各 8（组件给），最高 360px 且不超过主区域高度的 60%；超出可滚动，不显示滚动条 */
+  max-height: min(var(--anchor-list-max-h), 60vh);
+  padding: 8px 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  border: 1px solid var(--bd);
+  border-radius: 10px;
+  background: var(--surf);
+  box-shadow: var(--shadow-seg);
+}
+.iw-anchor__list::-webkit-scrollbar {
+  display: none;
+}
+/* 有更多内容的那一侧，边缘 16px 渐隐；到头那一侧不渐隐 */
+.iw-anchor__list--fade-top {
+  mask-image: linear-gradient(to bottom, transparent, #000 16px);
+}
+.iw-anchor__list--fade-bottom {
+  mask-image: linear-gradient(to top, transparent, #000 16px);
+}
+.iw-anchor__list--fade-top.iw-anchor__list--fade-bottom {
+  mask-image: linear-gradient(to bottom, transparent, #000 16px, #000 calc(100% - 16px), transparent);
+}
+
+/* 刻度：每条占 --anchor-pitch 高、整行可点；线画在 ::after 里。平时 10×2、--tx3、60% */
 .iw-tick {
-  position: absolute;
-  left: 0;
-  top: calc(var(--off) * 11px - 1px);
-  width: calc(20px - var(--d) * 3px);
-  height: 2px;
-  padding: 0;
+  display: block;
+  width: 100%;
+  height: var(--anchor-pitch);
+  padding: 0 0 0 8px;
   border: none;
+  background: none;
+  cursor: pointer;
+}
+.iw-tick::after {
+  content: "";
+  display: block;
+  width: 10px;
+  height: 2px;
   border-radius: 1px;
   background: var(--tx3);
-  opacity: calc(1 - var(--d) * 0.18);
-  cursor: pointer;
-  transition: top 0.12s ease, width 0.12s ease, opacity 0.12s ease;
+  opacity: 0.6;
+  transition: width 0.1s ease, opacity 0.1s ease;
 }
-.iw-tick::before {
-  /* 点击区比线粗 */
-  content: "";
-  position: absolute;
-  inset: -4px 0;
+.iw-tick--near2::after {
+  width: 12px;
 }
-.iw-tick--center {
+.iw-tick--near1::after {
+  width: 15px;
+  opacity: 0.85;
+}
+.iw-tick--hover::after {
+  width: 20px;
+  height: 3px;
+  opacity: 1;
+}
+/* 当前阅读位置：--tx、高 3px、宽不小于 16px */
+.iw-tick--current::after {
+  min-width: 16px;
   height: 3px;
   background: var(--tx);
 }
-.iw-tick--waiting {
+.iw-tick--waiting::after {
   background: var(--mus);
 }
-.iw-tick--failed {
+.iw-tick--failed::after {
   background: var(--acc);
 }
 
-/* 信息卡：样式同画布「锚点样式 S3」的预览卡，左侧小三角指向中间刻度 */
+/* 点了还没载入的消息：被点的刻度变 22×3 轨道，一道亮光从右往左流（约 1 秒一圈）；其余刻度淡到 30% */
+.iw-anchor__list--seeking .iw-tick::after {
+  opacity: 0.3;
+}
+.iw-anchor__list--seeking .iw-tick--seeking::after {
+  width: 22px;
+  height: 3px;
+  opacity: 1;
+  background: linear-gradient(to left, var(--bd2) 0 35%, var(--tx) 50%, var(--bd2) 65% 100%) var(--bd2);
+  background-size: 300% 100%;
+  animation: iw-tick-seek 1s linear infinite;
+}
+@keyframes iw-tick-seek {
+  from {
+    background-position: 0% 0;
+  }
+  to {
+    background-position: 100% 0;
+  }
+}
+
+/* 续载约 300ms 还没到：那一端一个 6px 的加载点（呼吸） */
+.iw-anchor__more {
+  display: block;
+  width: 6px;
+  height: 6px;
+  margin: 2px 0 2px 10px;
+  border-radius: 50%;
+  background: var(--tx3);
+  animation: iw-anchor-breathe 1.2s ease-in-out infinite;
+}
+@keyframes iw-anchor-breathe {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* 信息卡：同画布「锚点样式 S3」的预览卡，宽 268px；竖直中心对齐预览那一条刻度（组件给 top），左侧小三角指向它 */
 .iw-anchor__card {
   position: absolute;
   top: 0;
-  left: 28px;
+  left: 48px;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  width: 280px;
+  width: 268px;
   padding: 10px 12px;
   border: 1px solid var(--bd);
   border-radius: var(--r-md);
   background: var(--surf);
-  box-shadow: var(--shadow-pop, 0 6px 24px rgba(19, 51, 77, 0.12));
+  box-shadow: var(--shadow-pop);
   color: var(--tx);
   text-align: left;
   transform: translateY(-50%);
@@ -154,46 +229,11 @@
   from {
     opacity: 0.4;
   }
-  to {
-    opacity: 1;
-  }
-}
-
-/* 到头轻轻回弹 */
-.iw-anchor__wheel--bounce-start {
-  animation: iw-anchor-bounce-start 0.18s ease;
-}
-.iw-anchor__wheel--bounce-end {
-  animation: iw-anchor-bounce-end 0.18s ease;
-}
-@keyframes iw-anchor-bounce-start {
-  50% {
-    transform: translateY(4px);
-  }
-}
-@keyframes iw-anchor-bounce-end {
-  50% {
-    transform: translateY(-4px);
-  }
-}
-
-/* 跳到没加载的地方、正在取那一段（Q18：原地不动，加一行提示） */
-.iw-anchor__loading {
-  position: absolute;
-  top: calc(50% + 70px);
-  left: 12px;
-  padding: 2px 8px;
-  border-radius: var(--r-xs);
-  background: var(--tag);
-  color: var(--tx2);
-  font-size: var(--fs-xs);
-  white-space: nowrap;
 }
 
 /* 窄形态：标题栏最右端 32×32 按钮，三条短线；状态点画在按钮右上角（ui-m1 2a 第 11 条「窄形态」） */
 .iw-anchor-btn-wrap {
   position: relative;
-  margin-left: auto;
 }
 .iw-anchor-btn {
   position: relative;
@@ -238,37 +278,49 @@
   right: 11px;
 }
 
-/* 窄形态的弹出面板：按钮下方、右对齐，约 312px；左边刻度滚轮，右边信息卡，样式同展开态 */
+/* 窄形态的弹出面板：按钮下方、右对齐，约 312px；左边刻度列表，右边信息卡，样式同展开态；高度上限 min(280, 可用高度) */
 .iw-anchor-panel {
   position: absolute;
   z-index: 20;
   top: calc(100% + 6px);
   right: 0;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
   width: 312px;
-  height: 180px;
+  max-height: min(280px, calc(100vh - 120px));
+  padding: 10px;
   border: 1px solid var(--bd2);
   border-radius: var(--r-lg);
   background: var(--surf);
   box-shadow: var(--shadow-pop);
 }
-.iw-anchor-panel .iw-anchor__wheel {
-  top: 50%;
-  left: 20px;
+.iw-anchor-panel .iw-anchor__open {
+  padding-left: 0;
+}
+.iw-anchor-panel .iw-anchor__list {
+  max-height: min(258px, calc(100vh - 142px));
+  border: none;
+  box-shadow: none;
 }
 .iw-anchor-panel .iw-anchor__card {
-  width: 248px;
-}
-.iw-anchor-panel .iw-anchor__loading {
-  top: auto;
-  bottom: 8px;
+  left: 44px;
+  width: 244px;
 }
 
-/* 减少动态效果：去掉滑动、淡入与回弹 */
+/* 减少动态效果：去掉过渡与淡入；流光改为被点的刻度静止加粗，加载点不呼吸 */
 @media (prefers-reduced-motion: reduce) {
-  .iw-tick,
-  .iw-anchor__card,
-  .iw-anchor__wheel {
+  .iw-tick::after,
+  .iw-anchor__card {
     transition: none;
+    animation: none;
+  }
+  .iw-anchor__more {
+    animation: none;
+  }
+  .iw-anchor__list--seeking .iw-tick--seeking::after {
+    height: 4px;
+    background: var(--tx);
     animation: none;
   }
 }

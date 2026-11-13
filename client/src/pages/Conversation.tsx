@@ -48,6 +48,8 @@ export function ConversationPage(props: {
   const shownAnchors = () => (overflow() && (anchors()?.items.length ?? 0) > 0 ? anchors() : undefined);
   const jumpTo = (key: string) => void host.act({ case: "jumpToAnchor", value: { conversationId: props.id, key } });
   const browseAt = (key: string) => void host.act({ case: "anchorBrowse", value: { conversationId: props.id, key } });
+  const browseEdge = (latest: boolean) =>
+    void host.act({ case: "anchorBrowseEdge", value: { conversationId: props.id, latest } });
   // 路由带来的「进来时滚到这一行」（从「待你处理」点进来）：和 Rust 的跳转指令走同一条滚动路径，行到了才滚、
   // 高亮一下。本地指令的 token 取负数，不和 Rust 的（从 1 递增）撞；Rust 之后发的跳转照常盖过它。
   const [entryScroll, setEntryScroll] = createSignal<{ rowKey: string; token: bigint; highlightMs: number }>();
@@ -87,7 +89,15 @@ export function ConversationPage(props: {
         </Show>
         {props.headerEnd}
         <Show when={narrow() && shownAnchors()}>
-          {(a) => <AnchorButton anchors={a()} currentKey={conv()?.anchorKey} onJump={jumpTo} onBrowse={browseAt} />}
+          {(a) => (
+            <AnchorButton
+              anchors={a()}
+              currentKey={conv()?.anchorKey}
+              onJump={jumpTo}
+              onBrowse={browseAt}
+              onBrowseEdge={browseEdge}
+            />
+          )}
         </Show>
       </div>
       <Show when={header()?.notice}>
@@ -132,7 +142,26 @@ export function ConversationPage(props: {
               onReachOldest={() => void host.act({ case: "loadOlder", value: { conversationId: props.id } })}
             />
             <Show when={!narrow() && shownAnchors()}>
-              {(a) => <AnchorRail anchors={a()} currentKey={conv()?.anchorKey} onJump={jumpTo} onBrowse={browseAt} />}
+              {(a) => (
+                <AnchorRail
+                  anchors={a()}
+                  currentKey={conv()?.anchorKey}
+                  onJump={jumpTo}
+                  onBrowse={browseAt}
+                  onBrowseEdge={browseEdge}
+                />
+              )}
+            </Show>
+            {/* 点了还没载入的消息（Q18：对话原地不动）：顶端 2px 进度线，读屏读一句；被点的刻度自己流光（AnchorList） */}
+            <Show when={anchors()?.jumpLoading}>
+              {(t) => (
+                <>
+                  <div class="iw-seek-line" aria-hidden="true" />
+                  <span class="iw-sr-only" role="status">
+                    {t()}
+                  </span>
+                </>
+              )}
             </Show>
             <Show when={(win()?.newBelow ?? 0) > 0}>
               <Button

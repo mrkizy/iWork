@@ -206,3 +206,38 @@
   color: var(--tx3);
   font-size: var(--fs-sm2);
 }
+
+/* 跳到还没载入的消息时（ui-m1 2a 第 11 条，Q18 原地不动）：对话区顶端 2px 细进度线，从左滑到右，约 1.1 秒一圈 */
+.iw-seek-line {
+  position: absolute;
+  z-index: 6;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  overflow: hidden;
+  pointer-events: none;
+}
+.iw-seek-line::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 40%;
+  background: var(--brand);
+  animation: iw-seek-slide 1.1s ease-in-out infinite;
+}
+@keyframes iw-seek-slide {
+  from {
+    left: -40%;
+  }
+  to {
+    left: 100%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .iw-seek-line::after {
+    left: 0;
+    animation: none;
+  }
+}

@@ -1,8 +1,8 @@
 // 窄形态的锚点按钮与弹出面板（ui-m1.md 2a 第 11 条「窄形态」）：数据来自 anchors-* 录像里 Rust 给的 AnchorsView。
-// 面板里的滚轮、跳转、翻看与宽形态共用 AnchorWheel，那些规则的细节在 AnchorRail.test.tsx；这里测窄形态自己的部分：
+// 面板里的列表、悬停预览、跳转、续载与宽形态共用 AnchorList，那些规则的细节在 AnchorRail.test.tsx；这里测窄形态自己的部分：
 // 按钮与状态点、点开、不靠悬停、Esc / 点外面 / 跳转之后收起且焦点回到按钮。
 import { fireEvent, render, screen } from "@solidjs/testing-library";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { AnchorsView } from "../gen/iwork/v1/view_pb";
 import { loadScenario, noFixtures } from "../test-fixtures";
 import { AnchorButton } from "./AnchorButton";
@@ -18,22 +18,21 @@ function mount(anchors: AnchorsView, current?: string) {
   const browses: string[] = [];
   render(() => (
     <div>
-      <AnchorButton anchors={anchors} currentKey={current} onJump={(k) => jumps.push(k)} onBrowse={(k) => browses.push(k)} />
+      <AnchorButton
+        anchors={anchors}
+        currentKey={current}
+        onJump={(k) => jumps.push(k)}
+        onBrowse={(k) => browses.push(k)}
+        onBrowseEdge={() => {}}
+      />
       <p data-testid="outside">别处</p>
     </div>
   ));
   const button = screen.getByRole("button", { name: "消息锚点" });
   const panel = () => document.querySelector<HTMLElement>(".iw-anchor-panel");
-  const centerTick = () => panel()?.querySelector<HTMLButtonElement>(".iw-tick--center");
+  const centerTick = () => panel()?.querySelector<HTMLButtonElement>(".iw-tick[aria-current]");
   return { button, panel, centerTick, jumps, browses };
 }
-
-let now = 0;
-beforeEach(() => {
-  now = 1000;
-  vi.spyOn(performance, "now").mockImplementation(() => now);
-});
-afterEach(() => vi.restoreAllMocks());
 
 describe.skipIf(noFixtures)("锚点按钮（窄形态）", () => {
   it("静止态：按钮右上角有状态点（等你处理、失败）；没有就不画", () => {
@@ -63,13 +62,14 @@ describe.skipIf(noFixtures)("锚点按钮（窄形态）", () => {
     expect(a.panel()).toBeNull();
   });
 
-  it("面板里滚轮一格换一处，不发跳转", () => {
+  it("面板里是同一份列表：每个锚点一条刻度，悬停换预览、不发跳转", () => {
     const basic = fromScenario("anchors-basic");
     const a = mount(basic.anchors, basic.current);
     fireEvent.click(a.button);
-    const before = a.centerTick()?.getAttribute("aria-label");
-    fireEvent.wheel(a.panel()!, { deltaY: -1, deltaMode: 1 });
-    expect(a.centerTick()?.getAttribute("aria-label")).not.toBe(before);
+    const ticks = [...a.panel()!.querySelectorAll<HTMLButtonElement>(".iw-tick")];
+    expect(ticks).toHaveLength(basic.anchors.items.length);
+    fireEvent.mouseEnter(ticks[0]);
+    expect(a.centerTick()).toBe(ticks[0]);
     expect(a.jumps).toEqual([]);
   });
 
@@ -99,7 +99,7 @@ describe.skipIf(noFixtures)("锚点按钮（窄形态）", () => {
     const a = mount(basic.anchors, basic.current);
     fireEvent.click(a.button);
     const ticks = [...a.panel()!.querySelectorAll<HTMLButtonElement>(".iw-tick")];
-    const other = ticks.find((t) => !t.classList.contains("iw-tick--center"))!;
+    const other = ticks.find((t) => !t.hasAttribute("aria-current"))!;
     const label = other.getAttribute("aria-label")!;
     fireEvent.click(other);
     expect(a.jumps).toHaveLength(1);
