@@ -187,6 +187,8 @@
 
 ## 5 踩过的坑
 
+- **临时副本共用 CARGO_TARGET_DIR 会串产物（2026-11-13，T10a 步 7 实测）**：两份不同源码的副本（尤其 `git archive` 导出的，文件 mtime 是提交时间、比已有产物旧）共用一个 target，cargo 可能认为不用重编、链上另一份的产物；步 7 的前后对照因此链错了 iwork-ports、编译失败。前后对照、跨版本验证时副本用各自的 target；只验同一份源码（审查用 archive 复现当前 HEAD）时复用可以，但改过源码后要 touch 或清对应 crate 的产物。派审查与变异时写明。
+
 - **磁盘满（2026-11-13 15:10）**：系统盘只剩 1.8G，worker 连命令都起不来。四个活跃 worktree 的 target 各 20–30G；占地最大的是旧会话 worker 在 `/private/tmp/claude-501/<worktree 路径>/<会话>/scratchpad/` 下给变异、基准、全量各开的独立 `target`（组 B 一个会话就 18G）。按「13:10 之后没人碰过」确认后只删这些 `target`，日志和结果留着，腾到 27G。派活时写明：变异各批共用一个 CARGO_TARGET_DIR，临时副本跑完就删；换会话之后，旧会话 scratchpad 里的 target 可以直接清。
 
 - **换 supervisor 后联系不上旧 worker（2026-11-13）**：新开的 supervisor 终端不能给旧 supervisor 派出的 worker `send_message`（CAO 只允许自己派的、派自己的、兄弟终端），旧 worker 的回报也只能发给已退出的旧终端。所以每个在途 worker 都要随时把现场写进自己 worktree 的 `.cao-handoff/`（分支、HEAD、剩下的步骤、命令），换 supervisor 时按它给每张卡派新 worker；旧终端不删（删了清 worktree）。`report_outcome` 时把 `workflow_name` 设成任务 ID，retrospector 才按名字找得到。
