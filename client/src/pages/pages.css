@@ -139,11 +139,11 @@
   font-size: var(--fs-title);
   font-weight: 600;
 }
+/* 空态文字和标题左对齐（UI 审查 g3 F-10） */
 .iw-list-page__empty {
   max-width: var(--content-max);
-  margin: 40px auto;
+  margin: 8px auto;
   color: var(--tx3);
-  text-align: center;
 }
 .iw-list {
   max-width: var(--content-max);

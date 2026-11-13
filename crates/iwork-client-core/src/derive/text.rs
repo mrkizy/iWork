@@ -237,6 +237,26 @@ pub fn usage_tooltip(u: &pb::Usage) -> String {
     s
 }
 
+/// 登录方式给用户看的说法（画布 00「已登录 · 本人订阅」）：按 `claude auth status` 的 `subscriptionType` 认；
+/// 认不出就不写，不露原值（UI 审查 g3 F-10）。表里的值是 Claude Code 的套餐名，真实取值待 T06 实测核对。
+const SUBSCRIPTIONS: &[(&str, &str)] = &[
+    ("pro", "本人订阅"),
+    ("max", "本人订阅"),
+    ("team", "团队订阅"),
+    ("enterprise", "企业订阅"),
+];
+
+pub fn login_label(subscription_type: &str) -> String {
+    let kind = SUBSCRIPTIONS
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(subscription_type.trim()))
+        .map(|(_, v)| *v);
+    match kind {
+        Some(k) => format!("已登录 · {k}"),
+        None => "已登录".into(),
+    }
+}
+
 pub fn runtime_state(state: pb::RuntimeState) -> &'static str {
     use pb::RuntimeState as S;
     match state {
@@ -629,6 +649,15 @@ mod anchor_text_tests {
             "前一天（本地时区）"
         );
         assert_eq!(clock_or_date(now, at(400 * 86_400), &tz), "2025年10月8日");
+    }
+
+    #[test]
+    fn login_label_is_readable() {
+        assert_eq!(login_label("max"), "已登录 · 本人订阅");
+        assert_eq!(login_label("Pro"), "已登录 · 本人订阅");
+        assert_eq!(login_label("team"), "已登录 · 团队订阅");
+        assert_eq!(login_label("x-unknown"), "已登录", "认不出：不露原值");
+        assert_eq!(login_label(""), "已登录");
     }
 
     #[test]

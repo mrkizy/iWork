@@ -16,7 +16,7 @@ pub fn runtime_view(r: &pb::RuntimeStatus) -> pb::RuntimeView {
         verification_label: text::verification(state).map(str::to_owned),
         version_label: r.cli_version.clone().unwrap_or_default(),
         login_label: match login {
-            Some(l) if l.logged_in => format!("已登录 · {}", l.subscription_type),
+            Some(l) if l.logged_in => text::login_label(&l.subscription_type),
             _ => "未登录".into(),
         },
         guidance: text::runtime_guidance(state, &r.display_name),
