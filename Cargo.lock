@@ -2955,6 +2955,7 @@ version = "0.1.0"
 dependencies = [
  "dunce",
  "futures",
+ "hex",
  "iwork-agent-acp",
  "iwork-app",
  "iwork-client-core",
