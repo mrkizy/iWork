@@ -351,8 +351,7 @@ impl Bench {
 
 fn card_state(card: iwork_domain::id::UserActionId, state: UserActionState) -> DomainEvent {
     iwork_domain::event::UserActionStateChanged {
-        // 引擎按自己折叠的表认对话，不读事件上的所属对话（G5 的路由不在这组用例里）
-        conversation_id: None,
+        conversation_id: Some(crate::support::conversation()),
         card_id: card,
         state,
         output_artifact: None,
@@ -372,7 +371,7 @@ fn command(events: Vec<DomainEvent>) -> iwork_ports::store::CommitRequest {
 
 fn state_changed(t: TurnId, from: TurnState, to: TurnState) -> DomainEvent {
     TurnStateChanged {
-        conversation_id: None,
+        conversation_id: Some(crate::support::conversation()),
         turn_id: t,
         from,
         to,

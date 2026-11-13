@@ -37,8 +37,7 @@ async fn settle_tasks() {
 
 fn voided(id: ApprovalId, reason: VoidReason) -> DomainEvent {
     ApprovalVoided {
-        // 引擎按自己折叠的表认对话，不读事件上的所属对话（G5 的路由不在这组用例里）
-        conversation_id: None,
+        conversation_id: Some(crate::support::conversation()),
         approval_id: id,
         reason,
     }
@@ -47,7 +46,7 @@ fn voided(id: ApprovalId, reason: VoidReason) -> DomainEvent {
 
 fn approved_by_user(id: ApprovalId) -> DomainEvent {
     ApprovalDecided {
-        conversation_id: None,
+        conversation_id: Some(crate::support::conversation()),
         approval_id: id,
         state: ApprovalState::Approved {
             decider: Decider::User,
@@ -59,7 +58,7 @@ fn approved_by_user(id: ApprovalId) -> DomainEvent {
 
 fn delivered(id: ApprovalId, t: TurnId) -> DomainEvent {
     ApprovalDelivered {
-        conversation_id: None,
+        conversation_id: Some(crate::support::conversation()),
         approval_id: id,
         turn_id: t,
     }
@@ -1326,7 +1325,7 @@ async fn f5_phantom_binding_dropped_at_turn_end() {
     );
     b.external(vec![
         TurnFinished {
-            conversation_id: None,
+            conversation_id: Some(crate::support::conversation()),
             turn_id: turn(1),
             state: TurnState::Cancelled,
             usage: Default::default(),
@@ -1423,7 +1422,7 @@ async fn t_replan_gives_up_after_three() {
         .await;
         b.store.seed(vec![
             ApprovalDecided {
-                conversation_id: None,
+                conversation_id: Some(crate::support::conversation()),
                 approval_id: *id,
                 state: ApprovalState::Denied,
                 remember: None,
