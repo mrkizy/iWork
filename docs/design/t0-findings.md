@@ -617,6 +617,22 @@ S0 合计 PASS 506、FAIL 46、INCONCLUSIVE 217、INFO 19。FAIL 里 34 个是 G
 - **临时钥匙串自动上锁**：`security create-keychain` 建的钥匙串默认 `lock-on-sleep timeout=300s`。脚本开头解锁后，几分钟后才签名的话，codesign 会弹框找人要钥匙串密码。现在的做法是：建好后 `security set-keychain-settings "$KC"`（不带 `-l`、`-t`，实测变成 `no-timeout`），每次签名前再 `security unlock-keychain`，签名都带 `--keychain`。被 timeout 掐断时照样走 cleanup 删掉钥匙串（bash 3.2 收到 TERM、INT 也会跑 EXIT trap，实测）。
 - **`sfltool dumpbtm`**：读后台项目数据库要管理员授权，会弹 SecurityAgent 授权框（用 CGWindowList 抓到了屏幕上的对话框）。脚本里不再调用。
 
+### 7.7 T04p 真包复核：P3 的后台一半（2026-11-13）
+
+T04p 方案 8.1 的 P3 问：`file_signer`（`check-install` 的第 2、3 件靠它）在磁盘上取的叶证书，等不等于程序跑起来之后系统认的那张。握手成功证不了它（握手只比两端运行时彼此相等），所以逐个角色把三样直接对拍。这里做后台这一半；客户端这一半要起真的客户端窗口，放在步 9 的专用账号里做。
+
+环境：macOS 27.2 arm64，main 308430c 经 `pnpm -C client tauri build` 打的形态 B 真包（自签证书，叶证书由 `scripts/test-signing-identity.sh` 建在临时钥匙串里；打包与核对见任务卡 `docs/tasks/M1/T04p.md` 完成记录）。后台从包里直接起：`HOME`、`IWORK_DATA_DIR` 都指向临时目录，不经 launchd、不注册自启；等到端点出现再取证，取完 SIGTERM。
+
+| 样 | 怎么取 | SHA-256 |
+| --- | --- | --- |
+| ① 磁盘上取的 | `check-install <包>/Contents/MacOS` 打出的 `iwork-daemon=certificate:…`（即 `peer::file_signer`） | `d7cd929aba9d1d41633858b870b7afaa98e1d9b2198e78cc18003a9330cb3d29` |
+| ② 运行起来之后的 | 后台跑着时 `codesign -d --extract-certificates=<前缀> <pid>`，对导出的第一张（叶证书）算 SHA-256 | 同上 |
+| ③ 预期的 | 建证书时 `openssl x509 -outform der` 算的叶证书摘要 | 同上 |
+
+结果 **PASS**：三样全等；`ps -o comm=` 是包里的 `Contents/MacOS/iwork-daemon`；后台收到 SIGTERM 以 0 退出；之后 `launchctl print gui/<uid>/com.iwork.daemon` 退出 113（没注册）、没有 `~/Library/LaunchAgents/com.iwork.daemon.plist`、没有残留进程。只导出、只打印公开证书的摘要，不读私钥、不改产品日志。同一程序在 T04p 合入前（审查之前的代码、另一张自签证书）量过一次，同样三样全等。
+
+还没做的（步 9）：客户端这一角色的 ①②③；②的第二种取法（探针 `iwork-t04-ipcprobe.rs` 用同一张证书签、放进包里同一位置，打出自己的 `SelfIdentity` 与握手时读到的对端叶证书）；两格对照（真后台与探针真握一次手成功；探针换一张证书签后握手以 `SignerMismatch` 被拒）。有一组不等就回 architect（方案 8.1）。
+
 ## 附：T06 S0 实测运行说明（给产品负责人；2026-11-11，developer 按 Claude Code 2.1.322 校对）
 
 T06 方案 16.2、16.3 要在真机上重跑的东西，按下面的顺序跑。脚本都在 `tools/t0/`，在仓库根目录下跑。跑出来的结论写进本文 2.4 节（新加），一项一行，注明 CLI 版本。
