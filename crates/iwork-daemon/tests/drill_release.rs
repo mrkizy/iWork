@@ -99,7 +99,13 @@ echo "pgrep $*" >> '{calls}'
 # 照 macOS 的 pgrep：不带 -u 时匹配所有用户的进程，带 -u 只认那个用户。pids/ 是本用户的，foreign/ 扮别的用户的
 exact= uid= name=
 while [ $# -gt 0 ]; do
-  case "$1" in -x) exact=1; shift ;; -u) uid="$2"; shift 2 ;; -*) exit 2 ;; *) name="$1"; shift ;; esac
+  case "$1" in
+    -x) exact=1; shift ;;
+    # 真 pgrep 会把多个 -u 合成一个集合；替身不模拟，见到第二个就报错，免得只认最后一个而假绿
+    -u) [ -z "$uid" ] || {{ echo "pgrep 替身：重复的 -u" >&2; exit 2; }}; uid="$2"; shift 2 ;;
+    -*) exit 2 ;;
+    *) name="$1"; shift ;;
+  esac
 done
 [ -n "$exact" ] && [ -n "$name" ] || exit 2
 emit() {{ for p in $(cat "$1" 2>/dev/null); do kill -0 "$p" 2>/dev/null && echo "$p"; done; }}
@@ -588,10 +594,14 @@ fn drill_ignores_other_users_processes() {
     let pgreps: Vec<&str> = calls.lines().filter(|l| l.starts_with("pgrep ")).collect();
     assert!(!pgreps.is_empty());
     for l in pgreps {
-        assert!(
-            l.contains(&format!("-u {}", uid.trim())),
-            "找进程没限定本用户：{l}"
-        );
+        let args: Vec<&str> = l.split_whitespace().collect();
+        let users: Vec<&str> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| **a == "-u")
+            .map(|(i, _)| args.get(i + 1).copied().unwrap_or(""))
+            .collect();
+        assert_eq!(users, [uid.trim()], "找进程要恰好一个 -u，值是本用户：{l}");
     }
 }
 
