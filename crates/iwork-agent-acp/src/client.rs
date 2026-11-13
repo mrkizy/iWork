@@ -687,6 +687,8 @@ impl AgentSession for AcpSession {
         let Some((turn_id, mut prompt_done)) = self.conn.shared.turns.request_cancel() else {
             return Ok(());
         };
+        // 先记一次清理范围（T06 方案 5.4a）：之后 CLI 被 SIGTERM 结束，它起的命令也找得到
+        self.conn.process.record().await;
         // 先让权限任务把答复写出去：调用方（编排）此前已停止受理，它们都已有结论、不再等编排；
         // GRACE_PERIOD 只是处理方不守约定时的上限
         let mut tasks = self.conn.shared.permission_tasks.subscribe();

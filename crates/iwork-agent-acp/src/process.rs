@@ -1,18 +1,26 @@
 //! 进程监管（技术设计 6.5）：每个运行时进程独立成树，结束时整棵树一起结束，不留孤儿；
 //! 每 2 秒采样整棵树的内存与 CPU，只用于显示与基准，不参与业务判断。
 //!
-//! 「树」在 macOS / Linux 是进程组（子进程以自己为组长启动，`killpg` 结束整组）；
+//! 「树」在 macOS / Linux 是 T06 方案 5.4a 的清理范围（[`tree`]）：子进程以自己为组长启动，范围是它的进程组、
+//! 记到过的后代、后代另立的会话；结束时先找后杀，连另立会话的命令一起清，清完才回收子进程。
 //! Windows 是 Job Object：进程以挂起状态创建，加入 Job 之后才恢复运行，所以它起的每个后代都在
 //! Job 里；Job 设为「句柄关闭即结束全部进程」，`TerminateJobObject` 主动结束。
+
+#[cfg(unix)]
+mod scan;
+#[cfg(unix)]
+mod scope;
+#[cfg(unix)]
+mod signal;
+#[cfg(unix)]
+mod tree;
+#[cfg(all(test, unix))]
+mod tree_tests;
 
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 use std::process::Stdio;
-#[cfg(unix)]
-use std::sync::Arc;
-#[cfg(unix)]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
@@ -25,7 +33,8 @@ pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 pub const GRACE_PERIOD: Duration = Duration::from_secs(3);
 /// 强制结束后等整棵树消失的时限：信号送达、进程回收都要一点时间。
 pub const TREE_CLEAR_LIMIT: Duration = Duration::from_secs(2);
-/// 查进程树是否已空的间隔。
+/// 查进程树是否已空的间隔（Windows）。
+#[cfg(windows)]
 const TREE_POLL: Duration = Duration::from_millis(10);
 
 /// 怎么启动一个运行时进程（桥接或原生 ACP 适配器）。
@@ -92,38 +101,33 @@ impl SupervisedProcess {
                 format!("启动运行时 {} 失败：{e}", launch.program.display()),
             )
         })?;
-        let tree = match ProcessTree::adopt(&child) {
-            Ok(tree) => tree,
-            Err(e) => {
-                reap(child);
-                return Err(io::Error::new(
-                    e.kind(),
-                    format!("运行时进程纳入监管失败：{e}"),
-                ));
-            }
-        };
-        let pid = child.id().expect("adopt 成功说明进程还在");
+        let pid = child
+            .id()
+            .ok_or_else(|| io::Error::other("运行时进程刚启动就已退出"))?;
         let pipes = Pipes {
             stdin: child.stdin.take().expect("stdin 设为 piped"),
             stdout: child.stdout.take().expect("stdout 设为 piped"),
             stderr: child.stderr.take().expect("stderr 设为 piped"),
         };
-
         let (exit_tx, exit) = watch::channel(None);
-        tokio::spawn(async move {
-            let description = match child.wait().await {
-                Ok(status) => status.to_string(),
-                Err(e) => format!("等待进程退出失败：{e}"),
-            };
-            let _ = exit_tx.send(Some(ExitInfo { description }));
-        });
+        let tree = adopt(child, exit_tx)?;
         let (sample_tx, samples) = watch::channel(None);
+        #[cfg(unix)]
+        let sampled = tree.clone();
         let sampler = tokio::spawn(async move {
             let Ok(Ok(mut system)) = tokio::task::spawn_blocking(sysinfo::System::new).await else {
                 // 采样只用于显示与基准；平台不支持时不采，不影响运行
                 return;
             };
-            sample_loop(move || sample_tree(&mut system, pid), sample_tx).await;
+            // Unix：采样顺带记一次清理范围（5.4a），只遍历一次进程表
+            #[cfg(unix)]
+            sample_loop(move || sampled.0.sample(&mut system), sample_tx).await;
+            #[cfg(windows)]
+            sample_loop(
+                move || sample_tree(&mut system, pid).map_or(Tick::Done, Tick::Sample),
+                sample_tx,
+            )
+            .await;
         });
         Ok((
             Self {
@@ -169,12 +173,30 @@ impl SupervisedProcess {
         *self.samples.borrow()
     }
 
-    /// 立即结束整棵树。可重复调用。
+    /// 立即开始结束整棵树，不等。可重复调用。
     pub fn kill_tree(&self) {
         self.tree.kill();
     }
 
+    /// 记一次清理范围（取消一开始，T06 方案 5.4a「什么时候记」）：之后 CLI 退了，它起的命令也找得到。
+    pub async fn record(&self) {
+        self.tree.record().await;
+    }
+
     /// 结束整棵树并等它消失，最多等 [`TREE_CLEAR_LIMIT`]。返回是否确认已清空。
+    #[cfg(unix)]
+    pub async fn kill_tree_and_wait(&self) -> bool {
+        self.tree.clear().await
+    }
+
+    /// 测试用：直接拿到 Unix 的进程树（装闸门、看范围）。
+    #[cfg(all(test, unix))]
+    fn unix_tree(&self) -> &tree::ProcessTree {
+        &self.tree.0
+    }
+
+    /// 结束整棵树并等它消失，最多等 [`TREE_CLEAR_LIMIT`]。返回是否确认已清空。
+    #[cfg(windows)]
     pub async fn kill_tree_and_wait(&self) -> bool {
         let pid = self.pid();
         tracing::debug!(pid, "kill_tree_and_wait: enter");
@@ -199,14 +221,14 @@ impl SupervisedProcess {
     pub async fn shutdown(&self) {
         let pid = self.pid();
         tracing::debug!(pid, "shutdown: enter");
-        self.tree.terminate();
+        self.tree.terminate().await;
         let exited = self.wait_exit(GRACE_PERIOD).await.is_some();
         tracing::debug!(pid, exited, "shutdown: waited for exit");
         let cleared = self.kill_tree_and_wait().await;
         tracing::debug!(pid, cleared, "shutdown: exit");
     }
 
-    /// 整棵树是否已经没有进程（Unix 查进程组，Windows 查 Job 里的活动进程数）。
+    /// 整棵树是否已经没有进程（Unix 查清理范围里有没有活成员，Windows 查 Job 里的活动进程数）。
     pub fn tree_is_empty(&self) -> io::Result<bool> {
         self.tree.is_empty()
     }
@@ -227,11 +249,22 @@ fn reap(mut child: Child) {
     });
 }
 
+/// 一次采样的结果。
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Tick {
+    Sample(ResourceSample),
+    /// 这一次没采成（扫描失败），下次再来
+    #[cfg_attr(windows, allow(dead_code))]
+    Skip,
+    /// 树里已没有进程，采样结束
+    Done,
+}
+
 /// 采样循环。全机进程扫描是同步的重活，放到阻塞线程池里做，不占异步工作线程；
-/// 一次做完才开始计下一次，不会重叠。`scan` 返回 `None`（树里已没有进程）时结束。
+/// 一次做完才开始计下一次，不会重叠。`scan` 返回 [`Tick::Done`]（树里已没有进程）时结束。
 async fn sample_loop<F>(scan: F, out: watch::Sender<Option<ResourceSample>>)
 where
-    F: FnMut() -> Option<ResourceSample> + Send + 'static,
+    F: FnMut() -> Tick + Send + 'static,
 {
     let mut scan = scan;
     let mut ticker = tokio::time::interval(SAMPLE_INTERVAL);
@@ -248,13 +281,15 @@ where
         };
         scan = back;
         match sample {
-            Some(sample) if out.send(Some(sample)).is_ok() => {}
+            Tick::Sample(sample) if out.send(Some(sample)).is_ok() => {}
+            Tick::Skip => {}
             _ => return,
         }
     }
 }
 
 /// 扫一次全机进程，按父进程号从根收集整棵树并求和。树里一个进程都没有时返回 `None`。
+#[cfg(windows)]
 fn sample_tree(system: &mut sysinfo::System, root: u32) -> Option<ResourceSample> {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate};
     let kind = ProcessRefreshKind::nothing().with_memory().with_cpu();
@@ -285,67 +320,44 @@ fn sample_tree(system: &mut sysinfo::System, root: u32) -> Option<ResourceSample
 
 // ---------- 进程树：平台实现 ----------
 
+/// Unix：清理范围（[`tree::ProcessTree`]，T06 方案 5.4a）。
 #[cfg(unix)]
-#[derive(Debug)]
-struct ProcessTree {
-    pgid: libc::pid_t,
-    /// 整组已确认清空后不再发信号：进程组号可能被系统复用给无关进程
-    gone: Arc<AtomicBool>,
+#[derive(Debug, Clone)]
+struct ProcessTree(tree::ProcessTree);
+
+/// 接管刚起来的子进程；失败时结束并回收它再报错。
+#[cfg(unix)]
+fn adopt(child: Child, exit: watch::Sender<Option<ExitInfo>>) -> io::Result<ProcessTree> {
+    tree::ProcessTree::adopt(child, exit)
+        .map(ProcessTree)
+        .map_err(|failed| {
+            let (e, child) = *failed;
+            reap(child);
+            io::Error::new(e.kind(), format!("运行时进程纳入监管失败：{e}"))
+        })
 }
 
 #[cfg(unix)]
 impl ProcessTree {
-    fn adopt(child: &Child) -> io::Result<Self> {
-        let pid = child
-            .id()
-            .ok_or_else(|| io::Error::other("运行时进程刚启动就已退出"))?;
-        let pgid = libc::pid_t::try_from(pid)
-            .map_err(|_| io::Error::other(format!("进程号 {pid} 超出范围")))?;
-        Ok(Self {
-            pgid,
-            gone: Arc::new(AtomicBool::new(false)),
-        })
-    }
-
-    fn signal(&self, sig: libc::c_int) {
-        if self.gone.load(Ordering::Acquire) {
-            return;
-        }
-        // SAFETY: killpg 只读两个整数参数，没有内存安全前提。
-        let rc = unsafe { libc::killpg(self.pgid, sig) };
-        if rc != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-            self.gone.store(true, Ordering::Release);
-        }
-    }
-
-    fn terminate(&self) {
-        self.signal(libc::SIGTERM);
+    /// 请桥接退出：只发给桥接自己，它的后代由之后的清理收拾。它的进程号已经不归我们（回收了、根作废了）就不发。
+    async fn terminate(&self) {
+        self.0.signal_root(libc::SIGTERM).await;
     }
 
     fn kill(&self) {
-        self.signal(libc::SIGKILL);
+        self.0.kill_detached();
     }
 
-    /// `ESRCH`：组里已没有进程。`EPERM`：组里还有进程，只是不许我们发信号（如组里有进程换了
-    /// 用户），不能当作已清空。
     fn is_empty(&self) -> io::Result<bool> {
-        if self.gone.load(Ordering::Acquire) {
-            return Ok(true);
-        }
-        // SAFETY: 信号 0 只做存在性检查。
-        let rc = unsafe { libc::killpg(self.pgid, 0) };
-        if rc == 0 {
-            return Ok(false);
-        }
-        let err = io::Error::last_os_error();
-        match err.raw_os_error() {
-            Some(libc::ESRCH) => {
-                self.gone.store(true, Ordering::Release);
-                Ok(true)
-            }
-            Some(libc::EPERM) => Ok(false),
-            _ => Err(err),
-        }
+        Ok(self.0.is_empty())
+    }
+
+    async fn record(&self) {
+        self.0.record().await;
+    }
+
+    async fn clear(&self) -> bool {
+        self.0.clear().await
     }
 }
 
@@ -355,10 +367,33 @@ struct ProcessTree {
     job: job::Job,
 }
 
+/// 接管刚起来的子进程（挂起状态）；失败时结束并回收它再报错。退出说明由等待任务发进 `exit`。
+#[cfg(windows)]
+fn adopt(mut child: Child, exit: watch::Sender<Option<ExitInfo>>) -> io::Result<ProcessTree> {
+    let tree = match ProcessTree::adopt_job(&child) {
+        Ok(tree) => tree,
+        Err(e) => {
+            reap(child);
+            return Err(io::Error::new(
+                e.kind(),
+                format!("运行时进程纳入监管失败：{e}"),
+            ));
+        }
+    };
+    tokio::spawn(async move {
+        let description = match child.wait().await {
+            Ok(status) => status.to_string(),
+            Err(e) => format!("等待进程退出失败：{e}"),
+        };
+        let _ = exit.send(Some(ExitInfo { description }));
+    });
+    Ok(tree)
+}
+
 #[cfg(windows)]
 impl ProcessTree {
     /// 进程此时是挂起的：先加入 Job，再恢复主线程。任何一步失败由调用方结束进程。
-    fn adopt(child: &Child) -> io::Result<Self> {
+    fn adopt_job(child: &Child) -> io::Result<Self> {
         let pid = child
             .id()
             .ok_or_else(|| io::Error::other("运行时进程刚启动就已退出"))?;
@@ -372,7 +407,7 @@ impl ProcessTree {
     }
 
     /// Windows 没有可靠的「请退出」信号，直接结束。
-    fn terminate(&self) {
+    async fn terminate(&self) {
         self.job.terminate();
     }
 
@@ -383,6 +418,8 @@ impl ProcessTree {
     fn is_empty(&self) -> io::Result<bool> {
         Ok(self.job.active_processes()? == 0)
     }
+
+    async fn record(&self) {}
 }
 
 #[cfg(windows)]
@@ -572,7 +609,7 @@ mod tests {
                         .lock()
                         .unwrap()
                         .push((ok, std::thread::current().id()));
-                    Some(ResourceSample {
+                    Tick::Sample(ResourceSample {
                         rss_bytes: 1,
                         cpu_percent: 0.0,
                         processes: 1,
