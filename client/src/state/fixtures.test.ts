@@ -17,10 +17,14 @@ function load(name: string, kind: "frames" | "full") {
   return decodeFrames(new Uint8Array(readFileSync(`${DIR}${name}.${kind}.binpb`)));
 }
 
-/** 对拍时只比视图内容：跳转请求是一次性的事件，全量帧不重发它；reset 次数是网页本地的计数（让时间线回到底部）。 */
+/** 对拍时只比视图内容：跳转请求与滚动指令是一次性的事件，全量帧不重发它们（与 Rust 侧 scenario_fold 同一条）；
+ *  reset 次数是网页本地的计数（让时间线回到底部）。 */
 function comparable(s: ViewState): ViewState {
   const { navigate: _navigate, ...rest } = structuredClone(unwrap(s));
-  if (rest.conversation) rest.conversation.resets = 0;
+  if (rest.conversation) {
+    rest.conversation.resets = 0;
+    delete rest.conversation.scrollTo;
+  }
   return rest;
 }
 
