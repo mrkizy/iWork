@@ -2,7 +2,8 @@
 // 整页三种：版本不一致 / 正在切换版本的中性提示（WAITING，后台照常退避重连）、诊断页（DIAGNOSTICS：原因、几行诊断、
 // 提示、「重试」）、环境说明（ENVIRONMENT，如 M1 不支持 Windows：说明、「重试」）。标题、说明、诊断行、可否重试都
 // 来自 ConnectionView。出口按 Rust 给的 kind 接（exit_actions：重试、重新打开 iWork），不按文字猜动作；
-// 没有实现的 kind（查看诊断，等 T04p）不画。诊断页的「重试」按 can_retry 画。
+// 没有实现的 kind（查看诊断，等 T04p）不画。诊断页的「重试」按 can_retry 画。诊断行（含系统的原始错误）收在
+// 可展开的「详细信息」里，正文只放 Rust 给的中文说明；没有诊断行就不画（UI 审查 g3 F-5）。
 // 确认框：菜单点了「完全退出 iWork」，Rust 设 quit_requested，这里弹确认；确认发 Quit{confirm: true}，取消发 false。
 import { For, Match, Show, Switch } from "solid-js";
 import { ConnectionExitKind, ConnectionState, type ConnectionExit, type ConnectionView } from "../gen/iwork/v1/view_pb";
@@ -41,16 +42,21 @@ export function ConnectionPage(props: { view: ConnectionView }) {
           <Match when={v().diagnostics}>
             {(d) => (
               <>
-                <dl class="iw-gate__lines">
-                  <For each={d().lines}>
-                    {(l) => (
-                      <>
-                        <dt>{l.label}</dt>
-                        <dd>{l.value}</dd>
-                      </>
-                    )}
-                  </For>
-                </dl>
+                <Show when={d().lines.length > 0}>
+                  <details class="iw-gate__details">
+                    <summary>详细信息</summary>
+                    <dl class="iw-gate__lines">
+                      <For each={d().lines}>
+                        {(l) => (
+                          <>
+                            <dt>{l.label}</dt>
+                            <dd>{l.value}</dd>
+                          </>
+                        )}
+                      </For>
+                    </dl>
+                  </details>
+                </Show>
                 <Show when={d().hint}>{(h) => <p class="iw-gate__hint">{h()}</p>}</Show>
                 <Show when={d().canRetry}>
                   <Button variant="primary" onClick={retry}>

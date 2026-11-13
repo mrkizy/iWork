@@ -26,6 +26,14 @@
   color: var(--tx2);
   line-height: 1.6;
 }
+.iw-gate__details {
+  width: 100%;
+  color: var(--tx2);
+  font-size: var(--fs-sm2);
+}
+.iw-gate__details summary {
+  cursor: pointer;
+}
 .iw-gate__lines {
   display: grid;
   grid-template-columns: max-content 1fr;

@@ -62,8 +62,16 @@ describe("连接类整页", () => {
     for (const t of ["后台服务没有响应", "端点", "/tmp/iwork.sock", "装回更新的那一版可继续使用"]) {
       expect(screen.getByText(t)).toBeInTheDocument();
     }
+    expect(screen.getByText("/tmp/iwork.sock").closest("details"), "诊断行收在可展开的详细信息里").not.toBeNull();
+    expect(screen.getByText("/tmp/iwork.sock").closest("details")!.open, "默认收起").toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     expect(acts).toEqual([{ case: "retry", value: {} }]);
+  });
+
+  it("诊断页没有诊断行：不画空的详细信息框", () => {
+    mount({ state: ConnectionState.DIAGNOSTICS, title: "连不上后台服务", diagnostics: { lines: [], canRetry: true } });
+    expect(screen.queryByText("详细信息")).toBeNull();
+    expect(document.querySelector(".iw-gate__lines")).toBeNull();
   });
 
   it("环境说明（M1 不支持 Windows）：说明来自 patch，出口「重试」", () => {

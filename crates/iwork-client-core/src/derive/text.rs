@@ -24,6 +24,15 @@ pub const QUERY_RETRYING: &str = "部分数据暂时没取到，稍后自动重�
 pub const OVERLOADED: &str = "后台负载过高，稍后重试或重新打开 iWork";
 pub const DIAGNOSTICS_TITLE: &str = "连不上后台服务";
 pub const NEWER_SCHEMA_HINT: &str = "装回更新的那一版可继续使用";
+/// 诊断页正文：按连不上的原因说一句人话；系统给的原始错误收进「详细信息」（UI 审查 g3 F-5）。
+pub const DIAG_NOT_RUNNING: &str =
+    "后台服务没在运行，或者还没启动好。iWork 会自动重试，也可以点「重试」。";
+pub const DIAG_PEER_REJECTED: &str = "连到的后台服务没通过身份校验，iWork 没有和它通信。";
+pub const DIAG_TIMEOUT: &str = "后台服务没有及时回应。iWork 会自动重试。";
+pub const DIAG_PROTOCOL: &str = "后台服务的回应不对，可能和客户端不是同一版。";
+pub const DIAG_OTHER: &str = "连接后台服务时出了问题。iWork 会自动重试。";
+/// 诊断行里放原始错误的那一行。
+pub const DIAG_RAW_ERROR: &str = "原始错误";
 pub const UNKNOWN_RESULT: &str = "执行结果未知，请自行核对";
 pub const UNKNOWN_BLOCKS_DELETE: &str = "有一张卡片的执行结果无法核对，请确认后继续删除";
 pub const OUTSIDE_SANDBOX_NOTE: &str = "将在沙箱外运行，命令带起的脚本也不受沙箱约束";

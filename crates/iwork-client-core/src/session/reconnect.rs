@@ -99,10 +99,20 @@ pub fn on_dial_error(e: &DialError) -> (Connection, Retry) {
     }
 }
 
+/// 连不上的原因 → 诊断页：正文是中文说明，系统的原始错误（常是英文）只进诊断行。
 fn diagnostics_for(e: &ConnectError) -> crate::store::Diagnostics {
+    use crate::derive::text;
+    let (reason, raw) = match e {
+        ConnectError::Io(io) => (text::DIAG_NOT_RUNNING, io.to_string()),
+        ConnectError::PeerRejected(_) => (text::DIAG_PEER_REJECTED, e.to_string()),
+        ConnectError::Timeout => (text::DIAG_TIMEOUT, e.to_string()),
+        ConnectError::Protocol(_) => (text::DIAG_PROTOCOL, e.to_string()),
+        // 版本不一致两种走中性提示（wait_prompt），到不了这里；兜一句通用的
+        _ => (text::DIAG_OTHER, e.to_string()),
+    };
     crate::store::Diagnostics {
-        reason: e.to_string(),
-        lines: Vec::new(),
+        reason: reason.into(),
+        lines: vec![(text::DIAG_RAW_ERROR.into(), raw)],
         newer_schema: false,
     }
 }
@@ -188,6 +198,16 @@ mod tests {
         let (c, retry) = on_dial_error(&DialError::Connect(ConnectError::Timeout));
         assert!(matches!(c, Connection::Diagnostics(_)));
         assert_eq!(retry, Retry::Backoff);
+        // 连不上：正文是中文说明，不重复标题；系统的英文原文只在诊断行
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        let raw = refused.to_string();
+        let (c, _) = on_dial_error(&DialError::Connect(ConnectError::Io(refused)));
+        let Connection::Diagnostics(d) = c else {
+            panic!("连不上走诊断页");
+        };
+        assert_eq!(d.reason, crate::derive::text::DIAG_NOT_RUNNING);
+        assert!(!d.reason.contains(&raw));
+        assert_eq!(d.lines, vec![("原始错误".to_owned(), raw)]);
         let (c, retry) = on_dial_error(&DialError::Environment("M1 暂不支持 Windows".into()));
         assert_eq!(c, Connection::Environment("M1 暂不支持 Windows".into()));
         assert_eq!(retry, Retry::Manual);
