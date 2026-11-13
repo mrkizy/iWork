@@ -829,3 +829,56 @@ async fn inherited_stdin_copy_does_not_keep_bridge_alive() {
         "后台关了连接，第一个桥接就退出，不被继承了它 stdin 写端的进程拖着"
     );
 }
+
+/// 后台死了，但它的 stdin 写端还被一个不相干的进程拿着（macOS 上并发起子进程时会被继承走，审查 S6-5b 1/F-3）：
+/// 桥接读不到 stdin 结束，靠「父进程换了」照样知道后台没了，在有界时间内给 CLI 发 SIGTERM、整个组退出。
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_dies_while_stdin_is_held_elsewhere() {
+    use std::os::fd::AsRawFd;
+    let mut steps = opening();
+    steps.extend([
+        read_user(),
+        init(),
+        support::acp::result_ok(),
+        json!({ "step": "log_signals_until_term" }),
+    ]);
+    let rig = Rig::new(Value::Array(steps));
+    let mut b = Orphanable::start(&rig).await;
+    let session = b.wire.open(&rig).await;
+    assert!(b.wire.prompt(3, &session).await["result"].is_object());
+    let cli = pid_of(&logged(&rig, "started").await);
+    logged(&rig, "watching_signals").await;
+    // 一个不相干的进程拿着桥接 stdin 写端的副本（不带 close-on-exec，它继承了）
+    // SAFETY: dup 只读一个整数参数；句柄是本测试拿着的写端
+    let copy = unsafe { libc::dup(b.wire.write.as_ref().unwrap().as_raw_fd()) };
+    assert!(copy > 2, "{}", std::io::Error::last_os_error());
+    let mut holder = std::process::Command::new("sleep")
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // SAFETY: 关本测试 dup 出来的句柄，只关一次
+    unsafe { libc::close(copy) };
+    let _cleanup = Leftover(vec![cli, b.bridge, holder.id() as i32]);
+    b.daemon_dies();
+    b.wire.hang_up();
+    let limit = BRIDGE_TERM_WAIT + Duration::from_secs(5);
+    let gone = tokio::time::timeout(limit, async {
+        while !b.group_gone() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert!(
+        gone,
+        "{limit:?} 内整个组没了（不等拿着 stdin 写端的进程退出）"
+    );
+    assert!(
+        signals(&rig).contains(&"SIGTERM".into()),
+        "桥接给 CLI 发了 SIGTERM：{:?}",
+        signals(&rig)
+    );
+}

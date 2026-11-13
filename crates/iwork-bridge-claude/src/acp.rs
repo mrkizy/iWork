@@ -40,7 +40,9 @@ use crate::cli::facts::{IsolationBroken, SessionExpect};
 use crate::cli::input::{InputBlock, control_request_line, user_line};
 use crate::cli::map::{Fatal, Out, Report, StreamMapper};
 use crate::cli::process::{CliProcess, InputError, InputQueue, ReadError};
-use crate::deadlines::{BRIDGE_TERM_WAIT, CANCEL_TERM_AFTER, TEARDOWN_WAIT, deadlines};
+use crate::deadlines::{
+    BRIDGE_TERM_WAIT, CANCEL_TERM_AFTER, PARENT_POLL, TEARDOWN_WAIT, deadlines,
+};
 use crate::hook_server::HookEvent;
 use crate::hook_server::input::{self as hook_input, HookInput};
 use crate::hook_server::pending::{BackendAnswer, CallId, Delivery};
@@ -399,9 +401,18 @@ async fn terminate_parked(slot: &Mutex<Slot>) {
     }
 }
 
-/// 在 stdin / stdout 上说 ACP（`acp` 子命令）。
-pub async fn serve_stdio(config: BridgeConfig) -> Result<(), String> {
+/// 在 stdin / stdout 上说 ACP（`acp` 子命令）。`parent` 是启动时的父进程号（后台）。
+///
+/// 「后台没了」有两个信号，哪个先到算哪个，后面走同一条路（输入到头，5.4a 第 5 条第二种）：stdin 读到结束；父进程
+/// 号变了。只靠 stdin 不够：macOS 上后台并发起子进程时，别的子进程可能继承到 stdin 的写端，后台死了它还拿着，桥接
+/// 就读不到结束（审查 S6-5b 1/F-3）。父进程号不会因为谁拿着什么句柄而不变。
+pub async fn serve_stdio(config: BridgeConfig, parent: libc::pid_t) -> Result<(), String> {
+    use futures::StreamExt as _;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let daemon_gone = async move {
+        parent_gone(parent).await;
+        tracing::warn!(parent, "父进程（后台）没了，当作输入到头");
+    };
     let incoming = futures::stream::unfold(
         BufReader::new(tokio::io::stdin()).lines(),
         |mut lines| async move {
@@ -411,7 +422,8 @@ pub async fn serve_stdio(config: BridgeConfig) -> Result<(), String> {
                 Err(e) => Some((Err(e), lines)),
             }
         },
-    );
+    )
+    .take_until(Box::pin(daemon_gone));
     let outgoing = futures::sink::unfold(tokio::io::stdout(), |mut w, line: String| async move {
         w.write_all(line.as_bytes()).await?;
         w.write_all(b"\n").await?;
@@ -419,6 +431,14 @@ pub async fn serve_stdio(config: BridgeConfig) -> Result<(), String> {
         Ok::<_, std::io::Error>(w)
     });
     serve(config, Lines::new(Box::pin(outgoing), Box::pin(incoming))).await
+}
+
+/// 等到父进程号不再是 `parent`：父进程退出后，系统（或别的收养进程）接过去，号就变了，之后不会再变回来。
+async fn parent_gone(parent: libc::pid_t) {
+    // SAFETY: getppid 不读写任何内存
+    while unsafe { libc::getppid() } == parent {
+        tokio::time::sleep(PARENT_POLL).await;
+    }
 }
 
 fn initialize_response(config: &BridgeConfig) -> InitializeResponse {

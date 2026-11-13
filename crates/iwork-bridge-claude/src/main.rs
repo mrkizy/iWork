@@ -10,6 +10,9 @@ const ENV_LOG: &str = "IWORK_BRIDGE_LOG";
 
 #[cfg(unix)]
 fn main() {
+    // 最先记下父进程（后台）：之后它一换，就是后台没了（5.4a 第 5 条，审查 S6-5b 1/F-3）
+    // SAFETY: getppid 不读写任何内存
+    let parent = unsafe { libc::getppid() };
     // 先于运行时：运行时会开自己的句柄，关的时候不能把它们一起关掉
     let inherited = close_inherited_fds();
     init_logging();
@@ -27,17 +30,17 @@ fn main() {
             std::process::exit(2);
         }
     };
-    runtime.block_on(run());
+    runtime.block_on(run(parent));
 }
 
 #[cfg(unix)]
-async fn run() {
+async fn run(parent: libc::pid_t) {
     let leader = become_group_leader();
     watch_hangup();
     let sub = std::env::args().nth(1);
     let result = match sub.as_deref() {
         None | Some("acp") => match iwork_bridge_claude::acp::BridgeConfig::from_process() {
-            Ok(config) => iwork_bridge_claude::acp::serve_stdio(config).await,
+            Ok(config) => iwork_bridge_claude::acp::serve_stdio(config, parent).await,
             Err(e) => Err(e),
         },
         Some(other) => Err(format!("不认识的子命令：{other}")),
