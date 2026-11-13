@@ -252,7 +252,8 @@ rh_run() {
     fi
     sleep 1
   done
-  wait "$pid"
+  # 2>/dev/null：被收掉时 bash 会打一行「Terminated: 15 <整条命令>」，上面已经报过超时
+  wait "$pid" 2>/dev/null
   rc=$?
   if [ "$timed_out" -eq 1 ]; then rc=124; fi
   if rh_kill_group "$pid"; then rh_say "命令退出后进程组 $pid 里还有残留进程，已收掉"; fi
