@@ -93,7 +93,9 @@ autostart_state() {
     echo 没注册
   fi
 }
-pids_of() { pgrep -x "$1" 2>/dev/null || true; }
+# 只认本用户的进程：macOS 的 pgrep 不带 -u 会匹配所有用户的同名进程（平时账号里的开发后台、测试进程），
+# 前置检查会误停，演练中途会选中、去杀别人的进程。找进程只有这一处
+pids_of() { pgrep -x -u "$UIDN" "$1" 2>/dev/null || true; }
 any_iwork_running() { [ -n "$(pids_of iwork-daemon)$(pids_of iwork-client)" ]; }
 # launchd 用户环境里的 IWORK_DATA_DIR：只问这一个名字，只回三态，不回值
 launchd_data_dir_state() {

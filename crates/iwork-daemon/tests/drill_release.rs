@@ -58,6 +58,7 @@ impl World {
         };
         std::fs::create_dir_all(&w.home).unwrap();
         std::fs::create_dir_all(w.state.join("pids")).unwrap();
+        std::fs::create_dir_all(w.state.join("foreign")).unwrap();
         std::fs::create_dir_all(&w.outer).unwrap();
         std::fs::write(w.outer.join("marker"), "outer").unwrap();
         for p in ["a-unsigned", "a-signed", "b-unsigned", "b-signed"] {
@@ -95,8 +96,21 @@ exit 0
             &format!(
                 r#"#!/bin/sh
 echo "pgrep $*" >> '{calls}'
-[ "$1" = -x ] || exit 2
-for p in $(cat '{st}/pids/'"$2" 2>/dev/null); do kill -0 "$p" 2>/dev/null && echo "$p"; done
+# 照 macOS 的 pgrep：不带 -u 时匹配所有用户的进程，带 -u 只认那个用户。pids/ 是本用户的，foreign/ 扮别的用户的
+exact= uid= name=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -x) exact=1; shift ;;
+    # 真 pgrep 会把多个 -u 合成一个集合；替身不模拟，见到第二个就报错，免得只认最后一个而假绿
+    -u) [ -z "$uid" ] || {{ echo "pgrep 替身：重复的 -u" >&2; exit 2; }}; uid="$2"; shift 2 ;;
+    -*) exit 2 ;;
+    *) name="$1"; shift ;;
+  esac
+done
+[ -n "$exact" ] && [ -n "$name" ] || exit 2
+emit() {{ for p in $(cat "$1" 2>/dev/null); do kill -0 "$p" 2>/dev/null && echo "$p"; done; }}
+[ -z "$uid" ] || [ "$uid" = "$(id -u)" ] && emit '{st}/pids/'"$name"
+[ "$uid" = "$(id -u)" ] || emit '{st}/foreign/'"$name"
 exit 0
 "#
             ),
@@ -547,6 +561,48 @@ fn drill_success_run_has_no_secrets_and_cleans_up() {
         assert!(!apps.join(name).exists(), "{name} 收尾删了");
     }
     assert!(!w.data_root().exists(), "数据根改名留证了");
+}
+
+/// 找进程只认本用户（审查后补）：macOS 的 pgrep 不带 -u 会匹配所有用户的进程。别的用户开着同名的 iwork-daemon、
+/// iwork-client 时，演练照样从前置检查跑到成功收尾，别人的进程没被选中、没被杀；每次找进程都带着 -u 本用户。
+#[test]
+fn drill_ignores_other_users_processes() {
+    let w = World::new();
+    w.flag("reactive");
+    let mut foreign = Vec::new();
+    for name in ["iwork-daemon", "iwork-client"] {
+        let child = Command::new("sleep").arg("120").spawn().unwrap();
+        std::fs::write(w.state.join("foreign").join(name), child.id().to_string()).unwrap();
+        foreign.push(child);
+    }
+    let out = w.drill();
+    let record = w.record();
+    let calls = w.calls();
+    let alive: Vec<bool> = foreign
+        .iter_mut()
+        .map(|c| c.try_wait().unwrap().is_none())
+        .collect();
+    for mut c in foreign {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    assert_eq!(out.status.code(), Some(0), "{}\n{record}", text(&out));
+    assert!(record.contains("演练跑完"), "{record}");
+    assert!(!record.contains("FAIL："), "{record}");
+    assert_eq!(alive, [true, true], "别的用户的进程不归演练收：{record}");
+    let uid = String::from_utf8(Command::new("id").arg("-u").output().unwrap().stdout).unwrap();
+    let pgreps: Vec<&str> = calls.lines().filter(|l| l.starts_with("pgrep ")).collect();
+    assert!(!pgreps.is_empty());
+    for l in pgreps {
+        let args: Vec<&str> = l.split_whitespace().collect();
+        let users: Vec<&str> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| **a == "-u")
+            .map(|(i, _)| args.get(i + 1).copied().unwrap_or(""))
+            .collect();
+        assert_eq!(users, [uid.trim()], "找进程要恰好一个 -u，值是本用户：{l}");
+    }
 }
 
 /// 审查 1/F-2：Applications 下已经有别人的 iWork.prev.app / iWork.incoming.app / iWork.failed.app → 前置检查停（退出 3），
