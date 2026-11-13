@@ -2,8 +2,15 @@
 // 只挂 Rust 发来的窗口行，窗口外用占位高度；滚动时报可见行的 ordinal（每帧最多一次，变了才报）；
 // 行增删时按锚点行保持位置；停在底部且时间线接着最新时贴底；顶到最旧一行时请求往前翻页。
 // 高度缓存以 ordinal 为键（稳定行号，重建前后不变）。
-// 跳转（消息锚点）：Rust 给一次性的滚动指令，同一个 token 只滚一次，滚到那一行居中并高亮一段时间（网页计时）；
-// 那一行还没随帧到达时等它到了再滚。另报告内容有没有超出一屏（锚点组件只在超出时显示，布局事实网页自己量）。
+// 跳转（消息锚点、⌥↑ / ⌥↓、从「待你处理」进来）：Rust 给一次性的滚动指令，同一个 token 只滚一次，滚到那一行居中
+// 并高亮一段时间（网页计时）；那一行还没随帧到达时等它到了再滚。另报告内容有没有超出一屏（锚点组件只在超出时显示，
+// 布局事实网页自己量）。
+//
+// 谁定滚动位置（优先级从高到低；高的在同一拍里最后写）：
+// 1. 用户自己滚动（之后 Rust 作废还在等的跳转）；
+// 2. 显式跳转（scrollTo）：挂载、reset 贴底、行变化保持位置之后才执行，所以是那一拍的最终结果；
+// 3. 行变化时保持位置（restore：停在底部且接着最新就贴底，否则锚点行放回原处）；
+// 4. 首次挂载、时间线 reset 时贴底（默认位置）。
 import { createEffect, createSignal, For, on, onCleanup, onMount, type JSX } from "solid-js";
 import { averageHeight, isAtBottom, unsentAround, visibleOrdinals, type RowBox } from "./virtual";
 import "./VirtualRows.css";
@@ -45,6 +52,8 @@ export function VirtualRows(props: VirtualRowsProps) {
   let askedOlderAt: bigint | undefined;
   let frame = 0;
   let scrolledToken: bigint | undefined;
+  // 挂载贴底之前不执行跳转：先执行的话会被挂载时的贴底盖掉，token 又已经用掉（g3b 1/F-2）
+  let mounted = false;
   let overflow: boolean | undefined;
   // 上一次报告以来有没有用户自己的滚动输入。程序改 scrollTop 也会触发 scroll 事件，所以看输入事件，不看 scroll
   let userInput = false;
@@ -134,6 +143,7 @@ export function VirtualRows(props: VirtualRowsProps) {
         // Rust 重建时作废了它记的窗口（6/F-3）：去重缓存跟着失效，布局后重报一次，首尾行和 reset 前一样也报（审查 7/F-3）
         reported = undefined;
         box.scrollTop = box.scrollHeight;
+        applyJump();
         if (frame === 0) frame = requestAnimationFrame(report);
       },
       { defer: true },
@@ -151,11 +161,10 @@ export function VirtualRows(props: VirtualRowsProps) {
     ),
   );
 
-  // 滚动指令：行到了才滚（行随后面的帧到达时 keys 变，这里重跑）
-  createEffect(() => {
+  // 滚动指令：行到了才滚（行随后面的帧到达时 keys 变，这里重跑）。挂载、reset 时在贴底之后也调一次
+  const applyJump = () => {
     const s = props.scrollTo;
-    void props.keys;
-    if (s === undefined || s.token === scrolledToken) return;
+    if (!mounted || s === undefined || s.token === scrolledToken) return;
     const el = box.querySelector<HTMLElement>(`[data-vrow][data-key="${CSS.escape(s.rowKey)}"]`);
     if (el === null) return;
     scrolledToken = s.token;
@@ -165,11 +174,18 @@ export function VirtualRows(props: VirtualRowsProps) {
     clearTimeout(highlightTimer);
     highlightTimer = setTimeout(() => setHighlight(undefined), s.highlightMs);
     if (frame === 0) frame = requestAnimationFrame(report);
+  };
+  createEffect(() => {
+    void props.scrollTo;
+    void props.keys;
+    applyJump();
   });
 
   onMount(() => {
     box.scrollTop = box.scrollHeight;
-    frame = requestAnimationFrame(report);
+    mounted = true;
+    applyJump();
+    if (frame === 0) frame = requestAnimationFrame(report);
   });
   onCleanup(() => {
     measure.disconnect();

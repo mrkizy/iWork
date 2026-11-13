@@ -170,3 +170,62 @@ describe("报可见行", () => {
     expect(t.visible.at(-1)?.slice(0, 2)).toEqual(settled?.slice(0, 2));
   });
 });
+
+// g3b 1/F-2：挂载那一刻就带着跳转指令（从「待你处理」进来、Rust 的跳转随首帧到达）。原来指令在首次 effect 里被
+// 消费、随后挂载时无条件贴底把它盖掉，token 已记下不会重滚。优先级：显式跳转是同一拍里最后写的，盖过首次贴底。
+describe("挂载时就有跳转指令", () => {
+  const tops = new WeakMap<HTMLElement, number>();
+  beforeEach(() => {
+    const old = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop");
+    Object.defineProperty(Element.prototype, "scrollTop", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return tops.get(this) ?? 0;
+      },
+      set(this: HTMLElement, v: number) {
+        tops.set(this, v);
+      },
+    });
+    restores.push(() => (old ? Object.defineProperty(Element.prototype, "scrollTop", old) : undefined));
+  });
+  const frame = () => new Promise((r) => requestAnimationFrame(() => r(undefined)));
+
+  function mountWith(initialKeys: string[], jump?: { rowKey: string; token: bigint; highlightMs: number }) {
+    const [keys, setKeys] = createSignal(initialKeys);
+    const { container } = render(() => (
+      <VirtualRows
+        keys={keys()}
+        ordinalOf={(k) => BigInt(k.charCodeAt(0))}
+        firstIndex={0}
+        total={keys().length}
+        atTail={true}
+        hasOlder={false}
+        renderRow={(k) => <span>{k}</span>}
+        onVisible={() => {}}
+        onReachOldest={() => {}}
+        scrollTo={jump}
+      />
+    ));
+    return { box: container.querySelector(".iw-vrows") as HTMLElement, setKeys };
+  }
+
+  it("指令和行一起到：最终停在目标行居中，不被贴底盖掉", async () => {
+    const { box } = mountWith(["a", "b", "c", "d", "e"], { rowKey: "c", token: 1n, highlightMs: 1000 });
+    await frame();
+    expect(box.scrollTop).toBe(centered(2));
+  });
+
+  it("指令先到、行后到：行到了滚到它居中，之后不再被贴底拉走", async () => {
+    const { box, setKeys } = mountWith(["a"], { rowKey: "d", token: -1n, highlightMs: 1000 });
+    await frame();
+    setKeys(["a", "b", "c", "d", "e"]);
+    await frame();
+    expect(box.scrollTop).toBe(centered(3));
+  });
+
+  it("对照：没有指令时挂载贴底", async () => {
+    const { box } = mountWith(["a", "b", "c", "d", "e"]);
+    await frame();
+    expect(box.scrollTop).toBe(10 * ROW_GAP);
+  });
+});
