@@ -4979,7 +4979,8 @@ VDIR_LOGIN_VARIANTS = {"不设": None, "默认位置的路径": "default-path", 
 
 def vdir_login():
     """V1a/V9（0 个模型实例，只跑 claude auth status）：带一个空的专用目录，三种安全存储的设法各跑一次，只取 loggedIn。
-    第一种登得上的（空串优先、其次默认位置的路径）定为这一组的登录方式；都登不上 → 后面各格要产品负责人先在专用目录里登录一次。只跑一次。"""
+    第一种登得上的（空串优先、其次默认位置的路径）定为这一组的登录方式；都登不上 → 后面各格记 INCONCLUSIVE、不起实例。
+    专用目录是每次运行新建的，没法事先在里面登录：登不上要交 supervisor 换办法。只跑一次。"""
     if VDIR["checked"]: return VDIR["storage"] is not None
     VDIR["checked"] = True
     d = vdir_dir("login")
@@ -4994,7 +4995,7 @@ def vdir_login():
     chosen = next((how for label, how in (("空串", ""), ("默认位置的路径", "default-path")) if facts.get(label) is True), None)
     if chosen is not None: VDIR["storage"] = os.path.join(HOME, ".claude") if chosen == "default-path" else ""
     control_ok = facts["不设"] is False
-    VDIR["why"] = "" if chosen is not None else "专用目录里登不上（两种安全存储设法都不是 loggedIn），要产品负责人先在专用目录里登录一次"
+    VDIR["why"] = "" if chosen is not None else "专用目录里登不上（两种安全存储设法都不是 loggedIn）：专用目录每次新建，没法事先登录，把结果包交 supervisor 换办法"
     record(info_if(control_ok and chosen is not None), "R2X vdir V1a/V9 专用目录里的登录（只记 loggedIn；不设时应当是假）",
            f"{json.dumps(facts, ensure_ascii=False)}；这一组用的设法={'空串' if chosen == '' else chosen}")
     return chosen is not None
