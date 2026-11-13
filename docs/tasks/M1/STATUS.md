@@ -101,6 +101,7 @@
 - T04p 第 3 版 8fd61b2，9a5980a0 审第 3 轮（最后一轮）。T10a 表第 2 版 7a531fc，8036b426 审。
 - 待转设计窗口：tokens.css 259 行 --sidebar-w-max 注释「主区域至少 480」与 12b 的 568 不一致；P4 沙箱依赖缺失时的提示文案。
 - 记住规则的推送：后台一半已在 T10a 步 7（设置范围 streams 加 all(K::Rule)，方案 2.7 G5），客户端一半（收到 RuleRemembered/RuleRevoked/RulesDeleted 标过期、重查 ListRules，重连后也重查）交 T09 组 3 先对着假后台做（2026-11-13）。
+- 交给 T04p/T06（2026-11-13，T10a 组 B 发现）：发布包里目前只有 daemon、client 两个程序，桥接 iwork-bridge-claude 没进包（组 B 按 install::program_file("iwork-bridge-claude") 在后台同目录找），发布包探测到 CLI 也起不了桥接；T06 S8 前要把桥接加进装配（assemble-release.sh、check-install 的清单与对拍 R1）。
 - 交给 T10c（2026-11-13，T09 组 3 发现）：CloneFinished 只带后台 job_id、受理回包里没有它，客户端对不上自己的命令，「一次一个克隆」只在客户端内存里守不住（重启、重连快照都会破，代码审查第 2 轮），supervisor 定 T09 组 3 先不接克隆的客户端一半（意图回「未接入」，克隆页签本来就等 U-7d-4）；T10c 给 CloneFinished 加 command_id（或受理回包带 job_id，协议加法）后由 T09 接上。另：T09 把 claude auth status 的订阅类型原值映射成「本人订阅/团队订阅/企业订阅」（max/pro、team、enterprise），这几个原值仓库里没实测记录，T06 拿真 auth status 核对。
 - 墙钟测试排查（e355ed8c，表在它 scratchpad wallclock_survey.tsv，237 行）：第一批（agent-acp process.rs:567、ipc slow_consumer、client-core launcher、daemon process wait_ready/outbox、store crash_injection）在修，分支 fix-wallclock-tests-1；第二批等 T09 组 3、T10a 步 2 合入（client-core settle/record/composer、core turn_runner.rs:622 虚拟时钟下忙等真 5 秒）；daemon install cooldown 要可注入时钟（产品代码，小卡）；顺带记下的竞态：core turn_runner answer_arriving_while_cancelling、fake-agent permission_wait.rs:280、ipc protocol_violation audit>=7。
 - 小卡：e2e:webview 的 reload 用例客户端常驻内存涨幅上限 1 MiB，高负载下改动前的基点 e151247 也 4 次红 3 次（+0.6～+12.7 MiB），T04p 分支 5 次红 4 次，判为改动前就有的阈值/环境问题（e5b90212 对照，2026-11-13），负载低时重量或改判据。
