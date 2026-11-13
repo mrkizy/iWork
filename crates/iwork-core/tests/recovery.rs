@@ -138,11 +138,18 @@ fn apply(u: &Unsettled, events: &[DomainEvent]) -> Unsettled {
         }
     }
     // 再按 unsettled() 的口径筛一遍：恢复之后还剩什么
+    let turns: Vec<Turn> = turns
+        .into_values()
+        .filter(|t| t.state.holds_process())
+        .collect();
     let mut out = Unsettled {
-        turns: turns
-            .into_values()
-            .filter(|t| t.state.holds_process())
+        recorded_usage: u
+            .recorded_usage
+            .iter()
+            .filter(|(id, _)| turns.iter().any(|t| t.id == **id))
+            .map(|(id, used)| (*id, *used))
             .collect(),
+        turns,
         streaming: msgs
             .into_values()
             .filter(|m| m.status == MessageStatus::Streaming)
@@ -254,6 +261,7 @@ fn rule_table_rows_in_commit_order() {
         turns: vec![turn(1, TurnState::Running), turn(2, TurnState::Cancelling)],
         streaming: vec![streaming(10, Some(1), "ab"), streaming(11, Some(2), "cd")],
         cards: vec![card(20, UserActionState::Executing, true)],
+        ..Unsettled::default()
     };
     let p = plan(&u).unwrap();
     let kinds: Vec<&str> = p.events.iter().map(DomainEvent::kind).collect();
@@ -314,4 +322,39 @@ fn finished_message_or_settled_card_is_a_named_error() {
         ..Unsettled::default()
     };
     assert!(matches!(plan(&u), Err(RecoveryError::Card { .. })));
+}
+
+/// 取消中的回合进程没了，收成已取消：结束事件带上它已记下的用量累计；没记过的带零（事件里的用量是回合累计，
+/// 审查 2026-11-13-m1-t10a-d7 1/F-3）。
+#[test]
+fn finished_turn_carries_recorded_usage() {
+    let used = iwork_domain::common::Usage {
+        input_tokens: 30,
+        output_tokens: 4,
+        ..Default::default()
+    };
+    let u = Unsettled {
+        turns: vec![
+            turn(1, TurnState::Cancelling),
+            turn(2, TurnState::Cancelling),
+        ],
+        recorded_usage: [(TurnId::from_raw(RawUlid::from_u128(1)), used)].into(),
+        ..Unsettled::default()
+    };
+    let finished: Vec<(TurnId, iwork_domain::common::Usage)> = plan(&u)
+        .unwrap()
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            DomainEvent::TurnFinished(f) => Some((f.turn_id, f.usage)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        finished,
+        [
+            (TurnId::from_raw(RawUlid::from_u128(1)), used),
+            (TurnId::from_raw(RawUlid::from_u128(2)), Default::default()),
+        ]
+    );
 }

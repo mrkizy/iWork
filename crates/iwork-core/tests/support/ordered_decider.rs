@@ -33,6 +33,7 @@ pub struct OrderedDecider {
 #[derive(Default)]
 struct Folded {
     turn_of: BTreeMap<ApprovalId, TurnId>,
+    conversation_of: BTreeMap<ApprovalId, ConversationId>,
     pending: BTreeSet<ApprovalId>,
     /// 已批准、还没有 `ApprovalDelivered`
     awaiting_delivery: BTreeSet<ApprovalId>,
@@ -47,6 +48,8 @@ impl Folded {
             match e {
                 DomainEvent::ApprovalRequested(r) => {
                     f.turn_of.insert(r.approval.id, r.approval.turn_id);
+                    f.conversation_of
+                        .insert(r.approval.id, r.approval.conversation_id);
                     f.pending.insert(r.approval.id);
                 }
                 DomainEvent::ApprovalDecided(d) => {
@@ -136,10 +139,10 @@ impl OrderedDecider {
         } else {
             ApprovalState::Denied
         };
+        let conversation = self.folded().conversation_of[&id];
         self.commit(vec![
             ApprovalDecided {
-                // 引擎按自己折叠的表认对话，不读事件上的所属对话（G5 的路由不在这组用例里）
-                conversation_id: None,
+                conversation_id: Some(conversation),
                 approval_id: id,
                 state,
                 remember: None,
@@ -201,7 +204,7 @@ impl PermissionDecider for OrderedDecider {
             .filter(|a| f.turn_of[*a] == turn_id)
             .map(|a| {
                 ApprovalVoided {
-                    conversation_id: None,
+                    conversation_id: Some(f.conversation_of[a]),
                     approval_id: *a,
                     reason,
                 }

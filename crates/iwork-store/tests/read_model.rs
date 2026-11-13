@@ -523,10 +523,30 @@ fn unsettled_returns_only_in_flight() {
             .iter()
             .map(|c| UserActionProposed { card: c.clone() }.into()),
     );
+    // 回合用量：在跑的 21 记过（带出来）；已完成的 25 记过（不在没收尾的回合里，不带）；22、23 没记过
+    let used = |input: u64| iwork_domain::common::Usage {
+        input_tokens: input,
+        ..Default::default()
+    };
+    for (n, input) in [(21, 30), (25, 9)] {
+        events.push(
+            iwork_domain::event::UsageReported {
+                runtime_id: turn(n, 10).runtime_id,
+                turn_id: tid(n),
+                usage: used(input),
+            }
+            .into(),
+        );
+    }
     block(store.commit(cmd(2, events))).unwrap();
     block(store.checkpoint_message(mid(30), 7, "partial")).unwrap();
 
     let u = block(read_model(&store).unsettled()).unwrap();
+    assert_eq!(
+        u.recorded_usage,
+        [(tid(21), used(30))].into(),
+        "只列没收尾、记过用量的回合"
+    );
     let turn_ids: Vec<_> = u.turns.iter().map(|t| t.id).collect();
     assert_eq!(
         turn_ids,
@@ -555,7 +575,10 @@ fn unsettled_is_empty_when_nothing_in_flight() {
     let (_env, store) = setup();
     let u = block(read_model(&store).unsettled()).unwrap();
     assert!(
-        u.turns.is_empty() && u.streaming.is_empty() && u.cards.is_empty(),
+        u.turns.is_empty()
+            && u.recorded_usage.is_empty()
+            && u.streaming.is_empty()
+            && u.cards.is_empty(),
         "{u:?}"
     );
 }

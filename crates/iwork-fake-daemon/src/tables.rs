@@ -1009,7 +1009,7 @@ impl Tables {
             .cloned()
             .collect();
         let usage_total = self.usage_total(&row.conversation.id);
-        Ok(pb::GetConversationResult {
+        let mut out = pb::GetConversationResult {
             conversation: Some(self.conversation_view(row)),
             messages: page.to_vec(),
             turns,
@@ -1020,7 +1020,37 @@ impl Tables {
             attachments,
             usage_total,
             has_newer,
-        })
+        };
+        self.add_page_turns(&row.conversation.id, &mut out);
+        Ok(out)
+    }
+
+    /// 一页的 `turns` 再补两类：页里工具、审批、卡片所属的回合；这个对话所有还没到终态的回合（之后它们的事件
+    /// 到了，客户端要在 `turns` 里找得到）。两种取法共用，和真后台 `iwork-store` 的 `assemble` 同一条规则。
+    fn add_page_turns(&self, conversation_id: &str, out: &mut pb::GetConversationResult) {
+        use pb::TurnState as S;
+        let mut ids: std::collections::BTreeSet<String> =
+            out.turns.iter().map(|t| t.id.clone()).collect();
+        ids.extend(out.tool_calls.iter().map(|c| c.turn_id.clone()));
+        ids.extend(out.approvals.iter().map(|a| a.turn_id.clone()));
+        ids.extend(out.user_actions.iter().map(|c| c.turn_id.clone()));
+        ids.extend(
+            self.turns
+                .values()
+                .filter(|t| t.conversation_id == conversation_id)
+                .filter(|t| {
+                    !matches!(
+                        S::try_from(t.state),
+                        Ok(S::Completed | S::Cancelled | S::Failed)
+                    )
+                })
+                .map(|t| t.id.clone()),
+        );
+        out.turns = ids
+            .iter()
+            .filter_map(|id| self.turns.get(id))
+            .cloned()
+            .collect();
     }
 
     /// 整个对话的累计用量（标题栏「本对话用量」）。
@@ -1139,6 +1169,7 @@ impl Tables {
             .filter_map(|id| self.turns.get(id))
             .cloned()
             .collect();
+        self.add_page_turns(cid, &mut out);
         out
     }
 

@@ -651,8 +651,7 @@ mod tests {
         t.state = iwork_domain::turn::TurnState::Running;
         Unsettled {
             turns: vec![t],
-            streaming: vec![],
-            cards: vec![],
+            ..Unsettled::default()
         }
     }
 

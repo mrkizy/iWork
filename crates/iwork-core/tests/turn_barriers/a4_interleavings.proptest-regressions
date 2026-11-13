@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d9c4adc69ebf509a5689948a1c87e3b1f279ab823b6b78d4f9742e5bc181830c # shrinks to scenario = WithdrawVsDispatch, order = DirectFirst, spin = 0

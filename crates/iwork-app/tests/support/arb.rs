@@ -472,7 +472,7 @@ fn call_record() -> impl Strategy<Value = ApprovalCallRecord> + Clone {
 }
 
 /// `ApprovalRequested` 带的审批：待审批（或已拒绝，proto 消息也装得下）。
-fn approval() -> impl Strategy<Value = Approval> + Clone {
+pub fn approval() -> impl Strategy<Value = Approval> + Clone {
     (
         (
             approval_id(),

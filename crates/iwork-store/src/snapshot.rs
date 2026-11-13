@@ -118,8 +118,6 @@ snapshot!(
     "rule_remembered"
 );
 snapshot!(
-    // 附件没有读查询（T10 需要时再加）；解码只在快照往返测试里用
-    #[cfg_attr(not(test), expect(dead_code))]
     encode_attachment,
     decode_attachment,
     Attachment,

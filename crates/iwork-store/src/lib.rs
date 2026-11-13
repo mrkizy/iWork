@@ -30,6 +30,7 @@ mod store;
 pub mod tables;
 #[cfg(any(test, feature = "test-hooks"))]
 mod test_hooks;
+mod views;
 mod writer;
 
 #[doc(hidden)]
@@ -48,6 +49,7 @@ pub use store::OpenOptions;
 pub use store::{SqliteStore, StoreConfig};
 #[cfg(any(test, feature = "test-hooks"))]
 pub use test_hooks::WriterPark;
+pub use views::{ViewTx, Viewed};
 pub use writer::{Envelope, WriteTx};
 
 // 单测与集成测试共用一份夹具；夹具里按外部 crate 的路径 `iwork_store::…` 引用本 crate
