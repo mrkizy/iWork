@@ -92,7 +92,7 @@ fn rule_groups(store: &Store, ctx: Ctx, rules: &[pb::Rule]) -> Vec<pb::RuleGroup
             )),
         }
     }
-    groups.sort_by(|(a, _), (b, _)| a.0.cmp(&b.0));
+    groups.sort_by_key(|((order, _), _)| *order);
     groups.into_iter().map(|(_, g)| g).collect()
 }
 

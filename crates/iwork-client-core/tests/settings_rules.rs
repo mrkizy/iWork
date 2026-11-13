@@ -77,8 +77,11 @@ async fn rules_are_grouped_and_revoke_removes_one() {
         groups(&web.state),
         vec![
             ("永久".to_owned(), vec!["rule-forever".to_owned()]),
-            ("本项目".to_owned(), vec!["rule-project".to_owned()]),
-            ("本对话".to_owned(), vec!["rule-conv".to_owned()]),
+            ("本项目 · demo".to_owned(), vec!["rule-project".to_owned()]),
+            (
+                "本对话 · 跑一下测试".to_owned(),
+                vec!["rule-conv".to_owned()]
+            ),
         ]
     );
     let ack = app

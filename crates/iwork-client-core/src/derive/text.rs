@@ -270,7 +270,7 @@ pub const RULE_TARGET_GONE: &str = "（找不到）";
 pub fn code_spans(s: &str) -> Vec<pb::TextSpan> {
     let parts: Vec<&str> = s.split('`').collect();
     // 段数为偶数说明最后一个反引号落单：把它和最后一段并回文字
-    let paired = if parts.len() % 2 == 0 {
+    let paired = if parts.len().is_multiple_of(2) {
         parts.len() - 1
     } else {
         parts.len()
