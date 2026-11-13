@@ -234,6 +234,9 @@ rh_run() {
     rh-command "$td/src" "$LOG" /usr/bin/env -i "${RH_ENV[@]}" "${R_CMD[@]}" \
     </dev/null 8>&- 9>&- &
   local pid=$! start now deadline timed_out=0 rc
+  # 命令已经带着自己的 stderr 起来了。外层从这里起只经 rh_say 写 stdout；把外层 stderr 丢掉，
+  # 是为了不让 bash 在收掉进程组后打出「Terminated: 15 <整条命令>」这种作业通知（超时已经报过）。
+  exec 2>/dev/null
   start=$(date +%s)
   deadline=$((start + R_TIMEOUT))
   while kill -0 "$pid" 2>/dev/null; do
@@ -252,8 +255,7 @@ rh_run() {
     fi
     sleep 1
   done
-  # 2>/dev/null：被收掉时 bash 会打一行「Terminated: 15 <整条命令>」，上面已经报过超时
-  wait "$pid" 2>/dev/null
+  wait "$pid"
   rc=$?
   if [ "$timed_out" -eq 1 ]; then rc=124; fi
   if rh_kill_group "$pid"; then rh_say "命令退出后进程组 $pid 里还有残留进程，已收掉"; fi
