@@ -73,8 +73,9 @@ pub struct ProcessTree {
     /// 桥接的出生时间（起它之后立刻读）；读不到为 `None`，那时不给它发信号
     root_birth: Option<Birth>,
     scope: Arc<Mutex<Scope>>,
-    /// 同一时刻只有一个 `clear()` 在跑
-    clearing: Arc<tokio::sync::Mutex<()>>,
+    /// 同一时刻只有一个 `clear()` 在跑。里面记着有没有哪一次 `clear()` 已经确认清空、回收了桥接：之后再清
+    /// 是空转，直接答 `true`
+    clearing: Arc<tokio::sync::Mutex<bool>>,
     /// 桥接的子进程句柄：`clear()` 成功并当场回收之后为 `None`
     child: Arc<Mutex<Option<Child>>>,
     #[cfg(test)]
@@ -111,7 +112,7 @@ impl ProcessTree {
             root,
             root_birth,
             scope: Arc::new(Mutex::new(Scope::new(root, root_birth, root_sid))),
-            clearing: Arc::new(tokio::sync::Mutex::new(())),
+            clearing: Arc::new(tokio::sync::Mutex::new(false)),
             child: Arc::new(Mutex::new(Some(child))),
             #[cfg(test)]
             gate: Arc::new(Mutex::new(None)),
@@ -399,7 +400,12 @@ impl ProcessTree {
     /// 清掉范围里的全部进程并确认，最多 [`TREE_CLEAR_LIMIT`]。`true` 之后桥接已被回收、根组作废；`false` 时什么都
     /// 不放，可以再调。
     pub async fn clear(&self) -> bool {
-        let _one = self.clearing.lock().await;
+        let mut settled = self.clearing.lock().await;
+        // 上一次已经确认清空、回收了桥接：范围里记到的都死了，根也不在了，不会再长出我们的进程。不再扫描，
+        // 免得和调用方「空没空」的查询撞成「有扫描在飞」（取消那次清完，输出到头又补一次时就是这样）
+        if *settled {
+            return true;
+        }
         let deadline = Instant::now() + TREE_CLEAR_LIMIT;
         let cleared = self.clear_until(deadline).await;
         self.gate(GateStep::BeforeReap).await;
@@ -410,6 +416,7 @@ impl ProcessTree {
                 .await
                 .unwrap_or(false);
         tracing::debug!(root = self.root, cleared, "clear");
+        *settled = cleared;
         cleared
     }
 

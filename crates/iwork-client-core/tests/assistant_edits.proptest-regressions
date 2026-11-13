@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c2b7011d3f3e1173f02dd4e1ca093979206d9ce97c94bd48b71a4148a2e58285 # shrinks to ops = [User(5, 1), User(5, 1)]
+cc 58076bf47bcced33a5f83d1f5afa4f8c996eadc01db3781d8219778ef6663357 # shrinks to ops = [User(2, 0)]
+cc 36e0f70e499d4cac7614a32d8955d9493a780620cf25cf685e0823cb468ebaa5 # shrinks to ops = [User(2, 0)]
+cc ea76cf636dc9234887029c6ee37a3647e7e2d50209ce3639fb3ddd613560ee7d # shrinks to ops = [User(0, 0), Process, Refresh, User(4, 2), Reply, Process, User(4, 0)]
+cc f5d08a14a4ee3849906b94c7267df3e0d00dda94abb99c712d5d0f7d6c89ef3f # shrinks to ops = [User(0, 0), User(0, 0), Process, User(2, 0), Reply, Refresh, Process, BadName, User(2, 0)]

@@ -21,3 +21,4 @@ pub mod refusal;
 pub mod settings_command;
 pub mod subscription;
 pub mod turn_command;
+pub mod views;

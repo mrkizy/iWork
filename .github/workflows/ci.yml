@@ -91,7 +91,7 @@ jobs:
           security list-keychains -d user -s "$kc" "${orig[@]}"
           export IWORK_TEST_SIGNING_KEYCHAIN="$kc"
           cargo test --workspace
-      # T06 方案 4.3：hook timeout 调成 10 秒的故障注入（只在测试 feature 下编译，见 scripts/check-no-dev-trust.sh）
+      # T06 方案 4.3：hook timeout 调成 10 秒；S6-5b：会话任务 panic。故障注入只在测试 feature 下编译（见 scripts/check-no-dev-trust.sh）
       - name: 桥接故障注入
         if: runner.os != 'Windows'
         run: cargo test -p iwork-bridge-claude --features fake-cli,fault-injection --test fault_injection
@@ -107,6 +107,8 @@ jobs:
           cargo test -p iwork-client-core --features dev --test launcher_process
           # 桌面客户端的拨号器在 dev 构建里只用 DirectDialer（T04p 方案 4.7）
           cargo test -p iwork-client-core --features dev --test app_dialer
+          # 客户端拒绝不可信的后台时 client.log 里有 peer_rejected（ADR-0013）
+          cargo test -p iwork-client-core --features dev --test client_log_process
 
       # T04：M1 不支持 Windows，后台在启动表第 1 步就拒绝（退出码 10）。按名字核对这一条真的跑到且通过
       - name: 后台在 Windows 上启动即拒绝（Windows）

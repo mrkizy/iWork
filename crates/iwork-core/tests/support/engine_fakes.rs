@@ -172,6 +172,16 @@ fn selected(filter: &EventFilter, event: &DomainEvent) -> bool {
 
 impl StoragePort for MemStore {
     async fn commit(&self, req: CommitRequest) -> Result<CommitReceipt, StorageError> {
+        // 经端口提交的事件（引擎自己的，或 T10 经 commit_with 交给引擎的）一律带所属对话（G5，T10a 方案 2.7
+        // 「怎么守住新构造的一律 Some」）。查的是真引擎交给存储的载荷原样，不经任何补齐；测试布景走 `seed`，不在此列
+        for e in &req.events {
+            assert_ne!(
+                e.carried_conversation(),
+                Some(None),
+                "{} 没带所属对话：{e:?}",
+                e.kind()
+            );
+        }
         let gate = self.enqueue_gate.lock().unwrap().take();
         if let Some(gate) = gate {
             self.at_enqueue_gate.store(true, Ordering::SeqCst);

@@ -76,24 +76,28 @@ pub enum Retry {
 pub fn on_dial_error(e: &DialError) -> (Connection, Retry) {
     match e {
         DialError::Connect(c) => match c.wait_prompt() {
-            Some(p) => (
-                Connection::Waiting {
-                    title: p.text(),
-                    exits: p.exits().to_vec(),
-                },
-                Retry::Backoff,
-            ),
+            Some(p) => (Connection::Waiting(p), Retry::Backoff),
             None => (Connection::Diagnostics(diagnostics_for(c)), Retry::Backoff),
         },
-        DialError::NotReady(d) => (Connection::Diagnostics(d.clone()), Retry::Backoff),
+        DialError::NotReady { view, .. } => (Connection::Diagnostics(view.clone()), Retry::Backoff),
         DialError::Environment(msg) => (Connection::Environment(msg.clone()), Retry::Manual),
     }
 }
 
+/// 连不上的原因 → 诊断页：正文是中文说明，系统的原始错误（常是英文）只进诊断行。
 fn diagnostics_for(e: &ConnectError) -> crate::store::Diagnostics {
+    use crate::derive::text;
+    let (reason, raw) = match e {
+        ConnectError::Io(io) => (text::DIAG_NOT_RUNNING, io.to_string()),
+        ConnectError::PeerRejected(_) => (text::DIAG_PEER_REJECTED, e.to_string()),
+        ConnectError::Timeout => (text::DIAG_TIMEOUT, e.to_string()),
+        ConnectError::Protocol(_) => (text::DIAG_PROTOCOL, e.to_string()),
+        // 版本不一致两种走中性提示（wait_prompt），到不了这里；兜一句通用的
+        _ => (text::DIAG_OTHER, e.to_string()),
+    };
     crate::store::Diagnostics {
-        reason: e.to_string(),
-        lines: Vec::new(),
+        reason: reason.into(),
+        lines: vec![(text::DIAG_RAW_ERROR.into(), raw)],
         newer_schema: false,
     }
 }
@@ -101,6 +105,7 @@ fn diagnostics_for(e: &ConnectError) -> crate::store::Diagnostics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iwork_ipc::client::WaitPrompt;
 
     /// 第 1 次关：续传；第 2 次：快照；第 3 次：提示；应用了一项：清零。
     #[test]
@@ -156,28 +161,26 @@ mod tests {
     #[test]
     fn dial_error_table() {
         let (c, retry) = on_dial_error(&DialError::Connect(ConnectError::ClosedBeforeWelcome));
-        assert!(matches!(
-            c,
-            Connection::Waiting {
-                title: "后台服务与客户端版本不一致",
-                ..
-            }
-        ));
+        assert_eq!(c, Connection::Waiting(WaitPrompt::VersionMismatch));
         assert_eq!(retry, Retry::Backoff);
         let (c, _) = on_dial_error(&DialError::Connect(ConnectError::VersionMismatch {
             client_major: 1,
             server_major: 2,
         }));
-        assert!(matches!(
-            c,
-            Connection::Waiting {
-                title: "正在切换版本",
-                ..
-            }
-        ));
+        assert_eq!(c, Connection::Waiting(WaitPrompt::SwitchingVersion));
         let (c, retry) = on_dial_error(&DialError::Connect(ConnectError::Timeout));
         assert!(matches!(c, Connection::Diagnostics(_)));
         assert_eq!(retry, Retry::Backoff);
+        // 连不上：正文是中文说明，不重复标题；系统的英文原文只在诊断行
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        let raw = refused.to_string();
+        let (c, _) = on_dial_error(&DialError::Connect(ConnectError::Io(refused)));
+        let Connection::Diagnostics(d) = c else {
+            panic!("连不上走诊断页");
+        };
+        assert_eq!(d.reason, crate::derive::text::DIAG_NOT_RUNNING);
+        assert!(!d.reason.contains(&raw));
+        assert_eq!(d.lines, vec![("原始错误".to_owned(), raw)]);
         let (c, retry) = on_dial_error(&DialError::Environment("M1 暂不支持 Windows".into()));
         assert_eq!(c, Connection::Environment("M1 暂不支持 Windows".into()));
         assert_eq!(retry, Retry::Manual);

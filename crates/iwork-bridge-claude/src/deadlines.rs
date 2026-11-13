@@ -9,6 +9,15 @@ use std::time::Duration;
 /// 必须小于后台的 3 秒（后台到点结束整棵进程树），SIGTERM 才有机会让 CLI 自己收拾、把会话记录写完整。
 pub const CANCEL_TERM_AFTER: Duration = Duration::from_millis(1500);
 
+/// 桥接自己要停（致命错误）之后，等后台来清树最多多久；到点没被清就自己收拾 CLI（5.4a 第 5 条）。
+pub const TEARDOWN_WAIT: Duration = Duration::from_secs(5);
+
+/// 桥接自己收拾 CLI 时，发了 SIGTERM 之后等它退出多久，再发 SIGKILL（5.4a 第 5 条）。
+pub const BRIDGE_TERM_WAIT: Duration = Duration::from_secs(2);
+
+/// 多久看一次父进程（后台）还在不在（5.4a 第 5 条「后台没了」的第二个信号，审查 S6-5b 1/F-3）。
+pub const PARENT_POLL: Duration = Duration::from_millis(250);
+
 /// 三方各自的期限，都从 hook 开始等算起。`0 < daemon < bridge < hook < h`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Deadlines {

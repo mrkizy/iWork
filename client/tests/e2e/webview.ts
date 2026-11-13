@@ -110,6 +110,23 @@ const CASES: Record<string, Case> = {
       return f;
     },
   },
+  forged: {
+    scenario: "empty",
+    script: "forged.js",
+    timeoutS: 60,
+    check(r) {
+      const d = done(r) as { forged?: { code?: string | null }; control?: { code?: string | null }; dialogOpen?: boolean };
+      const f: string[] = [];
+      expect(f, d.forged?.code === "invalid_intent", `伪造的 70 号意图没被拒：${JSON.stringify(d.forged)}`);
+      expect(f, d.control?.code === null, `对照：合法的 clear_add_project 应被受理：${JSON.stringify(d.control)}`);
+      expect(f, d.dialogOpen === false, "添加项目弹窗被打开了");
+      const intents = r.counters?.intents ?? {};
+      expect(f, intents["?"] === 1, `Rust 认作「认不出的操作」的次数：${JSON.stringify(intents)}`);
+      expect(f, intents.ClearAddProject === 1, `对照：ClearAddProject 次数：${JSON.stringify(intents)}`);
+      expect(f, r.counters?.fallback === 0, `走了回退路径 ${r.counters?.fallback} 次`);
+      return f;
+    },
+  },
   reload: {
     scenario: "stream-16x100",
     live: { pace: 70 },
@@ -239,7 +256,8 @@ async function runCase(name: string, c: Case): Promise<Run> {
     await waitFor(`假后台${ready}（${c.scenario}）`, 120_000, () => (daemonErr.includes(ready) ? true : undefined));
     const client = spawn(join(TARGET, "debug/iwork-client"), [], {
       stdio: "ignore",
-      env: { ...process.env, IWORK_DEV_ENDPOINT: sock, IWORK_E2E_SCRIPT: script, IWORK_E2E_OUT: out, ...c.env },
+      // IWORK_DATA_DIR：客户端日志（client.log）写进用例的临时目录，不写开发者真实的数据目录
+      env: { ...process.env, IWORK_DEV_ENDPOINT: sock, IWORK_DATA_DIR: join(dir, "data"), IWORK_E2E_SCRIPT: script, IWORK_E2E_OUT: out, ...c.env },
     });
     children.push(client);
     const rssKb: number[] = [];

@@ -61,6 +61,8 @@ dunce = "1"
 # 读 `.iwork/project.toml`；只要解析，不要写出与 serde 派生
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 tracing = "0.1"
+# 按字素簇截字：对话自动标题（技术设计 9.0a）、锚点摘录（T09 方案 2.9）
+unicode-segmentation = "1"
 sha2 = "0.10"
 hex = "0.4"
 core-foundation-sys = "0.8"
@@ -74,6 +76,7 @@ iwork-core = { path = "crates/iwork-core" }
 iwork-shell = { path = "crates/iwork-shell" }
 iwork-app = { path = "crates/iwork-app" }
 iwork-store = { path = "crates/iwork-store" }
+iwork-log = { path = "crates/iwork-log" }
 iwork-agent-acp = { path = "crates/iwork-agent-acp" }
 iwork-vcs-git = { path = "crates/iwork-vcs-git" }
 iwork-rootfs = { path = "crates/iwork-rootfs" }

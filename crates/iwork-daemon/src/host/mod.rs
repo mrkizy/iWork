@@ -675,12 +675,12 @@ impl HostCommit {
                     .into_iter()
                     .filter(|m| m.turn_id == Some(turn.id))
                     .collect();
-                let events = owed_turn_events(&turn, &streaming, &by)
+                let events = owed_turn_events(&turn, &streaming, &by, Default::default())
                     .map_err(|e| format!("算补账的事件失败：{e}"))?;
                 (turn.id, events, Some(void))
             }
             HostCommit::Withdraw { turn, void } => {
-                let events = owed_turn_events(&turn, &[], &OwedBy::Closing)
+                let events = owed_turn_events(&turn, &[], &OwedBy::Closing, Default::default())
                     .map_err(|e| format!("算收尾事件失败：{e}"))?;
                 (turn.id, events, void)
             }

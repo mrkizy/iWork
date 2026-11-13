@@ -713,6 +713,70 @@ impl StreamId {
 }
 
 impl DomainEvent {
+    /// 自己带所属对话的事件（G5）：返回那个字段（`None` 只出现在加字段之前落盘的旧事件上）；别的事件返回 `None`。
+    /// 穷举 `match`：加一种事件要在这里表态它带不带。
+    pub fn carried_conversation(&self) -> Option<Option<ConversationId>> {
+        use DomainEvent as E;
+        match self {
+            E::TurnStateChanged(e) => Some(e.conversation_id),
+            E::TurnFinished(e) => Some(e.conversation_id),
+            E::TurnModelReported(e) => Some(e.conversation_id),
+            E::TurnSessionBound(e) => Some(e.conversation_id),
+            E::TurnIntentRecorded(e) => Some(e.conversation_id),
+            E::ToolCallStarted(e) => Some(e.conversation_id),
+            E::ToolCallFinished(e) => Some(e.conversation_id),
+            E::ApprovalDelivered(e) => Some(e.conversation_id),
+            E::ApprovalReviewUpdated(e) => Some(e.conversation_id),
+            E::ApprovalDecided(e) => Some(e.conversation_id),
+            E::ApprovalVoided(e) => Some(e.conversation_id),
+            E::UserActionStateChanged(e) => Some(e.conversation_id),
+            E::ProjectAdded(_)
+            | E::ProjectUpdated(_)
+            | E::ProjectRelocated(_)
+            | E::ProjectPathStatusChanged(_)
+            | E::ProjectRemoved(_)
+            | E::ProjectSettingsUpdated(_)
+            | E::RepositoryInitialized(_)
+            | E::CloneFinished(_)
+            | E::AgentsMdDraftProposed(_)
+            | E::AgentsMdDraftDecided(_)
+            | E::AssistantCreated(_)
+            | E::AssistantUpdated(_)
+            | E::AssistantDeleted(_)
+            | E::AssistantReset(_)
+            | E::ConversationCreated(_)
+            | E::ConversationDeleting(_)
+            | E::ConversationDeleted(_)
+            | E::ConversationModelChanged(_)
+            | E::ApprovalModeChanged(_)
+            | E::DmProjectSwitched(_)
+            | E::ConversationRead(_)
+            | E::MessageAppended(_)
+            | E::MessageCompleted(_)
+            | E::TurnQueued(_)
+            | E::ApprovalRequested(_)
+            | E::ApprovalEvaluated(_)
+            | E::RuleRemembered(_)
+            | E::RuleRevoked(_)
+            | E::RulesDeleted(_)
+            | E::ApprovalStaleResultDropped(_)
+            | E::UserActionProposed(_)
+            | E::SecurityListEntryAdded(_)
+            | E::SecurityListEntryRemoved(_)
+            | E::AttachmentStored(_)
+            | E::AttachmentConfirmed(_)
+            | E::RuntimeUpdated(_)
+            | E::QuotaObserved(_)
+            | E::UsageReported(_)
+            | E::RuntimeSessionForgetFailed(_)
+            | E::LocalImportPrompted(_)
+            | E::LocalConfigImported(_)
+            | E::McpSecretSet(_)
+            | E::GlobalSettingsChanged(_)
+            | E::RecoveryCompleted(_) => None,
+        }
+    }
+
     /// 事件所属的流。`None` 表示整类一条流（设置、系统、批量删除规则）。
     pub fn stream(&self) -> (StreamKind, Option<StreamId>) {
         use StreamKind as K;

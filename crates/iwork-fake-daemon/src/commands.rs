@@ -210,9 +210,189 @@ pub fn decide(
                 new_path: x.new_path.clone(),
             })));
         }
+        // 添加项目一组（T09 方案 15.2）。真后台的判定（detect、地址白名单、目录名）在 iwork-vcs-git / iwork-host，
+        // 假后台不另写一份：目录照场景登记的假「盘」（Tables::disk）判，被拒的克隆地址由场景登记。
+        C::AddProject(x) => {
+            let check = tables.inspect_project_path(&x.path)?;
+            match pb::ProjectPathState::try_from(check.state).unwrap_or_default() {
+                pb::ProjectPathState::Addable => {}
+                pb::ProjectPathState::NotVersionControlled => {
+                    return Err(error(
+                        pb::ErrorCode::ProjectNotVersionControlled,
+                        "这个文件夹还没有版本控制",
+                        false,
+                    ));
+                }
+                _ => {
+                    return Err(error(
+                        pb::ErrorCode::InvalidArgument,
+                        "这个文件夹已经是项目了",
+                        false,
+                    ));
+                }
+            }
+            let project_id = fresh("project");
+            d.events.push(fixtures::project(
+                &project_id,
+                &check.name,
+                &check.root_path,
+            ));
+            // 勾了「生成草稿」而且没有 AGENTS.md：同一次提交里排上草稿（假后台直接给出草稿卡片）
+            if x.propose_agents_md_draft == Some(true) && !check.has_agents_md {
+                d.events
+                    .push(fixtures::agents_md_draft(&fresh("draft"), &project_id));
+            }
+        }
+        C::InitRepository(x) => {
+            let dir = tables
+                .disk
+                .get(&x.path)
+                .ok_or_else(|| not_found("path", &x.path))?;
+            if dir.versioned {
+                return Err(error(
+                    pb::ErrorCode::InvalidArgument,
+                    "这个文件夹已经有版本控制了",
+                    false,
+                ));
+            }
+            if let Some(why) = tables.init_failures.get(&x.path) {
+                return Err(error(pb::ErrorCode::VcsIdentityMissing, why, false));
+            }
+            d.events
+                .push(ev(E::RepositoryInitialized(pb::RepositoryInitialized {
+                    path: x.path.clone(),
+                })));
+        }
+        C::CreateProject(x) => {
+            let parent = x
+                .parent_dir
+                .clone()
+                .unwrap_or_else(|| tables.settings.projects_root.clone());
+            let path = format!("{}/{}", parent.trim_end_matches('/'), x.name);
+            d.events
+                .push(fixtures::project(&fresh("project"), &x.name, &path));
+        }
+        C::CloneRepository(x) => {
+            if let Some(why) = tables.rejected_clone_urls.get(&x.url) {
+                return Err(error(pb::ErrorCode::InvalidArgument, why, false));
+            }
+            let parent = x
+                .parent_dir
+                .clone()
+                .unwrap_or_else(|| tables.settings.projects_root.clone());
+            let name = x.name.clone().unwrap_or_else(|| {
+                crate::tables::last_segment(&x.url)
+                    .trim_end_matches(".git")
+                    .to_owned()
+            });
+            // 假后台不真克隆：直接完成（进度条由场景用瞬时事件演）
+            d.events.push(ev(E::CloneFinished(pb::CloneFinished {
+                job_id: fresh("clone"),
+                ok: true,
+                error: None,
+                path: Some(format!("{}/{name}", parent.trim_end_matches('/'))),
+            })));
+        }
+        // 设置（步 7d）：只带变了的字段
+        C::SetPlayfulUi(x) => {
+            d.events
+                .push(ev(E::GlobalSettingsChanged(pb::GlobalSettingsChanged {
+                    playful_ui: Some(x.enabled),
+                    ..Default::default()
+                })))
+        }
+        C::SetAutostart(x) => {
+            d.events
+                .push(ev(E::GlobalSettingsChanged(pb::GlobalSettingsChanged {
+                    autostart: Some(x.enabled),
+                    ..Default::default()
+                })))
+        }
+        C::SetProjectsRoot(x) => {
+            d.events
+                .push(ev(E::GlobalSettingsChanged(pb::GlobalSettingsChanged {
+                    projects_root: Some(x.path.clone()),
+                    ..Default::default()
+                })))
+        }
+        C::RevokeRule(x) => {
+            if !tables.rules.contains_key(&x.rule_id) {
+                return Err(not_found("rule_id", &x.rule_id));
+            }
+            d.events.push(ev(E::RuleRevoked(pb::RuleRevoked {
+                rule_id: x.rule_id.clone(),
+            })));
+        }
+        // 助手（步 7c 的配置页、新建弹窗、删除）：乐观并发照协议（版本对不上回 CONFLICT），名字为空回
+        // INVALID_ARGUMENT，配置没变不产生事件；新建同时建它的私聊；内置 iWork 不能删。
+        C::CreateAssistant(x) => {
+            let config = x.config.clone().unwrap_or_default();
+            check_assistant_name(&config)?;
+            let id = fresh("assistant");
+            d.events.push(ev(E::AssistantCreated(pb::AssistantCreated {
+                assistant: Some(pb::Assistant {
+                    id: id.clone(),
+                    builtin: false,
+                    version: 1,
+                    config: Some(config),
+                    updated_at: None,
+                }),
+            })));
+            d.events.push(fixtures::dm(&fresh("dm"), &id));
+        }
+        C::UpdateAssistant(x) => {
+            let a = tables
+                .assistants
+                .get(&x.assistant_id)
+                .ok_or_else(|| not_found("assistant_id", &x.assistant_id))?;
+            if a.version != x.expected_version {
+                return Err(error(
+                    pb::ErrorCode::Conflict,
+                    "助手配置已经被改过，请按最新的再改",
+                    false,
+                ));
+            }
+            let config = x.config.clone().unwrap_or_default();
+            check_assistant_name(&config)?;
+            if a.config.as_ref() != Some(&config) {
+                d.events.push(ev(E::AssistantUpdated(pb::AssistantUpdated {
+                    assistant_id: a.id.clone(),
+                    version: a.version + 1,
+                    config: Some(config),
+                })));
+            }
+        }
+        C::DeleteAssistant(x) => {
+            let a = tables
+                .assistants
+                .get(&x.assistant_id)
+                .ok_or_else(|| not_found("assistant_id", &x.assistant_id))?;
+            if a.builtin {
+                return Err(error(
+                    pb::ErrorCode::InvalidArgument,
+                    "iWork 不能删除",
+                    false,
+                ));
+            }
+            d.events.push(ev(E::AssistantDeleted(pb::AssistantDeleted {
+                assistant_id: a.id.clone(),
+                name_snapshot: a
+                    .config
+                    .as_ref()
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default(),
+            })));
+        }
         _ => return Err(unimplemented()),
     }
     Ok(d)
+}
+
+fn check_assistant_name(c: &pb::AssistantConfig) -> Result<(), pb::Error> {
+    if c.name.trim().is_empty() {
+        return Err(error(pb::ErrorCode::InvalidArgument, "名字不能为空", false));
+    }
+    Ok(())
 }
 
 fn unimplemented() -> pb::Error {

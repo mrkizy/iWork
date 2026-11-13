@@ -4,13 +4,15 @@
 //! - [`store`]：状态库，唯一写入口 `Store::apply`；
 //! - [`derive`]：从状态算视图模型（纯函数）：计数、文案、可否点击都在这里；
 //! - [`frame`]：取帧、代次、分块；
-//! - [`session`]：会话主循环、重连、在飞查询与命令。
+//! - [`session`]：会话主循环、重连、在飞查询与命令；
+//! - [`logging`]：客户端日志（`client.log`），要在拨号之前装。
 
 pub mod attach;
 pub mod derive;
 pub mod frame;
 pub mod intent;
 pub mod launcher;
+pub mod logging;
 pub mod session;
 pub mod store;
 
@@ -40,6 +42,8 @@ pub struct Options {
     pub clock: Clock,
     /// 只给录像与预览：按助手 id 换形象（阿森、林岚、老周）。M1 没有选形象的入口，正式运行时为空。
     pub characters: derive::avatar::CharacterOverrides,
+    /// 用户的家目录：界面上的路径把它写成 `~`（T09 方案 15.2）。不给就原样显示。
+    pub home_dir: Option<String>,
 }
 
 impl std::fmt::Debug for Options {
@@ -58,6 +62,7 @@ impl Default for Options {
             timeline_cap: store::timeline::TIMELINE_CAP,
             clock: tokio_clock(),
             characters: Default::default(),
+            home_dir: None,
         }
     }
 }
@@ -76,6 +81,7 @@ impl App {
             effects_tx,
         )
         .with_characters(opts.characters)
+        .with_home_dir(opts.home_dir)
         .with_stats(stats_tx);
         tokio::spawn(session.run(rx));
         (

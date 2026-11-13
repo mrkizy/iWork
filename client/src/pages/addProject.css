@@ -1,0 +1,119 @@
+/* 添加项目弹窗（画布 07） */
+.iw-addproj {
+  width: min(640px, calc(100vw - 48px));
+}
+.iw-addproj__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.iw-addproj__tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 8px 0 16px;
+}
+.iw-addproj__tab {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-lg);
+  background: var(--surf);
+  color: var(--tx);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.iw-addproj__tab span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.iw-addproj__tab small {
+  color: var(--tx3);
+  font-size: var(--fs-sm2);
+}
+.iw-addproj__tab[aria-selected="true"] {
+  border: 2px solid var(--brand);
+  padding: 11px 13px;
+}
+.iw-addproj__body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.iw-addproj__pathbox {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px dashed var(--bd2);
+  border-radius: var(--r-md);
+}
+.iw-addproj__pathbox--plain {
+  padding: 0;
+  border: none;
+}
+.iw-addproj__path {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm2);
+}
+.iw-addproj__notice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-md);
+  background: var(--surf2);
+  color: var(--tx2);
+}
+.iw-addproj__notice p {
+  margin: 0;
+}
+.iw-addproj__notice--warn {
+  border-color: var(--warnBd);
+  background: var(--warnBg);
+  color: var(--warnTx);
+}
+.iw-addproj__line {
+  margin: 0;
+  color: var(--tx);
+  font-size: var(--fs-md);
+}
+.iw-addproj__line > span:first-child {
+  margin-right: 8px;
+  color: var(--tx3);
+}
+.iw-addproj__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-md);
+}
+.iw-addproj__error {
+  margin: 0;
+  color: var(--acc);
+  font-size: var(--fs-sm2);
+}
+.iw-addproj__drafts {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--bd);
+}
+.iw-addproj__draft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.iw-addproj__draft > span {
+  flex: 1;
+}

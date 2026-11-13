@@ -3,6 +3,7 @@
 //! 计数、标签文字、按钮可否点击、表情状态只在这里算；网页只把结果画出来。后台给的文字（审批范围说明、
 //! 错误说明）原样用；摘要值（未读、标题、最近动态）只读后台的，不在这里推演。
 
+pub mod add_project;
 pub mod anchors;
 pub mod assistant;
 pub mod avatar;

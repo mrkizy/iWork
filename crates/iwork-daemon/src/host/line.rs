@@ -420,7 +420,10 @@ async fn run_turn_job<P: HostPorts>(
                 Err(why) => ResumeRequest::Unavailable(why),
             };
             (
-                TurnEntry::Resume { request },
+                TurnEntry::Resume {
+                    request,
+                    recorded_usage: Default::default(),
+                },
                 vec![ContentBlock::Text(note)],
             )
         }

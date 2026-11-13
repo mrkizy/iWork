@@ -19,6 +19,7 @@ pub mod instance;
 pub mod logging;
 pub mod publish;
 pub mod recovery;
+pub mod snapshot;
 pub mod source;
 pub mod status;
 pub mod stop;
@@ -33,3 +34,5 @@ pub use boot::run;
 #[cfg(test)]
 #[path = "../../iwork-store/tests/support/fixtures.rs"]
 mod fixtures;
+#[cfg(test)]
+mod query_tests;

@@ -6,8 +6,11 @@
 //! - 断了 → 立即重拨，之后按 `Backoff` 退避；在飞视图查询表整张清空，每种用途从状态里重新算「还要再发」。
 //! - 网页取帧是一次长等待：没有可交的就挂着，状态变了或到了 16ms 再试。
 
+mod add_project;
+mod assistant_edits;
 mod attention;
 pub mod dial;
+pub(crate) mod log_fields;
 mod models;
 mod presence;
 pub mod reconnect;
@@ -109,6 +112,12 @@ enum Internal {
         epoch: u64,
         result: Option<pb::GetOpenTargetResult>,
     },
+    /// 添加项目的检查回来了（见 add_project 模块）。错误为 None 表示连接断了，不算失败。
+    Inspected {
+        epoch: u64,
+        token: u64,
+        result: Result<pb::InspectProjectPathResult, Option<String>>,
+    },
     /// 模型清单的附带查询回来了（见 models 模块）。错误为 None 表示连接断了，不算失败。
     ModelsLoaded {
         epoch: u64,
@@ -194,6 +203,10 @@ pub struct Session<D: Dialer> {
     query_backoff: HashMap<&'static str, (Instant, Backoff)>,
     /// 首页「新建并发出」新对话配上后还没发的步骤（session::start）；None 表示还没排。
     start_steps: Option<std::collections::VecDeque<pb::command::Kind>>,
+    /// 在飞的目录检查：(连接代次, token)。换了连接就算不在飞（断线丢了的检查重连后重发）。
+    inspect_in_flight: Option<(u64, u64)>,
+    /// 添加项目草稿发出的命令（command_id → 草稿操作编号）：回包按编号交回草稿（store::add_project）。
+    add_project_ops: HashMap<String, u64>,
     /// 「已重新连接，回到最新」提示到时撤掉的时刻（Q9）。
     back_to_latest_until: Option<Instant>,
     /// 时钟（方案 2.4 第 10 条：注入）。一轮循环只读一次，service 与 next_deadline 用同一个时刻（审查 2/F-1）。
@@ -267,6 +280,8 @@ impl<D: Dialer> Session<D> {
             conn_epoch: 0,
             query_backoff: HashMap::new(),
             start_steps: None,
+            inspect_in_flight: None,
+            add_project_ops: HashMap::new(),
             back_to_latest_until: None,
             clock,
         }
@@ -275,6 +290,12 @@ impl<D: Dialer> Session<D> {
     /// 只给录像与预览：按助手 id 换形象（M1 没有选形象的入口）。
     pub fn with_characters(mut self, c: crate::derive::avatar::CharacterOverrides) -> Self {
         self.store.character_overrides = c;
+        self
+    }
+
+    /// 家目录：界面上的路径把它写成 `~`。
+    pub fn with_home_dir(mut self, home: Option<String>) -> Self {
+        self.store.home_dir = home;
         self
     }
 
@@ -433,6 +454,8 @@ impl<D: Dialer> Session<D> {
             self.ask_open_target();
             self.want_models(now);
             self.advance_start();
+            self.drive_assistant_edits();
+            self.want_inspect();
             self.mark_read(now);
         }
         if self.store.take_back_to_latest_started() {
@@ -535,6 +558,10 @@ impl<D: Dialer> Session<D> {
             ShellEvent::Picked(paths) => self.on_picked(paths),
             ShellEvent::Dropped(paths) => {
                 self.store.set_dragging(false);
+                // 恰好一个文件夹：添加项目（方案 15.2）；别的照旧当附件
+                if self.dropped_folder(&paths) {
+                    return;
+                }
                 let Some(cid) = self.store.visible.conversation_id.clone() else {
                     return;
                 };
@@ -571,6 +598,14 @@ impl<D: Dialer> Session<D> {
                 let _ = self.effects.send(e);
                 let _ = tx.send(ok);
             }
+            Action::AddProject(act) => self.add_project_act(act, tx),
+            Action::AssistantField {
+                assistant_id,
+                field,
+            } => {
+                let error = self.assistant_field(&assistant_id, field);
+                let _ = tx.send(pb::IntentAck { error });
+            }
             Action::Start { project_id, text } => {
                 let error = self.start(project_id, text);
                 let _ = tx.send(pb::IntentAck { error });
@@ -579,7 +614,25 @@ impl<D: Dialer> Session<D> {
                 self.on_local(l);
                 let _ = tx.send(ok);
             }
-            Action::Command(kind) => self.send_command(kind, Some(tx)),
+            Action::Command(kind) => {
+                self.send_command(kind, Some(tx));
+            }
+            Action::CreateAssistant(c) => {
+                if self.store.creating_assistant() {
+                    let _ = tx.send(pb::IntentAck {
+                        error: Some(pb::IntentError {
+                            code: "not_ready".into(),
+                            message: "正在创建，等上一次有结果".into(),
+                            retryable: false,
+                        }),
+                    });
+                } else if self
+                    .send_command(pb::command::Kind::CreateAssistant(c), Some(tx))
+                    .is_some()
+                {
+                    self.store.set_creating_assistant(true);
+                }
+            }
             Action::AttachPasted(x) => self.on_attach(attach::Source::Pasted(x), tx),
             Action::Pick(p) => self.open_picker(p, tx),
         }
@@ -625,13 +678,29 @@ impl<D: Dialer> Session<D> {
                 tx,
             ),
             // 选文件夹的框只给一个路径
-            Pick::ProjectLocation { project_id } => self.send_command(
-                pb::command::Kind::RelocateProject(pb::RelocateProject {
-                    project_id,
-                    new_path: first,
-                }),
-                Some(tx),
-            ),
+            Pick::ProjectLocation { project_id } => {
+                self.send_command(
+                    pb::command::Kind::RelocateProject(pb::RelocateProject {
+                        project_id,
+                        new_path: first,
+                    }),
+                    Some(tx),
+                );
+            }
+            Pick::ProjectFolder => {
+                self.add_project_picked(add_project::AddProjectPick::Candidate, first);
+                let _ = tx.send(pb::IntentAck { error: None });
+            }
+            Pick::ProjectsParent => {
+                self.add_project_picked(add_project::AddProjectPick::Parent, first);
+                let _ = tx.send(pb::IntentAck { error: None });
+            }
+            Pick::ProjectsRoot => {
+                self.send_command(
+                    pb::command::Kind::SetProjectsRoot(pb::SetProjectsRoot { path: first }),
+                    Some(tx),
+                );
+            }
         }
     }
 
@@ -773,24 +842,25 @@ impl<D: Dialer> Session<D> {
                 tokio::spawn(async move {
                     let error = match rx.await {
                         Ok(Ok(())) | Ok(Err(ClientError::Closed)) | Err(_) => return,
-                        Ok(Err(e)) => e.to_string(),
+                        Ok(Err(e)) => log_fields::client_error(&e),
                     };
                     let _ = tx.send(Internal::SubscribeFailed { epoch, id, error });
                 });
             }
             Err(e) => {
-                tracing::debug!(target: "iwork_client", id, error = %e, "订阅没写出去，连接已关，重连时一起订");
+                tracing::debug!(target: "iwork_client", id, error = %log_fields::client_error(&e), "订阅没写出去，连接已关，重连时一起订");
             }
         }
     }
 
     // ---------- 命令 ----------
 
+    /// 发一条命令，返回它的 command_id（断线时不发，回 None）。
     fn send_command(
         &mut self,
         kind: pb::command::Kind,
         reply: Option<oneshot::Sender<pb::IntentAck>>,
-    ) {
+    ) -> Option<String> {
         if !self.live() {
             // 断线期间不接新命令（D8：发送禁用，草稿留在网页本地）。
             if let Some(tx) = reply {
@@ -798,7 +868,7 @@ impl<D: Dialer> Session<D> {
                     error: Some(offline_error()),
                 });
             }
-            return;
+            return None;
         }
         let command_id = ulid::Ulid::generate().to_string();
         let command = pb::Command {
@@ -806,7 +876,7 @@ impl<D: Dialer> Session<D> {
             kind: Some(kind),
         };
         self.outbox.insert(
-            command_id,
+            command_id.clone(),
             InFlight {
                 command: command.clone(),
                 reply,
@@ -814,6 +884,7 @@ impl<D: Dialer> Session<D> {
             },
         );
         self.dispatch(command);
+        Some(command_id)
     }
 
     fn dispatch(&self, command: pb::Command) {
@@ -911,6 +982,15 @@ impl<D: Dialer> Session<D> {
                             crate::store::created::Purpose::Open,
                         );
                     }
+                    if let Some(pb::command::Kind::UpdateAssistant(u)) = &f.command.kind {
+                        self.assistant_update_done(&u.assistant_id, ack.as_ref());
+                    }
+                    if matches!(f.command.kind, Some(pb::command::Kind::CreateAssistant(_))) {
+                        self.store.set_creating_assistant(false);
+                    }
+                    if let Some(op) = self.add_project_ops.remove(&command_id) {
+                        self.add_project_done(op, &f.command.kind, accepted, ack.as_ref());
+                    }
                     if ack.is_none()
                         && matches!(f.command.kind, Some(pb::command::Kind::RevokeRule(_)))
                     {
@@ -929,6 +1009,11 @@ impl<D: Dialer> Session<D> {
                 runtime_id,
                 result,
             } => self.on_models(epoch, &runtime_id, result),
+            Internal::Inspected {
+                epoch,
+                token,
+                result,
+            } => self.on_inspected(epoch, token, result),
             Internal::OpenTarget { epoch, result } => self.on_open_target(epoch, result),
             Internal::QueryFailed { epoch, request_id } => {
                 if epoch != self.conn_epoch {
@@ -936,7 +1021,7 @@ impl<D: Dialer> Session<D> {
                     return;
                 }
                 if let Some(p) = self.queries.remove(&request_id) {
-                    tracing::warn!(target: "iwork_client", request_id, purpose = ?p, "视图查询失败，退避后重发");
+                    tracing::warn!(target: "iwork_client", request_id, purpose = purpose_kind(&p), "视图查询失败，退避后重发");
                     // 属于某一轮摘要重查的查询（四张表与列表页那一条）失败：这一轮作废，标记还在，整轮重发
                     // （审查 2/F-2：列表那一条原来不走这一支，这一轮永远走不完、摘要从此停更）。
                     if matches!(
@@ -949,6 +1034,10 @@ impl<D: Dialer> Session<D> {
                     }
                     if matches!(p, QueryPurpose::OlderPage { .. }) {
                         self.want_older = false;
+                    }
+                    // 发出时清掉的过期标记放回去：退避过后再查（审查 g3 1/F-1）
+                    if p == QueryPurpose::Rules {
+                        self.store.rules_stale = true;
                     }
                     self.query_failed(purpose_kind(&p));
                 }
@@ -993,7 +1082,9 @@ impl<D: Dialer> Session<D> {
                     }
                 });
             }
-            Err(e) => tracing::debug!(target: "iwork_client", error = %e, "视图查询没发出去"),
+            Err(e) => {
+                tracing::debug!(target: "iwork_client", error = %log_fields::client_error(&e), "视图查询没发出去")
+            }
         }
     }
 
@@ -1101,10 +1192,12 @@ impl<D: Dialer> Session<D> {
             }
         }
         if self.store.visible.settings
-            && self.store.rules.is_none()
+            && (self.store.rules.is_none() || self.store.rules_stale)
             && !self.backed_off("rules", now)
             && !self.in_flight(|p| *p == QueryPurpose::Rules)
         {
+            // 发出即清掉过期：在飞期间又来了 rule 事件会再标过期，结果回来后再查一次
+            self.store.rules_stale = false;
             want.push((
                 pb::Query {
                     kind: Some(Q::ListRules(pb::ListRules { project_id: None })),
@@ -1257,7 +1350,7 @@ impl<D: Dialer> Session<D> {
             Ok((client, incoming)) => self.on_connected(client, incoming),
             Err(e) => {
                 let (view, retry) = reconnect::on_dial_error(&e);
-                tracing::info!(target: "iwork_client", error = ?e, "连不上后台服务");
+                tracing::info!(target: "iwork_client", error = %log_fields::dial_error(&e), "连不上后台服务");
                 self.store.set_connection(view);
                 self.retry_at = match retry {
                     Retry::Backoff => Some(self.now() + self.backoff.next_delay()),
@@ -1324,6 +1417,10 @@ impl<D: Dialer> Session<D> {
         self.presence_due = None;
         self.open_target_in_flight = false;
         self.incoming = None;
+        // 断线丢掉的规则重查：过期标记放回去，重连后再查（重连没走快照时不会有别的东西替它标）
+        if self.queries.values().any(|p| *p == QueryPurpose::Rules) {
+            self.store.rules_stale = true;
+        }
         self.queries.clear();
         // 查询退避属于出错的那条连接：新连接从头来（审查 2/F-3）。
         self.query_backoff.clear();
@@ -1355,11 +1452,11 @@ impl<D: Dialer> Session<D> {
                 self.store.apply(Item::Subscribed(subscribed))
             }
             IncomingItem::ServerError(e) => {
-                tracing::warn!(target: "iwork_client", code = e.code, message = %e.message, "后台服务主动报错");
+                tracing::warn!(target: "iwork_client", code = %log_fields::error_code_name(e.code), "后台服务主动报错");
                 return;
             }
             IncomingItem::Closed(reason) => {
-                self.on_closed(&format!("{reason:?}"));
+                self.on_closed(log_fields::close_reason(&reason));
                 return;
             }
         };
@@ -1463,15 +1560,8 @@ fn response_error(r: &pb::Response) -> Option<pb::IntentError> {
 
 /// 后台的错误原样给网页（R6：后台给的文字原样用）；错误码转成小写名。
 pub fn server_error(e: &pb::Error) -> pb::IntentError {
-    let code = pb::ErrorCode::try_from(e.code)
-        .map(|c| {
-            c.as_str_name()
-                .trim_start_matches("ERROR_CODE_")
-                .to_ascii_lowercase()
-        })
-        .unwrap_or_else(|_| format!("code_{}", e.code));
     pb::IntentError {
-        code,
+        code: log_fields::error_code_name(e.code),
         message: e.message.clone(),
         retryable: e.retryable,
     }

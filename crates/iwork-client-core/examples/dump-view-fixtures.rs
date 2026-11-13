@@ -10,6 +10,10 @@
 //! 两段式（与 scenario_fold 测试同一份，tests/support/record.rs）：客户端先连上；跑到建出 focus 对话，
 //! 打开它、等快照到；再跑剩下的事件，这一段的帧是对话的增量（流式、断线重连都在里面）。
 //! 录像不入库，测试前由 `pnpm -C client fixtures` 生成。
+//!
+//! 另有几份「合成录像」（只给预览页看，见 [`unix::synthetic`]）：假后台造不出来的连接状态（版本不一致、正在切换版本、
+//! 不支持的环境）与「完全退出」确认框。做法是在 `empty` 场景的录像后面接一帧连接视图，视图由 client-core 自己的
+//! `derive::connection` 算，文字与出口和真界面同一份。
 
 #[cfg(unix)]
 #[tokio::main(flavor = "current_thread")]
@@ -37,6 +41,7 @@ mod unix {
 
     use iwork_client_core::Options;
     use iwork_fake_daemon::scenario::{self, Scenario};
+    use iwork_proto::pb;
     use tokio::time::timeout;
 
     use super::record;
@@ -70,7 +75,8 @@ mod unix {
             eprintln!("建不了输出目录 {}：{e}", out.display());
             return ExitCode::FAILURE;
         }
-        let mut index = Vec::new();
+        let mut index: Vec<Entry> = Vec::new();
+        let mut empty: Option<record::Recording> = None;
         for s in picked {
             match timeout(SCENARIO_LIMIT, record::record(s, Options::default())).await {
                 Ok(Ok(rec)) => {
@@ -84,7 +90,15 @@ mod unix {
                         rec.frames.len(),
                         rec.increments
                     );
-                    index.push((s, rec.opened));
+                    index.push(Entry {
+                        name: s.name.to_owned(),
+                        about: s.about.to_owned(),
+                        focus: s.focus,
+                        opened: rec.opened,
+                    });
+                    if s.name == "empty" {
+                        empty = Some(rec);
+                    }
                 }
                 Ok(Err(e)) => {
                     eprintln!("场景 {} 录不下来：{e}", s.name);
@@ -94,6 +108,24 @@ mod unix {
                     eprintln!("场景 {} 超过 {SCENARIO_LIMIT:?} 还没录完", s.name);
                     return ExitCode::FAILURE;
                 }
+            }
+        }
+        // 只在录全部场景时出合成录像（单录某几个时 index.json 只列它们，见 pnpm -C client fixtures）
+        if names.is_empty()
+            && let Some(base) = &empty
+        {
+            for s in synthetic() {
+                let rec = with_connection(base, &s.connection);
+                if let Err(e) = write_recording(&out, s.name, &rec) {
+                    eprintln!("合成录像 {} 写不下来：{e}", s.name);
+                    return ExitCode::FAILURE;
+                }
+                index.push(Entry {
+                    name: s.name.to_owned(),
+                    about: s.about.to_owned(),
+                    focus: None,
+                    opened: rec.opened,
+                });
             }
         }
         if let Err(e) = std::fs::write(out.join("index.json"), index_json(&index)) {
@@ -117,8 +149,81 @@ mod unix {
         write(&out.join(format!("{name}.full.binpb")), &one)
     }
 
+    /// index.json 的一项。
+    struct Entry {
+        name: String,
+        about: String,
+        focus: Option<&'static str>,
+        opened: usize,
+    }
+
+    /// 一份合成录像：名字、说明、连接状态。
+    pub struct Synthetic {
+        pub name: &'static str,
+        pub about: &'static str,
+        pub connection: pb::ConnectionView,
+    }
+
+    /// 假后台造不出来的连接状态（只给预览页看）。视图由 client-core 的 derive::connection 算。
+    pub fn synthetic() -> Vec<Synthetic> {
+        use iwork_client_core::derive::connection::connection;
+        use iwork_client_core::store::{Connection, Store};
+        use iwork_ipc::client::WaitPrompt;
+        let view = |c: Connection, quit: bool| {
+            let mut s = Store::default();
+            s.set_connection(c);
+            s.set_quit_requested(quit);
+            connection(&s)
+        };
+        vec![
+            Synthetic {
+                name: "connection-version-mismatch",
+                about: "连接类整页：后台服务与客户端版本不一致（说明 + 出口「重新打开 iWork」，不转圈）",
+                connection: view(Connection::Waiting(WaitPrompt::VersionMismatch), false),
+            },
+            Synthetic {
+                name: "connection-switching-version",
+                about: "连接类整页：正在切换版本（中性提示，后台照常重连）",
+                connection: view(Connection::Waiting(WaitPrompt::SwitchingVersion), false),
+            },
+            Synthetic {
+                name: "connection-environment",
+                about: "连接类整页：不支持的环境（M1 的 Windows），有标题、没有出口。真界面的说明文字取启动错误原文",
+                connection: view(Connection::Environment("M1 暂不支持 Windows".into()), false),
+            },
+            Synthetic {
+                name: "quit-confirm",
+                about: "「完全退出 iWork」确认框（菜单点了之后）",
+                connection: view(Connection::Live, true),
+            },
+        ]
+    }
+
+    /// 在一份录像后面接一帧连接视图；全量帧里同样追加（网页按顺序应用，后来的盖住前面的）。
+    fn with_connection(base: &record::Recording, view: &pb::ConnectionView) -> record::Recording {
+        use prost::Message as _;
+        let change = pb::ViewChange {
+            change: Some(pb::view_change::Change::Connection(pb::ConnectionPatch {
+                view: Some(view.clone()),
+            })),
+        };
+        let patch = pb::ViewPatch {
+            changes: vec![change.clone()],
+            ..Default::default()
+        };
+        let mut full = pb::ViewPatch::decode(base.full.as_slice()).expect("自己写的全量帧解得开");
+        full.changes.push(change);
+        let mut frames = base.frames.clone();
+        frames.push(patch.encode_to_vec());
+        record::Recording {
+            frames,
+            full: full.encode_to_vec(),
+            ..base.clone()
+        }
+    }
+
     /// 目录：网页的预览页与测试按它找录像。手写 JSON，免得为一个小文件加依赖。
-    fn index_json(list: &[(&Scenario, usize)]) -> String {
+    fn index_json(list: &[Entry]) -> String {
         let esc = |s: &str| {
             s.chars()
                 .flat_map(|c| match c {
@@ -131,14 +236,15 @@ mod unix {
         };
         let items: Vec<String> = list
             .iter()
-            .map(|(s, opened)| {
-                let focus = s
+            .map(|e| {
+                let focus = e
                     .focus
                     .map_or("null".to_owned(), |f| format!("\"{}\"", esc(f)));
                 format!(
-                    "  {{\"name\": \"{}\", \"about\": \"{}\", \"focus\": {focus}, \"opened\": {opened}}}",
-                    esc(s.name),
-                    esc(s.about)
+                    "  {{\"name\": \"{}\", \"about\": \"{}\", \"focus\": {focus}, \"opened\": {}}}",
+                    esc(&e.name),
+                    esc(&e.about),
+                    e.opened
                 )
             })
             .collect();

@@ -1,6 +1,7 @@
 /* 全站基础样式。颜色、字号、圆角只引设计系统令牌（docs/design/design-system/tokens.css），组件不写死颜色。 */
 @import "@design/tokens.css";
 @import "@design/motion.css";
+@import "./forms.css";
 
 /* 字体随包带（Q13）：fontsource 变体包注册的族名带「Variable」后缀，这里把令牌指过去；
    系统字体留作后备。令牌文件本身不改。 */

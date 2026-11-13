@@ -93,7 +93,9 @@ autostart_state() {
     echo 没注册
   fi
 }
-pids_of() { pgrep -x "$1" 2>/dev/null || true; }
+# 只认本用户的进程：macOS 的 pgrep 不带 -u 会匹配所有用户的同名进程（平时账号里的开发后台、测试进程），
+# 前置检查会误停，演练中途会选中、去杀别人的进程。找进程只有这一处
+pids_of() { pgrep -x -u "$UIDN" "$1" 2>/dev/null || true; }
 any_iwork_running() { [ -n "$(pids_of iwork-daemon)$(pids_of iwork-client)" ]; }
 # launchd 用户环境里的 IWORK_DATA_DIR：只问这一个名字，只回三态，不回值
 launchd_data_dir_state() {
@@ -288,6 +290,15 @@ F_READY='.fields.message == "后台服务就绪"'
 F_INSTALLING='.fields.message == "安装中：磁盘上的后台不是我，也还没有装齐的包"'
 F_DROPPED='(.fields.message // "") | test("丢了")'
 connected_filter() { echo "${F_CONNECTED//\$pid/$1}"; }
+# wait_event 交回的那一行日志的时刻
+ts_of() { jq -r '.ts' <<<"$1"; }
+# 等 <起点> 之后的「自行重启」，再等这一条之后的「就绪」。「就绪」按这次重启的时刻找，不按起点找：前一次重启的
+# 「就绪」可能晚于起点到（上一格只等到重启就往下走了），按起点找会把它当成这一次的，进程还没换成新版就去比 CDHash
+wait_restart_ready() { # <名字> <起点>
+  local restart
+  restart="$(wait_event "$1 自行重启" "$2" "$F_RESTART")" || return 1
+  wait_event "$1 就绪" "$(ts_of "$restart")" "$F_READY" >/dev/null
+}
 stop_log() { note "日志配置没放行第 $1 类（$2）：后面的格一格都不做，不记成 FAIL"; exit 4; }
 
 cdhash_of_pid() { codesign -dvvv "$1" 2>&1 | sed -n 's/^CDHash=//p' | head -1; }
@@ -327,8 +338,8 @@ INODE_BEFORE="$(stat -f %i "$DEST/Contents/MacOS/iwork-daemon")"
 OLD_HASH="$(cdhash_of_pid "$DAEMON_PID")"
 T2="$(now_ms)"
 install_package b-unsigned
-wait_event "②自行重启（U1）" "$T2" "$F_RESTART" >/dev/null || stop_log 2 "磁盘上装齐了另一版，自行重启"
-wait_event "U1 重启后就绪" "$T2" "$F_READY" >/dev/null || FAILURES+=("U1：重启后没就绪")
+R2="$(wait_event "②自行重启（U1）" "$T2" "$F_RESTART")" || stop_log 2 "磁盘上装齐了另一版，自行重启"
+wait_event "U1 重启后就绪" "$(ts_of "$R2")" "$F_READY" >/dev/null || FAILURES+=("U1：重启后没就绪")
 NEW_HASH="$(cdhash_of_pid "$DAEMON_PID")"
 if kill -0 "$DAEMON_PID" 2>/dev/null && [ "$NEW_HASH" = "$(cdhash_of_file "$DEST/Contents/MacOS/iwork-daemon")" ] && [ "$NEW_HASH" != "$OLD_HASH" ]; then
   note "U1 PASS：同一个 pid $DAEMON_PID 重启成 B 版（inode 前 ${INODE_BEFORE}、后 $(stat -f %i "$DEST/Contents/MacOS/iwork-daemon")）"
@@ -364,7 +375,8 @@ else
 fi
 T5="$(now_ms)"
 install_package b-signed
-if wait_event "U4 救回后自行重启" "$T5" "$F_RESTART" >/dev/null; then note "U4 PASS：整包替换后重启成 B 版形态 B"; else note "U4 FAIL：整包替换后 ${WAIT} 秒内没重启"; fi
+# 等到这次重启的「就绪」再往下走：不然它的「就绪」会落进 9.7 第一轮
+if wait_restart_ready "U4 救回后" "$T5"; then note "U4 PASS：整包替换后重启成 B 版形态 B"; else note "U4 FAIL：整包替换后 ${WAIT} 秒内没重启并就绪"; fi
 DAEMON_PID="$(pids_of iwork-daemon | head -1)"
 
 # ---------------------------------------------------------------- 9.6 形态 B 与 9.7 的另两遍
@@ -373,8 +385,7 @@ upgrade_round() { # <从> <到>：后台跑着 <从>、客户端关着；整包�
   pid="$(pids_of iwork-daemon | head -1)"
   t="$(now_ms)"
   install_package "$to"
-  if wait_event "9.7 ${from}→$to 自行重启" "$t" "$F_RESTART" >/dev/null \
-     && wait_event "9.7 ${from}→$to 就绪" "$t" "$F_READY" >/dev/null \
+  if wait_restart_ready "9.7 ${from}→$to" "$t" \
      && [ "$(cdhash_of_pid "$pid")" = "$(cdhash_of_file "$DEST/Contents/MacOS/iwork-daemon")" ]; then
     local installing
     installing="$(events_since "$t" "$F_INSTALLING" | wc -l | tr -d ' ')"

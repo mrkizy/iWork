@@ -20,6 +20,7 @@ mod conversation;
 pub mod dispatch;
 pub mod engine;
 pub mod lifecycle;
+pub mod query;
 mod settings;
 mod turn;
 
