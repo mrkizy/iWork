@@ -27,7 +27,7 @@
   --warnTx:#7A5A0E;
   --warnBd:#EBCB79;
   --okBg:#E3F2E7;
-  --okTx:#2F7D55;
+  --okTx:#2B7551;
   --impBg:#FDF3D7;
   --impTx:#7A5A0E;
   --blkBg:#FBE3DA;
@@ -256,7 +256,7 @@
 
   --sidebar-w: 296px;     /* 侧栏外宽（含内边距与右边框，box-sizing: border-box），与画布截图一致 */
   --sidebar-w-min: 240px; /* 可拖动调宽的下限（ui-m1 2a 第 12 条） */
-  --sidebar-w-max: 390px; /* 完整侧栏上限；运行时还要保证主区域至少 480px */
+  --sidebar-w-max: 390px; /* 完整侧栏上限；运行时还要保证主区域至少 568px（ui-m1 2a 第 12b 条） */
   --sidebar-w-rail: 64px; /* 仅头像形态的固定宽度；拖到约 160px 以下收成它 */
   --anchor-rail-w: 44px;  /* 消息锚点导轨宽 */
   --anchor-gutter: 52px;  /* 宽形态下头像左边缘到主区域左边缘 = 导轨 44 + 间隙 8（ui-m1 2a 第 11 条）；对话区左内边距 = calc(var(--anchor-gutter) - 24px)（扣掉行自带的 24px），右内边距 0；主区域 < 600px 切窄形态，回到 ≥ 620px 切回 */
@@ -265,6 +265,7 @@
   --content-max: 720px;   /* 对话内容列 */
   --composer-max: 760px;  /* 输入框 */
   --window-min-w: 880px;  /* 窗口最小宽度（ui-m1 2a 第 12b 条）；完整侧栏实际上限 = min(--sidebar-w-max, 窗口宽 - 568px)，568 = 窄形态内容列 520 + 行内边距 48 */
+  --profile-w: 356px;     /* 助手私聊页右侧资料栏宽；主区域 < 924px 收起（ui-m1 2a 第 18 条 d） */
 }
 
 body {
