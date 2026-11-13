@@ -26,8 +26,13 @@
 #   repo.lock              抓取、建删 worktree 的短锁
 #   PERF_WINDOW            存在时拒绝起新的重测试（T11 夜间测量手动建、测完删）
 #
-# 只用 ssh 和 git：不开端口（ClearAllForwardings）、不转发 agent、不改系统设置与钥匙串（git 抓取关掉凭据助手）。
-# 命令在 env -i 下启动，只带下面 rh_command_env 列出的变量，本机和 ssh 会话里的环境变量一个都不带进去。
+# 只用 ssh 和 git：不开端口（ClearAllForwardings）、不转发 agent、不改系统设置与钥匙串。
+# 信任边界（每一层都不靠「过滤」，而是只放进白名单）：
+#   本机 → ssh：ssh 在 env -i 下启动，用 -F /dev/null 不读任何 ssh 配置；连接参数只从 `ssh -G mac120`
+#     里挑 hostname、user、port、identityfile 等几项（ssh_args_for），所以配置里的 SendEnv / SetEnv 带不过去。
+#   远端 git：rh_git 在 env -i 下跑，不读全局与系统 git 配置，关掉凭据助手、askpass 与终端提示；要鉴权就直接失败。
+#   远端命令：env -i，只带 rh_command_env 列出的变量。
+#   任务名：只许字母数字 . _ -、不许 ..，本机与远端共用 rh_is_task_name；动路径前再核真实路径落在 tasks/ 之下。
 #
 # 测试替身：REMOTE_HEAVY_SSH（替换 ssh 程序）、REMOTE_HEAVY_ORIGIN（远端抓取的地址），只给 --selftest 用。
 set -euo pipefail
@@ -36,7 +41,6 @@ HOST="mac120"
 ORIGIN_URL="${REMOTE_HEAVY_ORIGIN:-https://github.com/mrkizy/iWork.git}"
 DEFAULT_TIMEOUT="2h"
 DEFAULT_MIN_FREE_GB=50
-TASK_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 
 die_usage() {
   echo "remote-heavy: $*" >&2
@@ -76,6 +80,7 @@ rh_main() {
   # 发起这次运行的 sshd 会话进程；它没了就说明连接断了。
   SESSION_PID=$PPID
   LOG=""
+  rh_validate_inputs
   mkdir -p "$TASKS" || rh_refuse "建不了 $TASKS"
   case "$R_MODE" in
     run) rh_run ;;
@@ -85,8 +90,70 @@ rh_main() {
   esac
 }
 
-rh_check_task_name() {
-  printf '%s' "$R_TASK" | grep -Eq "$R_TASK_RE" || rh_refuse "任务名不合法：'$R_TASK'"
+# 任务名会拼进远端路径，是删除操作的目标，本机与远端都只用这一个判断。
+# 字符集逐个列出而不用 A-Z 这类范围：范围的含义随 locale 变，列出来的不会。整串匹配，换行、斜杠、
+# 多字节字符都不在集合里；首字符不许是 . _ -，整串不许含 ..。
+rh_is_task_name() {
+  local n=$1 alnum='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+  [ "${#n}" -ge 1 ] && [ "${#n}" -le 64 ] || return 1
+  case "$n" in
+    [!$alnum]* | *[!$alnum._-]* | *..*) return 1 ;;
+  esac
+  return 0
+}
+
+rh_is_sha() {
+  [ "${#1}" -eq 40 ] || return 1
+  case "$1" in *[!0123456789abcdef]*) return 1 ;; esac
+  return 0
+}
+
+rh_is_uint() {
+  case "$1" in '' | *[!0123456789]*) return 1 ;; esac
+  [ "${#1}" -le 9 ]
+}
+
+# 远端入口先把收到的参数全部核一遍，之后的代码只信任它们的形状。
+rh_validate_inputs() {
+  case "$R_MODE" in run | clean | list) ;; *) rh_refuse "未知模式 '$R_MODE'" ;; esac
+  if [ "$R_MODE" != list ]; then
+    rh_is_task_name "$R_TASK" || rh_refuse "任务名不合法：$(printf '%q' "$R_TASK")"
+  fi
+  if [ "$R_MODE" = run ]; then
+    rh_is_sha "$R_SHA" || rh_refuse "提交号不合法：$(printf '%q' "$R_SHA")"
+    rh_is_uint "$R_TIMEOUT" && [ "$R_TIMEOUT" -gt 0 ] || rh_refuse "超时不合法：$(printf '%q' "$R_TIMEOUT")"
+    rh_is_uint "$R_MIN_FREE_GB" || rh_refuse "空间阈值不合法：$(printf '%q' "$R_MIN_FREE_GB")"
+    [ -n "$R_ORIGIN" ] || rh_refuse "origin 地址为空"
+    [ "${#R_CMD[@]}" -gt 0 ] || rh_refuse "没有命令"
+  fi
+}
+
+# 任务目录：入口核过名字之后，动路径前再核一次（纵深防御）：名字本身、tasks/ 不是符号链接、
+# 任务目录存在时解析后的物理路径正好是 <tasks 的物理路径>/<任务名>、固定子目录不是符号链接。
+# 结果放在 TD。目录刚建出来后要再调一次，才核得到物理路径。
+rh_task_dir() {
+  local tasks_real root_real sub
+  rh_is_task_name "$R_TASK" || rh_refuse "任务名不合法：$(printf '%q' "$R_TASK")"
+  root_real=$(cd -P "$ROOT" && pwd) || rh_refuse "解析不了 $ROOT"
+  [ ! -L "$TASKS" ] || rh_refuse "$TASKS 是符号链接"
+  tasks_real=$(cd -P "$TASKS" && pwd) || rh_refuse "解析不了 $TASKS"
+  [ "$tasks_real" = "$root_real/tasks" ] || rh_refuse "$TASKS 解析到了 ${tasks_real}，不在 $root_real 之下"
+  TD="$tasks_real/$R_TASK"
+  if [ -e "$TD" ]; then
+    [ "$(cd -P "$TD" && pwd)" = "$TD" ] || rh_refuse "$TD 解析后不在 $tasks_real 之下"
+    for sub in src target tmp logs; do
+      [ ! -L "$TD/$sub" ] || rh_refuse "$TD/$sub 是符号链接"
+    done
+  fi
+}
+
+# 远端所有 git 调用都走这里：env -i 清掉 GIT_*、GIT_ASKPASS、SSH_ASKPASS 等一切环境；
+# 不读全局与系统配置（凭据助手、core.askPass、url.insteadOf 都进不来）；命令行再显式关掉凭据助手与
+# askpass，终端提示也关掉，需要鉴权时 git 直接失败而不是去问谁。
+rh_git() {
+  env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+    git -c credential.helper= -c core.askPass= "$@"
 }
 
 # PERF_WINDOW 与剩余空间：起跑前查一次，拿到锁后再查一次（等锁期间可能有人建了标记或占了空间）。
@@ -149,29 +216,39 @@ rh_unlock_heavy() {
 
 rh_fetch_and_verify() {
   if [ ! -d "$REPO" ]; then
-    git init -q --bare "$REPO" || rh_refuse "建不了裸仓库 $REPO"
+    rh_git init -q --bare "$REPO" || rh_refuse "建不了裸仓库 $REPO"
   fi
-  git -C "$REPO" config remote.origin.url "$R_ORIGIN"
-  # 关掉凭据助手与终端提示：公开仓库不需要凭据，也绝不去读钥匙串。
-  GIT_TERMINAL_PROMPT=0 git -C "$REPO" -c credential.helper= fetch --quiet --prune origin \
+  rh_git -C "$REPO" config remote.origin.url "$R_ORIGIN"
+  # 公开仓库不需要凭据；rh_git 让需要鉴权的抓取直接失败，绝不去读钥匙串或问 askpass。
+  rh_git -C "$REPO" fetch --quiet --prune origin \
     '+refs/heads/*:refs/remotes/origin/*' || rh_refuse "从 $R_ORIGIN 抓取失败"
-  if ! git -C "$REPO" cat-file -e "$R_SHA^{commit}" 2>/dev/null ||
-    [ -z "$(git -C "$REPO" for-each-ref --count=1 --contains "$R_SHA" refs/remotes/origin)" ]; then
+  if ! rh_git -C "$REPO" cat-file -e "$R_SHA^{commit}" 2>/dev/null ||
+    [ -z "$(rh_git -C "$REPO" for-each-ref --count=1 --contains "$R_SHA" refs/remotes/origin)" ]; then
     rh_refuse "提交 $R_SHA 不在 origin 的任何分支上：先 git push 再跑（本机未提交、未推送的改动不会带过去）"
   fi
 }
 
 rh_checkout() { # src
   local src=$1
-  if [ -e "$src/.git" ]; then
-    git -C "$src" checkout -q --detach --force "$R_SHA" &&
-      git -C "$src" clean -q -ffdx || rh_refuse "检出 $R_SHA 到 $src 失败"
+  if [ -e "$src" ]; then
+    # 已有的 src 必须是挂在我们裸仓库上的 worktree，才能对它 checkout --force 和 clean -ffdx。
+    rh_is_our_worktree "$src" || rh_refuse "$src 不是 $REPO 的 worktree，不动它"
+    rh_git -C "$src" checkout -q --detach --force "$R_SHA" &&
+      rh_git -C "$src" clean -q -ffdx || rh_refuse "检出 $R_SHA 到 $src 失败"
   else
-    git -C "$REPO" worktree prune
-    git -C "$REPO" worktree add -q --detach "$src" "$R_SHA" || rh_refuse "建 worktree $src 失败"
+    rh_git -C "$REPO" worktree prune
+    rh_git -C "$REPO" worktree add -q --detach "$src" "$R_SHA" || rh_refuse "建 worktree $src 失败"
   fi
-  [ "$(git -C "$src" rev-parse HEAD)" = "$R_SHA" ] || rh_refuse "$src 检出后 HEAD 不是 $R_SHA"
-  [ -z "$(git -C "$src" status --porcelain --ignored)" ] || rh_refuse "$src 检出后不干净"
+  [ "$(rh_git -C "$src" rev-parse HEAD)" = "$R_SHA" ] || rh_refuse "$src 检出后 HEAD 不是 $R_SHA"
+  [ -z "$(rh_git -C "$src" status --porcelain --ignored)" ] || rh_refuse "$src 检出后不干净"
+}
+
+rh_is_our_worktree() { # dir
+  local common repo_real
+  [ -f "$1/.git" ] || return 1
+  repo_real=$(cd -P "$REPO" && pwd) || return 1
+  common=$(rh_git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ "$(cd -P "$common" && pwd)" = "$repo_real" ]
 }
 
 # 命令能看到的全部环境变量。改这里就是改远端命令的环境。
@@ -203,7 +280,6 @@ rh_kill_group() { # pgid
 }
 
 rh_run() {
-  rh_check_task_name
   rh_check_gate
   rh_lock_repo
   rh_fetch_and_verify
@@ -214,8 +290,10 @@ rh_run() {
     "$(date '+%F %T')" "${R_CMD[*]}" >"$HOLDER"
   rh_check_gate
 
-  local td="$TASKS/$R_TASK"
-  mkdir -p "$td/target" "$td/tmp" "$td/logs"
+  rh_task_dir
+  mkdir -p "$TD/target" "$TD/tmp" "$TD/logs" || rh_refuse "建不了 $TD 下的目录"
+  rh_task_dir
+  local td=$TD
   LOG="$td/logs/$(date -u +%Y%m%dT%H%M%SZ)-${R_SHA:0:12}.log"
   : >"$LOG"
   rh_lock_repo
@@ -266,20 +344,22 @@ rh_run() {
 }
 
 rh_clean() {
-  rh_check_task_name
-  local td="$TASKS/$R_TASK"
-  if [ ! -e "$td" ]; then
+  rh_task_dir
+  if [ ! -e "$TD" ]; then
     rh_say "没有任务 ${R_TASK}，不用清"
     exit 0
   fi
   rh_lock_heavy
   printf 'task=%s pid=%s since=%s cmd=clean\n' "$R_TASK" "$$" "$(date '+%F %T')" >"$HOLDER"
-  local size
+  # 等锁期间目录可能被换掉，拿到锁后再核一次真实路径，之后才删。
+  rh_task_dir
+  local td=$TD size
   size=$(du -sh "$td" 2>/dev/null | awk '{print $1}')
   rh_lock_repo
-  if [ -e "$td/src/.git" ]; then git -C "$REPO" worktree remove --force "$td/src" || true; fi
+  if rh_is_our_worktree "$td/src"; then rh_git -C "$REPO" worktree remove --force "$td/src" || true; fi
+  # rm -rf 不跟随符号链接；td 已核过是 tasks/ 下的真实目录。
   rm -rf "$td" || rh_refuse "删不掉 $td"
-  if [ -d "$REPO" ]; then git -C "$REPO" worktree prune; fi
+  if [ -d "$REPO" ]; then rh_git -C "$REPO" worktree prune; fi
   rh_unlock_repo
   rh_unlock_heavy
   rh_say "已删任务 ${R_TASK}（约 ${size}）"
@@ -293,7 +373,7 @@ rh_list() {
   for td in "$TASKS"/*; do
     [ -d "$td" ] || continue
     printf '  %-32s %8s  %s\n' "$(basename "$td")" "$(du -sh "$td" 2>/dev/null | awk '{print $1}')" \
-      "$(git -C "$td/src" rev-parse --short=12 HEAD 2>/dev/null || echo '-')"
+      "$(rh_git -C "$td/src" rev-parse --short=12 HEAD 2>/dev/null || echo '-')"
   done
 }
 
@@ -305,12 +385,48 @@ parse_seconds() { # 90 | 30m | 2h
   local v=$1 n unit
   n=${v%[smh]}
   unit=${v#"$n"}
-  case "$n" in '' | *[!0-9]*) die_usage "时长不合法：$v" ;; esac
+  rh_is_uint "$n" || die_usage "时长不合法：$(printf '%q' "$v")"
   case "$unit" in
     '' | s) echo "$n" ;;
     m) echo $((n * 60)) ;;
     h) echo $((n * 3600)) ;;
   esac
+}
+
+# 由 `ssh -G <别名>` 解析出的有效配置里只挑连接要的几项，拼成 SSH_ARGS；之后 ssh 用 -F /dev/null 运行，
+# 不再读用户或系统的 ssh 配置，配置里的 SendEnv、SetEnv、LocalForward、ProxyCommand 等都进不来。
+# 第二个参数只给自测用：指定解析时读的配置文件。
+ssh_args_for() { # 主机别名 [配置文件]
+  local alias=$1 cfg=${2:-} conf line key val hostname="" user="" port=""
+  if [ -n "$cfg" ]; then
+    conf=$(ssh -G -F "$cfg" "$alias" 2>/dev/null) || { echo "remote-heavy: ssh -G $alias 失败" >&2; return 2; }
+  else
+    conf=$(ssh -G "$alias" 2>/dev/null) || { echo "remote-heavy: ssh -G $alias 失败" >&2; return 2; }
+  fi
+  SSH_ARGS=(-F /dev/null)
+  while IFS= read -r line; do
+    key=${line%% *}
+    val=${line#* }
+    case "$key" in
+      hostname) hostname=$val ;;
+      user) user=$val ;;
+      port) port=$val ;;
+      identityfile) SSH_ARGS+=(-o "IdentityFile=$val") ;;
+      certificatefile) SSH_ARGS+=(-o "CertificateFile=$val") ;;
+      identitiesonly) SSH_ARGS+=(-o "IdentitiesOnly=$val") ;;
+      hostkeyalias) SSH_ARGS+=(-o "HostKeyAlias=$val") ;;
+      userknownhostsfile) SSH_ARGS+=(-o "UserKnownHostsFile=$val") ;;
+      proxycommand | proxyjump)
+        [ "$val" = none ] || { echo "remote-heavy: $alias 配了 ${key}，本脚本不经代理连接" >&2; return 2; } ;;
+    esac
+  done <<<"$conf"
+  case "$hostname" in '' | *[!A-Za-z0-9.:-]*) echo "remote-heavy: hostname 不合法：$(printf '%q' "$hostname")" >&2; return 2 ;; esac
+  case "$user" in '' | *[!A-Za-z0-9._-]*) echo "remote-heavy: user 不合法：$(printf '%q' "$user")" >&2; return 2 ;; esac
+  rh_is_uint "$port" || { echo "remote-heavy: port 不合法：$(printf '%q' "$port")" >&2; return 2; }
+  SSH_ARGS+=(-o "HostName=$hostname" -o "User=$user" -o "Port=$port"
+    -o BatchMode=yes -o StrictHostKeyChecking=yes -o ForwardAgent=no -o ForwardX11=no
+    -o ClearAllForwardings=yes -o PermitLocalCommand=no -o RequestTTY=no
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=4)
 }
 
 # 把远端程序与参数拼成一段脚本，经 ssh 的 stdin 交给远端 bash -s。
@@ -322,13 +438,13 @@ send_remote() { # mode task sha timeout min_free cmd...
   if [ -n "${REMOTE_HEAVY_SSH:-}" ]; then
     ssh_cmd=("$REMOTE_HEAVY_SSH")
   else
-    ssh_cmd=(ssh -o BatchMode=yes -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes
-      -o PermitLocalCommand=no -o 'SendEnv=-*' -o ServerAliveInterval=30 -o ServerAliveCountMax=4)
+    ssh_args_for "$HOST" || return 2
+    ssh_cmd=(ssh "${SSH_ARGS[@]}")
   fi
   local program
   program=$(
-    printf 'R_MODE=%q\nR_TASK=%q\nR_SHA=%q\nR_TIMEOUT=%q\nR_MIN_FREE_GB=%q\nR_ORIGIN=%q\nR_TASK_RE=%q\n' \
-      "$mode" "$task" "$sha" "$timeout" "$min_free" "$ORIGIN_URL" "$TASK_RE"
+    printf 'R_MODE=%q\nR_TASK=%q\nR_SHA=%q\nR_TIMEOUT=%q\nR_MIN_FREE_GB=%q\nR_ORIGIN=%q\n' \
+      "$mode" "$task" "$sha" "$timeout" "$min_free" "$ORIGIN_URL"
     printf 'R_CMD=('
     if [ "$#" -gt 0 ]; then printf ' %q' "$@"; fi
     printf ' )\n'
@@ -336,10 +452,19 @@ send_remote() { # mode task sha timeout min_free cmd...
     # 整段先读完再执行：rh_main 里的命令都不读 stdin（</dev/null），脚本本身就是 stdin。
     printf 'rh_main\n'
   )
+  # ssh 本身也在 env -i 下跑：本机的环境变量一个都不经它出去。SSH_AUTH_SOCK 只给本机 ssh 找钥匙用
+  # （ForwardAgent=no，不转发到远端）。
   local rc=0
-  printf '%s\n' "$program" | "${ssh_cmd[@]}" "$HOST" /bin/bash -s || rc=$?
+  printf '%s\n' "$program" |
+    env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin ${SSH_AUTH_SOCK:+SSH_AUTH_SOCK="$SSH_AUTH_SOCK"} \
+      "${ssh_cmd[@]}" "$HOST" /bin/bash -s || rc=$?
   if [ "$rc" -eq 255 ]; then echo "remote-heavy: ssh 失败或连接断开（退出码 255）" >&2; fi
   return "$rc"
+}
+
+need_task_name() {
+  rh_is_task_name "$1" ||
+    die_usage "任务名不合法：$(printf '%q' "$1")（只许字母数字 . _ -，首字符是字母数字，不含 ..，最长 64）"
 }
 
 cmd_run() {
@@ -361,18 +486,18 @@ cmd_run() {
   local seconds
   seconds=$(parse_seconds "$timeout")
   [ "$seconds" -gt 0 ] || die_usage "超时必须大于 0"
-  case "$min_free" in '' | *[!0-9]*) die_usage "--min-free-gb 要是整数：$min_free" ;; esac
+  rh_is_uint "$min_free" || die_usage "--min-free-gb 要是整数：$(printf '%q' "$min_free")"
 
   # 只取提交号：远端照提交号检出，本机工作区里的东西一概不带。是否已推送由远端对着 origin 判定。
   local sha
   sha=$(git rev-parse --verify --quiet "${ref}^{commit}") ||
     sha=$(git rev-parse --verify --quiet "origin/${ref}^{commit}") ||
-    die_usage "本机解析不了 '$ref'"
+    die_usage "本机解析不了 $(printf '%q' "$ref")"
   if [ -z "$task" ]; then
     [ "$ref" != "HEAD" ] || die_usage "用 HEAD 时请给 --task"
     task=${ref//\//-}
   fi
-  printf '%s' "$task" | grep -Eq "$TASK_RE" || die_usage "任务名不合法：'$task'（只许字母数字 . _ -，最长 64）"
+  need_task_name "$task"
   if ! git diff-index --quiet HEAD -- 2>/dev/null; then
     echo "remote-heavy: 提示：本机有未提交改动，不会带到远端；远端只跑 $sha" >&2
   fi
@@ -381,7 +506,7 @@ cmd_run() {
 
 cmd_clean() {
   [ "$#" -eq 1 ] || die_usage "clean 要一个任务名"
-  printf '%s' "$1" | grep -Eq "$TASK_RE" || die_usage "任务名不合法：'$1'"
+  need_task_name "$1"
   send_remote clean "$1" "" 0 0
 }
 
@@ -392,24 +517,43 @@ cmd_list() {
 
 # ---------------------------------------------------------------------------
 # 自测：假 ssh 在本机起 bash -s，HOME 指到临时目录，origin 是临时裸仓库。
-# 假 ssh 把本机环境整个传过去（比真 ssh 更坏的情况），用来证明命令的环境只来自白名单。
+# 整个自测在 env -i 下重新启动，临时目录里只会出现自测自己造的值（canary），不会有调用者的环境。
 # ---------------------------------------------------------------------------
 
 selftest() {
   local self
-  # tmp 不用 local：EXIT trap 在函数返回后才跑，要还能读到它。
   self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  if [ "${REMOTE_HEAVY_SELFTEST_CLEAN_ENV:-}" != 1 ]; then
+    exec env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR="${TMPDIR:-/tmp}" \
+      REMOTE_HEAVY_SELFTEST_CLEAN_ENV=1 "$BASH" "$self" --selftest
+  fi
+  # tmp 不用 local：EXIT trap 在函数返回后才跑，要还能读到它。
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/remote-heavy-selftest.XXXXXX")"
   # 自测里起的后台运行（锁、超时用例）在出错退出时也要收掉。
   trap 'jobs -p | xargs kill 2>/dev/null; rm -rf "$tmp"' EXIT
+  export HOME="$tmp/localhome" GIT_CONFIG_NOSYSTEM=1
   local home="$tmp/home" root="$tmp/home/work/iwork-remote" out="$tmp/out"
-  mkdir -p "$home" "$out"
-  cat >"$tmp/fake-ssh" <<EOF
+  mkdir -p "$HOME" "$home" "$out" "$tmp/fakedf"
+  # 远端 ~/work/iWork 的替身：T11 的检出。任何用例都不许动它。
+  mkdir -p "$home/work/iWork"
+  echo keep >"$home/work/iWork/sentinel"
+
+  # 假 ssh：只记本机 canary 有没有漏到它这里（不落盘任何别的环境）；远端会话里放一个 REMOTE_SESSION_CANARY，
+  # 模拟远端 sshd 接受了某个变量，用来证明远端命令的环境仍只来自白名单。$tmp/lowdisk 存在时换上假 df。
+  cat >"$tmp/fake-ssh" <<FAKE
 #!/bin/bash
-env >"$out/ssh-env"
-exec env HOME="$home" /bin/bash -s
-EOF
+if [ -n "\${REMOTE_HEAVY_SELFTEST_CANARY:-}" ]; then echo leaked >"$out/ssh-saw-canary"; fi
+prefix=""
+if [ -e "$tmp/lowdisk" ]; then prefix="$tmp/fakedf:"; fi
+exec env -i HOME="$home" PATH="\${prefix}/usr/bin:/bin:/usr/sbin:/sbin" REMOTE_SESSION_CANARY=remote-canary /bin/bash -s
+FAKE
   chmod +x "$tmp/fake-ssh"
+  cat >"$tmp/fakedf/df" <<'FAKE'
+#!/bin/sh
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/fake 1000000 999000 1000 99% /"
+FAKE
+  chmod +x "$tmp/fakedf/df"
 
   git init -q --bare "$tmp/origin.git"
   git clone -q "$tmp/origin.git" "$tmp/work" 2>/dev/null
@@ -427,14 +571,30 @@ EOF
   echo dirty >file.txt
 
   export REMOTE_HEAVY_SSH="$tmp/fake-ssh" REMOTE_HEAVY_ORIGIN="$tmp/origin.git"
-  export REMOTE_HEAVY_SELFTEST_SECRET="must-not-leak"
-  local fails=0 rc
-  check() { # 说明 条件…
+  ORIGIN_URL="$REMOTE_HEAVY_ORIGIN"
+  export REMOTE_HEAVY_SELFTEST_CANARY="canary-$$"
+  local fails=0 total=0 rc
+  # check 总是返回 0（脚本开着 set -e），结果记在 last_ok。
+  local last_ok
+  check() { # 说明 命令…
     local what=$1
     shift
-    if "$@"; then echo "  ok    $what"; else
+    total=$((total + 1))
+    if "$@"; then
+      echo "  ok    $what"
+      last_ok=1
+    else
       echo "  FAIL  $what"
       fails=$((fails + 1))
+      last_ok=0
+    fi
+  }
+  # 前置条件：不成立时后面依赖它的用例没有意义，立刻停。
+  need() {
+    check "$@"
+    if [ "$last_ok" -eq 0 ]; then
+      echo "remote-heavy selftest：前置条件不成立，停止（已 ${fails}/${total} 项失败）" >&2
+      exit 1
     fi
   }
   # 跑一次，退出码记进 rc，输出进 $out/<名字>
@@ -444,10 +604,74 @@ EOF
     rc=0
     "$self" "$@" >"$out/$name" 2>&1 || rc=$?
   }
+  # 正向用例：空间门禁放到 0，不受宿主剩余空间影响（门禁单独用假 df 测）。
+  rr() { # 名字 参数…
+    local name=$1
+    shift
+    rh "$name" --min-free-gb 0 "$@"
+  }
+  sentinel_intact() {
+    [ "$(cat "$home/work/iWork/sentinel" 2>/dev/null)" = keep ] &&
+      [ "$(ls -A "$home/work/iWork")" = sentinel ]
+  }
 
   echo "remote-heavy selftest（临时目录 ${tmp}）"
 
-  rh unpushed --task t-unpushed "$unpushed" -- /bin/sh -c "touch '$out/ran-unpushed'"
+  # --- 任务名：一个判断，本机与远端共用 ---
+  local good bad
+  for good in main t10a-b a.b_c-1 "$(printf 'a%.0s' $(seq 64))"; do
+    check "合法任务名：$(printf '%q' "$good")" rh_is_task_name "$good"
+  done
+  not() { ! "$@"; }
+  for bad in '' .x -x _x a/b ../x a..b .. $'ok\n/../../../iWork' $'a\nb' $'a\tb' ' a' 'é' "$(printf 'a%.0s' $(seq 65))"; do
+    check "非法任务名被拒：$(printf '%q' "$bad")" not rh_is_task_name "$bad"
+  done
+
+  # 本机入口：多行名字、.. 、斜杠，run 和 clean 都在本机就被拒
+  for bad in $'ok\n/../../../iWork' '../iWork' 'a/b' '..'; do
+    rr "badname-run" --task "$bad" "$pushed" -- /bin/sh -c "touch '$out/ran-badname'"
+    check "本机 run 拒绝任务名 $(printf '%q' "$bad")" test "$rc" -eq 2 -a ! -e "$out/ran-badname"
+    rh "badname-clean" clean "$bad"
+    check "本机 clean 拒绝任务名 $(printf '%q' "$bad")" [ "$rc" -eq 2 ]
+  done
+  # 远端入口：绕过本机检查直接把坏名字送过去，远端自己也要拒
+  local evil=$'ok\n/../../../iWork'
+  rc=0
+  send_remote run "$evil" "$pushed" 60 0 /bin/sh -c "touch '$out/ran-badname'" >"$out/remote-badname-run" 2>&1 || rc=$?
+  check "远端 run 自己拒绝多行任务名" test "$rc" -eq 2 -a ! -e "$out/ran-badname"
+  rc=0
+  send_remote clean "$evil" "" 0 0 >"$out/remote-badname-clean" 2>&1 || rc=$?
+  check "远端 clean 自己拒绝多行任务名" [ "$rc" -eq 2 ]
+  check "边界外哨兵（远端 ~/work/iWork）没被动" sentinel_intact
+
+  # 纵深防御：任务目录或 src 是指向边界外的符号链接时，run 与 clean 都拒绝
+  mkdir -p "$root/tasks" "$root/tasks/t-sym"
+  ln -s "$home/work/iWork" "$root/tasks/evil"
+  ln -s "$home/work/iWork" "$root/tasks/t-sym/src"
+  rr sym-run --task evil "$pushed" -- /bin/sh -c "touch '$out/ran-sym'"
+  check "任务目录是符号链接：run 拒绝" test "$rc" -eq 2 -a ! -e "$out/ran-sym"
+  rh sym-clean clean evil
+  check "任务目录是符号链接：clean 拒绝" [ "$rc" -eq 2 ]
+  rr sym-src --task t-sym "$pushed" -- /bin/sh -c "touch '$out/ran-sym'"
+  check "src 是符号链接：run 拒绝" test "$rc" -eq 2 -a ! -e "$out/ran-sym"
+  check "符号链接用例后哨兵没被动" sentinel_intact
+  rm "$root/tasks/evil" "$root/tasks/t-sym/src"
+  # logs 指向边界外：日志不许写到外面去
+  ln -s "$home/work/iWork" "$root/tasks/t-sym/logs"
+  rr sym-logs --task t-sym "$pushed" -- /bin/sh -c "touch '$out/ran-sym'"
+  check "logs 是符号链接：run 拒绝" test "$rc" -eq 2 -a ! -e "$out/ran-sym"
+  rm "$root/tasks/t-sym/logs"
+  # src 是普通目录但不是我们裸仓库的 worktree：不许对它 checkout --force / clean -ffdx
+  # 用 origin 的克隆冒充：它有这个提交，少了 worktree 核对就会被 checkout --force、clean -ffdx 掉 precious
+  git clone -q "$tmp/origin.git" "$root/tasks/t-sym/src" 2>/dev/null
+  echo keep >"$root/tasks/t-sym/src/precious"
+  rr notwt --task t-sym "$pushed" -- /bin/sh -c "touch '$out/ran-sym'"
+  check "src 不是本仓库的 worktree：run 拒绝且没清它" test "$rc" -eq 2 -a ! -e "$out/ran-sym" -a -e "$root/tasks/t-sym/src/precious"
+  check "符号链接与非 worktree 用例后哨兵没被动" sentinel_intact
+  rm -rf "$root/tasks/t-sym"
+
+  # --- 只认 origin ---
+  rr unpushed --task t-unpushed "$unpushed" -- /bin/sh -c "touch '$out/ran-unpushed'"
   check "未推送提交被拒（退出码 2）" [ "$rc" -eq 2 ]
   check "未推送提交：提示先推送" grep -q '不在 origin' "$out/unpushed"
   check "未推送提交：命令没跑" [ ! -e "$out/ran-unpushed" ]
@@ -458,34 +682,41 @@ EOF
   local gone
   gone=$(git rev-parse HEAD)
   git push -q origin HEAD:refs/heads/gone 2>/dev/null
-  rh gone-1 --task t-gone "$gone" -- /bin/sh -c 'exit 0'
-  check "对照：分支还在时能跑" [ "$rc" -eq 0 ]
+  rr gone-1 --task t-gone "$gone" -- /bin/sh -c 'exit 0'
+  need "对照：分支还在时能跑" [ "$rc" -eq 0 ]
   git push -q origin :refs/heads/gone 2>/dev/null
-  rh gone-2 --task t-gone "$gone" -- /bin/sh -c "touch '$out/ran-gone'"
+  rr gone-2 --task t-gone "$gone" -- /bin/sh -c "touch '$out/ran-gone'"
   check "origin 上已不在任何分支的提交被拒" test "$rc" -eq 2 -a ! -e "$out/ran-gone"
   check "对照：远端裸仓库里还留着这个提交" git -C "$root/repo.git" cat-file -e "$gone^{commit}"
   git reset -q --hard "$unpushed"
   echo dirty >file.txt
 
-  rh exit7 --task t-a "$pushed" -- /bin/sh -c 'git rev-parse HEAD; cat file.txt; env >"$TMPDIR/../env"; exit 7'
-  check "退出码透传（7）" [ "$rc" -eq 7 ]
+  # --- 正常运行：退出码、输出、日志、环境 ---
+  rr exit7 --task t-a "$pushed" -- /bin/sh -c 'git rev-parse HEAD; cat file.txt; env >"$TMPDIR/../env"; exit 7'
+  need "退出码透传（7）" [ "$rc" -eq 7 ]
   check "输出流回本机且检出的是指定提交" grep -q "^$pushed\$" "$out/exit7"
   check "本机未提交改动没带过去" grep -q '^committed$' "$out/exit7"
   check "结束行给出日志路径与退出码" grep -q '结束：退出码 7.*日志 .*/tasks/t-a/logs/' "$out/exit7"
   check "远端留了日志且含命令输出" grep -q "^$pushed\$" "$root"/tasks/t-a/logs/*.log
   check "命令环境有 CARGO_INCREMENTAL=0" grep -q '^CARGO_INCREMENTAL=0$' "$root/tasks/t-a/env"
-  check "命令环境用任务自己的 target" grep -q "^CARGO_TARGET_DIR=$root/tasks/t-a/target\$" "$root/tasks/t-a/env"
+  # 远端按物理路径定任务目录（/var → /private/var 这类链接会被解开）
+  local root_real
+  root_real=$(cd -P "$root" && pwd)
+  check "命令环境用任务自己的 target" grep -q "^CARGO_TARGET_DIR=$root_real/tasks/t-a/target\$" "$root/tasks/t-a/env"
   check "命令 PATH 以 ~/.cargo/bin 开头" grep -q "^PATH=$home/.cargo/bin:" "$root/tasks/t-a/env"
-  check "本机环境变量没进命令" sh -c "! grep -q REMOTE_HEAVY_SELFTEST_SECRET '$root/tasks/t-a/env'"
-  check "对照：假 ssh 确实把它带到了远端" grep -q REMOTE_HEAVY_SELFTEST_SECRET "$out/ssh-env"
+  check "远端会话里的变量没进命令" not grep -q REMOTE_SESSION_CANARY "$root/tasks/t-a/env"
+  check "本机变量没进命令" not grep -q REMOTE_HEAVY_SELFTEST_CANARY "$root/tasks/t-a/env"
+  check "本机变量没经过 ssh（ssh 在 env -i 下启动）" [ ! -e "$out/ssh-saw-canary" ]
+  check "对照：本机环境里确实有这个变量" [ -n "$REMOTE_HEAVY_SELFTEST_CANARY" ]
 
-  rh exit0 --task t-a "$pushed" -- /bin/sh -c 'exit 0'
+  rr exit0 --task t-a "$pushed" -- /bin/sh -c 'exit 0'
   check "退出码透传（0）" [ "$rc" -eq 0 ]
 
-  # 锁：A 拿锁后一直等到测试放行；测试先看到 B 报「等锁」再放 A，所以不靠睡多久，机器再忙也不抖。
+  # --- 锁 ---
+  # A 拿锁后一直等到测试放行；测试先看到 B 报「等锁」再放 A，所以不靠睡多久，机器再忙也不抖。
   # B 必须等 A 结束才开始。等待都有上限（60 秒），超了按失败记。
   local order="$out/order" release="$out/release-a"
-  "$self" --task t-lock-a "$pushed" -- /bin/sh -c \
+  "$self" --min-free-gb 0 --task t-lock-a "$pushed" -- /bin/sh -c \
     "echo A-start >>'$order'; i=0; while [ ! -e '$release' ] && [ \$i -lt 600 ]; do sleep 0.1; i=\$((i+1)); done; echo A-end >>'$order'" \
     >"$out/lock-a" 2>&1 &
   local a_pid=$!
@@ -497,8 +728,8 @@ EOF
       i=$((i + 1))
     done
   }
-  check "锁：A 开始了" wait_for "$order" A-start
-  "$self" --task t-lock-b "$pushed" -- /bin/sh -c "echo B-start >>'$order'" >"$out/lock-b" 2>&1 &
+  need "锁：A 开始了" wait_for "$order" A-start
+  "$self" --min-free-gb 0 --task t-lock-b "$pushed" -- /bin/sh -c "echo B-start >>'$order'" >"$out/lock-b" 2>&1 &
   local b_pid=$!
   check "锁：B 报了在等锁、点名持有者" wait_for "$out/lock-b" '等锁：task=t-lock-a'
   touch "$release"
@@ -506,38 +737,86 @@ EOF
   wait "$b_pid" || true
   check "锁：B 在 A 结束后才开始" [ "$(tr '\n' ' ' <"$order")" = "A-start A-end B-start " ]
 
+  # --- PERF_WINDOW ---
   touch "$root/PERF_WINDOW"
-  rh perf --task t-a "$pushed" -- /bin/sh -c "touch '$out/ran-perf'"
-  check "PERF_WINDOW 存在时拒绝（退出码 2）" [ "$rc" -eq 2 ]
-  check "PERF_WINDOW：命令没跑" [ ! -e "$out/ran-perf" ]
+  rr perf --task t-a "$pushed" -- /bin/sh -c "touch '$out/ran-perf'"
+  check "PERF_WINDOW 存在时拒绝（退出码 2）" test "$rc" -eq 2 -a ! -e "$out/ran-perf"
   rm "$root/PERF_WINDOW"
-  rh perf-off --task t-a "$pushed" -- /bin/sh -c "touch '$out/ran-perf'"
+  rr perf-off --task t-a "$pushed" -- /bin/sh -c "touch '$out/ran-perf'"
   check "对照：删掉 PERF_WINDOW 后能跑" test "$rc" -eq 0 -a -e "$out/ran-perf"
 
-  rh disk --task t-a --min-free-gb 999999999 "$pushed" -- /bin/sh -c "touch '$out/ran-disk'"
+  # --- 空间门禁：用假 df（剩 1000 KB），不看宿主真实空间 ---
+  touch "$tmp/lowdisk"
+  rh disk --task t-a --min-free-gb 1 "$pushed" -- /bin/sh -c "touch '$out/ran-disk'"
   check "剩余空间低于阈值时拒绝（退出码 2）" test "$rc" -eq 2 -a ! -e "$out/ran-disk"
+  check "拒绝理由来自假 df（剩 0G）" grep -q '剩余空间 0G，低于阈值 1G' "$out/disk"
+  rh disk-ok --task t-a --min-free-gb 0 "$pushed" -- /bin/sh -c "touch '$out/ran-disk'"
+  check "对照：阈值 0 时同一个假 df 下能跑" test "$rc" -eq 0 -a -e "$out/ran-disk"
+  rm "$tmp/lowdisk"
 
-  # 超时：命令起一个后台 sleep 后挂住；超时后整组（含那个 sleep）都要没了，锁也要放掉。
-  rh timeout --task t-a --timeout 2 "$pushed" -- /bin/sh -c "sleep 300 & echo \$! >'$out/child'; wait"
+  # --- 超时：命令起一个后台 sleep 后挂住；超时后整组（含那个 sleep）都要没了，锁也要放掉 ---
+  rr timeout --task t-a --timeout 2 "$pushed" -- /bin/sh -c "sleep 300 & echo \$! >'$out/child'; wait"
   check "超时退出码 124" [ "$rc" -eq 124 ]
   check "超时：进程组里的后台子进程也被收掉" sh -c "! kill -0 \$(cat '$out/child') 2>/dev/null"
-  rh after-timeout --task t-a "$pushed" -- /bin/sh -c 'exit 0'
+  rr after-timeout --task t-a "$pushed" -- /bin/sh -c 'exit 0'
   check "超时后锁已释放（下一次不用等锁）" sh -c "[ $rc -eq 0 ] && ! grep -q 等锁 '$out/after-timeout'"
 
-  rh badname --task '../x' "$pushed" -- /bin/sh -c 'exit 0'
-  check "任务名带路径被拒" [ "$rc" -eq 2 ]
-
+  # --- clean ---
   rh clean clean t-a
   check "clean 成功" [ "$rc" -eq 0 ]
   check "clean：任务目录没了" [ ! -e "$root/tasks/t-a" ]
-  check "clean：worktree 登记也清了" sh -c "! git -C '$root/repo.git' worktree list | grep -q tasks/t-a"
+  check "clean：worktree 登记也清了" not sh -c "git -C '$root/repo.git' worktree list | grep -q tasks/t-a"
   check "对照：别的任务还在" [ -d "$root/tasks/t-lock-a/src" ]
+  check "全部用例跑完哨兵仍在" sentinel_intact
+
+  # --- ssh 边界：配置里的 SendEnv / SetEnv / 转发进不了真正发出去的参数 ---
+  cat >"$tmp/ssh_config" <<'CFG'
+Host rhtest
+  HostName 192.0.2.10
+  User someone
+  Port 2222
+  IdentityFile ~/.ssh/id_rhtest
+  IdentitiesOnly yes
+  SendEnv RH_SECRET_TOKEN LC_*
+  SetEnv RH_SET=1
+  LocalForward 9999 127.0.0.1:9999
+  ForwardAgent yes
+CFG
+  need "对照：直接读这份配置时 SendEnv、SetEnv 都生效" sh -c \
+    "ssh -G -F '$tmp/ssh_config' rhtest | grep -q '^sendenv RH_SECRET_TOKEN' && ssh -G -F '$tmp/ssh_config' rhtest | grep -q '^setenv RH_SET=1'"
+  need "ssh_args_for 解析成功" ssh_args_for rhtest "$tmp/ssh_config"
+  local eff
+  eff=$(ssh -G "${SSH_ARGS[@]}" rhtest 2>/dev/null)
+  check "有效配置里没有 SendEnv" not grep -q '^sendenv ' <<<"$eff"
+  check "有效配置里没有 SetEnv" not grep -q '^setenv ' <<<"$eff"
+  check "有效配置里没有 LocalForward" not grep -q '^localforward ' <<<"$eff"
+  check "ForwardAgent 关着" grep -q '^forwardagent no$' <<<"$eff"
+  check "连接参数保留：hostname/user/port" sh -c 'printf "%s\n" "$1" | grep -q "^hostname 192.0.2.10$" && printf "%s\n" "$1" | grep -q "^user someone$" && printf "%s\n" "$1" | grep -q "^port 2222$"' _ "$eff"
+  check "连接参数保留：identityfile" grep -q '^identityfile ~/.ssh/id_rhtest$' <<<"$eff"
+  printf 'Host rhproxy\n  HostName 192.0.2.11\n  ProxyCommand nc %%h %%p\n' >"$tmp/ssh_config_proxy"
+  check "配了 ProxyCommand 时拒绝" not ssh_args_for rhproxy "$tmp/ssh_config_proxy" 2>/dev/null
+
+  # --- 远端 git：askpass、凭据助手、全局配置都进不来 ---
+  local gh="$tmp/githome" called="$out/askpass-called"
+  mkdir -p "$gh"
+  printf '#!/bin/sh\necho x >>"%s"\necho x\n' "$called" >"$tmp/askpass"
+  chmod +x "$tmp/askpass"
+  printf '[credential]\n\thelper = "!f() { echo helper >>%s; }; f"\n[core]\n\taskPass = %s\n' "$called" "$tmp/askpass" >"$gh/.gitconfig"
+  local cred_req=$'protocol=https\nhost=example.invalid\n\n'
+  rm -f "$called"
+  HOME="$gh" GIT_ASKPASS="$tmp/askpass" GIT_TERMINAL_PROMPT=0 git credential fill <<<"$cred_req" >/dev/null 2>&1 || true
+  need "对照：普通 git 会调 askpass / 凭据助手" [ -s "$called" ]
+  rm -f "$called"
+  rc=0
+  HOME="$gh" GIT_ASKPASS="$tmp/askpass" SSH_ASKPASS="$tmp/askpass" rh_git credential fill <<<"$cred_req" >/dev/null 2>&1 || rc=$?
+  check "rh_git：需要鉴权时直接失败" [ "$rc" -ne 0 ]
+  check "rh_git：askpass、凭据助手都没被调用" [ ! -e "$called" ]
 
   if [ "$fails" -eq 0 ]; then
-    echo "remote-heavy selftest：通过"
+    echo "remote-heavy selftest：通过（${total} 项）"
     return 0
   fi
-  echo "remote-heavy selftest：$fails 项失败（输出在 ${out}，已随临时目录删除；要留现场把 trap 去掉重跑）" >&2
+  echo "remote-heavy selftest：${fails}/${total} 项失败（临时目录随退出删除；要留现场把 trap 去掉重跑）" >&2
   return 1
 }
 
@@ -547,7 +826,7 @@ main() {
     clean) shift; cmd_clean "$@" ;;
     list) shift; cmd_list "$@" ;;
     run) shift; cmd_run "$@" ;;
-    -h | --help) sed -n '2,32p' "$0" ;;
+    -h | --help) sed -n '2,40p' "$0" ;;
     '') die_usage "缺参数" ;;
     *) cmd_run "$@" ;;
   esac
