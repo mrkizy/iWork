@@ -461,10 +461,18 @@ impl Daemon {
     }
 }
 
-/// 进程组里还有没有进程。
+/// 进程组里还有没有在跑的进程。僵尸不算：它已经结束，只等收养它的 init 回收，什么时候回收不归后台管，后台清树
+/// 判空也不算它（T06 方案 5.4a）；`kill(-pgid, 0)` 对只剩僵尸的组照样成功，不能拿来判「组空了没有」。
 pub fn group_alive(pgid: u32) -> bool {
-    // SAFETY：信号 0 只探测
-    unsafe { libc::kill(-(pgid as i32), 0) == 0 }
+    let out = std::process::Command::new("ps")
+        .args(["-A", "-o", "pgid=,stat="])
+        .output()
+        .expect("运行 ps");
+    String::from_utf8_lossy(&out.stdout).lines().any(|line| {
+        let mut cols = line.split_whitespace();
+        cols.next().and_then(|g| g.parse::<u32>().ok()) == Some(pgid)
+            && cols.next().is_some_and(|stat| !stat.starts_with('Z'))
+    })
 }
 
 /// 日志文件的全部内容。
