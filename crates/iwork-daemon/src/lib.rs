@@ -3,6 +3,7 @@
 //! 入口是 [`boot::run`]：解析参数 → 启动表（[`boot`]）→ 运行 → 退出状态（[`exit::process_status`]）。
 
 pub mod args;
+pub mod attention;
 pub mod boot;
 #[cfg(unix)]
 mod daemon;

@@ -5,6 +5,7 @@
 
 use std::future::Future;
 
+use iwork_domain::common::Timestamp;
 use iwork_domain::id::{ApprovalId, ConversationId, JobId, TurnId, UserActionId};
 
 use crate::read_model::PendingItem;
@@ -67,6 +68,16 @@ impl OpenTarget {
             conversation_id: item.conversation_id(),
         }
     }
+}
+
+/// 后台记下的一次点击（`GetOpenTarget` 的答案）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenRecord {
+    /// 每记一次加一，从 1 起；客户端拿它判断是不是新的
+    pub token: u64,
+    pub target: OpenTarget,
+    /// 点击的时刻
+    pub at: Timestamp,
 }
 
 /// 一条系统通知；`open` 是点了它之后打开的那一项。

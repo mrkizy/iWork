@@ -13,5 +13,6 @@ pub mod codec;
 pub mod convert;
 pub mod details;
 pub mod lifecycle;
+pub mod notify;
 pub mod subscription;
 pub mod views;

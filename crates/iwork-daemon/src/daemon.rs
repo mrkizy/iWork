@@ -20,6 +20,7 @@ use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::args::DaemonArgs;
+use crate::attention::Attention;
 use crate::boot::{
     self, BootError, Identity, PAUSE_BEFORE_EXIT, Step, Store, StorePorts, VERSION, report,
     starting, status_of,
@@ -567,12 +568,14 @@ async fn serve_with<W: RunningWork>(
     cfg.trust = args.trust;
     // 查询与订阅快照共用一个读模型（和存储共用读线程池）；命令受理归组 B 的分发入口，没接时是 NotWired
     let read = Arc::new(store.read_model(boot::read_defaults()));
+    // 在看哪、点通知记下的目标（内存）：查询读它，连接断开清在看哪；ReportPresence 与 notify 任务等组 B 合入后接
+    let attention = Arc::new(Attention::default());
     let (server, publisher) = Server::new(
         cfg,
         id.own.clone(),
         DaemonHandler::new(
             gate.clone(),
-            QueryOr::new(Queries::new(read.clone()), NotWired),
+            QueryOr::new(Queries::new(read.clone(), attention.clone()), NotWired),
             work.clone(),
             stop_switch.clone(),
         )

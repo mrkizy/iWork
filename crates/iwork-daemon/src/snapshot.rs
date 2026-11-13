@@ -9,7 +9,7 @@ use iwork_ports::store::EventCodec;
 use iwork_proto::pb;
 use iwork_store::SqliteReadModel;
 
-use crate::handler::query::{answer_in, answer_outside};
+use crate::handler::query::{Place, answer_in, place};
 use crate::source::SnapshotProvider;
 
 /// 读模型上的快照提供方。
@@ -34,7 +34,7 @@ impl<C: EventCodec + 'static> SnapshotProvider for ReadSnapshots<C> {
             .filter_map(|q| q.kind)
             .collect();
         // 快照只由视图查询组成（登记表 snapshot_queries）；混进别的是登记表写错了
-        if let Some(k) = queries.iter().find(|k| answer_outside(k).is_some()) {
+        if let Some(k) = queries.iter().find(|k| place(k) != Place::View) {
             return Err(SourceError(format!("快照里有非视图查询：{k:?}")));
         }
         let read = self.read.view(move |tx| {
