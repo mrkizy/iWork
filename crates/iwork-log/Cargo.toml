@@ -1,0 +1,21 @@
+[package]
+name = "iwork-log"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# 后台与客户端共用的结构化日志（JSON 行、滚动、脱敏）与数据目录的定位（ADR-0013）。
+# 不依赖任何 I/O 框架：客户端与存储层都能用。
+[dependencies]
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["registry"] }
+serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW：日志文件不跟随链接打开
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

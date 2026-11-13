@@ -239,7 +239,8 @@ async function runCase(name: string, c: Case): Promise<Run> {
     await waitFor(`假后台${ready}（${c.scenario}）`, 120_000, () => (daemonErr.includes(ready) ? true : undefined));
     const client = spawn(join(TARGET, "debug/iwork-client"), [], {
       stdio: "ignore",
-      env: { ...process.env, IWORK_DEV_ENDPOINT: sock, IWORK_E2E_SCRIPT: script, IWORK_E2E_OUT: out, ...c.env },
+      // IWORK_DATA_DIR：客户端日志（client.log）写进用例的临时目录，不写开发者真实的数据目录
+      env: { ...process.env, IWORK_DEV_ENDPOINT: sock, IWORK_DATA_DIR: join(dir, "data"), IWORK_E2E_SCRIPT: script, IWORK_E2E_OUT: out, ...c.env },
     });
     children.push(client);
     const rssKb: number[] = [];

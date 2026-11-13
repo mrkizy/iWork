@@ -57,8 +57,14 @@ direct = ["thiserror", "futures-channel", "futures-core", "sha2", "serde_json", 
 [crates.iwork-app]
 internal = ["iwork-core", "iwork-shell", "iwork-ports", "iwork-proto", "iwork-domain"]
 
+[crates.iwork-log]
+# 后台与客户端共用的结构化日志与数据目录定位（ADR-0013）：只许 tracing 一族、serde_json，unix 上 libc（O_NOFOLLOW）
+internal = []
+direct = ["tracing", "tracing-subscriber", "serde_json", "libc"]
+
 [crates.iwork-store]
-internal = ["iwork-ports", "iwork-domain"]
+# iwork-log：数据目录的根与日志子目录在那里算（ADR-0013）
+internal = ["iwork-ports", "iwork-domain", "iwork-log"]
 direct = ["rusqlite", "sha2", "thiserror", "tracing"]
 direct_dev = ["pollster", "proptest", "prost", "prost-reflect", "rusqlite", "tempfile", "tracing-subscriber"]
 transitive_exempt = ["rusqlite"]
@@ -89,7 +95,7 @@ transitive_exempt = ["tokio"]
 internal = [
     "iwork-domain", "iwork-ports", "iwork-proto", "iwork-core", "iwork-shell", "iwork-app",
     "iwork-store", "iwork-agent-acp", "iwork-vcs-git", "iwork-host", "iwork-ipc",
-    "iwork-rootfs",
+    "iwork-rootfs", "iwork-log",
 ]
 deny_transitive = "none"
 
@@ -103,7 +109,8 @@ internal = []
 direct = ["serde", "serde_json", "libc"]
 
 [crates.iwork-client-core]
-internal = ["iwork-ipc", "iwork-proto"]
+# iwork-log：客户端日志 client.log，和 daemon.log 同一份格式与脱敏（ADR-0013）
+internal = ["iwork-ipc", "iwork-proto", "iwork-log"]
 transitive_exempt = ["tokio"]
 
 [crates.iwork-client]
@@ -112,7 +119,7 @@ transitive_exempt = ["tokio"]
 # 同一套，objc2-app-kit 为它加开 NSMenu、NSMenuItem。直接依赖 objc2、objc2-foundation 与加开的这两项：产品负责人 2026-11-12 批准。
 # rfd 0.17.2（关默认 feature，只开 gtk3、common-controls-v6）：回形针与「重新定位」的系统文件选择框（T09 组 2b，
 # 产品负责人 2026-11-11 定）。关掉默认的 xdg-portal / wayland，不带进 zbus 一类的 D-Bus 栈。
-internal = ["iwork-client-core", "iwork-ipc", "iwork-proto"]
+internal = ["iwork-client-core", "iwork-ipc", "iwork-proto", "iwork-log"]
 transitive_exempt = ["tokio", "tauri"]
 
 [crates.iwork-fake-agent]

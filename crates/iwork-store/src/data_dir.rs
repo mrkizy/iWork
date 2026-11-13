@@ -1,14 +1,14 @@
-//! 数据目录（技术设计 5.1，方案 2.1）：定位与目录结构。
+//! 数据目录（技术设计 5.1，方案 2.1）：目录结构。
 //!
-//! 只有这里知道各子目录叫什么；别的模块（迁移的备份、制品的三个区、T04 的 `run/`、T06 写进沙箱
-//! 只读区的 `attachments/`、`imports/`）都问它要路径。
+//! 根目录在哪、日志子目录叫什么由 `iwork_log::data_dir` 算（客户端也要找日志目录，ADR-0013）；其余子目录只有这里
+//! 知道叫什么，别的模块（迁移的备份、制品的三个区、T04 的 `run/`、T06 写进沙箱只读区的 `attachments/`、`imports/`）
+//! 都问它要路径。
 
 use std::path::{Path, PathBuf};
 
 use iwork_domain::common::ArtifactArea;
 
-/// 覆盖数据目录的环境变量：开发、测试与诊断时换目录用。
-pub const DATA_DIR_ENV: &str = "IWORK_DATA_DIR";
+pub use iwork_log::data_dir::DATA_DIR_ENV;
 
 const DB_FILE: &str = "iwork.db";
 
@@ -37,28 +37,11 @@ pub struct DataDir {
 }
 
 impl DataDir {
-    /// 三平台定位：macOS `~/Library/Application Support/iWork/`；Linux `$XDG_DATA_HOME/iwork/`
-    /// （未设则 `~/.local/share/iwork/`）；Windows `%LOCALAPPDATA%\iWork\`。
-    /// 环境变量 [`DATA_DIR_ENV`] 存在且非空时优先。
+    /// 定位数据目录（三平台的位置与 [`DATA_DIR_ENV`] 的覆盖见 `iwork_log::data_dir::locate_root`）。
     pub fn locate() -> Result<Self, DataDirError> {
-        let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
-        if let Some(root) = var(DATA_DIR_ENV) {
-            return Ok(Self::from_root(PathBuf::from(root)));
-        }
-        let root = if cfg!(target_os = "windows") {
-            PathBuf::from(var("LOCALAPPDATA").ok_or(DataDirError::HomeNotFound)?).join("iWork")
-        } else {
-            let home = PathBuf::from(var("HOME").ok_or(DataDirError::HomeNotFound)?);
-            if cfg!(target_os = "macos") {
-                home.join("Library/Application Support/iWork")
-            } else {
-                var("XDG_DATA_HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| home.join(".local/share"))
-                    .join("iwork")
-            }
-        };
-        Ok(Self::from_root(root))
+        iwork_log::data_dir::locate_root()
+            .map(Self::from_root)
+            .map_err(|iwork_log::data_dir::HomeNotFound| DataDirError::HomeNotFound)
     }
 
     pub fn from_root(root: PathBuf) -> Self {
@@ -123,7 +106,7 @@ impl DataDir {
     }
 
     pub fn logs(&self) -> PathBuf {
-        self.root.join("logs")
+        iwork_log::data_dir::logs_dir(&self.root)
     }
 }
 
@@ -144,22 +127,7 @@ fn area_dir_name(area: ArtifactArea) -> &'static str {
 
 /// 建目录（含上级）；只对这次新建的目录设 0700。
 fn create_private_dir(dir: &Path) -> Result<(), DataDirError> {
-    if dir.is_dir() {
-        return Ok(());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(|e| DataDirError::io(dir, e))
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::create_dir_all(dir).map_err(|e| DataDirError::io(dir, e))
-    }
+    iwork_log::data_dir::create_private_dir(dir).map_err(|e| DataDirError::io(dir, e))
 }
 
 #[cfg(test)]

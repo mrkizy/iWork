@@ -130,6 +130,8 @@ fn options() -> Options {
 }
 
 fn main() {
+    // 日志最先装：第一次拨号时取身份（清单审计）、判定后台（拒绝审计）都要有地方记（T03 方案 2.12）
+    let _log = iwork_client_core::logging::init();
     // 建不成拨号器（身份取不到、端点目录不安全）不在这里 panic：第一次拨号回 Environment，窗口照常开、整页显示原因、
     // 留「重试」，修好后重试能连上（T04p 方案 4.7）
     let dialer = effects::dialer();
@@ -209,6 +211,8 @@ fn main() {
             }
             #[cfg(target_os = "macos")]
             RunEvent::Reopen { .. } => reopen(app),
+            // 事件循环结束后进程直接退出、不跑 main 里的析构：日志队列在这里排空
+            RunEvent::Exit => iwork_client_core::logging::flush_global(),
             _ => {
                 let _ = app;
             }
