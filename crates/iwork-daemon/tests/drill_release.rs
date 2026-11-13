@@ -222,7 +222,9 @@ while :; do
     sleep 0.3
     rm -f '{st}/follow'
     line '"target":"iwork_daemon::tasks::install_watch","fields":{{"message":"磁盘上装齐了另一版，自行重启"}}'
-    cat "$dest" > '{st}/image'
+    # 换成看到变化时的那一版，不再读一次磁盘：这期间又装了新版的话，下一轮循环另记一次「自行重启」（真后台也是
+    # 重启成哪一版就是哪一版）；读当下的磁盘会一步跳到新版、却没有新版那条「自行重启」，等它的那一格就等不到
+    echo "$cur" > '{st}/image'
     line '"target":"iwork_daemon","fields":{{"message":"后台服务就绪"}}'
     unsigned_manifest
     c=$(cat '{st}/pids/iwork-client' 2>/dev/null)
