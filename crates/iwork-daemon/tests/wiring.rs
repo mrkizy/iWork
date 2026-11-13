@@ -164,6 +164,64 @@ async fn engine_sync_wiring_real_observer() {
     sync.abort();
 }
 
+/// D9：`engine-sync` 任务没了又重起（任务表照 restartable 重起它）：重起后第一件事是追平一次。任务不在的时候删掉助手、
+/// 留下孤儿审批；重起的任务拿一个没人叫的唤醒，所以孤儿只可能被这次起步追平清掉。对照：任务不在时孤儿留着。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn engine_sync_task_restarts_and_catches_up() {
+    let env = Env::new();
+    let raw = Arc::new(env.open());
+    raw.commit(cmd(1, orphan_setup())).await.unwrap();
+    let publishing = PublishState::new();
+    raw.set_commit_observer(Box::new(PublishObserver::new(
+        Arc::new(Nowhere),
+        publishing.clone(),
+    )))
+    .await
+    .unwrap();
+    let engine = engine_on(&env, &raw).await;
+    let synced = Arc::new(tokio::sync::Notify::new());
+    let after_sync = {
+        let s = synced.clone();
+        move || s.notify_one()
+    };
+    let first = tokio::spawn(engine_sync::run(
+        engine.clone(),
+        publishing.engine.clone(),
+        after_sync.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(10), synced.notified())
+        .await
+        .expect("第一次起来先追平一次");
+    // 任务没了
+    first.abort();
+    let _ = first.await;
+    raw.commit(cmd(
+        2,
+        vec![
+            AssistantDeleted {
+                assistant_id: aid(HELPER),
+                name_snapshot: "a40".into(),
+            }
+            .into(),
+        ],
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!voided(&events(&raw).await), "对照：任务不在时孤儿留着");
+    // 重起：唤醒是新的、没人叫
+    let restarted = tokio::spawn(engine_sync::run(
+        engine.clone(),
+        Arc::new(tokio::sync::Notify::new()),
+        after_sync,
+    ));
+    tokio::time::timeout(Duration::from_secs(10), synced.notified())
+        .await
+        .expect("重起后追平了一次");
+    assert!(voided(&events(&raw).await), "重起后的那次追平把孤儿清了");
+    restarted.abort();
+}
+
 /// K15 的对照：把 `sync()` 直接写进写线程上的提交观察者。有孤儿要清时它要提交，排在写队列里等写线程，写线程却停在
 /// 回调里：删除那一笔的回执发不出来。正确接线（上一格）在同样的布置下限时返回。
 struct SyncInObserver {

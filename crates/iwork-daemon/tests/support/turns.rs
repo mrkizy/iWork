@@ -74,6 +74,8 @@ pub struct Ctl {
     pub opening: Notify,
     /// 为真时清树（`terminate`）永不返回：进程树清不掉
     pub hang_terminate: std::sync::atomic::AtomicBool,
+    /// 为真时收下取消但不理：回合一直跑着，直到 `finish_one`
+    pub ignore_cancel: std::sync::atomic::AtomicBool,
 }
 
 type Asker = Arc<
@@ -214,6 +216,9 @@ impl AgentSession for FakeSession {
     }
     async fn cancel(&self) -> Result<(), AgentError> {
         self.ctl.cancels.fetch_add(1, Ordering::SeqCst);
+        if self.ctl.ignore_cancel.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let c = self.cancelled.lock().unwrap().clone();
         c.0.store(true, Ordering::SeqCst);
         c.1.notify_waiters();
