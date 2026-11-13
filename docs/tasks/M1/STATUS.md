@@ -177,6 +177,8 @@
 
 ## 5 踩过的坑
 
+- **换 supervisor 后联系不上旧 worker（2026-11-13）**：新开的 supervisor 终端不能给旧 supervisor 派出的 worker `send_message`（CAO 只允许自己派的、派自己的、兄弟终端），旧 worker 的回报也只能发给已退出的旧终端。所以每个在途 worker 都要随时把现场写进自己 worktree 的 `.cao-handoff/`（分支、HEAD、剩下的步骤、命令），换 supervisor 时按它给每张卡派新 worker；旧终端不删（删了清 worktree）。`report_outcome` 时把 `workflow_name` 设成任务 ID，retrospector 才按名字找得到。
+
 - **变异测试挂住、占着重测试锁（2026-11-11）**：T05 复审的 reviewer 在副本里做变异，被改坏的代码让 turn_runner 挂住 1.5 小时，一直占着 `/tmp/iwork-heavy-test.lock`，别的卡全排在后面。派 reviewer、developer 做变异时写明：测试命令外面套 `timeout`（如 120 秒），挂住按「测试抓住了」记。排查：`ps -o pid,etime,command` 看 lockf 进程，`lsof -p <pid> | grep cwd` 看是谁的副本。（调优窗口 T-2 期间不改 reviewer 项目提示词，先写在派活消息里。）
 
 - **worker 窗口被缩成 93×7（2026-11-10 夜）**：所有 worker 收件箱卡了 9～12 小时。`agent-scaffold ps` 出现「收件箱有 N 条消息在等待投递」先看 `tmux list-windows -t cao-a46fd0b6 -F '#{window_index} #{window_width}x#{window_height}'`，太小就逐个 `resize-window -x 140 -y 45`。
