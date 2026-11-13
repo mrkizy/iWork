@@ -8,7 +8,8 @@ import type { AvatarView } from "../gen/iwork/v1/view_pb";
 import { ANGRY_MOOD, DESIGN_CATALOG, HOVER_MOOD, svgFor, type CharacterCatalog } from "./characters";
 import "./Avatar.css";
 
-const HEX_COLOR = /^#[0-9a-fA-F]{3,8}$/;
+/** 形象主色是设计令牌名（ch1、ch4 等，Rust 给的，不认识的已换成 ch4）。 */
+const COLOR_TOKEN = /^ch\d+$/;
 const POKE_WINDOW_MS = 2000;
 const POKES_TO_ANGRY = 3;
 const ANGRY_MS = 1500;
@@ -60,13 +61,14 @@ export function Avatar(props: {
     if (angry()) c.push("iw-angry");
     return c.join(" ");
   };
-  // 配置里选的颜色经 --ch4 交给素材（只圆团子用它；Rust 对换过形象的不给颜色）
+  // 配置里选的配色经 --ch4 交给素材（只圆团子用它；Rust 对换过形象的不给颜色）。存的是令牌名，在这里解析成
+  // var(--chN)，浅色深色各取各的值；ch4 本来就是素材的默认色，不设（设成 var(--ch4) 会自引用）
   const style = () => {
     const color = props.avatar?.color ?? "";
     return {
       width: `${size()}px`,
       height: `${size()}px`,
-      ...(HEX_COLOR.test(color) ? { "--ch4": color } : {}),
+      ...(COLOR_TOKEN.test(color) && color !== "ch4" ? { "--ch4": `var(--${color})` } : {}),
     };
   };
 

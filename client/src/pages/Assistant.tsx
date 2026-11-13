@@ -19,7 +19,8 @@ type AssistantField =
   | { case: "name"; value: string }
   | { case: "prompt"; value: string }
   | { case: "model"; value: { modelId: string; effort?: string } }
-  | { case: "tool"; value: { group: number; enabled: boolean } };
+  | { case: "tool"; value: { group: number; enabled: boolean } }
+  | { case: "avatarColor"; value: string };
 
 const TABS: { tab: AssistantTab; label: string }[] = [
   { tab: "activity", label: "动态" },
@@ -103,6 +104,28 @@ function Config(props: { view: AssistantProfileView }) {
   return (
     <div class="iw-config">
       <TextField label="名字" value={v().name} onCommit={(name) => send({ case: "name", value: name })} />
+      <Show when={v().avatarColors.length > 0}>
+        <div class="iw-field">
+          <span class="iw-field__label" id="iw-avatar-colors">
+            头像配色
+          </span>
+          <div class="iw-config__colors" role="radiogroup" aria-labelledby="iw-avatar-colors">
+            <For each={v().avatarColors}>
+              {(c) => (
+                <button
+                  type="button"
+                  role="radio"
+                  class="iw-config__color"
+                  style={{ background: `var(--${c.token})` }}
+                  aria-label={c.label}
+                  aria-checked={c.selected}
+                  onClick={() => !c.selected && send({ case: "avatarColor", value: c.token })}
+                />
+              )}
+            </For>
+          </div>
+        </div>
+      </Show>
       <TextField
         label="提示词"
         multiline

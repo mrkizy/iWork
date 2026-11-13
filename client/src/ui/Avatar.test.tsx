@@ -75,8 +75,13 @@ describe("Rust 给的表情与动效", () => {
     expect(el.querySelector("svg")).toBeNull();
   });
 
-  it("配置里的颜色经 --ch4 交给素材", () => {
-    const { el } = shown({ character: "blob", mood: "idle", color: "#E8A33D" });
-    expect(el.style.getPropertyValue("--ch4")).toBe("#E8A33D");
+  // 配置里的配色是令牌名，解析成 var(--令牌) 经 --ch4 交给素材；默认 ch4 不设（免得自引用）；不是令牌名不认
+  it.each([
+    ["ch1", "var(--ch1)"],
+    ["ch4", ""],
+    ["#E8A33D", ""],
+  ])("配色 %s → --ch4 = %j", (color, expected) => {
+    const { el } = shown({ character: "blob", mood: "idle", color });
+    expect(el.style.getPropertyValue("--ch4")).toBe(expected);
   });
 });

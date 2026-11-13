@@ -208,6 +208,41 @@ async fn empty_name_is_rejected_by_backend_and_reported() {
     .await;
 }
 
+/// 头像配色（ui-m1 2a 第 18 条 a）：选一块，令牌名存进后台的配置，资料栏的头像和色块跟着变；
+/// 不是 8 块之一的值在意图入口就拒，后台不动。
+#[tokio::test(flavor = "multi_thread")]
+async fn avatar_color_saves_token_and_rejects_unknown() {
+    let (d, app, mut web, _dir) = start().await;
+    ready(&app, &mut web).await;
+    let before = backend(&d, ID).unwrap();
+    let ack = act(&app, field(F::AvatarColor("ch3".into()))).await;
+    assert_eq!(
+        ack.error.as_ref().map(|e| e.code.as_str()),
+        Some("invalid_intent"),
+        "ch3 不在 8 块里"
+    );
+    assert_eq!(act(&app, field(F::AvatarColor("ch6".into()))).await.error, None);
+    until(&app, &mut web, "头像与色块换成淡紫", |s| {
+        s.assistant.as_ref().is_some_and(|a| {
+            a.avatar.as_ref().is_some_and(|v| v.color == "ch6")
+                && a
+                    .avatar_colors
+                    .iter()
+                    .filter(|c| c.selected)
+                    .map(|c| c.token.as_str())
+                    .eq(["ch6"])
+        })
+    })
+    .await;
+    let after = backend(&d, ID).unwrap();
+    assert_eq!(
+        after.config.and_then(|c| c.avatar).map(|a| a.color),
+        Some("ch6".to_owned()),
+        "后台存的是令牌名"
+    );
+    assert_eq!(after.version, before.version + 1, "只落了一次（ch3 没发出去）");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn create_and_delete_assistant() {
     let (d, app, mut web, _dir) = start().await;

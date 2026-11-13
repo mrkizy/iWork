@@ -46,6 +46,24 @@ describe.skipIf(noFixtures)("助手主页", () => {
     }
   });
 
+  it("头像配色：8 个色块来自 patch，选中的标 aria-checked；点没选中的发令牌名，点选中的不发", () => {
+    const { acts } = renderScenario("assistant-profile", route("config"));
+    const opts = profile().avatarColors;
+    expect(opts.length, "对照：有 8 块").toBe(8);
+    const group = within(panel()).getByRole("radiogroup", { name: "头像配色" });
+    const radios = within(group).getAllByRole("radio");
+    expect(radios.map((r) => r.getAttribute("aria-label"))).toEqual(opts.map((o) => o.label));
+    expect(radios.map((r) => r.getAttribute("aria-checked"))).toEqual(opts.map((o) => String(o.selected)));
+    const picked = opts.findIndex((o) => o.selected);
+    fireEvent.click(radios[picked]);
+    expect(fieldActs(acts), "点选中的不发").toEqual([]);
+    const other = opts.findIndex((o) => !o.selected);
+    fireEvent.click(radios[other]);
+    expect(fieldActs(acts)).toEqual([
+      { case: "updateAssistantField", value: { assistantId: ID, field: { case: "avatarColor", value: opts[other].token } } },
+    ]);
+  });
+
   it("名字：输入时不发，回车提交一次只带名字；Esc 还原不发；没变不发", () => {
     const { acts } = renderScenario("assistant-profile", route("config"));
     const name = within(panel()).getByLabelText("名字") as HTMLInputElement;

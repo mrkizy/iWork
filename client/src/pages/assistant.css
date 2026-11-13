@@ -94,3 +94,25 @@
 .iw-dialog--form .iw-model-selects {
   margin-top: 12px;
 }
+
+/* 头像配色：8 个色块一行（ui-m1 2a 第 18 条 a）。选中的用 2px --brand 边框，不只靠颜色区分 */
+.iw-config__colors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.iw-config__color {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--bd2);
+  border-radius: 7px;
+  cursor: pointer;
+}
+.iw-config__color[aria-checked="true"] {
+  border: 2px solid var(--brand);
+}
+.iw-config__color:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
