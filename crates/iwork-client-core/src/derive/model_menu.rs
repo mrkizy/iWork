@@ -6,8 +6,9 @@ use iwork_proto::pb;
 use super::text;
 use crate::store::Store;
 
-/// 还没接入的运行时：灰着列在运行时一节末尾，标「M2 接入」（画布 01-Main-modelmenu）。接入后从这里删掉。
-pub const UPCOMING_RUNTIMES: &[&str] = &["Codex"];
+/// M1 还没接入的运行时：输入框的运行时菜单（画布 01）和设置 › 运行时（画布 12）都灰着列在末尾、标「M2 接入」，
+/// 两处读这一份（ui-m1 2a 第 18 条 e）。接入后从这里删掉。
+pub const UPCOMING_RUNTIMES: &[&str] = &["Codex", "Antigravity CLI"];
 
 /// 菜单要的输入：当前运行时、当前模型选择、运行时一节是否已锁（对话开始后）。
 pub struct MenuInput<'a> {

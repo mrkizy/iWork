@@ -195,9 +195,11 @@ describe.skipIf(noFixtures)("对话页", () => {
     expect(within(menu).getByRole("menuitem", { name: /Claude Code/ })).toHaveClass("iw-menu__item--selected");
     expect(within(menu).getByRole("menuitem", { name: /Fake Large/ })).toHaveClass("iw-menu__item--selected");
     expect(within(menu).getByRole("menuitem", { name: /Fake Small/ })).not.toHaveClass("iw-menu__item--selected");
-    const codex = within(menu).getByRole("menuitem", { name: /Codex/ });
-    expect(codex).toBeDisabled();
-    expect(codex).toHaveTextContent("M2 接入");
+    for (const name of [/Codex/, /Antigravity CLI/]) {
+      const item = within(menu).getByRole("menuitem", { name });
+      expect(item).toBeDisabled();
+      expect(item).toHaveTextContent("M2 接入");
+    }
     fireEvent.click(within(menu).getByRole("menuitem", { name: /Fake Small/ }));
     expect(userActs(acts)).toEqual([
       expect.objectContaining({ case: "setModel", value: expect.objectContaining({ modelId: "fake-small", effort: "medium" }) }),

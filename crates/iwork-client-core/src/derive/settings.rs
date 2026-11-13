@@ -2,6 +2,7 @@
 
 use iwork_proto::pb;
 
+use super::model_menu::UPCOMING_RUNTIMES;
 use super::sidebar::{conversation_item, waiting_conversations};
 use super::{Ctx, text, to_system_time};
 use crate::store::Store;
@@ -30,10 +31,6 @@ pub fn runtime_view(r: &pb::RuntimeStatus) -> pb::RuntimeView {
         upcoming: false,
     }
 }
-
-/// 设置 › 运行时里列出、但 M1 还没接入的运行时（画布 12；ui-m1 第 1 节：Codex、agy 显示「M2 接入」）。
-/// 输入框的运行时菜单照画布 01 只列 Codex（model_menu::UPCOMING_RUNTIMES）。接入后从这里删掉。
-pub const UPCOMING_IN_SETTINGS: &[&str] = &["Codex", "Antigravity CLI"];
 
 fn upcoming_runtime(name: &str) -> pb::RuntimeView {
     pb::RuntimeView {
@@ -180,7 +177,7 @@ pub fn settings(store: &Store, ctx: Ctx) -> pb::SettingsView {
             .values()
             .map(runtime_view)
             .chain(
-                UPCOMING_IN_SETTINGS
+                UPCOMING_RUNTIMES
                     .iter()
                     .filter(|n| !store.runtimes.values().any(|r| r.display_name == **n))
                     .map(|n| upcoming_runtime(n)),

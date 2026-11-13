@@ -96,13 +96,16 @@ async fn model_menu_fetches_catalog_for_the_open_conversation() {
             .all(|r| !r.enabled && r.tip == "要换运行时请开新对话")
     );
     assert!(installed.iter().any(|r| r.selected));
-    // 还没接入的运行时灰着列在末尾（画布 01-Main-modelmenu）
+    // 还没接入的运行时灰着列在末尾，和设置 › 运行时同一份（ui-m1 2a 第 18 条 e）
     assert_eq!(
         upcoming
             .iter()
             .map(|r| (r.label.as_str(), r.enabled, r.tip.as_str()))
             .collect::<Vec<_>>(),
-        [("Codex", false, "M2 接入")]
+        [
+            ("Codex", false, "M2 接入"),
+            ("Antigravity CLI", false, "M2 接入")
+        ]
     );
 }
 
