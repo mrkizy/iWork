@@ -539,6 +539,13 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
         self.query(|conn, _codec| crate::host_queries::quit_counts(conn))
     }
 
+    fn turn_request(
+        &self,
+        turn: TurnId,
+    ) -> impl Future<Output = Result<Option<Message>, StorageError>> + Send {
+        self.query(move |conn, codec| turn_request(conn, codec, turn))
+    }
+
     fn turn_with_conversation(
         &self,
         turn: TurnId,
@@ -598,7 +605,7 @@ fn summary_source<C: EventCodec + ?Sized>(
             entity: "turn",
             id: turn_key.clone(),
         })?;
-    let bound = queued_commit_start(conn, codec, &turn_key, &conversation)?;
+    let (bound, _) = queued_commit(conn, codec, &turn_key, &conversation)?;
     let snapshots = blobs(
         conn,
         "SELECT snapshot FROM messages WHERE conversation_id = ?1 AND author_kind <> ?2 \
@@ -633,18 +640,62 @@ fn summary_source<C: EventCodec + ?Sized>(
     })
 }
 
-/// 排这个回合的那次提交的起始 seq。回合流上的第一条事件必须是 `TurnQueued`，不是就报错点名。
+/// 这一轮的请求：和回合的 `TurnQueued` 同一次提交写下的那条用户消息（受理 `SendMessage` 的形状）。
+/// 系统回合没有触发它的用户消息，返回 `None`；回合不存在报 `NotFound`。
+fn turn_request<C: EventCodec + ?Sized>(
+    conn: &Connection,
+    codec: &C,
+    turn: TurnId,
+) -> Result<Option<Message>, StorageError> {
+    let turn_key = turn.to_string();
+    let row: Option<(String, Vec<u8>)> = conn
+        .prepare_cached("SELECT conversation_id, snapshot FROM turns WHERE id = ?1")
+        .and_then(|mut s| {
+            s.query_row([&turn_key], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()
+        })
+        .map_err(sql_err)?;
+    let Some((conversation, snapshot)) = row else {
+        return Err(StorageError::NotFound {
+            entity: "turn",
+            id: turn_key,
+        });
+    };
+    if decode_turn(codec, &snapshot)?.kind != TurnKind::Assistant {
+        return Ok(None);
+    }
+    let (first, last) = queued_commit(conn, codec, &turn_key, &conversation)?;
+    let snapshots = blobs(
+        conn,
+        "SELECT snapshot FROM messages WHERE conversation_id = ?1 AND author_kind = ?2 \
+         AND appended_seq BETWEEN ?3 AND ?4 ORDER BY id",
+        params![conversation, author_kind(&Author::User), first, last],
+    )?;
+    match snapshots.as_slice() {
+        [one] => Ok(Some(decode_message(codec, one)?)),
+        _ => Err(crate::sql::bad_column(
+            "messages",
+            "appended_seq",
+            format!(
+                "排回合 {turn_key} 的那次提交（seq {first}–{last}）里有 {} 条用户消息，应当恰好一条",
+                snapshots.len()
+            ),
+        )),
+    }
+}
+
+/// 排这个回合的那次提交的 seq 区间（起、止）。回合流上的第一条事件必须是 `TurnQueued`，不是就报错点名。
 ///
 /// 「这一轮的请求落在界外」靠的是请求和 `TurnQueued` 同一次提交写下（受理 `SendMessage` 的形状，T10a 核对）。
 /// 所以用户消息触发的回合（`TurnKind::Assistant`）在这次提交的 seq 区间里必须有这个对话的一条用户消息，
 /// 没有就报错点名回合：分两次提交时请求会落在界内、被当成「已完成」收进摘要，不能悄悄放过。系统回合没有触发
 /// 它的用户消息，不查。
-fn queued_commit_start<C: EventCodec + ?Sized>(
+fn queued_commit<C: EventCodec + ?Sized>(
     conn: &Connection,
     codec: &C,
     turn_key: &str,
     conversation: &str,
-) -> Result<i64, StorageError> {
+) -> Result<(i64, i64), StorageError> {
     let first: Option<(String, Vec<u8>, i64, i64)> = conn
         .prepare_cached(
             "SELECT e.type, e.payload, c.first_seq, c.last_seq FROM events e \
@@ -700,7 +751,7 @@ fn queued_commit_start<C: EventCodec + ?Sized>(
             ));
         }
     }
-    Ok(first_seq)
+    Ok((first_seq, last_seq))
 }
 
 /// 一条消息在摘要原料里的样子；系统消息与正文、附件都为空的返回 `None`。附件只取文件名。

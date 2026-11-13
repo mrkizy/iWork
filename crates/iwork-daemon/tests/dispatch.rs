@@ -370,7 +370,10 @@ async fn handler_abort_three_points() {
         let d = h.d.clone();
         tokio::spawn(async move { ask(&d, id2, send_message("again")).await })
     };
-    assert_eq!(within("第二条到受理函数开头", h.reached.recv()).await, Some(3));
+    assert_eq!(
+        within("第二条到受理函数开头", h.reached.recv()).await,
+        Some(3)
+    );
     let park = h.raw.park_writer().unwrap();
     park.wait_parked(Duration::from_secs(10));
     h.release.send_replace(usize::MAX);

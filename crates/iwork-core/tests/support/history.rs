@@ -125,6 +125,12 @@ impl ReadModelPort for FakeHistory {
     async fn quit_counts(&self) -> Result<iwork_ports::read_model::QuitCounts, StorageError> {
         unimplemented!("{UNUSED}")
     }
+    async fn turn_request(
+        &self,
+        _turn: TurnId,
+    ) -> Result<Option<iwork_domain::message::Message>, StorageError> {
+        unimplemented!("{UNUSED}")
+    }
     async fn turn_with_conversation(
         &self,
         _turn: TurnId,

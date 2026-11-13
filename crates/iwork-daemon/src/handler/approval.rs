@@ -48,12 +48,13 @@ where
                 .into());
             }
         };
-        Ok(self
-            .ports
-            .engine
-            .decide(approval, decision, user(), id)
-            .await?
-            .receipt)
+        let span = crate::logging::span::approval(&c.approval_id);
+        let decided = tracing::Instrument::instrument(
+            self.ports.engine.decide(approval, decision, user(), id),
+            span,
+        )
+        .await?;
+        Ok(decided.receipt)
     }
 
     pub(super) async fn set_approval_mode(

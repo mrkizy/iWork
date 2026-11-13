@@ -24,7 +24,7 @@ use iwork_ports::store::OutboxItem;
 
 use crate::stop::StopSwitch;
 use crate::tasks::outbox::{DispatchFuture, OnUncertain, OutboxDispatch, OutboxRoute};
-use crate::work::{AbortReport, RunningCount, RunningWork};
+use crate::work::{AbortReport, QuitCounts, RunningWork, ShutdownDecision};
 
 pub const WORK_ENV: &str = "IWORK_DEV_WORK";
 pub const RECEIVER_ENV: &str = "IWORK_DEV_OUTBOX_RECEIVER";
@@ -99,11 +99,21 @@ impl DevWork {
 }
 
 impl RunningWork for DevWork {
-    fn running(&self) -> RunningCount {
-        RunningCount {
-            turns: self.turns.load(Ordering::SeqCst),
-            cards: self.cards.load(Ordering::SeqCst),
-        }
+    async fn quit_counts(&self) -> Option<QuitCounts> {
+        Some(QuitCounts {
+            running_turns: self.turns.load(Ordering::SeqCst),
+            queued_turns: 0,
+            executing_cards: self.cards.load(Ordering::SeqCst),
+        })
+    }
+
+    fn try_quit(
+        &self,
+        confirmed: bool,
+        counts: Option<QuitCounts>,
+        trigger: impl FnOnce(),
+    ) -> ShutdownDecision {
+        crate::work::NoWork.try_quit(confirmed, counts, trigger)
     }
 
     async fn cancel_all(&self) {

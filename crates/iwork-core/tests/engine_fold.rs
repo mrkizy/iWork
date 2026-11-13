@@ -354,7 +354,13 @@ fn delivered_after_interrupt_drops_grant() {
     ]));
     assert!(f.grant(apid(1)).is_none());
     assert!(f.awaiting_delivery(apid(1)).is_none());
-    assert!(f.turns_to_resume().is_empty());
+    assert!(
+        f.turns_to_resume()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -524,7 +530,13 @@ fn grant_audit_allow_moves_to_awaiting() {
     assert!(f.awaiting_delivery(apid(1)).is_some());
     more(&mut f, &[e_delivered(1, 20), e_interrupted(20)]);
     assert!(f.grant(apid(1)).is_none(), "交付过的不回来");
-    assert!(f.turns_to_resume().is_empty());
+    assert!(
+        f.turns_to_resume()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -551,7 +563,13 @@ fn stale_grant_audit_after_interrupt_keeps_grant() {
     more(&mut f, &[e_grant_audit(20, 1, Verdict::Allow, c)]);
     assert!(f.grant(apid(1)).is_some(), "过期的消费不算数");
     assert!(f.awaiting_delivery(apid(1)).is_none());
-    assert_eq!(f.turns_to_resume(), vec![tid(20)]);
+    assert_eq!(
+        f.turns_to_resume()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>(),
+        vec![tid(20)]
+    );
     // 对照：审计先落盘、中断在后 → 先挪进等交付、中断再挪回来
     let (mut f, c) = grant_left();
     more(&mut f, &[e_grant_audit(20, 1, Verdict::Allow, c)]);
@@ -580,7 +598,13 @@ fn r1_pending_at_interrupt_then_allow_grants() {
         e_allowed(1),
     ]));
     assert_eq!(f.grant(apid(1)).unwrap().turn, tid(20));
-    assert_eq!(f.turns_to_resume(), vec![tid(20)]);
+    assert_eq!(
+        f.turns_to_resume()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>(),
+        vec![tid(20)]
+    );
 }
 
 #[test]
@@ -600,7 +624,13 @@ fn r1_approved_undelivered_then_interrupted_grants() {
         "等待方在允许那一刻收到过 Allow"
     );
     assert_eq!(f.grant(apid(1)).unwrap().record, record("a"));
-    assert_eq!(f.turns_to_resume(), vec![tid(20)]);
+    assert_eq!(
+        f.turns_to_resume()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>(),
+        vec![tid(20)]
+    );
 }
 
 #[test]
@@ -622,7 +652,13 @@ fn r1_delivered_no_grant() {
         e_interrupted(20),
     ]));
     assert!(f.grant(apid(1)).is_none(), "之后回合中断也没有");
-    assert!(f.turns_to_resume().is_empty());
+    assert!(
+        f.turns_to_resume()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -656,7 +692,13 @@ fn r2_terminal_drops_grants() {
         e_turn_finished(20, TurnState::Cancelled),
     ]));
     assert!(f.grant(apid(1)).is_none());
-    assert!(f.turns_to_resume().is_empty());
+    assert!(
+        f.turns_to_resume()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>()
+            .is_empty()
+    );
 }
 
 // ---------- 归属事实与孤儿 ----------

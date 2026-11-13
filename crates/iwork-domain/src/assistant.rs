@@ -39,3 +39,26 @@ pub struct Assistant {
     pub builtin: bool,
     pub current: AssistantVersion,
 }
+
+/// 内置助手 iWork 的默认配置（T10a 方案 2.8 第 1a 步）。启动时登记、T10b 的 `ResetAssistant` 都只从这里取
+/// （AC21「可重置」）。名字与运行时有依据（需求第 3 章、技术设计 9.1a）；提示词、模型、工具开关、头像四样文档没写，
+/// 模型与思考强度产品负责人 2026-11-13 定为 opus / high，另三样先按推荐取值；改了只动这一个函数（方案第 10 节第 5 条）。
+pub fn builtin_iwork_config() -> AssistantConfig {
+    AssistantConfig {
+        name: "iWork".into(),
+        // 界面上内置 iWork 显示的是 iWork 标志（ui-m1.md），这两个字段只是落库的占位
+        avatar: Avatar {
+            initial: "i".into(),
+            color: "#8A8F98".into(),
+        },
+        prompt: String::new(),
+        runtime_id: RuntimeId::DEFAULT_RUNTIME,
+        // 适配器的模型别名与思考强度（产品负责人 2026-11-13 定）
+        model: crate::common::ModelSelection {
+            model_id: crate::common::ModelId("opus".into()),
+            effort: Some(crate::common::EffortLevel("high".into())),
+        },
+        // 四组工具都开
+        disabled_groups: ToolGroups::new(),
+    }
+}

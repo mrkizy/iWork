@@ -77,7 +77,15 @@ async fn legacy_approval_neither_grants_nor_resumes() {
     // 没有调用记录就发不出一次性放行；续接以「有放行可用」为准（方案 6.10.6 第 2 条），所以也不续接
     assert_eq!(result.resume_turn, None);
     assert!(recovered.grant(id).await.is_none());
-    assert!(recovered.engine.turns_to_resume().is_empty());
+    assert!(
+        recovered
+            .engine
+            .turns_to_resume()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

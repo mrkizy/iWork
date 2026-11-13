@@ -25,12 +25,32 @@ pub struct SealGate {
     sealed: Mutex<bool>,
     /// 测试的可观测点：一笔提交过了闸、入了队（在临界区里调用）。发布构建里没有
     #[cfg(any(test, feature = "test-hooks"))]
-    on_enqueued: Mutex<Option<Arc<dyn Fn(CommandId) + Send + Sync>>>,
+    on_enqueued: Mutex<Option<EnqueuedHook>>,
+    /// 测试的故障注入：匹配的提交回 `Busy`、不入队（返回真就拒）。发布构建里没有
+    #[cfg(any(test, feature = "test-hooks"))]
+    refuse: Mutex<Option<RefuseHook>>,
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+type EnqueuedHook = Arc<dyn Fn(CommandId) + Send + Sync>;
+
+#[cfg(any(test, feature = "test-hooks"))]
+type RefuseHook = Arc<dyn Fn(&CommitRequest) -> bool + Send + Sync>;
 
 impl SealGate {
     fn lock(&self) -> MutexGuard<'_, bool> {
         self.sealed.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// 测试用：`f` 返回真的提交回 `Busy`、不入队（编排、宿主的「存储报错」用它造）。
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn refuse_when(&self, f: impl Fn(&CommitRequest) -> bool + Send + Sync + 'static) {
+        *self.refuse.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(f));
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn stop_refusing(&self) {
+        *self.refuse.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     /// 测试用：每一笔过了闸、入了队的提交调一次 `f`（带它的 `command_id`）。后装的替换先装的。
@@ -85,6 +105,17 @@ impl<S: StoragePort> StoragePort for GatedStore<S> {
     ) -> impl Future<Output = Result<CommitReceipt, StorageError>> + Send {
         let sealed = self.gate.lock();
         if *sealed {
+            return Either::Left(std::future::ready(Err(StorageError::Busy)));
+        }
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(f) = self
+            .gate
+            .refuse
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            && f(&req)
+        {
             return Either::Left(std::future::ready(Err(StorageError::Busy)));
         }
         #[cfg(any(test, feature = "test-hooks"))]

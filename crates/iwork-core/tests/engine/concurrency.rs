@@ -704,7 +704,15 @@ async fn r1_crash_before_delivery_grants_after_restart() {
         )])
         .await;
     assert_eq!(fresh.grant(id).await.unwrap().record, *record);
-    assert_eq!(fresh.engine.turns_to_resume(), vec![turn(1)]);
+    assert_eq!(
+        fresh
+            .engine
+            .turns_to_resume()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>(),
+        vec![turn(1)]
+    );
 }
 
 /// W1 留下放行 A 并续接回到等审批。返回 A。
@@ -880,7 +888,14 @@ async fn f1_interrupt_before_grant_audit_keeps_grant() {
         assert!(audit.0 > interrupted_at, "审计落在中断之后");
         assert!(audit.1.live_rules_seq < interrupted_at, "求值在中断之前");
         assert!(b.grant(a).await.is_some(), "过期的消费不挪动放行");
-        assert_eq!(b.engine.turns_to_resume(), vec![turn(1)]);
+        assert_eq!(
+            b.engine
+                .turns_to_resume()
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect::<Vec<_>>(),
+            vec![turn(1)]
+        );
         // 再续接：同一调用命中一次并交付，之后没有放行
         b.waiting(turn(1), assistant());
         assert_eq!(

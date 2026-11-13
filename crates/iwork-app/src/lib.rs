@@ -16,6 +16,7 @@ pub mod conversation_command;
 pub mod convert;
 pub mod details;
 pub mod lifecycle;
+pub mod message_blocks;
 pub mod refusal;
 pub mod settings_command;
 pub mod subscription;

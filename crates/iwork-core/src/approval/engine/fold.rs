@@ -406,6 +406,7 @@ impl Folded {
                                 approval_id: e.approval_id,
                                 turn: p.approval.turn_id,
                                 record,
+                                decided_seq: seq,
                             };
                             if p.detached {
                                 conv.grants.insert(e.approval_id, grant);
@@ -720,13 +721,15 @@ impl Folded {
             .find_map(|c| c.awaiting_delivery.get(&id))
     }
 
-    /// R1 的「要求续接」：有一次性放行、回合在 `Interrupted` 的回合。
-    pub fn turns_to_resume(&self) -> Vec<TurnId> {
-        let mut out: BTreeSet<TurnId> = BTreeSet::new();
+    /// R1 的「要求续接」：有一次性放行、回合在 `Interrupted` 的回合，连同批准它的最晚那条 `ApprovalDecided` 的 seq
+    /// （宿主只认这次运行里落盘的批准，T10a 方案 D7 ①）。按回合升序。
+    pub fn turns_to_resume(&self) -> Vec<(TurnId, Seq)> {
+        let mut out: BTreeMap<TurnId, Seq> = BTreeMap::new();
         for conv in self.conversations.values() {
             for g in conv.grants.values() {
                 if self.interrupted_turns.contains(&g.turn) {
-                    out.insert(g.turn);
+                    let at = out.entry(g.turn).or_insert(g.decided_seq);
+                    *at = (*at).max(g.decided_seq);
                 }
             }
         }

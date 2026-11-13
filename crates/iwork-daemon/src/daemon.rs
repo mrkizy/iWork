@@ -19,6 +19,7 @@ use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::args::DaemonArgs;
+use crate::assembly::{self, RuntimeSlot};
 use crate::boot::{
     self, BootError, Identity, PAUSE_BEFORE_EXIT, Step, Store, StorePorts, VERSION, report,
     starting, status_of,
@@ -26,11 +27,15 @@ use crate::boot::{
 use crate::dev;
 use crate::exit::{exited, process_status};
 use crate::gate::{GatedStore, SealGate};
+use crate::handler::dispatch::{CommandPorts, Dispatcher};
 use crate::handler::lifecycle::autostart_handler;
-use crate::handler::{DaemonHandler, Gate, NotWired};
+use crate::handler::{DaemonHandler, Gate, Late};
+use crate::host::TurnHost;
+use crate::host::changes::{ReadBudget, VcsChanges};
+use crate::host::ports::{HostEnv, Wired};
 use crate::instance::{self, LockOutcome, StandbyAction};
 use crate::logging::{self, AuditSignal, LogGuard};
-use crate::publish::{PublishObserver, PublishState};
+use crate::publish::{LiveDeltas, PublishObserver, PublishState};
 use crate::source::{SnapshotNotWired, StoreSource};
 use crate::status::{StatusBoard, StatusIdentity};
 use crate::stop::{self, StopHooks, StopStep, StopSwitch};
@@ -38,10 +43,12 @@ use crate::supervisor::{RestartPolicy, Supervisor, TaskSpec};
 use crate::tasks::outbox::{self, OutboxRoute};
 use crate::tasks::signals::{self, Signals};
 use crate::tasks::{
-    autostart_align, install_watch, maintenance, publish_check, sleep_watch, store_health,
+    autostart_align, engine_sync, install_watch, maintenance, publish_check, sleep_watch,
+    store_health,
 };
-use crate::time::{MonotonicIds, SystemClock};
-use crate::work::{NoWork, RunningWork};
+use crate::time::{MonotonicIds, SystemClock, TokioTimer};
+use crate::work::{LateWork, RunningWork};
+use iwork_host::fs::OsPathResolver;
 
 /// 第 2 步的结果。
 pub struct Places {
@@ -285,6 +292,8 @@ async fn boot_and_serve(
     if let Some(work) = crate::dev_parts::DevWork::from_env() {
         return serve_with(
             Arc::new(work),
+            |_host| {},
+            || {},
             args,
             id,
             places,
@@ -297,8 +306,13 @@ async fn boot_and_serve(
         )
         .await;
     }
+    // 停机流程管的「在跑的东西」是回合宿主；它在第 9 步才组装好，先交一个空的，组装完填上
+    let late_work = Arc::new(LateWork::default());
+    let (fill, release) = (late_work.clone(), late_work.clone());
     serve_with(
-        Arc::new(NoWork),
+        late_work,
+        move |host| fill.fill(host),
+        move || release.release(),
         args,
         id,
         places,
@@ -330,6 +344,8 @@ struct DaemonStop<'a> {
     supervisor: &'a mut Supervisor,
     serve_token: CancellationToken,
     store: Option<Arc<Store>>,
+    /// 关存储之前放掉停机流程手里的回合宿主（它经带闸的存储握着存储）
+    release_work: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl StopHooks for DaemonStop<'_> {
@@ -351,6 +367,9 @@ impl StopHooks for DaemonStop<'_> {
     }
 
     async fn close_store(&mut self) -> Result<(), iwork_ports::store::StorageError> {
+        if let Some(release) = self.release_work.take() {
+            release();
+        }
         let Some(store) = self.store.take() else {
             return Ok(());
         };
@@ -539,6 +558,8 @@ fn observer(o: PublishObserver<Publisher>) -> Box<dyn iwork_store::CommitObserve
 #[allow(clippy::too_many_arguments)]
 async fn serve_with<W: RunningWork>(
     work: Arc<W>,
+    bind_host: impl FnOnce(TurnHost<HostP>),
+    release_host: impl FnOnce() + Send + 'static,
     args: DaemonArgs,
     id: Identity,
     places: Places,
@@ -562,17 +583,25 @@ async fn serve_with<W: RunningWork>(
     ));
     let gate = Arc::new(Gate::default());
     let stop_switch = StopSwitch::new();
+    // 受理要用引擎与回合宿主，它们要用 ipc 的发布方：先交一个空的内层，组装完、bind 之前填上
+    let late = Arc::new(std::sync::OnceLock::new());
     let mut cfg = ServerConfig::new(VERSION);
     cfg.trust = args.trust;
     let (server, publisher) = Server::new(
         cfg,
         id.own.clone(),
-        DaemonHandler::new(gate.clone(), NotWired, work.clone(), stop_switch.clone())
-            .with_autostart(autostart_handler(autostart.clone(), gated.clone())),
+        DaemonHandler::new(
+            gate.clone(),
+            Late(late.clone()),
+            work.clone(),
+            stop_switch.clone(),
+        )
+        .with_autostart(autostart_handler(autostart.clone(), gated.clone())),
         StoreSource::new(store.clone(), SnapshotNotWired),
     );
     let publishing = PublishState::new();
-    let observer = PublishObserver::new(Arc::new(publisher), publishing.clone());
+    let publisher = Arc::new(publisher);
+    let observer = PublishObserver::new(publisher.clone(), publishing.clone());
     if let Err(e) = store.set_commit_observer(self::observer(observer)).await {
         return fail(
             &board,
@@ -589,6 +618,26 @@ async fn serve_with<W: RunningWork>(
             return fail(&board, boot::read_error(Step::Server, e));
         }
     }
+    // 第 9 步的回合与审批参与方（T10a 方案 2.8 第 1–5 步）
+    let turns = match assemble_turns(
+        &places,
+        &id,
+        &store,
+        gated.as_ref(),
+        LiveDeltas::new(publisher.clone(), publishing.routes.clone()),
+        publishing.host.clone(),
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => return fail(&board, e),
+    };
+    if late.set(turns.dispatcher).is_err() {
+        unreachable!("内层只在这里填一次");
+    }
+    bind_host(turns.host.clone());
+    // 请求入口那一份随 ipc 停下（停机第 5 步）放手；这里的不留，否则关存储时还握着它
+    drop(late);
 
     // 第 9a 步：托管实例 + 已提交的设置是关 → 查到自己还注册着就注销。注销会结束本进程——这正是要的：
     // 这时还没 bind、没有客户端、没有回合在跑（方案 2.12）。失败只记 warn，继续启动
@@ -648,6 +697,24 @@ async fn serve_with<W: RunningWork>(
     ));
     specs.extend([
         TaskSpec::fatal(TASK_SERVE, server.serve(listener, serve_token.clone())),
+        TaskSpec::fatal("turn-host", {
+            let host = turns.host.clone();
+            async move {
+                let e = host.run().await;
+                tracing::error!(error = %e, "回合宿主致命错误，整体退出");
+            }
+        }),
+        TaskSpec::restartable("engine-sync", {
+            let (engine, wake, host) = (
+                turns.engine.clone(),
+                publishing.engine.clone(),
+                turns.host.clone(),
+            );
+            move || {
+                let host = host.clone();
+                engine_sync::run(engine.clone(), wake.clone(), move || host.wake())
+            }
+        }),
         TaskSpec::restartable("signals", {
             let stop = stop_switch.clone();
             let mut pre = Some(signals);
@@ -708,6 +775,10 @@ async fn serve_with<W: RunningWork>(
         }),
     ]);
     let mut supervisor = Supervisor::start(specs, RestartPolicy::default());
+    // 组装用的这几份交给任务与请求入口之后就不要了：关存储时这里不能还握着存储（1/F-2）
+    drop(turns.host);
+    drop(turns.engine);
+    drop(gated);
 
     // 第 12 步：就绪
     board.set_phase(Phase::Ready);
@@ -730,6 +801,7 @@ async fn serve_with<W: RunningWork>(
         supervisor: &mut supervisor,
         serve_token,
         store: Some(store),
+        release_work: Some(Box::new(release_host)),
     };
     let phase = stop::stop(
         reason,
@@ -742,6 +814,155 @@ async fn serve_with<W: RunningWork>(
     .await;
     supervisor.abort_all();
     phase
+}
+
+/// 回合与审批这一侧装配好的东西。
+struct TurnParts {
+    dispatcher: Disp,
+    host: TurnHost<HostP>,
+    engine: Arc<Engine>,
+}
+
+type GStore = GatedStore<Store>;
+type Read = iwork_store::SqliteReadModel<iwork_app::codec::ProtoEventCodec>;
+type Engine = iwork_core::approval::engine::ApprovalEngine<
+    SystemClock,
+    MonotonicIds<SystemClock>,
+    GStore,
+    RuntimeSlot,
+    TokioTimer,
+    OsPathResolver,
+>;
+type HostP = Wired<
+    GStore,
+    Read,
+    RuntimeSlot,
+    Arc<Engine>,
+    LiveDeltas<Publisher>,
+    SystemClock,
+    MonotonicIds<SystemClock>,
+    TokioTimer,
+    OsPathResolver,
+    VcsChanges<iwork_vcs_git::GitVcs>,
+>;
+type Disp = Dispatcher<GStore, Read, Engine>;
+
+/// 改动探针开不开（D10）：7/F-2（T08 子模块 `.git` 链接）修好之前关着，关着时一次版本控制调用都不发。
+const CHANGE_PROBE_ENABLED: bool = false;
+
+fn startup_failed(message: String) -> BootError {
+    BootError::Fatal {
+        step: Step::Server,
+        message,
+    }
+}
+
+/// 启动表第 9 步的回合与审批参与方（T10a 方案 2.8 第 1–5 步）。读到不认识的事件种类原样走 `read_error`（归 12）。
+async fn assemble_turns(
+    places: &Places,
+    id: &Identity,
+    raw: &Arc<Store>,
+    gated: &GStore,
+    live: LiveDeltas<Publisher>,
+    host_wake: Arc<Notify>,
+) -> Result<TurnParts, BootError> {
+    use iwork_ports::discovery::RuntimeDiscovery;
+    let read = raw.read_model(boot::read_defaults());
+    let ids = MonotonicIds::new(SystemClock::new());
+    let storage = |e: iwork_ports::store::StorageError| boot::read_error(Step::Server, e);
+    // 1. 探测运行时，提交运行时那一行（S8 合入之前探测是「什么都找不到」的占位）
+    let probe = assembly::NothingFound
+        .discover(&iwork_domain::runtime::RuntimeKind(
+            assembly::RUNTIME_KIND.into(),
+        ))
+        .await
+        .map_err(|e| startup_failed(format!("探测运行时失败：{e}")))?;
+    assembly::commit_runtime_row(gated, &read, &ids, assembly::runtime_row(&probe, VERSION))
+        .await
+        .map_err(storage)?;
+    // 1a. 登记内置助手 iWork
+    assembly::register_builtin_assistant(gated, &read, &SystemClock::new())
+        .await
+        .map_err(storage)?;
+    // 2. 运行时
+    let data_dir = places.data.root().to_path_buf();
+    let agent = RuntimeSlot(
+        assembly::runtime_launch(assembly::bridge_program(&id.exe), &data_dir, &probe)
+            .map(iwork_agent_acp::AcpRuntime::new),
+    );
+    let home = std::env::home_dir()
+        .and_then(|h| h.canonicalize().ok())
+        .ok_or_else(|| startup_failed("取不到家目录".into()))?;
+    let case_insensitive = OsPathResolver::detect_case_insensitive(&data_dir).unwrap_or(false);
+    let fs = OsPathResolver::new(home.clone(), case_insensitive);
+    let env = HostEnv {
+        platform: HostEnv::platform(),
+        home,
+        data_dir,
+        tmp_dirs: vec![std::env::temp_dir()],
+    };
+    // 3、4. 引擎折叠到位，恢复计划落盘
+    let keys = assembly::keys_for_pending(&read, &env, &fs)
+        .await
+        .map_err(storage)?;
+    let engine = assembly::start_engine(
+        iwork_core::approval::engine::EnginePorts {
+            clock: SystemClock::new(),
+            ids: MonotonicIds::new(SystemClock::new()),
+            store: gated.clone(),
+            reviewer: agent.clone(),
+            timer: TokioTimer,
+            fs: fs.clone(),
+        },
+        keys,
+        gated,
+        &ids,
+    )
+    .await
+    .map_err(|e| match e {
+        iwork_core::approval::engine::EngineError::Storage(s) => storage(s),
+        other => startup_failed(format!("审批引擎起不来：{other}")),
+    })?;
+    // 5. 回合宿主
+    let host = TurnHost::start(
+        Arc::new(Wired {
+            store: gated.clone(),
+            read: raw.read_model(boot::read_defaults()),
+            agent,
+            engine: engine.clone(),
+            live,
+            clock: SystemClock::new(),
+            ids: MonotonicIds::new(SystemClock::new()),
+            timer: TokioTimer,
+            fs,
+            env,
+            changes: VcsChanges::new(
+                Arc::new(iwork_vcs_git::GitVcs::default()),
+                CHANGE_PROBE_ENABLED,
+                Arc::new(ReadBudget::default()),
+            ),
+            gate: gated.gate().clone(),
+        }),
+        host_wake,
+    )
+    .await
+    .map_err(|e| match e {
+        crate::host::HostStartError::Storage(s) => storage(s),
+        other => startup_failed(other.to_string()),
+    })?;
+    let dispatcher = Dispatcher::new(CommandPorts {
+        store: Arc::new(gated.clone()),
+        read: Arc::new(read),
+        engine: engine.clone(),
+        ids: Arc::new(MonotonicIds::new(SystemClock::new())),
+        clock: Arc::new(SystemClock::new()),
+        host: Arc::new(host.clone()),
+    });
+    Ok(TurnParts {
+        dispatcher,
+        host,
+        engine,
+    })
 }
 
 fn bind(places: &Places) -> Result<LocalListener, BootError> {
@@ -873,7 +1094,7 @@ mod tests {
             h.store_failed.load(Ordering::SeqCst),
             &h.board,
             &Gate::default(),
-            &NoWork,
+            &crate::work::NoWork,
             &mut hooks,
         )
         .await;

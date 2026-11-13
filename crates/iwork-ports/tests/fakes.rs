@@ -808,6 +808,12 @@ impl ReadModelPort for FakeReadModel {
     async fn quit_counts(&self) -> Result<QuitCounts, StorageError> {
         Ok(QuitCounts::default())
     }
+    async fn turn_request(
+        &self,
+        _turn: TurnId,
+    ) -> Result<Option<iwork_domain::message::Message>, StorageError> {
+        Ok(None)
+    }
     async fn turn_with_conversation(
         &self,
         _turn: TurnId,

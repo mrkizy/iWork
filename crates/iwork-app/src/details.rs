@@ -17,3 +17,7 @@ pub const SERVER_MAJOR: &str = iwork_proto::handshake::DETAIL_SERVER_MAJOR;
 pub const RUNNING_TURNS: &str = "running_turns";
 /// 完全退出被拒（要确认）时：执行中的亲手执行卡片数。
 pub const EXECUTING_CARDS: &str = "executing_cards";
+/// 完全退出被拒（要确认）时：排着的回合数（退出会把它们取消，T10a P2 a）。
+pub const QUEUED_TURNS: &str = "queued_turns";
+/// 完全退出被拒（要确认）时：数目读不出来（`"true"` 时别的数不可信）。
+pub const COUNTS_UNKNOWN: &str = "counts_unknown";

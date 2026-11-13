@@ -46,7 +46,8 @@ fn ten_concurrent_starts_one_survives() {
         let (c, _in) = sb.connect().await.expect("握手");
         c.welcome().clone()
     });
-    assert_eq!(welcome.head_seq, 0, "库没被写过");
+    // 只有活下来的那个写过库：启动表第 9 步登记的运行时那一行与内置助手（T10a 方案 2.8 第 1、1a 步）
+    assert_eq!(welcome.head_seq, 2, "库只被活下来的那个写过");
     assert_eq!(rendezvous::read_lock_info(&sb.run_dir()).unwrap().pid, pid);
 }
 

@@ -203,7 +203,7 @@ pub async fn stop<W: RunningWork>(
 mod tests {
     use super::*;
     use crate::status::StatusIdentity;
-    use crate::work::{AbortReport, RunningCount};
+    use crate::work::{AbortReport, QuitCounts, ShutdownDecision};
     use iwork_ipc::rendezvous::{ExeStamp, ExitCode};
     use std::sync::{Arc, Mutex};
 
@@ -215,8 +215,19 @@ mod tests {
     }
 
     impl RunningWork for Work {
-        fn running(&self) -> RunningCount {
-            RunningCount { turns: 1, cards: 0 }
+        async fn quit_counts(&self) -> Option<QuitCounts> {
+            Some(QuitCounts {
+                running_turns: 1,
+                ..QuitCounts::default()
+            })
+        }
+        fn try_quit(
+            &self,
+            confirmed: bool,
+            counts: Option<QuitCounts>,
+            trigger: impl FnOnce(),
+        ) -> ShutdownDecision {
+            crate::work::NoWork.try_quit(confirmed, counts, trigger)
         }
         async fn cancel_all(&self) {
             self.log.lock().unwrap().push("cancel_all");
