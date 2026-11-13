@@ -27,6 +27,7 @@ impl Raw {
         cmd.arg("acp")
             .envs(rig.launch.env.iter().map(|(k, v)| (k, v)))
             .env("IWORK_BRIDGE_LOG", log_level)
+            .env("IWORK_SUPERVISOR_PID", std::process::id().to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

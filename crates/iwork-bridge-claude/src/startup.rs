@@ -211,6 +211,8 @@ async fn open_in(dir: &SessionDir, req: &OpenRequest<'_>) -> Result<Parts, OpenE
     let serving = server.spawn();
     let mut cli = CliProcess::spawn(&plan)
         .map_err(|e| OpenError::Spawn(format!("{e}（{}）", plan.program.display())))?;
+    // 收尾线程要知道给谁发 SIGTERM（5.4a 第 5 条第二种）
+    crate::reaper::register_cli(cli.id());
     let mut early = Early::default();
     let result = handshake(
         &mut cli,

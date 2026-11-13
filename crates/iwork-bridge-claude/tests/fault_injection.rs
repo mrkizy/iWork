@@ -88,3 +88,119 @@ async fn too_small_timeout_is_refused() {
         "{err}"
     );
 }
+
+/// 会话任务 panic（审查 S6-5b 停放期第 12 条）：桥接整个退出（不留一个没有会话任务的桥接），后台看到输出到头就
+/// 清树。CLI 这时还活着、父链没断，它另立会话的命令一起被清掉。
+#[tokio::test(flavor = "multi_thread")]
+async fn session_task_panic_ends_the_bridge_and_daemon_clears() {
+    let mut steps = opening();
+    steps.extend([
+        read_user(),
+        init(),
+        json!({ "step": "spawn", "command": "exec sleep 30" }),
+        text("m1", "PANIC-HERE"),
+        json!({ "step": "log_signals_until_term" }),
+    ]);
+    let mut rig = Rig::new(Value::Array(steps));
+    rig.launch
+        .env
+        .push(("IWORK_BRIDGE_FAULT_PANIC_ON".into(), "PANIC-HERE".into()));
+    let session = rig
+        .open(rig.spec(), Handler(Default::default()))
+        .await
+        .unwrap();
+    let updates = turn(&session, "hi").await;
+    let started = Instant::now();
+    let cmd = pid_of(&rig, "spawned");
+    let cli = pid_of(&rig, "started");
+    let bridge = rig
+        .log()
+        .into_iter()
+        .find(|v| v["kind"] == "started")
+        .unwrap()["parent"]
+        .as_i64()
+        .unwrap() as i32;
+    // 桥接 panic 后整个进程没了
+    while alive(bridge) {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "5 秒内桥接退出（会话任务 panic 时不留着进程）：{updates:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // 后台按输出到头清树：CLI 和它另立会话的命令都没了
+    while alive(cli) || alive(cmd) {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "10 秒内 CLI 与命令被清掉：cli={} cmd={}",
+            alive(cli),
+            alive(cmd)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(session);
+}
+
+fn pid_of(rig: &Rig, kind: &str) -> i32 {
+    let v = rig
+        .log()
+        .into_iter()
+        .find(|v| v["kind"] == kind)
+        .unwrap_or_else(|| panic!("假 CLI 记了 {kind}：{:?}", rig.log()));
+    v["pid"].as_i64().unwrap() as i32
+}
+
+/// 进程还活着（僵尸不算）。
+fn alive(pid: i32) -> bool {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&out.stdout);
+    let stat = stat.trim();
+    !stat.is_empty() && !stat.starts_with('Z')
+}
+
+/// stderr 写满、没人读的时候会话任务 panic（审查 S6-5b 2/F-3）：panic 的处理不先同步写 stderr，桥接照样立刻结束。
+#[tokio::test(flavor = "multi_thread")]
+async fn panic_with_stderr_full_still_ends_the_bridge() {
+    use support::procs::{Launch, Orphanable};
+    let mut steps = opening();
+    steps.extend([
+        read_user(),
+        init(),
+        result_ok(),
+        read_user(),
+        text("m1", "PANIC-HERE"),
+        json!({ "step": "log_signals_until_term" }),
+    ]);
+    let mut rig = Rig::new(Value::Array(steps));
+    rig.launch
+        .env
+        .push(("IWORK_BRIDGE_FAULT_PANIC_ON".into(), "PANIC-HERE".into()));
+    // 只留 error 级日志：stderr 填满之后，卡住桥接的只会是 panic 时的那次写
+    rig.launch
+        .env
+        .push(("IWORK_BRIDGE_LOG".into(), "error".into()));
+    let mut b = Orphanable::start_with(&rig, Launch::StderrFifo).await;
+    let session = b.wire.open(&rig).await;
+    assert!(b.wire.prompt(3, &session).await["result"].is_object());
+    let cli = pid_of(&rig, "started");
+    let _cleanup = support::procs::Leftover(vec![cli, b.bridge]);
+    b.fill_stderr();
+    // 第二轮：CLI 吐出标记，会话任务 panic
+    b.wire
+        .send(
+            json!({ "jsonrpc": "2.0", "id": 4, "method": "session/prompt",
+            "params": { "sessionId": session, "prompt": [{ "type": "text", "text": "again" }] } }),
+        )
+        .await;
+    let started = Instant::now();
+    while alive(b.bridge) {
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "3 秒内桥接结束（panic 处理不等 stderr）"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}

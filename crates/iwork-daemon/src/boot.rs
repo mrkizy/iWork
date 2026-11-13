@@ -13,7 +13,7 @@ use std::time::Instant;
 use iwork_app::codec::ProtoEventCodec;
 use iwork_domain::id::{Seq, TurnId};
 use iwork_domain::settings::GlobalSettings;
-use iwork_ipc::peer::{self, ImageId, SelfIdentity};
+use iwork_ipc::peer::{self, ImageId, SelfIdentity, StartupAudit};
 use iwork_ipc::rendezvous::{ExeStamp, ExitCode, Phase, Refusal};
 use iwork_ports::clock::IdGenerator;
 use iwork_ports::read_model::{ReadModelPort, Unsettled};
@@ -216,7 +216,8 @@ pub struct Identity {
     pub started: Instant,
 }
 
-fn identify(started: Instant) -> Result<Identity, BootError> {
+/// 身份之外还交回启动时的清单审计：第 1 步时文件日志还没装，由拿到锁、装好日志的一方记（[`StartupAudit`]）。
+fn identify(started: Instant) -> Result<(Identity, StartupAudit), BootError> {
     // 取戳是第 1 步的第一件事：失败之后再取一次来比，看程序文件在这期间动没动（方案 2.2）
     let exe = std::env::current_exe().map_err(|e| format!("取不到本进程的可执行文件路径：{e}"));
     let stamp_before = exe.as_ref().ok().and_then(|p| ExeStamp::of(p).ok());
@@ -225,7 +226,7 @@ fn identify(started: Instant) -> Result<Identity, BootError> {
     let own = if dev::fail_at(Step::Identity.name()) {
         Err("开发注入：取身份失败".to_owned())
     } else {
-        SelfIdentity::detect().map_err(|e| e.to_string())
+        SelfIdentity::detect_deferred().map_err(|e| e.to_string())
     };
     let running = peer::running_image_id().map_err(|e| format!("取运行映像身份失败：{e}"));
     let stamp = match &exe {
@@ -234,13 +235,16 @@ fn identify(started: Instant) -> Result<Identity, BootError> {
     };
     match (own, running, exe, stamp, stamp_before) {
         // 全都取到就成功；开头的戳只在失败后的分类里用，不另加成功的条件
-        (Ok(own), Ok(running_image), Ok(exe), Ok(exe_stamp), _) => Ok(Identity {
-            own,
-            running_image,
-            exe,
-            exe_stamp,
-            started,
-        }),
+        (Ok((own, audit)), Ok(running_image), Ok(exe), Ok(exe_stamp), _) => Ok((
+            Identity {
+                own,
+                running_image,
+                exe,
+                exe_stamp,
+                started,
+            },
+            audit,
+        )),
         (own, running, exe, stamp, stamp_before) => {
             let message = [own.err(), running.as_ref().err().cloned(), stamp.err()]
                 .into_iter()
@@ -312,7 +316,7 @@ pub fn run(raw: Vec<OsString>) -> std::process::ExitCode {
         eprintln!("iwork-daemon：--dev-trust 已开启，跳过签名校验（同用户照查），只用于开发");
     }
     let started = Instant::now();
-    let identity = match identify(started) {
+    let (identity, audit) = match identify(started) {
         Ok(i) => i,
         Err(e) => {
             report(&e);
@@ -320,13 +324,18 @@ pub fn run(raw: Vec<OsString>) -> std::process::ExitCode {
         }
     };
     #[cfg(unix)]
-    return crate::daemon::run_identified(args, raw, identity);
+    return crate::daemon::run_identified(args, raw, identity, audit);
     #[cfg(not(unix))]
-    return run_identified(args, raw, identity);
+    return run_identified(args, raw, identity, audit);
 }
 
 #[cfg(not(unix))]
-fn run_identified(args: DaemonArgs, _raw: Vec<OsString>, _id: Identity) -> std::process::ExitCode {
+fn run_identified(
+    args: DaemonArgs,
+    _raw: Vec<OsString>,
+    _id: Identity,
+    _audit: StartupAudit,
+) -> std::process::ExitCode {
     // M1 不支持 Windows：`SelfIdentity::detect` 在第 1 步就失败，走不到这里（方案 2.15）
     let e = BootError::Identity {
         kind: crate::install::IdentityFailure::PlatformUnsupported,
@@ -642,8 +651,7 @@ mod tests {
         t.state = iwork_domain::turn::TurnState::Running;
         Unsettled {
             turns: vec![t],
-            streaming: vec![],
-            cards: vec![],
+            ..Unsettled::default()
         }
     }
 

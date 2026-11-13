@@ -33,6 +33,7 @@ use crate::snapshot::{
     decode_conversation, decode_message, decode_project, decode_rule, decode_runtime, decode_turn,
 };
 use crate::sql::{ColumnText, enum_col, id_col, sha_col, sha_text, sql_err, u64_col};
+use crate::views::ViewTx;
 
 /// 读侧补的默认值（依赖环境，如用户主目录）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,25 @@ impl<C: EventCodec + 'static> SqliteReadModel<C> {
             codec,
             defaults: Arc::new(defaults),
         }
+    }
+
+    /// 在**一个**读事务里跑 `f`（T10a 方案 Q1、S1）：视图查询与订阅快照用。
+    pub fn view<T, F>(
+        &self,
+        f: F,
+    ) -> impl Future<Output = Result<T, StorageError>> + Send + use<T, F, C>
+    where
+        T: Send + 'static,
+        F: FnOnce(&ViewTx<'_, C>) -> Result<T, StorageError> + Send + 'static,
+    {
+        let defaults = self.defaults.clone();
+        self.query(move |conn, codec| {
+            f(&ViewTx {
+                conn,
+                codec,
+                defaults: &defaults,
+            })
+        })
     }
 
     fn query<T, F>(
@@ -130,7 +150,7 @@ fn message_page<C: EventCodec + ?Sized>(
 }
 
 /// 流式中的消息正文用检查点填，没有检查点就是空串；别的消息不动。
-fn fill_streaming_body(conn: &Connection, m: &mut Message) -> Result<(), StorageError> {
+pub(crate) fn fill_streaming_body(conn: &Connection, m: &mut Message) -> Result<(), StorageError> {
     if m.status == MessageStatus::Streaming {
         let text: Option<String> = conn
             .prepare_cached("SELECT text FROM message_checkpoints WHERE message_id = ?1")
@@ -187,16 +207,58 @@ fn turns_for<C: EventCodec + ?Sized>(
         .collect()
 }
 
-/// `approvals` 的一行：`(id, snapshot, state, decider, void_reason)`。
-type ApprovalRow = (String, Vec<u8>, String, Option<String>, Option<String>);
+/// 还没决定的 AGENTS.md 草稿卡片，按 id 升序，连同提出它的 seq（没决定前 `updated_seq` 就是提出时的）。
+pub(crate) fn pending_drafts(
+    conn: &Connection,
+) -> Result<Vec<(AgentsMdDraftCard, i64)>, StorageError> {
+    type DraftRow = (String, String, String, String, i64, i64, i64);
+    let drafts: Vec<DraftRow> = rows(
+        conn,
+        "SELECT card_id, project_id, content_sha256, content_area, content_size, proposed_at, \
+         updated_seq FROM agents_md_drafts WHERE decision IS NULL ORDER BY card_id",
+        [],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        },
+    )?;
+    let mut out = Vec::with_capacity(drafts.len());
+    for (card, project, sha, area, size, at, seq) in drafts {
+        const T: &str = "agents_md_drafts";
+        out.push((
+            AgentsMdDraftCard {
+                card_id: id_col(T, "card_id", &card)?,
+                project_id: id_col(T, "project_id", &project)?,
+                content: ArtifactRef {
+                    sha256: sha_col(T, "content_sha256", &sha)?,
+                    area: enum_col(T, "content_area", &area)?,
+                    size: u64_col(T, "content_size", size)?,
+                },
+                proposed_at: Timestamp(at),
+            },
+            seq,
+        ));
+    }
+    Ok(out)
+}
 
-fn approval_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRow> {
+/// `approvals` 的一行：`(id, snapshot, state, decider, void_reason)`。
+pub(crate) type ApprovalColumns = (String, Vec<u8>, String, Option<String>, Option<String>);
+
+pub(crate) fn approval_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalColumns> {
     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
 }
 
-fn decode_approval_row<C: EventCodec + ?Sized>(
+pub(crate) fn decode_approval_row<C: EventCodec + ?Sized>(
     codec: &C,
-    (id, snapshot, state, decider, void_reason): ApprovalRow,
+    (id, snapshot, state, decider, void_reason): ApprovalColumns,
 ) -> Result<Approval, StorageError> {
     let state =
         approval_state_from_columns(&id, &state, decider.as_deref(), void_reason.as_deref())?;
@@ -265,36 +327,11 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
     }
 
     fn projects(&self) -> impl Future<Output = Result<Vec<ProjectSummary>, StorageError>> + Send {
-        self.query(|conn, codec| {
-            rows(
-                conn,
-                "SELECT p.snapshot, COALESCE((SELECT SUM(c.unread) FROM conversations c \
-                 WHERE c.project_id = p.id), 0) FROM projects p ORDER BY p.id",
-                [],
-                |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
-            )?
-            .into_iter()
-            .map(|(s, unread)| {
-                Ok(ProjectSummary {
-                    project: decode_project(codec, &s)?,
-                    unread: unread_u32(unread),
-                })
-            })
-            .collect()
-        })
+        self.query(|conn, codec| projects_on(conn, codec))
     }
 
     fn assistants(&self) -> impl Future<Output = Result<Vec<Assistant>, StorageError>> + Send {
-        self.query(|conn, codec| {
-            blobs(
-                conn,
-                "SELECT snapshot FROM assistants ORDER BY builtin DESC, id",
-                [],
-            )?
-            .iter()
-            .map(|s| decode_assistant(codec, s))
-            .collect()
-        })
+        self.query(|conn, codec| assistants_on(conn, codec))
     }
 
     fn pending_items(&self) -> impl Future<Output = Result<Vec<PendingItem>, StorageError>> + Send {
@@ -317,26 +354,8 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
             )? {
                 out.push(PendingItem::UserAction(decode_card(codec, &s)?));
             }
-            type DraftRow = (String, String, String, String, i64, i64);
-            let drafts: Vec<DraftRow> = rows(
-                conn,
-                "SELECT card_id, project_id, content_sha256, content_area, content_size, proposed_at \
-                 FROM agents_md_drafts WHERE decision IS NULL ORDER BY card_id",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
-            )?;
-            for (card, project, sha, area, size, at) in drafts {
-                const T: &str = "agents_md_drafts";
-                out.push(PendingItem::AgentsMdDraft(AgentsMdDraftCard {
-                    card_id: id_col(T, "card_id", &card)?,
-                    project_id: id_col(T, "project_id", &project)?,
-                    content: ArtifactRef {
-                        sha256: sha_col(T, "content_sha256", &sha)?,
-                        area: enum_col(T, "content_area", &area)?,
-                        size: u64_col(T, "content_size", size)?,
-                    },
-                    proposed_at: Timestamp(at),
-                }));
+            for (draft, _seq) in pending_drafts(conn)? {
+                out.push(PendingItem::AgentsMdDraft(draft));
             }
             for s in blobs(
                 conn,
@@ -401,8 +420,15 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
             )? {
                 cards.push(decode_card(codec, &s)?);
             }
+            let mut recorded_usage = std::collections::BTreeMap::new();
+            for t in &turns {
+                if let Some(u) = recorded_usage_on(conn, &t.id.to_string())? {
+                    recorded_usage.insert(t.id, u);
+                }
+            }
             Ok(Unsettled {
                 turns,
+                recorded_usage,
                 streaming,
                 cards,
             })
@@ -410,49 +436,11 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
     }
 
     fn quota(&self) -> impl Future<Output = Result<Vec<RuntimeQuota>, StorageError>> + Send {
-        self.query(|conn, _codec| {
-            type Row = (String, String, i64, Option<i64>, i64);
-            let all: Vec<Row> = rows(
-                conn,
-                "SELECT runtime_id, window, used_pct, resets_at, observed_at FROM quota_snapshots \
-                 ORDER BY runtime_id, window",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )?;
-            let mut out: Vec<RuntimeQuota> = Vec::new();
-            for (runtime, window, used_pct, resets_at, observed_at) in all {
-                let runtime_id = id_col("quota_snapshots", "runtime_id", &runtime)?;
-                let w = QuotaWindow {
-                    window,
-                    used_pct: u8::try_from(used_pct).map_err(|_| {
-                        crate::sql::bad_column("quota_snapshots", "used_pct", used_pct)
-                    })?,
-                    resets_at: resets_at.map(Timestamp),
-                    observed_at: Timestamp(observed_at),
-                };
-                match out.last_mut() {
-                    Some(q) if q.runtime_id == runtime_id => {
-                        q.observed_at = q.observed_at.max(w.observed_at);
-                        q.windows.push(w);
-                    }
-                    _ => out.push(RuntimeQuota {
-                        runtime_id,
-                        observed_at: w.observed_at,
-                        windows: vec![w],
-                    }),
-                }
-            }
-            Ok(out)
-        })
+        self.query(|conn, _codec| quota_on(conn))
     }
 
     fn runtimes(&self) -> impl Future<Output = Result<Vec<Runtime>, StorageError>> + Send {
-        self.query(|conn, codec| {
-            blobs(conn, "SELECT snapshot FROM runtimes ORDER BY id", [])?
-                .iter()
-                .map(|s| decode_runtime(codec, s))
-                .collect()
-        })
+        self.query(|conn, codec| runtimes_on(conn, codec))
     }
 
     /// `Some(p)`：全局规则 + 该项目的规则。更细的范围（助手、对话）由需要的卡再加查询。
@@ -460,18 +448,7 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
         &self,
         project: Option<ProjectId>,
     ) -> impl Future<Output = Result<Vec<RuleEntry>, StorageError>> + Send {
-        self.query(move |conn, codec| {
-            let snapshots = match project {
-                None => blobs(conn, "SELECT snapshot FROM approval_rules ORDER BY id", [])?,
-                Some(p) => blobs(
-                    conn,
-                    "SELECT snapshot FROM approval_rules WHERE scope_kind = 'global' \
-                     OR (scope_kind = 'project' AND scope_id = ?1) ORDER BY id",
-                    [p.to_string()],
-                )?,
-            };
-            snapshots.iter().map(|s| decode_rule(codec, s)).collect()
-        })
+        self.query(move |conn, codec| rules_on(conn, codec, project))
     }
 
     fn security_lists(&self) -> impl Future<Output = Result<Vec<RuleEntry>, StorageError>> + Send {
@@ -485,23 +462,7 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
 
     fn settings(&self) -> impl Future<Output = Result<GlobalSettings, StorageError>> + Send {
         let defaults = self.defaults.clone();
-        self.query(move |conn, _codec| {
-            let row: Option<(Option<bool>, Option<bool>, Option<String>)> = conn
-                .query_row(
-                    "SELECT playful_ui, autostart, projects_root FROM global_settings WHERE id = 1",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()
-                .map_err(sql_err)?;
-            let d = &defaults.global_settings;
-            let (playful_ui, autostart, root) = row.unwrap_or((None, None, None));
-            Ok(GlobalSettings {
-                playful_ui: playful_ui.unwrap_or(d.playful_ui),
-                autostart: autostart.unwrap_or(d.autostart),
-                projects_root: root.map_or_else(|| d.projects_root.clone(), PathBuf::from),
-            })
-        })
+        self.query(move |conn, _codec| settings_on(conn, &defaults))
     }
 
     fn summary_source(
@@ -728,8 +689,156 @@ fn summary_line(conn: &Connection, m: &Message) -> Result<Option<SummaryLine>, S
     }))
 }
 
+/// 一个回合已记下的用量累计（`turn_usage` 里那一行；事件里的用量是回合累计，这一行就是最后一条）。没记过为 `None`。
+pub(crate) fn recorded_usage_on(
+    conn: &Connection,
+    turn_id: &str,
+) -> Result<Option<iwork_domain::common::Usage>, StorageError> {
+    type Row = (i64, i64, i64, i64, Option<f64>);
+    let row: Option<Row> = conn
+        .prepare_cached(
+            "SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd \
+             FROM turn_usage WHERE turn_id = ?1",
+        )
+        .and_then(|mut st| {
+            st.query_row([turn_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .optional()
+        })
+        .map_err(sql_err)?;
+    const T: &str = "turn_usage";
+    row.map(|(input, output, read, write, cost)| {
+        Ok(iwork_domain::common::Usage {
+            input_tokens: u64_col(T, "input_tokens", input)?,
+            output_tokens: u64_col(T, "output_tokens", output)?,
+            cache_read_tokens: u64_col(T, "cache_read_tokens", read)?,
+            cache_write_tokens: u64_col(T, "cache_write_tokens", write)?,
+            cost_usd: cost,
+        })
+    })
+    .transpose()
+}
+
 fn unread_u32(v: i64) -> u32 {
     u32::try_from(v).unwrap_or(u32::MAX)
+}
+
+pub(crate) fn projects_on<C: EventCodec + ?Sized>(
+    conn: &Connection,
+    codec: &C,
+) -> Result<Vec<ProjectSummary>, StorageError> {
+    rows(
+        conn,
+        "SELECT p.snapshot, COALESCE((SELECT SUM(c.unread) FROM conversations c \
+             WHERE c.project_id = p.id), 0) FROM projects p ORDER BY p.id",
+        [],
+        |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
+    )?
+    .into_iter()
+    .map(|(s, unread)| {
+        Ok(ProjectSummary {
+            project: decode_project(codec, &s)?,
+            unread: unread_u32(unread),
+        })
+    })
+    .collect()
+}
+
+pub(crate) fn assistants_on<C: EventCodec + ?Sized>(
+    conn: &Connection,
+    codec: &C,
+) -> Result<Vec<Assistant>, StorageError> {
+    blobs(
+        conn,
+        "SELECT snapshot FROM assistants ORDER BY builtin DESC, id",
+        [],
+    )?
+    .iter()
+    .map(|s| decode_assistant(codec, s))
+    .collect()
+}
+
+pub(crate) fn quota_on(conn: &Connection) -> Result<Vec<RuntimeQuota>, StorageError> {
+    type Row = (String, String, i64, Option<i64>, i64);
+    let all: Vec<Row> = rows(
+        conn,
+        "SELECT runtime_id, window, used_pct, resets_at, observed_at FROM quota_snapshots \
+             ORDER BY runtime_id, window",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    )?;
+    let mut out: Vec<RuntimeQuota> = Vec::new();
+    for (runtime, window, used_pct, resets_at, observed_at) in all {
+        let runtime_id = id_col("quota_snapshots", "runtime_id", &runtime)?;
+        let w = QuotaWindow {
+            window,
+            used_pct: u8::try_from(used_pct)
+                .map_err(|_| crate::sql::bad_column("quota_snapshots", "used_pct", used_pct))?,
+            resets_at: resets_at.map(Timestamp),
+            observed_at: Timestamp(observed_at),
+        };
+        match out.last_mut() {
+            Some(q) if q.runtime_id == runtime_id => {
+                q.observed_at = q.observed_at.max(w.observed_at);
+                q.windows.push(w);
+            }
+            _ => out.push(RuntimeQuota {
+                runtime_id,
+                observed_at: w.observed_at,
+                windows: vec![w],
+            }),
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn runtimes_on<C: EventCodec + ?Sized>(
+    conn: &Connection,
+    codec: &C,
+) -> Result<Vec<Runtime>, StorageError> {
+    blobs(conn, "SELECT snapshot FROM runtimes ORDER BY id", [])?
+        .iter()
+        .map(|s| decode_runtime(codec, s))
+        .collect()
+}
+
+pub(crate) fn rules_on<C: EventCodec + ?Sized>(
+    conn: &Connection,
+    codec: &C,
+    project: Option<ProjectId>,
+) -> Result<Vec<RuleEntry>, StorageError> {
+    let snapshots = match project {
+        None => blobs(conn, "SELECT snapshot FROM approval_rules ORDER BY id", [])?,
+        Some(p) => blobs(
+            conn,
+            "SELECT snapshot FROM approval_rules WHERE scope_kind = 'global' \
+                 OR (scope_kind = 'project' AND scope_id = ?1) ORDER BY id",
+            [p.to_string()],
+        )?,
+    };
+    snapshots.iter().map(|s| decode_rule(codec, s)).collect()
+}
+
+pub(crate) fn settings_on(
+    conn: &Connection,
+    defaults: &ReadDefaults,
+) -> Result<GlobalSettings, StorageError> {
+    let row: Option<(Option<bool>, Option<bool>, Option<String>)> = conn
+        .query_row(
+            "SELECT playful_ui, autostart, projects_root FROM global_settings WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(sql_err)?;
+    let d = &defaults.global_settings;
+    let (playful_ui, autostart, root) = row.unwrap_or((None, None, None));
+    Ok(GlobalSettings {
+        playful_ui: playful_ui.unwrap_or(d.playful_ui),
+        autostart: autostart.unwrap_or(d.autostart),
+        projects_root: root.map_or_else(|| d.projects_root.clone(), PathBuf::from),
+    })
 }
 
 #[cfg(test)]

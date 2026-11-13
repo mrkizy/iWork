@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::peer::{Manifest, PeerIdentity, RejectReason};
+use crate::peer::{PeerIdentity, RejectReason};
 
 /// 审计日志的 tracing target。
 pub const TARGET: &str = "iwork.ipc.audit";
@@ -69,12 +69,16 @@ pub(crate) fn peer_identity_failed(role: Role, error: &dyn std::fmt::Display) {
     tracing::warn!(target: TARGET, event = EVENT_PEER_REJECTED, role = role.as_str(), reason = %format_args!("Unavailable: {error}"));
 }
 
-pub(crate) fn manifest_loaded(path: &Path, manifest: &Manifest, self_listed: bool) {
+pub(crate) fn manifest_loaded(path: &Path, app_version: &str, entries: usize, self_listed: bool) {
     if self_listed {
-        tracing::info!(target: TARGET, event = EVENT_MANIFEST_LOADED, path = %path.display(), app_version = %manifest.app_version, entries = manifest.entries(), self_listed);
+        tracing::info!(target: TARGET, event = EVENT_MANIFEST_LOADED, path = %path.display(), app_version, entries, self_listed);
     } else {
-        tracing::warn!(target: TARGET, event = EVENT_MANIFEST_LOADED, path = %path.display(), app_version = %manifest.app_version, entries = manifest.entries(), self_listed);
+        tracing::warn!(target: TARGET, event = EVENT_MANIFEST_LOADED, path = %path.display(), app_version, entries, self_listed);
     }
+}
+
+pub(crate) fn manifest_unavailable(path: &Path, reason: &str) {
+    tracing::warn!(target: TARGET, event = EVENT_MANIFEST_UNAVAILABLE, path = %path.display(), reason);
 }
 
 /// 协议违规。`phase` 是 `handshake`（握手前）或 `established`。不记帧内容。

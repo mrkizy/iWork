@@ -87,6 +87,18 @@ fn protocol(message: &str) -> AgentError {
     }
 }
 
+/// 运行时说「这条会话已经结束」（`error.data.iwork.session_ended == true`，T06 方案 5.4a 第 5 条）：运行时不再
+/// 收拾自己的进程，等后台清树。和错误码无关：任何错误码都可以带它。
+pub fn session_ended(data: Option<&Value>) -> bool {
+    data.and_then(|d| d.get(META_KEY))
+        .and_then(|i| i.get(SESSION_ENDED_KEY))
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
+/// 「会话已结束」标记的键名，桥接那边照同一份字符串写。
+pub const SESSION_ENDED_KEY: &str = "session_ended";
+
 /// 错误响应的 `data` → [`AgentError`]。没有点名错误码、或错误码不认识时返回 `None`。
 pub fn map(data: Option<&Value>, cx: &ErrorContext) -> Option<AgentError> {
     let (code, reason) = code_of(data)?;
@@ -270,6 +282,17 @@ mod tests {
     }
 
     /// 运行时塞进 `reason` 的自由文字不回显：不像枚举的一律当 `unknown`。
+    #[test]
+    fn session_ended_needs_a_literal_true() {
+        let with = |v: serde_json::Value| json!({ META_KEY: { "code": "approval_backstop", "session_ended": v } });
+        assert!(session_ended(Some(&with(json!(true)))));
+        for not in [json!(false), json!("true"), json!(1)] {
+            assert!(!session_ended(Some(&with(not.clone()))), "{not}");
+        }
+        assert!(!session_ended(Some(&json!({ META_KEY: { "code": "x" } }))));
+        assert!(!session_ended(None));
+    }
+
     #[test]
     fn free_text_reason_is_never_echoed() {
         for bad in [

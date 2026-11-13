@@ -14,6 +14,7 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::mem::ManuallyDrop;
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -37,7 +38,9 @@ pub const STDERR_TAIL_BYTES: usize = 8 * 1024;
 
 /// 一个跑着的 CLI。
 pub struct CliProcess {
-    child: Child,
+    /// 回收它（wait、kill、丢掉）之前先经收尾线程交还身份（[`crate::reaper::release_cli`]，审查 S6-5b 3/F-1）；
+    /// 交还不了就不丢它，留着到桥接退出
+    child: ManuallyDrop<Child>,
     /// 交给 [`InputQueue`] 之后为 `None`
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
@@ -76,7 +79,7 @@ impl CliProcess {
             }
         });
         Ok(Self {
-            child,
+            child: ManuallyDrop::new(child),
             stdin: Some(stdin),
             stdout,
             partial: Vec::new(),
@@ -148,11 +151,17 @@ impl CliProcess {
 
     /// 等 CLI 退出。取消安全。
     pub async fn wait(&mut self) -> io::Result<ExitStatus> {
+        if !release(&self.child) {
+            return Err(io::Error::other("收尾线程正在给 CLI 发信号，这次不回收"));
+        }
         self.child.wait().await
     }
 
     /// 杀掉 CLI 并等它退出。只管 CLI 自己（见模块说明）。
     pub async fn kill(&mut self) -> io::Result<()> {
+        if !release(&self.child) {
+            return Err(io::Error::other("收尾线程正在给 CLI 发信号，这次不回收"));
+        }
         self.child.kill().await
     }
 
@@ -160,6 +169,27 @@ impl CliProcess {
     pub fn stderr_tail(&self) -> String {
         let tail = self.stderr_tail.lock().expect("锁没有中毒");
         String::from_utf8_lossy(&tail.iter().copied().collect::<Vec<_>>()).into_owned()
+    }
+}
+
+impl Drop for CliProcess {
+    fn drop(&mut self) {
+        if release(&self.child) {
+            // SAFETY: 只在这里丢一次，之后不再碰 child
+            unsafe { ManuallyDrop::drop(&mut self.child) };
+        }
+        // 交还不了：不丢（不杀、不回收），CLI 留到桥接退出，由收尾线程或 init 收拾
+    }
+}
+
+/// 回收 CLI 之前把身份交还给收尾线程（unix；别的平台没有收尾线程）。
+fn release(child: &Child) -> bool {
+    #[cfg(unix)]
+    return crate::reaper::release_cli(child.id());
+    #[cfg(not(unix))]
+    {
+        let _ = child;
+        true
     }
 }
 

@@ -66,14 +66,15 @@ iWork 在本机是三类进程：客户端、后台服务（daemon）、每个�
 | `iwork-ports` | 端口 | AgentPort、VcsProvider、StoragePort、ExecutionBackend、SecretStore、Notifier 等 trait | domain |
 | `iwork-core` | 编排核心 | 调度、等待与唤醒、消息路由、审批引擎、防失控底线 | domain、ports |
 | `iwork-app` | 应用服务 | 命令与查询处理、权限校验、配置快照 | core、ports、proto |
-| `iwork-store` | 基础设施 | SQLite 事件日志与投影、制品存储 | ports |
+| `iwork-store` | 基础设施 | SQLite 事件日志与投影、制品存储 | ports、log |
+| `iwork-log` | 基础设施 | 后台与客户端共用的结构化日志（JSON 行、滚动、脱敏、审计 target 不过滤）；数据目录根与 `logs/` 的定位（ADR-0013） | 无（只依赖 tracing、tracing-subscriber、serde_json） |
 | `iwork-agent-acp` | 适配层 | ACP 客户端端，实现 AgentPort | ports |
 | `iwork-vcs-git` | 基础设施 | VcsProvider 的 git 实现 | ports |
 | `iwork-host` | 基础设施 | 本机能力：ExecutionBackend 的用户执行（亲手执行卡片，7.2a）、SecretStore 的系统钥匙串实现（M1 存 MCP 密钥）、Notifier 的系统通知实现与「把桌面客户端叫到前台」（7.3） | ports |
 | `iwork-ipc` | 基础设施 | 本地传输、对端身份校验、分帧、订阅 | proto |
 | `iwork-daemon` | 组合入口 | 二进制；在这里把实现注入端口 | 全部 |
 | `iwork-bridge-claude` | 适配层 | M1 接法：独立二进制，ACP agent 端 ↔ Claude Code CLI（-p + hook）；把随会话下发的抽象约束与会话工具集翻译为 Claude Code 启动参数与 `sandbox` 设置（7.0、7.2b） | proto（ACP 消息，以及抽象约束、会话工具集等随会话下发的类型；不依赖 domain 与 core） |
-| `iwork-client-core` | 客户端 | Tauri Rust 侧：连接、状态、帧合并 | ipc、proto |
+| `iwork-client-core` | 客户端 | Tauri Rust 侧：连接、状态、帧合并、客户端日志 | ipc、proto、log |
 
 依赖只向下：`domain` 与 `ports` 不依赖任何框架与 I/O（包括 tokio；`ports` 的异步接口用语言原生的 async trait）；`core` 不知道 SQLite、git、ACP 的存在；只有 `iwork-daemon` 同时知道所有实现。CI 用 `cargo-deny` 与自定义检查强制这条规则。异步运行时统一为 tokio。
 
@@ -148,7 +149,7 @@ iWork 在本机是三类进程：客户端、后台服务（daemon）、每个�
 
 **登录自启（设置里开启）**：macOS 用 `SMAppService` 注册 LaunchAgent；Linux 写 systemd 用户单元；Windows 用登录触发的计划任务。三者都配置为异常退出后自动重启。
 
-**成员进程与后台服务的关系**：桥接进程是后台服务的子进程，各自独立进程组。后台服务意外退出时，桥接从 stdin 读到结束，先记录 CLI 会话 id，再结束 CLI 进程树。不让成员在无人监管时继续写文件，审批底线始终有效。
+**成员进程与后台服务的关系**：桥接进程是后台服务的子进程，各自独立进程组。后台服务意外退出时，桥接有两个信号，先到的算：stdin 读到结束；父进程号不再是后台起它时经 `IWORK_SUPERVISOR_PID` 告诉它的那个号（桥接每 250 毫秒看一次；只看 stdin 不够，macOS 上别的子进程可能继承到桥接 stdin 的写端，T06 S6-5b）。随后先记录 CLI 会话 id，再结束 CLI 进程树。不让成员在无人监管时继续写文件，审批底线始终有效。
 
 **崩溃恢复**：启动时比对存储里“运行中”的回合与实际进程：进程不在的标为 `interrupted` 并在对话里出一张“继续”卡片，用 CLI 的会话恢复能力续上；待审批项保留；未发送的待发消息按事务记录重投。
 
@@ -523,7 +524,7 @@ Bash 命令用 shell 语法解析器拆成管道、子命令、重定向、变�
 ### 9.4 本机额度
 
 - M1 只接 Claude Code；Codex 与 agy 显示“—”（M2 接入后，Codex 额度取自 app-server 的 account/rateLimits/read）。
-- 确定可得的数据：每回合结束时 CLI 上报的用量（token 等），用于“本对话用量”。
+- 确定可得的数据：每回合结束时 CLI 上报的用量（token 等），用于“本对话用量”。事件层的 `UsageReported`、`TurnFinished` 带回合累计（续接接着上次的累计加），「本对话用量」只加已结束回合（T06 方案 6.3「事件层口径」，2026-11-14）。
 - 费用：CLI 上报的 `costUSD` 是它按官方标价估算的（`costBasis: "list"`），订阅账号并不按它扣费。存储照原样记（`turns.cost_usd`），界面只在“本对话用量”的悬停里标“按官方标价估算”显示，标签本身只显示 token（`ui-m1.md` 2a 第 15 条）。为此本对话用量的视图数据要带上该运行时的登录方式（订阅 / API Key / 未知，取自探测时 `claude auth status` 的 `authMethod`、`subscriptionType`，只取这两个字段），以及“有回合缺少费用”的标记。
 - 额度窗口：取自 CLI 输出的 rate\_limit\_event（窗口类型、使用率、重置时间，见第 12 节 Q3），写入 quota\_snapshots；上报了哪些窗口就显示哪些。只用 CLI 公开输出的数据，不读凭据、不自行调用厂商接口；拿不到就显示“—”。
 
@@ -587,7 +588,7 @@ Bash 命令用 shell 语法解析器拆成管道、子命令、重定向、变�
 
 ### 10.3 可观测性
 
-用 `tracing` 输出结构化日志到 `logs/`，按大小滚动；每个命令、回合、审批一个 span，带 `command_id` / `turn_id` 串联。只存本机、不上报。设置里可导出脱敏诊断包。
+用 `tracing` 输出结构化日志：后台写 `logs/daemon.log`、桌面客户端写 `logs/client.log`，格式、滚动、脱敏同一份（`iwork-log`，ADR-0013）；panic 与「日志队列满，丢了 N 条」这两类的 target 是 `iwork_log`（后台和客户端都是），用 `IWORK_LOG` 按 target 精确过滤时要把它也带上。客户端日志字段不 Debug 整个请求、回包、意图、查询用途，不记后台的说明文字（`Error.message` 可能带路径），只记种类、错误码、长度（经 `iwork-client-core` 的 `session::log_fields`）。按大小滚动；每个命令、回合、审批一个 span，带 `command_id` / `turn_id` 串联。只存本机、不上报。设置里可导出脱敏诊断包。
 
 ### 10.4 错误处理
 

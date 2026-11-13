@@ -54,7 +54,10 @@ fn scope_table() -> Vec<(pb::SubscriptionScope, Vec<StreamKey>, Vec<pb::Query>)>
             scope(Scope::Conversation(pb::ConversationScope {
                 conversation_id: "c1".into(),
             })),
-            vec![StreamKey::one("conversation", "c1")],
+            vec![
+                StreamKey::one("conversation", "c1"),
+                StreamKey::one("live", "c1"),
+            ],
             vec![
                 query(Q::GetConversation(pb::GetConversation {
                     conversation_id: "c1".into(),
@@ -85,7 +88,7 @@ fn scope_table() -> Vec<(pb::SubscriptionScope, Vec<StreamKey>, Vec<pb::Query>)>
         ),
         (
             scope(Scope::Settings(pb::SettingsScope {})),
-            vec![all("settings"), all("project")],
+            vec![all("settings"), all("project"), all("rule")],
             vec![query(Q::GetSettings(pb::GetSettings { project_id: None }))],
         ),
     ]

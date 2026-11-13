@@ -69,9 +69,9 @@ BRIDGE="target/release/iwork-bridge-claude${EXE}"
 FAKE_CLI="target/release/iwork-fake-claude${EXE}"
 # 发布产物里不许出现的开发字样，每条注明由哪个构建做阳性对照：
 #   - 开关本身与后台的开发故障注入点（`IWORK_DEV_*` 环境变量，T04）：iwork-daemon 开 dev；
-#   - 桥接的 hook timeout 故障注入（T06 方案 4.3）：iwork-bridge-claude 开 fault-injection；
+#   - 桥接的故障注入（T06 方案 4.3 的 hook timeout；S6-5b 审查的会话任务 panic）：iwork-bridge-claude 开 fault-injection；
 #   - 测试用假 CLI 的脚本与记录变量（T06 方案 15.1）：iwork-fake-claude（fake-cli feature 才有这个程序）。
-PATTERNS=('dev-trust' 'IWORK_DEV_' 'IWORK_BRIDGE_HOOK_TIMEOUT_SECS' 'IWORK_FAKE_CLAUDE_')
+PATTERNS=('dev-trust' 'IWORK_DEV_' 'IWORK_BRIDGE_HOOK_TIMEOUT_SECS' 'IWORK_BRIDGE_FAULT_PANIC_ON' 'IWORK_FAKE_CLAUDE_')
 count() { grep -a -c -- "$2" "$1" || true; }
 # 文件里出现任何一条字样就报出来、返回 1
 scan() {
@@ -110,6 +110,7 @@ positive "$BIN" 'IWORK_DEV_'
 if [ -z "$EXE" ]; then
   build -p iwork-bridge-claude --features fault-injection
   positive "$BRIDGE" 'IWORK_BRIDGE_HOOK_TIMEOUT_SECS'
+  positive "$BRIDGE" 'IWORK_BRIDGE_FAULT_PANIC_ON'
   build -p iwork-bridge-claude --features fake-cli --bin iwork-fake-claude
   positive "$FAKE_CLI" 'IWORK_FAKE_CLAUDE_'
 fi

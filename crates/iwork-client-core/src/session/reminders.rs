@@ -9,7 +9,7 @@ use iwork_ipc::client::ClientError;
 use iwork_proto::pb;
 
 use super::presence::{self, ARRIVE_DELAY, Presence};
-use super::{Internal, Session};
+use super::{Internal, Session, log_fields};
 use crate::session::dial::Dialer;
 
 /// 系统通知被点之后多久之内叫到前台还算数（方案 2.8）。
@@ -69,11 +69,13 @@ impl<D: Dialer> Session<D> {
             match client.request(pb::request::Body::Command(command)).await {
                 Ok(r) => {
                     if let Some(pb::response::Body::Error(e)) = r.body {
-                        tracing::warn!(target: "iwork_client", code = e.code, message = %e.message, "报在看哪被拒");
+                        tracing::warn!(target: "iwork_client", code = %log_fields::error_code_name(e.code), "报在看哪被拒");
                     }
                 }
                 Err(ClientError::Closed) => {}
-                Err(e) => tracing::warn!(target: "iwork_client", error = %e, "报在看哪没发出去"),
+                Err(e) => {
+                    tracing::warn!(target: "iwork_client", error = %log_fields::client_error(&e), "报在看哪没发出去")
+                }
             }
         });
     }
@@ -103,13 +105,13 @@ impl<D: Dialer> Session<D> {
                         ..
                     })) => Some(t),
                     other => {
-                        tracing::warn!(target: "iwork_client", ?other, "GetOpenTarget 的回包不对");
+                        tracing::warn!(target: "iwork_client", response = %log_fields::response(other.as_ref()), "GetOpenTarget 的回包不对");
                         None
                     }
                 },
                 Err(ClientError::Closed) => None,
                 Err(e) => {
-                    tracing::warn!(target: "iwork_client", error = %e, "GetOpenTarget 没问到");
+                    tracing::warn!(target: "iwork_client", error = %log_fields::client_error(&e), "GetOpenTarget 没问到");
                     None
                 }
             };

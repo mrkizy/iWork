@@ -9,7 +9,6 @@
 
 use std::collections::BTreeMap;
 
-use iwork_domain::common::Usage;
 use iwork_domain::event::{
     DomainEvent, MessageCompleted, TurnFinished, TurnStateChanged, UserActionStateChanged,
 };
@@ -89,7 +88,11 @@ pub fn plan(unsettled: &Unsettled) -> Result<RecoveryPlan, RecoveryError> {
                     turn_id: t.id,
                     conversation_id: Some(t.conversation_id),
                     state: to,
-                    usage: Usage::default(),
+                    usage: unsettled
+                        .recorded_usage
+                        .get(&t.id)
+                        .copied()
+                        .unwrap_or_default(),
                     celebrate: false,
                     change_summary: None,
                 }

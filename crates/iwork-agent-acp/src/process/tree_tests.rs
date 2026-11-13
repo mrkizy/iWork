@@ -9,8 +9,11 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 
+use std::sync::PoisonError;
+
 use super::scan;
 use super::scope::Pid;
+use super::signal::{Ident, signal_member};
 use super::tree::{GateStep, TREE_SCAN_POLL};
 use super::{RuntimeLaunch, SupervisedProcess, TREE_CLEAR_LIMIT};
 
@@ -20,6 +23,22 @@ const SETSID: &str = "perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' --";
 struct Fixture {
     dir: tempfile::TempDir,
     process: SupervisedProcess,
+    /// 经 [`Fixture::pid`] 读到过的辅助进程（连同出生时间）：夹具丢掉时按身份杀掉
+    helpers: std::sync::Mutex<Vec<Ident>>,
+}
+
+/// 夹具自己收拾：根进程，和读到过的辅助进程（按出生时间核对身份，号换了人就不杀）。不靠 `SupervisedProcess` 丢掉时
+/// 在后台起的清理：测试失败中途 panic 时运行时随之结束，那次清理来不及跑，另立会话的辅助进程会一直活着。
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let helpers =
+            std::mem::take(&mut *self.helpers.lock().unwrap_or_else(PoisonError::into_inner));
+        for who in helpers {
+            signal_member(who, libc::SIGKILL, None);
+        }
+        // SAFETY: 根进程是这个夹具起的子进程，还没被回收，号不会是别人的
+        unsafe { libc::kill(self.process.pid() as Pid, libc::SIGKILL) };
+    }
 }
 
 impl Fixture {
@@ -41,7 +60,11 @@ impl Fixture {
         })
         .unwrap();
         process.sampler.abort();
-        Self { dir, process }
+        Self {
+            dir,
+            process,
+            helpers: std::sync::Mutex::new(Vec::new()),
+        }
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -54,7 +77,14 @@ impl Fixture {
 
     /// 等标记文件出现并读出里面的进程号。
     async fn pid(&self, name: &str) -> Pid {
-        wait_for(&self.path(name)).await.trim().parse().unwrap()
+        let pid: Pid = wait_for(&self.path(name)).await.trim().parse().unwrap();
+        if let Some(birth) = scan::birth_of(pid) {
+            self.helpers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(Ident { pid, birth });
+        }
+        pid
     }
 
     fn root(&self) -> Pid {
@@ -161,6 +191,11 @@ async fn worker_forks_in_leaderless_group_after_scan() {
 /// - 同一个会话里还有别的已记到的成员活着（命令的 shell 还在）→ 孩子过得了见证，被清掉；
 /// - worker 是那个会话里唯一记到过的成员（shell 早退了）→ 孩子不认领：它活着，`clear()` 照样返回 `true`
 ///   （2/F-1 带来的边界，钉成测试）。
+///
+/// 命令的 shell 不轮询（`exec sleep 30`）：它会被 SIGKILL，要是正在跑一个轮询用的 `sleep`，那个 sleep 就成了同一会话
+/// 里的孤儿，第二次记范围时被记到；机器慢时它活到清理的扫描，会话里就还有活着的已记到成员，孩子按规则被认领、
+/// 清掉，和这一格要钉的边界相反（macOS CI 上的偶发即此；把轮询间隔拉长到 1 秒在本机必现）。worker 自己的轮询
+/// 不受影响：它正常退出，退出前轮询的 sleep 已经结束。
 #[tokio::test]
 async fn worker_forks_then_exits_before_stop() {
     for shell_stays in [true, false] {
@@ -168,8 +203,7 @@ async fn worker_forks_then_exits_before_stop() {
             r#"{SETSID} sh -c '
                 sh -c "while [ ! -e $D/fork ]; do sleep 0.01; done; sleep 30 & echo \$! > $D/c.pid; exit 0" &
                 echo $! > $D/w.pid
-                while [ ! -e $D/leader_exit ]; do sleep 0.01; done
-                sleep 30' &
+                exec sleep 30' &
             echo $! > $D/s.pid
             sleep 30"#
         ));
@@ -706,4 +740,45 @@ async fn stale_empty_sample_does_not_stop_sampling() {
     assert_eq!(tree.sample(&mut system), super::Tick::Skip);
     tree.overtake_scans(false);
     assert_eq!(tree.sample(&mut system), super::Tick::Done);
+}
+
+/// 清空确认过、桥接回收了之后，再来的 `clear()`（取消那次清完，输出到头又补一次；丢弃时再补一次）直接答
+/// `true`，不再扫描：范围里记到的都已经死了、根也回收了，不会再长出我们的进程。要是照样扫，它的扫描会和调用方
+/// 「空没空」的查询撞上，查询看到有扫描在飞就答「不空」（S6-5b 在 CI 上撞到的）。
+#[tokio::test]
+async fn clear_after_confirmed_clear_does_not_scan() {
+    let f = Fixture::start("sleep 30");
+    assert!(f.process.kill_tree_and_wait().await);
+    let (tx, mut rx) = mpsc::unbounded_channel::<(GateStep, oneshot::Sender<()>)>();
+    let tree = f.process.unix_tree().clone();
+    tree.set_gate(tx);
+    let again = tokio::time::timeout(Duration::from_secs(5), tree.clear()).await;
+    assert_eq!(again.ok(), Some(true), "第二次 clear() 当场答 true");
+    assert!(rx.try_recv().is_err(), "第二次 clear() 没有走任何一步扫描");
+}
+
+/// 夹具自己收拾经 [`Fixture::pid`] 读到过的辅助进程：测试失败中途 panic、运行时随之结束时，夹具丢掉时在后台起的
+/// 清理来不及跑，另立会话的辅助进程（比如等标记文件的轮询 shell）会被系统收养、一直活着。
+#[test]
+fn fixture_drop_kills_the_helpers_it_read() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let worker = rt.block_on(async {
+        let f = Fixture::start(&format!(
+            r#"{SETSID} sh -c 'while [ ! -e $D/never ]; do sleep 0.01; done' &
+            echo $! > $D/w.pid
+            sleep 30"#
+        ));
+        let worker = f.pid("w.pid").await;
+        drop(f);
+        worker
+    });
+    // 运行时结束：夹具丢掉时起的后台清理到不了
+    drop(rt);
+    std::thread::sleep(Duration::from_millis(300));
+    let leaked = alive(worker);
+    let _cleanup = Leftover(vec![worker]);
+    assert!(!leaked, "夹具丢掉之后，它读到过的辅助进程 {worker} 还活着");
 }

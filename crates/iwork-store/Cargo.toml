@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 iwork-domain.workspace = true
 iwork-ports.workspace = true
+iwork-log.workspace = true
 rusqlite.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
@@ -34,4 +35,8 @@ tracing-subscriber.workspace = true
 
 [[bench]]
 name = "write_commit"
+harness = false
+
+[[bench]]
+name = "view_queries"
 harness = false

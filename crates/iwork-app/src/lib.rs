@@ -14,3 +14,4 @@ pub mod convert;
 pub mod details;
 pub mod lifecycle;
 pub mod subscription;
+pub mod views;
