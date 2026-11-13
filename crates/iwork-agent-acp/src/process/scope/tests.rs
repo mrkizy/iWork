@@ -911,3 +911,25 @@ fn staged_probe_keeps_the_child() {
     ];
     assert_eq!(run_staged(&steps), Ok(()));
 }
+
+/// 快照之后会话 S 作废（清理杀掉了它最后的见证），中间没有别的扫描提交，再提交那一遍：S 仍然是作废的，表里同号会话
+/// 的进程不被认领（作废也让代次加一，那一遍因此只加不删；作废过的会话不恢复）。
+#[test]
+fn dropped_session_is_not_restored_by_an_older_snapshot() {
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
+    observe(&mut s, base_table());
+    let snap = s.clone();
+    s.drop_session(20);
+    // 那一遍读到的表里会话 20 的进程都还在（父链已断）
+    let mut t: Vec<Proc> = base_table().into_iter().filter(|p| p.pid != 11).collect();
+    t.iter_mut().find(|p| p.pid == 20).unwrap().ppid = 1;
+    let got = s.commit(pass(&snap, t.clone(), &t));
+    assert!(got.stale, "作废让代次变了，这一遍被超过去了");
+    assert!(
+        !s.sessions.contains(&20) && s.dropped.contains(&20),
+        "S 仍然作废"
+    );
+    // 之后的完整扫描里，会话 20 里一个不靠身份的新进程不被认领
+    t.push(proc(25, 1, 25, 20, 25));
+    assert!(!observe(&mut s, t).contains(&25));
+}
