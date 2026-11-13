@@ -167,7 +167,8 @@ mod unix {
     /// 假后台造不出来的连接状态（只给预览页看）。视图由 client-core 的 derive::connection 算。
     pub fn synthetic() -> Vec<Synthetic> {
         use iwork_client_core::derive::connection::connection;
-        use iwork_client_core::store::{Connection, Exit, Store};
+        use iwork_client_core::store::{Connection, Store};
+        use iwork_ipc::client::WaitPrompt;
         let view = |c: Connection, quit: bool| {
             let mut s = Store::default();
             s.set_connection(c);
@@ -177,29 +178,17 @@ mod unix {
         vec![
             Synthetic {
                 name: "connection-version-mismatch",
-                about: "连接类整页：后台服务与客户端版本不一致（中性提示，出口「重新打开 iWork」）",
-                connection: view(
-                    Connection::Waiting {
-                        title: "后台服务与客户端版本不一致",
-                        exits: vec![Exit::Relaunch],
-                    },
-                    false,
-                ),
+                about: "连接类整页：后台服务与客户端版本不一致（说明 + 出口「重新打开 iWork」，不转圈）",
+                connection: view(Connection::Waiting(WaitPrompt::VersionMismatch), false),
             },
             Synthetic {
                 name: "connection-switching-version",
                 about: "连接类整页：正在切换版本（中性提示，后台照常重连）",
-                connection: view(
-                    Connection::Waiting {
-                        title: "正在切换版本",
-                        exits: vec![],
-                    },
-                    false,
-                ),
+                connection: view(Connection::Waiting(WaitPrompt::SwitchingVersion), false),
             },
             Synthetic {
                 name: "connection-environment",
-                about: "连接类整页：不支持的环境（M1 的 Windows），只留「重试」。真界面的说明文字取启动错误原文",
+                about: "连接类整页：不支持的环境（M1 的 Windows），有标题、没有出口。真界面的说明文字取启动错误原文",
                 connection: view(Connection::Environment("M1 暂不支持 Windows".into()), false),
             },
             Synthetic {

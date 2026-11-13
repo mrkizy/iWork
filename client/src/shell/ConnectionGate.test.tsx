@@ -37,16 +37,19 @@ function mount(view: ViewInit, quit = false) {
 }
 
 describe("连接类整页", () => {
-  it("版本不一致：标题来自 patch；「重新打开 iWork」发 relaunch；没有实现的出口（查看诊断）不画", () => {
+  it("版本不一致：标题、说明来自 patch，不转圈；「重新打开 iWork」发 relaunch；没有实现的出口（查看诊断）不画", () => {
     const acts = mount({
       state: ConnectionState.WAITING,
       title: "后台服务与客户端版本不一致",
+      message: "这个窗口和后台服务不是同一版",
       exitActions: [
         { label: "重新打开 iWork", kind: ConnectionExitKind.RELAUNCH },
         { label: "查看诊断", kind: ConnectionExitKind.SHOW_DIAGNOSTICS },
       ],
     });
     expect(screen.getByRole("heading", { name: "后台服务与客户端版本不一致" })).toBeInTheDocument();
+    expect(screen.getByText("这个窗口和后台服务不是同一版")).toBeInTheDocument();
+    expect(screen.queryByLabelText("正在重新连接"), "要用户动手：不转圈").toBeNull();
     expect(screen.queryByRole("button", { name: "查看诊断" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "重新打开 iWork" }));
     expect(acts).toEqual([{ case: "relaunch", value: {} }]);
@@ -74,13 +77,24 @@ describe("连接类整页", () => {
     expect(document.querySelector(".iw-gate__lines")).toBeNull();
   });
 
-  it("环境说明（M1 不支持 Windows）：说明来自 patch，出口「重试」", () => {
+  it("正在切换版本：没有出口，转圈（后台照常重连）", () => {
+    mount({ state: ConnectionState.WAITING, title: "正在切换版本" });
+    expect(screen.getByLabelText("正在重新连接")).toBeInTheDocument();
+  });
+
+  it("环境说明（M1 不支持 Windows）：标题、说明来自 patch；Rust 没给出口就没有按钮", () => {
+    mount({ state: ConnectionState.ENVIRONMENT, title: "iWork 暂时不能在这台电脑上运行", message: "M1 暂不支持 Windows" });
+    expect(screen.getByRole("heading", { name: "iWork 暂时不能在这台电脑上运行" })).toBeInTheDocument();
+    expect(screen.getByText("M1 暂不支持 Windows")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("出口「重试」（Rust 给了的话）发 retry", () => {
     const acts = mount({
-      state: ConnectionState.ENVIRONMENT,
-      message: "M1 暂不支持 Windows",
+      state: ConnectionState.WAITING,
+      title: "x",
       exitActions: [{ label: "重试", kind: ConnectionExitKind.RETRY }],
     });
-    expect(screen.getByText("M1 暂不支持 Windows")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
     expect(acts).toEqual([{ case: "retry", value: {} }]);
   });

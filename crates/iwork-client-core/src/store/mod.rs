@@ -236,21 +236,11 @@ pub enum Connection {
     Connecting,
     Live,
     Reconnecting,
-    /// 升级窗口的中性提示：文字取 `WaitPrompt`，出口见 [`Exit`]。
-    Waiting {
-        title: &'static str,
-        exits: Vec<Exit>,
-    },
+    /// 升级窗口的中性提示（标题、说明、出口由 derive::connection 按提示种类给）。
+    Waiting(iwork_ipc::client::WaitPrompt),
     Diagnostics(Diagnostics),
+    /// 不支持的运行环境（M1 的 Windows）：说明取启动错误原文。不给「重试」：环境不会自己变。
     Environment(String),
-}
-
-/// 连接类整页上的出口（只列有实现的；查看诊断等 T04p 接上真诊断再加）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Exit {
-    Retry,
-    /// 重启客户端自己，不碰后台。
-    Relaunch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

@@ -1,5 +1,5 @@
 // 连接类整页与「完全退出 iWork」确认框（方案 2.3 的表、2.7「连接类」；Q16）。
-// 整页三种：版本不一致 / 正在切换版本的中性提示（WAITING，后台照常退避重连）、诊断页（DIAGNOSTICS：原因、几行诊断、
+// 整页三种：版本不一致 / 正在切换版本的中性提示（WAITING，后台照常退避重连；版本不一致带说明和出口、不转圈）、诊断页（DIAGNOSTICS：原因、几行诊断、
 // 提示、「重试」）、环境说明（ENVIRONMENT，如 M1 不支持 Windows：说明、「重试」）。标题、说明、诊断行、可否重试都
 // 来自 ConnectionView。出口按 Rust 给的 kind 接（exit_actions：重试、重新打开 iWork），不按文字猜动作；
 // 没有实现的 kind（查看诊断，等 T04p）不画。诊断页的「重试」按 can_retry 画。诊断行（含系统的原始错误）收在
@@ -36,7 +36,8 @@ export function ConnectionPage(props: { view: ConnectionView }) {
           <p class="iw-gate__message">{v().message}</p>
         </Show>
         <Switch>
-          <Match when={v().state === ConnectionState.WAITING}>
+          {/* 转圈只给没有出口的等待（正在切换版本，后台自己会好）；版本不一致要用户动手，转圈会让人以为在等它自己好 */}
+          <Match when={v().state === ConnectionState.WAITING && v().exitActions.length === 0}>
             <Spinner label="正在重新连接" />
           </Match>
           <Match when={v().diagnostics}>

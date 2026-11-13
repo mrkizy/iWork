@@ -3,7 +3,9 @@
 use iwork_proto::pb;
 
 use super::text;
-use crate::store::{Connection, Exit, Store};
+use iwork_ipc::client::WaitPrompt;
+
+use crate::store::{Connection, Store};
 
 pub fn connection(store: &Store) -> pb::ConnectionView {
     let mut v = pb::ConnectionView {
@@ -23,10 +25,18 @@ pub fn connection(store: &Store) -> pb::ConnectionView {
             v.state = pb::ConnectionState::Reconnecting.into();
             v.title = text::RECONNECTING.into();
         }
-        Connection::Waiting { title, exits } => {
+        Connection::Waiting(p) => {
             v.state = pb::ConnectionState::Waiting.into();
-            v.title = (*title).into();
-            v.exit_actions = exits.iter().map(|e| exit(*e)).collect();
+            v.title = p.text().into();
+            // 版本不一致：说清楚是怎么回事、点了会怎样；只给有实现的出口（查看诊断等 T04p）。
+            // 正在切换版本：后台照常退避重连，没有出口（网页据此画转圈）。
+            match p {
+                WaitPrompt::VersionMismatch => {
+                    v.message = text::VERSION_MISMATCH_MESSAGE.into();
+                    v.exit_actions = vec![relaunch()];
+                }
+                WaitPrompt::SwitchingVersion => {}
+            }
         }
         Connection::Diagnostics(d) => {
             v.state = pb::ConnectionState::Diagnostics.into();
@@ -47,21 +57,17 @@ pub fn connection(store: &Store) -> pb::ConnectionView {
         }
         Connection::Environment(msg) => {
             v.state = pb::ConnectionState::Environment.into();
+            v.title = text::ENVIRONMENT_TITLE.into();
             v.message.clone_from(msg);
-            v.exit_actions = vec![exit(Exit::Retry)];
         }
     }
     v
 }
 
-fn exit(e: Exit) -> pb::ConnectionExit {
-    let (label, kind) = match e {
-        Exit::Retry => (text::EXIT_RETRY, pb::ConnectionExitKind::Retry),
-        Exit::Relaunch => (text::EXIT_RELAUNCH, pb::ConnectionExitKind::Relaunch),
-    };
+fn relaunch() -> pb::ConnectionExit {
     pb::ConnectionExit {
-        label: label.into(),
-        kind: kind.into(),
+        label: text::EXIT_RELAUNCH.into(),
+        kind: pb::ConnectionExitKind::Relaunch.into(),
     }
 }
 
@@ -79,24 +85,34 @@ mod tests {
             .collect()
     }
 
-    /// 出口带动作（网页按 kind 接，不按文字猜）：版本不一致给「重新打开 iWork」，环境说明给「重试」，
-    /// 正常连着时没有出口。
+    /// 出口带动作（网页按 kind 接，不按文字猜）：版本不一致给「重新打开 iWork」并说明；正在切换版本、环境说明没有出口；
+    /// 环境说明有标题。
     #[test]
     fn exits_carry_kinds() {
         assert_eq!(
-            exits(Connection::Waiting {
-                title: "后台服务与客户端版本不一致",
-                exits: vec![Exit::Relaunch],
-            }),
+            exits(Connection::Waiting(WaitPrompt::VersionMismatch)),
             vec![(
                 "重新打开 iWork".to_owned(),
                 pb::ConnectionExitKind::Relaunch
             )]
         );
         assert_eq!(
+            exits(Connection::Waiting(WaitPrompt::SwitchingVersion)),
+            vec![]
+        );
+        assert_eq!(
             exits(Connection::Environment("M1 暂不支持 Windows".into())),
-            vec![("重试".to_owned(), pb::ConnectionExitKind::Retry)]
+            vec![]
         );
         assert_eq!(exits(Connection::Live), vec![]);
+        let mut s = Store::default();
+        s.set_connection(Connection::Waiting(WaitPrompt::VersionMismatch));
+        assert_eq!(connection(&s).message, text::VERSION_MISMATCH_MESSAGE);
+        s.set_connection(Connection::Environment("M1 暂不支持 Windows".into()));
+        let v = connection(&s);
+        assert_eq!(
+            (v.title.as_str(), v.message.as_str()),
+            (text::ENVIRONMENT_TITLE, "M1 暂不支持 Windows")
+        );
     }
 }
