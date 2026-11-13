@@ -60,6 +60,11 @@ path = "tests/process/main.rs"
 required-features = ["dev"]
 
 # 生命周期基准（方案第 6 节）：起真的后台，要 dev（后台带 --dev-trust）
+# 步 3 动到的写入热路径：带闸存储、分发入口（T10a 方案第 6 节）
+[[bench]]
+name = "command_path"
+harness = false
+
 [[bench]]
 name = "lifecycle"
 harness = false
