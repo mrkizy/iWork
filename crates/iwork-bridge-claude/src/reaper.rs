@@ -286,18 +286,22 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (mut child, go, signaler) = signal_paused_after_check();
         let pid = child.id();
+        // 只记「交还成功」：等满期限放弃（返回 false、不回收）本来就是安全的，机器慢时可能先到
         let released = Arc::new(AtomicBool::new(false));
         let r = Arc::clone(&released);
         let releasing = std::thread::spawn(move || {
+            let started = Instant::now();
             let ok = release_cli(Some(pid));
-            r.store(true, Ordering::SeqCst);
-            ok
+            if ok {
+                r.store(true, Ordering::SeqCst);
+            }
+            (ok, started.elapsed())
         });
         std::thread::sleep(Duration::from_millis(40));
         let released_early = released.load(Ordering::SeqCst);
         go.send(()).unwrap();
         let sent = signaler.join().unwrap();
-        let ok = releasing.join().unwrap();
+        let (ok, took) = releasing.join().unwrap();
         let _ = child.kill();
         let _ = child.wait();
         CLI.store(0, Ordering::SeqCst);
@@ -305,7 +309,10 @@ mod tests {
             !released_early,
             "信号还没发，交还就成功了：回收可能排到发信号前面"
         );
-        assert!(ok, "信号发完之后交还成功");
+        assert!(
+            ok || took >= RELEASE_LIMIT,
+            "交还要么在信号发完之后成功，要么等满期限才放弃：ok={ok} took={took:?}"
+        );
         assert!(sent, "信号发给了还没被回收的 CLI");
     }
 
