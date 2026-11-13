@@ -89,12 +89,21 @@ pub fn pending(store: &Store) -> pb::PendingView {
                 kind_label: text::pending_kind(k).into(),
                 title: item_title(store, item),
                 context_label,
-                conversation_id,
                 row_key: row_key(item),
                 project_id: match item.item.as_ref() {
                     Some(pb::pending_item::Item::AgentsMdDraft(d)) => Some(d.project_id.clone()),
                     _ => None,
                 },
+                assistant_id: conversation_id
+                    .as_deref()
+                    .and_then(|cid| store.summary.conversation(cid))
+                    .and_then(|c| match &c.kind {
+                        Some(pb::conversation::Kind::AssistantDm(dm)) => {
+                            Some(dm.assistant_id.clone())
+                        }
+                        _ => None,
+                    }),
+                conversation_id,
             })
         })
         .collect();

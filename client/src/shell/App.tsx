@@ -133,7 +133,7 @@ export function App(props: { host: Host; toasts: Component; initialRoute?: Route
                 <AddProjectDialog onClose={() => p.router.go({ page: "home" })} />
               </Match>
               <Match when={p.router.route().page === "pending"}>
-                <PendingPage open={p.router.go} />
+                <PendingPage open={p.router.go} assistantTab={p.router.assistantTab} />
               </Match>
             </Switch>
           </main>

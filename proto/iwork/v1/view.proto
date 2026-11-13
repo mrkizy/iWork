@@ -615,6 +615,8 @@ message PendingEntry {
   optional string conversation_id = 6;
   optional string row_key = 7;
   optional string project_id = 8;
+  // 这一项在某个助手的私聊里：点开进那个助手的主页（私聊 + 资料栏，ui-m1 2a 第 18 条 b）。项目对话不设。
+  optional string assistant_id = 9;
 }
 
 // ---------- 设置 ----------

@@ -10,7 +10,8 @@ export type Route =
   // 「全部对话」：筛选文字是看哪儿的一部分（变了就重新声明，Rust 去后台筛，2a 第 5 条）
   | { page: "allConversations"; projectId: string; filter?: string }
   // 助手主页 = 和它的私聊 + 右侧资料栏（画布 09、13；需求 FR03「点开助手默认进入该对话，右侧为助手资料」）
-  | { page: "assistant"; id: string; conversationId: string; tab: AssistantTab }
+  // rowKey：进来时滚到私聊里的这一行（从「待你处理」点进来，ui-m1 2a 第 18 条 b）
+  | { page: "assistant"; id: string; conversationId: string; tab: AssistantTab; rowKey?: string }
   | { page: "addProject" };
 
 /** 设置页左栏的几节（画布 12）。 */
@@ -23,12 +24,15 @@ export function createRouter(initial: Route = { page: "home" }) {
   const [route, setRoute] = createSignal<Route>(initial);
   // 设置页是整页（盖住侧栏），「‹ 返回」回到进设置之前看的那一页
   let beforeSettings: Route = { page: "home" };
+  // 资料栏上次停在哪个页签：从「待你处理」进私聊时沿用（ui-m1 2a 第 18 条 b）
+  let lastAssistantTab: AssistantTab = initial.page === "assistant" ? initial.tab : "activity";
   const go = (r: Route) => {
     const now = route();
     if (r.page === "settings" && now.page !== "settings") beforeSettings = now;
+    if (r.page === "assistant") lastAssistantTab = r.tab;
     setRoute(r);
   };
-  return { route, go, back: () => setRoute(beforeSettings) };
+  return { route, go, back: () => setRoute(beforeSettings), assistantTab: () => lastAssistantTab };
 }
 
 export type Router = ReturnType<typeof createRouter>;

@@ -110,6 +110,7 @@ export function AssistantPage(props: {
     <div ref={page} class="iw-assistant-page">
       <ConversationPage
         id={props.route.conversationId}
+        rowKey={props.route.rowKey}
         openRuntimeDetails={props.openRuntimeDetails}
         headerEnd={profileButton}
       />
@@ -121,7 +122,9 @@ export function AssistantPage(props: {
           aria-label="助手资料"
         >
           <Show when={view()}>
-            {(v) => <Profile view={v()} tab={props.route.tab} setTab={(tab) => props.go({ ...props.route, tab })} />}
+            {(v) => (
+            <Profile view={v()} tab={props.route.tab} setTab={(tab) => props.go({ ...props.route, tab, rowKey: undefined })} />
+          )}
           </Show>
         </aside>
       </Show>

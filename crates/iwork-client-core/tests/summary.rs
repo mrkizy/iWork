@@ -660,3 +660,46 @@ fn rule_rows_say_where_and_when() {
         conv.created_label
     );
 }
+
+/// 待你处理里属于某个助手私聊的项带上助手 id：网页据此进助手主页（私聊 + 资料栏），不另开没有资料栏的对话页
+/// （ui-m1 2a 第 18 条 b）。项目对话里的项不带。
+#[test]
+fn pending_in_a_dm_names_its_assistant() {
+    let approval = |id: &str, conversation_id: &str| pb::PendingItem {
+        item: Some(pb::pending_item::Item::Approval(pb::Approval {
+            id: id.into(),
+            conversation_id: conversation_id.into(),
+            ..Default::default()
+        })),
+    };
+    let project_conv = pb::Conversation {
+        id: "c-proj".into(),
+        kind: Some(pb::conversation::Kind::Project(pb::ProjectConversation {
+            project_id: "p1".into(),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let s = with_summary(
+        vec![project(0)],
+        vec![dm("c-dm-asen", "a-asen", 0), project_conv],
+        vec![assistant("a-asen", "阿森", false)],
+        vec![],
+        vec![
+            approval("ap-dm", "c-dm-asen"),
+            approval("ap-proj", "c-proj"),
+        ],
+    );
+    let entries: Vec<_> = derive::pending::pending(&s)
+        .entries
+        .into_iter()
+        .map(|e| (e.item_id, e.assistant_id))
+        .collect();
+    assert_eq!(
+        entries,
+        [
+            ("ap-dm".to_owned(), Some("a-asen".to_owned())),
+            ("ap-proj".to_owned(), None)
+        ]
+    );
+}
