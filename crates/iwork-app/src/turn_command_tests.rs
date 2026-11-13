@@ -226,14 +226,19 @@ fn resume_and_abandon_only_on_interrupted() {
         let t = turn(5, state);
         let interrupted = matches!(state, TurnState::Interrupted { .. });
         let resume = plan_resume_turn(&t, &c);
-        let abandon = plan_abandon_turn(&t, &c);
+        let used = iwork_domain::common::Usage {
+            input_tokens: 7,
+            ..Default::default()
+        };
+        let abandon = plan_abandon_turn(&t, &c, used);
         if interrupted {
             assert!(
                 matches!(&resume.unwrap()[..], [DomainEvent::TurnIntentRecorded(i)] if i.intent == TurnIntentKind::Resume)
             );
+            // 结束事件带中断前记下的用量累计（用量口径 b）
             assert!(matches!(&abandon.unwrap()[..], [
-                DomainEvent::TurnStateChanged(s), DomainEvent::TurnFinished(_)
-            ] if s.from == state && s.to == TurnState::Cancelled));
+                DomainEvent::TurnStateChanged(s), DomainEvent::TurnFinished(f)
+            ] if s.from == state && s.to == TurnState::Cancelled && f.usage == used));
         } else {
             assert_eq!(
                 resume.unwrap_err().code(),

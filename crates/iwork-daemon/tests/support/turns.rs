@@ -90,6 +90,8 @@ pub struct Ctl {
     pub ask_gate: super::hooked::Stall,
     /// 为真时清树报错（进程树没确认清空）
     pub fail_terminate: std::sync::atomic::AtomicBool,
+    /// 每条 prompt 在发请求、收尾之前报一次的用量（这一趟的累计）
+    pub usage_per_prompt: Mutex<Option<iwork_domain::common::Usage>>,
 }
 
 type Asker = Arc<
@@ -145,6 +147,7 @@ pub struct FakeUpdates {
     /// 这是第几条 prompt（从 0 数）：放行数比它大就轮到它结束
     ticket: usize,
     step: u8,
+    usage_sent: bool,
 }
 
 impl AgentPort for FakeAgent {
@@ -236,6 +239,7 @@ impl AgentSession for FakeSession {
             cancelled,
             ticket,
             step: 0,
+            usage_sent: false,
         })
     }
     async fn cancel(&self) -> Result<(), AgentError> {
@@ -262,6 +266,13 @@ impl UpdateStream for FakeUpdates {
                 text: "好的".into(),
             }),
             2 => {
+                if !self.usage_sent
+                    && let Some(u) = self.ctl.usage_per_prompt.lock().unwrap().clone()
+                {
+                    self.usage_sent = true;
+                    self.step -= 1;
+                    return Some(AgentUpdate::Usage(u));
+                }
                 if let Some(ask) = self.asker.take() {
                     for _ in 0..self.ctl.asks_per_prompt.load(Ordering::SeqCst).max(1) {
                         let _passed = self.ctl.ask_gate.pass().await;

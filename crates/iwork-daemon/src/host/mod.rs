@@ -666,21 +666,34 @@ impl HostCommit {
     async fn run<P: HostPorts>(self, ports: Arc<P>, c: ConversationId) -> Result<bool, String> {
         let (turn, events, scope) = match self {
             HostCommit::Settle { turn, by, void } => {
-                let streaming: Vec<_> = ports
+                let unsettled = ports
                     .read()
                     .unsettled()
                     .await
-                    .map_err(|e| format!("补账前读流式消息失败：{e}"))?
+                    .map_err(|e| format!("补账前读流式消息失败：{e}"))?;
+                // 同一个读事务里的用量累计：结束事件带回合累计（用量口径 b）
+                let recorded = unsettled
+                    .recorded_usage
+                    .get(&turn.id)
+                    .copied()
+                    .unwrap_or_default();
+                let streaming: Vec<_> = unsettled
                     .streaming
                     .into_iter()
                     .filter(|m| m.turn_id == Some(turn.id))
                     .collect();
-                let events = owed_turn_events(&turn, &streaming, &by, Default::default())
+                let events = owed_turn_events(&turn, &streaming, &by, recorded)
                     .map_err(|e| format!("算补账的事件失败：{e}"))?;
                 (turn.id, events, Some(void))
             }
             HostCommit::Withdraw { turn, void } => {
-                let events = owed_turn_events(&turn, &[], &OwedBy::Closing, Default::default())
+                // 已中断的回合中断前可能记过用量；排着的没跑过，读出来是零
+                let recorded = ports
+                    .read()
+                    .recorded_usage(turn.id)
+                    .await
+                    .map_err(|e| format!("读回合用量失败：{e}"))?;
+                let events = owed_turn_events(&turn, &[], &OwedBy::Closing, recorded)
                     .map_err(|e| format!("算收尾事件失败：{e}"))?;
                 (turn.id, events, void)
             }

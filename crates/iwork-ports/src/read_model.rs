@@ -257,6 +257,12 @@ pub trait ReadModelPort: Send + Sync {
         &self,
         turn: TurnId,
     ) -> impl Future<Output = Result<Option<Message>, StorageError>> + Send;
+    /// 这个回合已记下的用量累计（用量口径 b：事件里的用量是回合累计）；没记过为零。续接时交给编排接着加，宿主或
+    /// 受理函数把回合收成终态时结束事件带上它。
+    fn recorded_usage(
+        &self,
+        turn: TurnId,
+    ) -> impl Future<Output = Result<Usage, StorageError>> + Send;
     /// 受理回合命令要读的（T10a 方案 A5）：回合与它所在的对话，一个读事务。回合不存在为 `None`。
     fn turn_with_conversation(
         &self,

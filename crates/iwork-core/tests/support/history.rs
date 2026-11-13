@@ -131,6 +131,12 @@ impl ReadModelPort for FakeHistory {
     ) -> Result<Option<iwork_domain::message::Message>, StorageError> {
         unimplemented!("{UNUSED}")
     }
+    async fn recorded_usage(
+        &self,
+        _turn: TurnId,
+    ) -> Result<iwork_domain::common::Usage, StorageError> {
+        unimplemented!("{UNUSED}")
+    }
     async fn turn_with_conversation(
         &self,
         _turn: TurnId,

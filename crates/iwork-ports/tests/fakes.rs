@@ -814,6 +814,12 @@ impl ReadModelPort for FakeReadModel {
     ) -> Result<Option<iwork_domain::message::Message>, StorageError> {
         Ok(None)
     }
+    async fn recorded_usage(
+        &self,
+        _turn: TurnId,
+    ) -> Result<iwork_domain::common::Usage, StorageError> {
+        Ok(Default::default())
+    }
     async fn turn_with_conversation(
         &self,
         _turn: TurnId,

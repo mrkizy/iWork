@@ -507,6 +507,15 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
         self.query(move |conn, codec| turn_request(conn, codec, turn))
     }
 
+    fn recorded_usage(
+        &self,
+        turn: TurnId,
+    ) -> impl Future<Output = Result<iwork_domain::common::Usage, StorageError>> + Send {
+        self.query(move |conn, _codec| {
+            Ok(recorded_usage_on(conn, &turn.to_string())?.unwrap_or_default())
+        })
+    }
+
     fn turn_with_conversation(
         &self,
         turn: TurnId,

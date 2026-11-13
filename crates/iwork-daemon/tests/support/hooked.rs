@@ -281,6 +281,12 @@ impl<R: ReadModelPort> ReadModelPort for HookedRead<R> {
         let _returned = self.knobs.quit_counts.pass().await;
         self.inner.quit_counts().await
     }
+    async fn recorded_usage(
+        &self,
+        turn: TurnId,
+    ) -> Result<iwork_domain::common::Usage, StorageError> {
+        self.inner.recorded_usage(turn).await
+    }
     async fn turn_request(
         &self,
         turn: TurnId,

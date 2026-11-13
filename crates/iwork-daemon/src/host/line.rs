@@ -231,11 +231,13 @@ fn turn_ports<P: HostPorts>(p: &P) -> PortsOf<'_, P> {
     }
 }
 
-/// 准备要读的：回合、这一轮的请求、算快照的已提交输入、这个对话最后一条会话绑定。一次在途（每条线 1 个）。
+/// 准备要读的：回合、这一轮的请求、算快照的已提交输入、回合已记下的用量。一次在途（每条线 1 个）。
 struct Facts {
     turn: Turn,
     request: Option<iwork_domain::message::Message>,
     inputs: SnapshotInputs,
+    /// 这个回合已记下的用量累计：续接时交给编排接着加（用量口径 b）
+    recorded_usage: iwork_domain::common::Usage,
 }
 
 async fn read_facts<P: HostPorts>(
@@ -257,10 +259,12 @@ async fn read_facts<P: HostPorts>(
             .snapshot_inputs(conversation)
             .await
             .map_err(|e| e.to_string())?;
+        let recorded_usage = r.recorded_usage(turn.id).await.map_err(|e| e.to_string())?;
         Ok::<_, String>(Facts {
             turn,
             request,
             inputs,
+            recorded_usage,
         })
     };
     match bounded(busy, HOST_IO_LIMIT, read).await {
@@ -422,7 +426,7 @@ async fn run_turn_job<P: HostPorts>(
             (
                 TurnEntry::Resume {
                     request,
-                    recorded_usage: Default::default(),
+                    recorded_usage: facts.recorded_usage,
                 },
                 vec![ContentBlock::Text(note)],
             )

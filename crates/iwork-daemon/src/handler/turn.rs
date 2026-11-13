@@ -169,7 +169,8 @@ where
         let turn: TurnId = parse(&c.turn_id)?;
         with_replan(|| async {
             let (t, conversation) = self.turn_of(turn).await?;
-            let events = plan_abandon_turn(&t, &conversation)?;
+            let recorded = self.ports.read.recorded_usage(t.id).await?;
+            let events = plan_abandon_turn(&t, &conversation, recorded)?;
             let scope = Scope::VoidTurn {
                 conversation: conversation.id,
                 turn: t.id,

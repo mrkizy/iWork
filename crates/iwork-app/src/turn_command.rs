@@ -115,11 +115,18 @@ pub fn plan_send_message(input: SendInput<'_>) -> Result<Vec<DomainEvent>, Refus
 /// 排着的回合直接取消（0 档的「撤回」）：`Queued → Cancelled` 与 `TurnFinished`。
 /// 宿主在删除、退出时取消排着的回合也用这一个（X2、E2 ③）。
 pub fn withdraw_queued(turn: &Turn) -> Vec<DomainEvent> {
-    finish(turn, TurnState::Queued, TurnState::Cancelled)
+    // 排着的回合从没跑过：没有记下的用量
+    finish(
+        turn,
+        TurnState::Queued,
+        TurnState::Cancelled,
+        Usage::default(),
+    )
 }
 
-/// 一条状态变化加上结束事件。没跑过的回合没有用量、没有改动摘要。
-fn finish(turn: &Turn, from: TurnState, to: TurnState) -> Vec<DomainEvent> {
+/// 一条状态变化加上结束事件。结束事件带回合的用量累计（用量口径 b：`recorded_usage` 是读模型里记下的那一份）；
+/// 这里收的回合这一刻都没有编排在跑，所以没有改动摘要。
+fn finish(turn: &Turn, from: TurnState, to: TurnState, recorded_usage: Usage) -> Vec<DomainEvent> {
     vec![
         TurnStateChanged {
             turn_id: turn.id,
@@ -133,7 +140,7 @@ fn finish(turn: &Turn, from: TurnState, to: TurnState) -> Vec<DomainEvent> {
             turn_id: turn.id,
             conversation_id: Some(turn.conversation_id),
             state: to,
-            usage: Usage::default(),
+            usage: recorded_usage,
             celebrate: false,
             change_summary: None,
         }
@@ -211,13 +218,20 @@ pub fn plan_resume_turn(
 }
 
 /// `AbandonTurn`：已中断 → 已取消。名下待审批与放行的作废由引擎在同一笔里附带（`Scope::VoidTurn`）。
+/// `recorded_usage`：中断前记下的用量累计，结束事件原样带上。
 pub fn plan_abandon_turn(
     turn: &Turn,
     conversation: &Conversation,
+    recorded_usage: Usage,
 ) -> Result<Vec<DomainEvent>, Refusal> {
     conversation.admit_command()?;
     require_interrupted(turn)?;
-    Ok(finish(turn, turn.state, TurnState::Cancelled))
+    Ok(finish(
+        turn,
+        turn.state,
+        TurnState::Cancelled,
+        recorded_usage,
+    ))
 }
 
 #[cfg(test)]
