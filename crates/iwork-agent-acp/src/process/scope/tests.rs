@@ -453,9 +453,14 @@ fn run_staged(steps: &[Staged]) -> Result<(), String> {
                         ));
                     }
                 }
-                // 被超过去的那一遍不作废会话
-                if members.stale && !before.sessions.is_subset(&scope.sessions) {
-                    return Err(format!("第 {n} 步：旧的那一遍作废了会话"));
+                // 范围里除了记到过的进程和根组的有效期，没有别的会影响认领的状态：把代次、在飞数清零，结果相同
+                let mut stripped = snap.clone();
+                stripped.generation = 0;
+                stripped.in_flight = 0;
+                if Scope::compute(&stripped, &table, &recheck).members_for_test()
+                    != Scope::compute(&snap, &table, &recheck).members_for_test()
+                {
+                    return Err(format!("第 {n} 步：范围里有证据以外的状态影响了认领"));
                 }
                 // 认下的都是读表那一刻桥接的后代（读表时的世界里）
                 for m in &members.list {
@@ -724,7 +729,7 @@ fn witness_must_hold_after_the_table_read() {
         t.push(proc(22, 1, 20, 20, 22));
         (s, Table::from_procs(t))
     };
-    let cases: [(&str, Recheck, bool); 3] = [
+    let cases: [(&str, Recheck, bool); 4] = [
         (
             "见证都不在了",
             BTreeMap::from([(20, None), (21, None)]),
@@ -736,6 +741,11 @@ fn witness_must_hold_after_the_table_read() {
                 .into_iter()
                 .map(|(p, v)| (p, v.map(|(b, _)| (b, p + 100))))
                 .collect(),
+            false,
+        ),
+        (
+            "读表时见证在，复核时号码已经换了人（出生时间不同、会话号碰巧相同）",
+            BTreeMap::from([(20, Some((Birth(999), 20))), (21, None)]),
             false,
         ),
         (
@@ -751,7 +761,7 @@ fn witness_must_hold_after_the_table_read() {
     }
 }
 
-/// 最后一个见证没了，下一次求范围就不认这个会话，不等周期删除。
+/// 最后一个见证没了，下一次求范围就不按这个会话认领（每一遍现算，不等周期删除，也不记「作废」）。
 #[test]
 fn session_is_dropped_the_moment_its_last_witness_is_gone() {
     let mut s = Scope::new(10, Some(Birth(10)), 2);
@@ -884,8 +894,11 @@ fn witnesses_come_from_the_snapshot() {
         .filter(|p| p.pid < 20)
         .chain([proc(22, 1, 20, 20, 22)])
         .collect();
-    let p = pass(&snap, with_22, &now);
-    assert!(!p.next.sessions.contains(&20));
+    let p = pass(&snap, now.clone(), &now);
+    assert!(
+        !p.members_for_test().iter().any(|m| m.pid == 22),
+        "这一遍会话 20 核不出见证，22 不被认领"
+    );
 }
 
 /// 完整提交里，表里有这个号但这一遍没读到出生时间的：不删，这一遍也不凭身份算它是成员。
@@ -971,10 +984,10 @@ fn stale_merge_takes_the_newer_session() {
     assert!(!s.commit(pass(&snap, base_table(), &base_table())).stale);
     assert!(s.commit(pass(&snap, newer.clone(), &newer)).stale);
     assert_eq!(s.recorded[&(21, Birth(21))], 21, "取等于自己进程号的那个");
-    // 下一遍完整提交：20 没了，会话 21 靠 21 自己当见证，不作废
-    let next: Vec<Proc> = newer.into_iter().filter(|p| p.pid != 20).collect();
-    observe(&mut s, next);
-    assert!(s.sessions.contains(&21) && !s.dropped.contains(&21));
+    // 下一遍完整提交：20 没了，会话 21 靠 21 自己当见证；会话 21 里的孤儿 24 被认领
+    let mut next: Vec<Proc> = newer.into_iter().filter(|p| p.pid != 20).collect();
+    next.push(proc(24, 1, 21, 21, 24));
+    assert!(observe(&mut s, next).contains(&24));
 }
 
 /// reviewer 探针在四步模型里的样子：甲取快照、读表；桥接 fork 出一个孩子；乙走完四步、把孩子记下；甲复核、提交。
@@ -996,24 +1009,85 @@ fn staged_probe_keeps_the_child() {
     assert_eq!(run_staged(&steps), Ok(()));
 }
 
-/// 快照之后会话 S 作废（清理杀掉了它最后的见证），中间没有别的扫描提交，再提交那一遍：S 仍然是作废的，表里同号会话
-/// 的进程不被认领（作废也让代次加一，那一遍因此只加不删；作废过的会话不恢复）。
+// ---------- 范围只存证据（审查 S6-5 4/F-1） ----------
+
+/// 第 4 轮的反例：会话 20 记到的见证只有 20。扫描乙读到 20 与新孩子 21、复核完，停在提交之前；20 退出，21 还活着；
+/// 扫描甲完整提交（这一遍核不出会话 20 的见证，不按它认领，也不记任何「作废」）；乙随后只加不删，记下 21（会话号 20）；
+/// 之后会话 20 里出现一个孤儿 22。下一遍扫描里 21 当见证，会话 20 受管，22 被认领。
 #[test]
-fn dropped_session_is_not_restored_by_an_older_snapshot() {
+fn witness_lost_then_evidence_arrives_session_is_claimed_again() {
     let mut s = Scope::new(10, Some(Birth(10)), 2);
-    observe(&mut s, base_table());
-    let snap = s.clone();
-    s.drop_session(20);
-    // 那一遍读到的表里会话 20 的进程都还在（父链已断）
-    let mut t: Vec<Proc> = base_table().into_iter().filter(|p| p.pid != 11).collect();
-    t.iter_mut().find(|p| p.pid == 20).unwrap().ppid = 1;
-    let got = s.commit(pass(&snap, t.clone(), &t));
-    assert!(got.stale, "作废让代次变了，这一遍被超过去了");
-    assert!(
-        !s.sessions.contains(&20) && s.dropped.contains(&20),
-        "S 仍然作废"
+    let base: Vec<Proc> = base_table().into_iter().filter(|p| p.pid != 21).collect();
+    observe(&mut s, base.clone());
+    let snap_b = s.clone();
+    let snap_a = s.clone();
+    // 乙读到 20 和它的新孩子 21，复核时 20 还活着
+    let mut b_table = base.clone();
+    b_table.push(proc(21, 20, 20, 20, 21));
+    let b_pass = pass(&snap_b, b_table.clone(), &b_table);
+    // 20 退出，21 成了孤儿；甲读到这张表，完整提交
+    let mut a_table: Vec<Proc> = base.into_iter().filter(|p| p.pid != 20).collect();
+    a_table.push(proc(21, 1, 20, 20, 21));
+    let a = s.commit(pass(&snap_a, a_table.clone(), &a_table));
+    assert!(!a.stale && !a.pids().contains(&21), "对照：甲认不出 21");
+    // 乙提交：只加不删，21 记下了
+    assert!(s.commit(b_pass).stale);
+    assert!(s.is_recorded(21, Birth(21)));
+    // 会话 20 里出现孤儿 22
+    let mut later = a_table;
+    later.push(proc(22, 1, 20, 20, 22));
+    assert!(observe(&mut s, later).contains(&22), "21 当见证，22 被认领");
+}
+
+/// 「为什么不记永久作废」第 2 条：我们的会话 20 成员全死之后，表里出现外人的同号会话。三格都不认领：
+/// ① 外人进程的号与出生时间都和记过的不同；② 外人拿到了我们某个旧身份的进程号（20），出生时间不同；
+/// ③ 同时还有一遍旧的扫描把我们已经死了的旧身份并回范围（它们复核不到活着）。
+#[test]
+fn outsider_session_with_the_same_number_is_never_claimed() {
+    for cell in 1..=3 {
+        let mut s = Scope::new(10, Some(Birth(10)), 2);
+        observe(&mut s, base_table());
+        let stale_snap = s.clone();
+        // 我们的会话 20 全死了
+        let ours_gone: Vec<Proc> = base_table().into_iter().filter(|p| p.pid < 20).collect();
+        observe(&mut s, ours_gone.clone());
+        if cell == 3 {
+            // 一遍旧扫描（读表时 20、21 还活着）现在才提交：把旧身份并回来
+            assert!(
+                s.commit(pass(&stale_snap, base_table(), &base_table()))
+                    .stale
+            );
+            assert!(s.is_recorded(20, Birth(20)) && s.is_recorded(21, Birth(21)));
+        }
+        let mut t = ours_gone;
+        let outsider: Vec<Proc> = match cell {
+            1 => vec![proc(30, 1, 30, 20, 300), proc(31, 30, 30, 20, 301)],
+            _ => vec![proc(20, 1, 20, 20, 999), proc(31, 20, 20, 20, 301)],
+        };
+        t.extend(outsider.clone());
+        let got = observe(&mut s, t);
+        for p in &outsider {
+            assert!(!got.contains(&p.pid), "格 {cell}：外人 {} 被认领了", p.pid);
+        }
+    }
+}
+
+/// 范围里只存证据：字段只有记到过的进程、根组的有效期（根组号与根会话）、代次、在飞的遍数。加了别的字段要改这条测试，
+/// 改的人得回答「它是证据还是结论」。
+#[test]
+fn scope_holds_only_evidence() {
+    let src = include_str!("../scope.rs");
+    let start = src.find("pub struct Scope {").expect("有 Scope 的定义");
+    let body = &src[start..start + src[start..].find("\n}").unwrap()];
+    let fields: Vec<&str> = body
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|l| !l.starts_with("//") && l.contains(':'))
+        .map(|l| l.split(':').next().unwrap().trim())
+        .collect();
+    assert_eq!(
+        fields,
+        ["root", "root_sid", "recorded", "generation", "in_flight"]
     );
-    // 之后的完整扫描里，会话 20 里一个不靠身份的新进程不被认领
-    t.push(proc(25, 1, 25, 20, 25));
-    assert!(!observe(&mut s, t).contains(&25));
 }

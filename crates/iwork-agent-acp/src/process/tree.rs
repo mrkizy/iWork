@@ -480,10 +480,6 @@ impl ProcessTree {
                 if !self.send_batch(victims, libc::SIGKILL, deadline).await {
                     return false;
                 }
-                let mut scope = lock(&self.scope);
-                for sid in release {
-                    scope.drop_session(sid);
-                }
             }
             if Instant::now() >= deadline {
                 return false;

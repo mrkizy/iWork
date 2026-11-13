@@ -121,11 +121,7 @@ pub struct Scope {
     /// 记到过的进程：身份（进程号，出生时间）→ 记它时的会话号。同一个进程号可以有两条不同出生时间的身份
     /// （只加不删并进来的，没了的那条等下一遍完整提交删）
     recorded: BTreeMap<(Pid, Birth), Pid>,
-    /// 还有效的受管会话
-    sessions: BTreeSet<Pid>,
-    /// 作废的会话号：以后不再按它认领
-    dropped: BTreeSet<Pid>,
-    /// 代次：范围每改一次加一（扫描提交、会话作废、根组作废）。一遍扫描提交时拿它判断中间有没有别的改动
+    /// 代次：范围每改一次加一（扫描提交、根组作废）。一遍扫描提交时拿它判断中间有没有别的改动
     generation: u64,
     /// 在飞的扫描有几遍（取了快照、还没提交也没放弃）。不属于范围的内容：完整提交时保留当前值，不取快照里的
     in_flight: usize,
@@ -143,8 +139,6 @@ impl Scope {
             root: Some(root),
             root_sid,
             recorded,
-            sessions: BTreeSet::new(),
-            dropped: BTreeSet::new(),
             generation: 0,
             in_flight: 0,
         }
@@ -165,7 +159,7 @@ impl Scope {
         let pids: BTreeSet<Pid> = self
             .recorded
             .iter()
-            .filter(|(_, sid)| self.sessions.contains(sid))
+            .filter(|(_, sid)| **sid != self.root_sid)
             .map(|((pid, _), _)| *pid)
             .collect();
         pids.into_iter().collect()
@@ -202,26 +196,14 @@ impl Scope {
         }
     }
 
-    /// 只加不删：把成员按身份并进来，它们带来的会话也并进来（作废过的不恢复）。不删任何记到过的进程，不作废会话。
+    /// 只加不删：把成员按身份并进来。不删任何记到过的进程。
     fn merge(&mut self, members: &[Member]) {
         for m in members {
-            let (Some(birth), Some(sid)) = (m.birth, m.sid) else {
-                continue;
-            };
-            self.record(m.pid, birth, sid);
-            if sid != self.root_sid && !self.dropped.contains(&sid) {
-                self.sessions.insert(sid);
+            if let (Some(birth), Some(sid)) = (m.birth, m.sid) {
+                self.record(m.pid, birth, sid);
             }
         }
         self.generation += 1;
-    }
-
-    /// 让一个会话作废（清理时杀掉了它最后的见证）。
-    pub fn drop_session(&mut self, sid: Pid) {
-        if self.sessions.remove(&sid) {
-            self.dropped.insert(sid);
-            self.generation += 1;
-        }
     }
 
     /// 一遍扫描（审查 S6-5 2/F-1，方案 5.4a「扫描怎么提交到范围」）分四步：在锁里取快照（[`Scope::clone`]，连同
@@ -300,27 +282,21 @@ impl Scope {
                 .get(pid)
                 .is_some_and(|p| p.birth.is_none_or(|b| b == *birth))
         });
-        // 受管会话：读完进程表之后，至少一个记到过的成员还活着（出生时间对得上）、还在这个会话里
-        let witnessed: BTreeSet<Pid> = self
+        // 受管会话（不存，每一遍现算，审查 S6-5 4/F-1）：快照里有一个记到过的进程记着会话号 S（不是根会话），读完
+        // 进程表之后复核到它还活着、此刻仍在 S 里 → 这一遍 S 受管。核不出只是这一遍不按 S 认领，不记任何「作废」
+        let managed: BTreeSet<Pid> = self
             .recorded
             .iter()
-            .filter(|((pid, birth), sid)| recheck.get(pid) == Some(&Some((*birth, **sid))))
+            .filter(|((pid, birth), sid)| {
+                **sid != self.root_sid && recheck.get(pid) == Some(&Some((*birth, **sid)))
+            })
             .map(|(_, sid)| *sid)
             .collect();
-        let gone: Vec<Pid> = self
-            .sessions
-            .iter()
-            .filter(|s| !witnessed.contains(s))
-            .copied()
-            .collect();
-        for sid in gone {
-            self.drop_session(sid);
-        }
 
         let base = |p: &Proc| -> bool {
             let recorded = p.birth.is_some_and(|b| self.is_recorded(p.pid, b));
             let in_root = self.root == Some(p.pgid);
-            let in_session = p.sid.is_some_and(|s| self.sessions.contains(&s));
+            let in_session = p.sid.is_some_and(|s| managed.contains(&s));
             recorded || in_root || in_session
         };
         let mut children: BTreeMap<Pid, Vec<Pid>> = BTreeMap::new();
@@ -344,14 +320,11 @@ impl Scope {
             }
         }
 
-        // 记下：每个读得到出生时间与会话号的成员；它带来的非根会话成为受管会话（作废过的不再恢复）
+        // 记下：每个读得到出生时间与会话号的成员（它们之后能当自己会话的见证）
         for pid in &members {
             let p = &table.0[pid];
             if let (Some(birth), Some(sid)) = (p.birth, p.sid) {
                 self.recorded.insert((*pid, birth), sid);
-                if sid != self.root_sid && !self.dropped.contains(&sid) {
-                    self.sessions.insert(sid);
-                }
             }
         }
 
@@ -392,7 +365,7 @@ impl Scope {
         let mut best: BTreeMap<Pid, (u32, Pid)> = BTreeMap::new();
         for m in &members.list {
             let Some(sid) = m.sid else { continue };
-            if !m.recorded || m.run != Run::Stopped || !self.sessions.contains(&sid) {
+            if !m.recorded || m.run != Run::Stopped || sid == self.root_sid {
                 continue;
             }
             let e = best.entry(sid).or_insert((m.depth, m.pid));
