@@ -4,11 +4,12 @@ use iwork_domain::event::{
     AgentsMdDraftDecided, AgentsMdDraftProposed, ProjectAdded, ProjectPathStatusChanged,
     ProjectRelocated, ProjectRemoved, ProjectSettingsUpdated, ProjectUpdated,
 };
-use iwork_domain::project::{PathStatus, Project};
+use iwork_domain::project::{PathStatus, Project, check_settings_committed};
 use iwork_ports::store::{EventCodec, StorageError};
 use rusqlite::params;
 
 use super::Cx;
+use super::owner::precondition;
 use crate::snapshot::{decode_project, encode_project};
 use crate::sql::{ColumnText, sha_text, u64_val};
 
@@ -39,11 +40,11 @@ pub(super) fn added<C: EventCodec + ?Sized>(
 fn modify<C: EventCodec + ?Sized>(
     cx: &Cx<'_, C>,
     id: impl std::fmt::Display,
-    change: impl FnOnce(&mut Project),
+    change: impl FnOnce(&mut Project) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     let id = id.to_string();
     let mut p = decode_project(cx.codec, &cx.snapshot("projects", "id", &id)?)?;
-    change(&mut p);
+    change(&mut p)?;
     cx.exec_hit(
         "UPDATE projects SET root_path = ?1, name = ?2, pinned = ?3, last_active_at = ?4, \
          path_status = ?5, default_approval_mode = ?6, snapshot = ?7, updated_seq = ?8 WHERE id = ?9",
@@ -77,6 +78,7 @@ pub(super) fn updated<C: EventCodec + ?Sized>(
         if let Some(at) = e.last_active_at {
             p.last_active_at = Some(at);
         }
+        Ok(())
     })
 }
 
@@ -88,6 +90,7 @@ pub(super) fn relocated<C: EventCodec + ?Sized>(
     modify(cx, e.project_id, |p| {
         p.root_path = e.new_path.clone();
         p.path_status = PathStatus::Ok;
+        Ok(())
     })
 }
 
@@ -95,14 +98,26 @@ pub(super) fn path_status_changed<C: EventCodec + ?Sized>(
     cx: &Cx<'_, C>,
     e: &ProjectPathStatusChanged,
 ) -> Result<(), StorageError> {
-    modify(cx, e.project_id, |p| p.path_status = e.path_status)
+    modify(cx, e.project_id, |p| {
+        p.path_status = e.path_status;
+        Ok(())
+    })
 }
 
+/// 整份设置写回之前先过状态前提（T10a 1/F-1）：库里的设置还是事件据以合并的那一份。
 pub(super) fn settings_updated<C: EventCodec + ?Sized>(
     cx: &Cx<'_, C>,
     e: &ProjectSettingsUpdated,
 ) -> Result<(), StorageError> {
-    modify(cx, e.project_id, |p| p.settings = e.settings.clone())
+    modify(cx, e.project_id, |p| {
+        precondition(
+            cx,
+            &format!("项目 {}", e.project_id),
+            check_settings_committed(&p.settings, e),
+        )?;
+        p.settings = e.settings.clone();
+        Ok(())
+    })
 }
 
 /// 项目默认档位（`ApprovalModeChanged{target: Project}`，方案 Q1 (a)）。
@@ -111,7 +126,10 @@ pub(super) fn set_default_mode<C: EventCodec + ?Sized>(
     id: impl std::fmt::Display,
     mode: iwork_domain::approval_mode::ProjectDefaultMode,
 ) -> Result<(), StorageError> {
-    modify(cx, id, |p| p.settings.default_approval_mode = mode)
+    modify(cx, id, |p| {
+        p.settings.default_approval_mode = mode;
+        Ok(())
+    })
 }
 
 /// 删项目行与它的草稿卡片。项目对话由 app 先发 `ConversationDeleted`（设计 9.0），这里不替它删。

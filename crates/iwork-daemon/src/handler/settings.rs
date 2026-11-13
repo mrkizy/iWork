@@ -80,7 +80,7 @@ where
             default_model: c.default_model.as_ref().map(model_selection_from_proto),
             ai_review,
         };
-        // 合到读到的设置上；读和提交之间别人改了设置，后到的这一笔整份覆盖（设置没有提交时校验）
+        // 合到读到的设置上；读和提交之间别人改了设置，写线程拒掉这一笔（`previous` 对不上），重读重算
         with_replan(|| async {
             let projects = self.ports.read.projects().await?;
             let current = projects

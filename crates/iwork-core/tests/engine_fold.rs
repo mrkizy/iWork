@@ -79,6 +79,7 @@ fn project_default_feeds_new_conversations() {
         e_conversation(project_conversation(10, 1)),
         ProjectSettingsUpdated {
             project_id: pid(1),
+            previous: Some(ProjectSettings::default()),
             settings: ProjectSettings::default(),
         }
         .into(),
@@ -115,6 +116,7 @@ fn snapshot_inputs_seq_tracks_lists_projects_assistants() {
         // 改项目设置不让快照过期
         ProjectSettingsUpdated {
             project_id: pid(1),
+            previous: Some(ProjectSettings::default()),
             settings: ProjectSettings::default(),
         }
         .into(),

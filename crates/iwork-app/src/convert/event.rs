@@ -65,6 +65,7 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
             P::ProjectSettingsUpdated(pb::ProjectSettingsUpdated {
                 project_id: e.project_id.to_string(),
                 settings: Some(project_settings_to_proto(&e.settings)),
+                previous: e.previous.as_ref().map(project_settings_to_proto),
             })
         }
         DomainEvent::RepositoryInitialized(e) => {
@@ -573,6 +574,11 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
                 "settings",
                 e.settings.as_ref(),
             )?)?,
+            previous: e
+                .previous
+                .as_ref()
+                .map(project_settings_from_proto)
+                .transpose()?,
         }
         .into(),
         P::RepositoryInitialized(e) => ev::RepositoryInitialized {

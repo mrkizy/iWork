@@ -51,7 +51,8 @@ pub struct ProjectSettingsPatch {
     pub ai_review: Option<AiReviewSettings>,
 }
 
-/// `UpdateProjectSettings`：把改动合到现有设置上，事件带完整设置（`ProjectSettingsUpdated` 的约定）。
+/// `UpdateProjectSettings`：把改动合到现有设置上，事件带完整设置（`ProjectSettingsUpdated` 的约定）和据以
+/// 合并的那一份；读完之后别人改过，写线程拒掉这一笔，外壳重读重算（T10a 1/F-1）。
 pub fn plan_update_project_settings(
     project: &Project,
     patch: ProjectSettingsPatch,
@@ -75,6 +76,7 @@ pub fn plan_update_project_settings(
     Ok(vec![
         ProjectSettingsUpdated {
             project_id: project.id,
+            previous: Some(project.settings.clone()),
             settings,
         }
         .into(),

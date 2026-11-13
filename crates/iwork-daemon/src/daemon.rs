@@ -521,13 +521,14 @@ fn outbox_routes() -> Vec<OutboxRoute> {
 }
 
 #[cfg(not(feature = "dev"))]
-fn dev_tasks(_stop: &StopSwitch, _store: &Arc<Store>) -> Vec<TaskSpec> {
+fn dev_tasks(_stop: &StopSwitch, _store: &Arc<GStore>) -> Vec<TaskSpec> {
     Vec::new()
 }
 
 /// 开发构建的触发器：停机（`IWORK_DEV_STOP_ON`）、让写线程失效（`IWORK_DEV_BREAK_WRITER_ON`）。
+/// 触发器的提交和别的任务一样走带封口闸的存储（E4）：封口之后它也入不了队。
 #[cfg(feature = "dev")]
-fn dev_tasks(stop: &StopSwitch, store: &Arc<Store>) -> Vec<TaskSpec> {
+fn dev_tasks(stop: &StopSwitch, store: &Arc<GStore>) -> Vec<TaskSpec> {
     let mut v = Vec::new();
     if let Some((file, reason)) = crate::dev_parts::stop_trigger() {
         let stop = stop.clone();
@@ -680,7 +681,7 @@ async fn serve_with<W: RunningWork>(
     let store_failed = Arc::new(AtomicBool::new(false));
     let woke = Arc::new(Notify::new());
     let clock = Arc::new(SystemClock::new());
-    let mut specs = dev_tasks(&stop_switch, &store);
+    let mut specs = dev_tasks(&stop_switch, &gated);
     specs.extend(health_tasks(
         store.failed(),
         store_failed.clone(),

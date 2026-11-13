@@ -212,3 +212,27 @@ fn cascade_needs_every_turn_terminal() {
         }
     }
 }
+
+/// 已读位置只往前走（T10a 1/F-2）：比库里大才过；相等、更小都拒，并点名对话与两个位置。
+#[test]
+fn read_marker_only_moves_forward() {
+    use iwork_domain::conversation::check_read_committed;
+    use iwork_domain::event::ConversationRead;
+    let c = conv_id(10);
+    let read = |n| ConversationRead {
+        conversation_id: c,
+        last_read_seq: Seq(n),
+    };
+    assert!(check_read_committed(Seq(5), &read(6)).is_ok());
+    assert!(check_read_committed(Seq(0), &read(1)).is_ok());
+    for stale in [5, 1] {
+        let e = check_read_committed(Seq(5), &read(stale)).unwrap_err();
+        assert!(
+            e.message.contains(&c.to_string())
+                && e.message.contains(&stale.to_string())
+                && e.message.contains('5'),
+            "{}",
+            e.message
+        );
+    }
+}

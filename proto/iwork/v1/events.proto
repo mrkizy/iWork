@@ -138,6 +138,9 @@ message ProjectRemoved {
 message ProjectSettingsUpdated {
   string project_id = 1;
   ProjectSettings settings = 2;
+  // 新设置是在哪一份上改出来的。写线程只在库里的设置仍等于它时落盘，不拿旧值盖掉别人刚做的改动（T10a 1/F-1）。
+  // 新写的事件必有；没有的是加这个字段之前的旧事件，照原样整份写回。
+  ProjectSettings previous = 3;
 }
 
 // 流：project（path；此时项目还没登记，没有 id）。设计 9.3 第 2 步。

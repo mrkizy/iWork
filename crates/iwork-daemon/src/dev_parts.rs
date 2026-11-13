@@ -217,8 +217,12 @@ pub fn break_writer_trigger() -> Option<PathBuf> {
     std::env::var(BREAK_WRITER_ENV).ok().map(PathBuf::from)
 }
 
-/// 任务体：等文件出现，删掉，提交一条触发器事件（这次提交会因写线程退出而失败）。
-pub async fn break_writer_on(file: PathBuf, store: std::sync::Arc<crate::boot::Store>) {
+/// 任务体：等文件出现，删掉，提交一条触发器事件（这次提交会因写线程退出而失败）。只收带封口闸的存储（E4）：
+/// 封口之后触发器的提交和别的任务一样入不了队。
+pub async fn break_writer_on(
+    file: PathBuf,
+    store: std::sync::Arc<crate::gate::GatedStore<crate::boot::Store>>,
+) {
     use iwork_ports::clock::IdGenerator;
     use iwork_ports::store::StoragePort;
     loop {

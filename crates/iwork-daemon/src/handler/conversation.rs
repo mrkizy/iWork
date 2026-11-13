@@ -71,10 +71,14 @@ where
         c: pb::MarkRead,
     ) -> Result<CommitReceipt, CommandError> {
         let conversation: ConversationId = parse(&c.conversation_id)?;
-        let conv = self.conversation_of(conversation).await?;
-        let head = self.ports.store.head_seq().await?;
-        let events = plan_mark_read(&conv, c.up_to_seq, head)?;
-        self.commit(id, events).await
+        // 读和提交之间另一条连接把已读位置推得更远：写线程拒掉这一笔（只往前走），重读后多半是空的一笔
+        with_replan(|| async {
+            let conv = self.conversation_of(conversation).await?;
+            let head = self.ports.store.head_seq().await?;
+            let events = plan_mark_read(&conv, c.up_to_seq, head)?;
+            self.commit(id, events).await
+        })
+        .await
     }
 
     pub(super) async fn set_conversation_model(

@@ -138,10 +138,15 @@ pub struct ProjectRemoved {
     pub project_id: ProjectId,
 }
 
-/// 带改动后的完整设置：只带变更字段时表达不了「清空默认模型」。
+/// 带改动后的完整设置：只带变更字段时表达不了「清空默认模型」。整份写回，所以还带着它是在哪一份上改的
+/// （`previous`）：写线程只在库里的设置仍等于它时落盘，读完之后别人改过就拒，不拿旧值盖掉新值
+/// （[`crate::project::check_settings_committed`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectSettingsUpdated {
     pub project_id: ProjectId,
+    /// `None` 只出现在加这个字段（T10a 1/F-1）之前写下的事件里：照当时的含义整份写回，不比。
+    /// 重建投影要按原样重放它们；新写的事件一律带上（`plan_update_project_settings`）。
+    pub previous: Option<ProjectSettings>,
     pub settings: ProjectSettings,
 }
 

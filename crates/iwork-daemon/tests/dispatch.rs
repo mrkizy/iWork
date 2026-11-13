@@ -848,3 +848,211 @@ async fn send_racing_delete_is_refused_at_commit() {
     );
     assert_no_turn_after_delete(&h.raw, &h.env.db()).await;
 }
+
+/// 只压 `paused` 那条命令的**第一次**提交（读完、算好、提交之前），每一次提交前都报到 `passes`。
+/// 被写线程拒了重算的那一次照常过去，所以 `passes` 收到两次 = 第一笔被拒、重读重算过。
+fn pause_first_commit(
+    h: &H,
+    paused: CommandId,
+) -> (
+    Arc<Disp>,
+    mpsc::UnboundedReceiver<()>,
+    Arc<tokio::sync::Notify>,
+) {
+    let (tx, passes) = mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let r = release.clone();
+    let first = Arc::new(AtomicUsize::new(0));
+    let d = Dispatcher::new(h.d_ports()).with_hooks(DispatchHooks {
+        before_commit: Some(Box::new(move |id| {
+            let (tx, r, first) = (tx.clone(), r.clone(), first.clone());
+            Box::pin(async move {
+                if id != paused {
+                    return;
+                }
+                let go = r.notified();
+                let _ = tx.send(());
+                if first.fetch_add(1, Ordering::SeqCst) == 0 {
+                    go.await;
+                }
+            })
+        })),
+        ..Default::default()
+    });
+    (Arc::new(d), passes, release)
+}
+
+fn patch_model(model: &str) -> pb::command::Kind {
+    pb::command::Kind::UpdateProjectSettings(pb::UpdateProjectSettings {
+        project_id: pid(PROJECT).to_string(),
+        default_model: Some(pb::ModelSelection {
+            model_id: model.into(),
+            effort: None,
+        }),
+        ..Default::default()
+    })
+}
+
+fn patch_mode(mode: pb::ApprovalMode) -> pb::command::Kind {
+    pb::command::Kind::UpdateProjectSettings(pb::UpdateProjectSettings {
+        project_id: pid(PROJECT).to_string(),
+        default_approval_mode: Some(mode.into()),
+        ..Default::default()
+    })
+}
+
+async fn project_settings(raw: &Arc<Store>) -> iwork_domain::project::ProjectSettings {
+    use iwork_ports::read_model::ReadModelPort;
+    let projects = read_model(raw).projects().await.unwrap();
+    projects
+        .iter()
+        .find(|p| p.project.id == pid(PROJECT))
+        .unwrap()
+        .project
+        .settings
+        .clone()
+}
+
+/// 项目设置补丁 `late` 读完旧设置、停在提交之前，另一条连接的 `newer` 先落盘；放开 `late` 之后两边的改动都在。
+/// `late` 只改模型，`newer` 把项目默认档位从自动改回手动（经 `UpdateProjectSettings` 或 `SetApprovalMode`）。
+async fn settings_patch_races(newer: pb::command::Kind) {
+    use iwork_domain::approval_mode::ProjectDefaultMode;
+    let h = harness().await;
+    let auto = ask(&h.d, fresh_id(99), patch_mode(pb::ApprovalMode::Auto)).await;
+    assert!(matches!(auto, Answer::Accepted(_)), "{auto:?}");
+    let late_id = fresh_id(100);
+    let (d, mut passes, release) = pause_first_commit(&h, late_id);
+    let late = {
+        let d = d.clone();
+        tokio::spawn(async move { ask(&d, late_id, patch_model("new-model")).await })
+    };
+    within("模型补丁读完旧设置、停在提交之前", passes.recv()).await;
+    let newer = ask(&d, fresh_id(101), newer).await;
+    assert!(matches!(newer, Answer::Accepted(_)), "{newer:?}");
+    assert_eq!(
+        project_settings(&h.raw).await.default_approval_mode,
+        ProjectDefaultMode::Manual
+    );
+    release.notify_waiters();
+    let late = within("模型补丁回来", late).await.unwrap();
+    assert!(matches!(late, Answer::Accepted(_)), "{late:?}");
+    let settings = project_settings(&h.raw).await;
+    assert_eq!(
+        settings.default_model.map(|m| m.model_id.0).as_deref(),
+        Some("new-model")
+    );
+    assert_eq!(
+        settings.default_approval_mode,
+        ProjectDefaultMode::Manual,
+        "只改模型的补丁不能把别人刚改的档位盖回去"
+    );
+    assert!(
+        passes.try_recv().is_ok(),
+        "第一笔应被写线程拒掉、重读重算过"
+    );
+}
+
+/// 1/F-1：两条连接各改项目设置的一项。后到的那笔是在旧设置上合并的，写线程拒掉它（`previous` 对不上），
+/// 重读重算后两项都在。修之前：后到的整份写回，档位退回自动。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_patch_racing_another_patch_keeps_both() {
+    settings_patch_races(patch_mode(pb::ApprovalMode::Manual)).await;
+}
+
+/// 1/F-1 的同类：项目默认档位也能经 `SetApprovalMode`（引擎切档）改，它和设置补丁写的是同一份设置。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_patch_racing_project_mode_switch_keeps_both() {
+    settings_patch_races(pb::command::Kind::SetApprovalMode(pb::SetApprovalMode {
+        target: Some(pb::ApprovalModeTarget {
+            kind: Some(pb::approval_mode_target::Kind::ProjectId(
+                pid(PROJECT).to_string(),
+            )),
+        }),
+        mode: pb::ApprovalMode::Manual.into(),
+        follow_supervisor: false,
+    }))
+    .await;
+}
+
+/// 1/F-2：已读位置只往前走。读得早的 `MarkRead(1)` 停在提交之前，另一条连接把位置推到 head；放开之后
+/// 写线程拒掉小的那笔，重读后是空的一笔，位置仍是 head。修之前：位置被拨回 1。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mark_read_racing_a_further_mark_never_moves_back() {
+    use iwork_ports::read_model::{MessagePage, ReadModelPort};
+    let h = harness().await;
+    let head = h.raw.head_seq().await.unwrap().0;
+    assert!(head > 1, "夹具要有不止一条事件，才分得出前后");
+    let mark = |up_to_seq| {
+        pb::command::Kind::MarkRead(pb::MarkRead {
+            conversation_id: cid(CONV).to_string(),
+            up_to_seq,
+        })
+    };
+    let read = read_model(&h.raw);
+    let last_read = || async {
+        read.conversation(
+            cid(CONV),
+            MessagePage {
+                before: None,
+                limit: 0,
+            },
+        )
+        .await
+        .unwrap()
+        .conversation
+        .last_read_seq
+        .0
+    };
+    let late_id = fresh_id(100);
+    let (d, mut passes, release) = pause_first_commit(&h, late_id);
+    let late = {
+        let d = d.clone();
+        let earlier = mark(1);
+        tokio::spawn(async move { ask(&d, late_id, earlier).await })
+    };
+    within("小的已读位置算好、停在提交之前", passes.recv()).await;
+    let newer = ask(&d, fresh_id(101), mark(head)).await;
+    assert!(matches!(newer, Answer::Accepted(_)), "{newer:?}");
+    assert_eq!(last_read().await, head);
+    release.notify_waiters();
+    let late = within("小的那笔回来", late).await.unwrap();
+    assert!(matches!(late, Answer::Accepted(_)), "{late:?}");
+    assert_eq!(last_read().await, head, "已读位置被拨回去了");
+    assert!(
+        passes.try_recv().is_ok(),
+        "第一笔应被写线程拒掉、重读重算过"
+    );
+}
+
+/// A2 ①：等同一个 `command_id` 的那一份到时退出，不放掉原来占着的那一份；占着的丢弃后才能再进。
+#[tokio::test(start_paused = true)]
+async fn same_id_wait_timeout_keeps_the_holder() {
+    use futures::FutureExt;
+    use iwork_daemon::handler::dispatch::{InFlight, SAME_ID_WAIT};
+    let table = Arc::new(InFlight::default());
+    let id = fresh_id(200);
+    let held = table.enter(id, || {}).await;
+    let waiting = Arc::new(tokio::sync::Notify::new());
+    let task = {
+        let table = table.clone();
+        let waiting = waiting.clone();
+        tokio::spawn(async move {
+            tokio::time::timeout(SAME_ID_WAIT, table.enter(id, || waiting.notify_one()))
+                .await
+                .is_err()
+        })
+    };
+    waiting.notified().await;
+    tokio::time::advance(SAME_ID_WAIT).await;
+    assert!(task.await.unwrap());
+    assert_eq!(table.waiting_len(), 0);
+    assert!(
+        table.enter(id, || {}).now_or_never().is_none(),
+        "到时退出的等待者不能放掉原来占着的那一份"
+    );
+    drop(held);
+    assert!(
+        table.enter(id, || {}).now_or_never().is_some(),
+        "占着的丢弃后才能再进"
+    );
+}

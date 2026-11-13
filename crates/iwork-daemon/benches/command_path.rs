@@ -1,7 +1,7 @@
 //! 步 3 动到的写入热路径（T10a 方案第 6 节「存储写入」「每条命令」两行）。每组一行 JSON 到 stdout。
 //!
 //! `cargo bench -p iwork-daemon --bench command_path`（重测试，套 `lockf /tmp/iwork-heavy-test.lock`）。
-//! 同一进程里两边交替跑多轮，各取每次的中位耗时；本机负载高时只看相对值。
+//! 同一进程里两边交替跑多轮（每轮换先后），各取每次的中位耗时；本机负载高时只看相对值。开头、结尾各记一次负载。
 //!
 //! - `gate_commit`：存储单事件提交，裸存储对带封口闸的存储（多拿一把没有争用的锁）。
 //! - `command_roundtrip`：同一种提交（`SetPlayfulUi` 的 `GlobalSettingsChanged`）直接 `commit`，对经分发入口受理
@@ -77,7 +77,7 @@ fn request(n: usize) -> CommitRequest {
         actor: Actor("bench".into()),
         events: vec![
             GlobalSettingsChanged {
-                playful_ui: Some(n % 2 == 0),
+                playful_ui: Some(n.is_multiple_of(2)),
                 autostart: None,
                 projects_root: None,
             }
@@ -103,23 +103,35 @@ where
 
 fn gate_commit(rt: &tokio::runtime::Runtime) {
     let (mut raw, mut gated) = (Vec::new(), Vec::new());
-    for _ in 0..ROUNDS {
-        let dir = tempfile::tempdir().unwrap();
-        let store = open_store(&dir);
-        raw.push(rt.block_on(timed(|i| {
-            let s = store.clone();
-            async move {
-                s.commit(request(i)).await.unwrap();
-            }
-        })));
-        let dir = tempfile::tempdir().unwrap();
-        let store = GatedStore::new(open_store(&dir), Arc::new(SealGate::default()));
-        gated.push(rt.block_on(timed(|i| {
-            let fut = store.commit(request(i));
-            async move {
-                fut.await.unwrap();
-            }
-        })));
+    for round in 0..ROUNDS {
+        let run_raw = || {
+            let dir = tempfile::tempdir().unwrap();
+            let store = open_store(&dir);
+            rt.block_on(timed(|i| {
+                let s = store.clone();
+                async move {
+                    s.commit(request(i)).await.unwrap();
+                }
+            }))
+        };
+        let run_gated = || {
+            let dir = tempfile::tempdir().unwrap();
+            let store = GatedStore::new(open_store(&dir), Arc::new(SealGate::default()));
+            rt.block_on(timed(|i| {
+                let fut = store.commit(request(i));
+                async move {
+                    fut.await.unwrap();
+                }
+            }))
+        };
+        // 每轮换先后，负载随时间的漂移不偏向一边
+        if round.is_multiple_of(2) {
+            raw.push(run_raw());
+            gated.push(run_gated());
+        } else {
+            gated.push(run_gated());
+            raw.push(run_raw());
+        }
     }
     emit(
         "gate_commit",
@@ -156,15 +168,21 @@ fn ctx() -> ConnectionContext {
 
 fn command_roundtrip(rt: &tokio::runtime::Runtime) {
     let (mut direct, mut dispatched) = (Vec::new(), Vec::new());
-    for _ in 0..ROUNDS {
-        let dir = tempfile::tempdir().unwrap();
-        let store = GatedStore::new(open_store(&dir), Arc::new(SealGate::default()));
-        direct.push(rt.block_on(timed(|i| {
-            let fut = store.commit(request(i));
-            async move {
-                fut.await.unwrap();
-            }
-        })));
+    for round in 0..ROUNDS {
+        let run_direct = || {
+            let dir = tempfile::tempdir().unwrap();
+            let store = GatedStore::new(open_store(&dir), Arc::new(SealGate::default()));
+            rt.block_on(timed(|i| {
+                let fut = store.commit(request(i));
+                async move {
+                    fut.await.unwrap();
+                }
+            }))
+        };
+        // 每轮换先后（同 gate_commit）
+        if round.is_multiple_of(2) {
+            direct.push(run_direct());
+        }
         let dir = tempfile::tempdir().unwrap();
         let raw = open_store(&dir);
         let gated = GatedStore::new(raw.clone(), Arc::new(SealGate::default()));
@@ -214,7 +232,7 @@ fn command_roundtrip(rt: &tokio::runtime::Runtime) {
                             body: Some(pb::request::Body::Command(pb::Command {
                                 command_id: id(i).to_string(),
                                 kind: Some(pb::command::Kind::SetPlayfulUi(pb::SetPlayfulUi {
-                                    enabled: i % 2 == 0,
+                                    enabled: i.is_multiple_of(2),
                                 })),
                             })),
                         },
@@ -223,6 +241,9 @@ fn command_roundtrip(rt: &tokio::runtime::Runtime) {
                 assert!(matches!(r.body, Some(pb::response::Body::Accepted(_))));
             }
         })));
+        if !round.is_multiple_of(2) {
+            direct.push(run_direct());
+        }
     }
     emit(
         "command_roundtrip",
@@ -258,5 +279,14 @@ fn main() {
     }
     if on("command_roundtrip") {
         command_roundtrip(&rt);
+    }
+    if let Ok(o) = std::process::Command::new("sysctl")
+        .args(["-n", "vm.loadavg"])
+        .output()
+    {
+        emit(
+            "environment_end",
+            serde_json::json!({ "loadavg": String::from_utf8_lossy(&o.stdout).trim() }),
+        );
     }
 }

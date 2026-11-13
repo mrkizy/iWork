@@ -89,6 +89,24 @@ pub struct ProjectSettings {
     pub ai_review: AiReviewSettings,
 }
 
+/// `ProjectSettingsUpdated` 的状态前提（T10a 1/F-1）：库里现在的设置 `current` 等于事件据以算出新设置的
+/// `previous`。事件带的是整份设置，受理函数在读到的那一份上合并补丁；读和提交之间别人改过（另一条连接的
+/// 补丁、切项目默认档位），按旧的那份写回就会把别人的改动盖掉。真存储在写线程上调这里。
+/// 没带 `previous` 的是加这个字段之前的旧事件，照原样通过（见字段说明）。
+pub fn check_settings_committed(
+    current: &ProjectSettings,
+    e: &crate::event::ProjectSettingsUpdated,
+) -> Result<(), crate::approval::PreconditionFailed> {
+    match &e.previous {
+        None => Ok(()),
+        Some(previous) if previous == current => Ok(()),
+        Some(previous) => Err(crate::approval::PreconditionFailed::new(format!(
+            "项目 {} 的设置在读之后被改过：据以合并的是 {previous:?}，库里是 {current:?}",
+            e.project_id
+        ))),
+    }
+}
+
 /// 项目实体。以 `id`（也写在仓库的 `.iwork/project.toml`）识别，不以路径识别。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {

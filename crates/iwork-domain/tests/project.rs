@@ -112,3 +112,37 @@ proptest! {
         prop_assert_eq!(p.last_active_at, times.iter().copied().max().map(Timestamp));
     }
 }
+
+/// 整份设置只落在它读到的那一份上（T10a 1/F-1）：库里的设置等于事件的 `previous` 才过；
+/// 读完之后别人改过（哪怕只改了一项）就拒，并点名项目。没带 `previous` 的旧事件照原样过。
+#[test]
+fn settings_update_needs_the_settings_it_was_based_on() {
+    use iwork_domain::approval_mode::ProjectDefaultMode;
+    use iwork_domain::common::ModelId;
+    use iwork_domain::common::ModelSelection;
+    use iwork_domain::event::ProjectSettingsUpdated;
+    use iwork_domain::project::check_settings_committed;
+    let id = ProjectId::from_raw(RawUlid::from_u128(3));
+    let base = ProjectSettings::default();
+    let mut next = base.clone();
+    next.default_model = Some(ModelSelection {
+        model_id: ModelId("m".into()),
+        effort: None,
+    });
+    let mut e = ProjectSettingsUpdated {
+        project_id: id,
+        previous: Some(base.clone()),
+        settings: next,
+    };
+    assert!(check_settings_committed(&base, &e).is_ok());
+    let mut moved = base.clone();
+    moved.default_approval_mode = match base.default_approval_mode {
+        ProjectDefaultMode::Manual => ProjectDefaultMode::Auto,
+        ProjectDefaultMode::Auto => ProjectDefaultMode::Manual,
+    };
+    let err = check_settings_committed(&moved, &e).unwrap_err();
+    assert!(err.message.contains(&id.to_string()), "{}", err.message);
+    // 旧事件没带据以合并的那一份：重建投影时照原样重放
+    e.previous = None;
+    assert!(check_settings_committed(&moved, &e).is_ok());
+}
