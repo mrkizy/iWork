@@ -135,31 +135,37 @@ rh_validate_inputs() {
   fi
 }
 
-# a 与 b 是同一路径，或一个在另一个之下（都是物理路径）
-rh_path_overlaps() {
-  [ "$1" = "$2" ] && return 0
-  case "$1/" in "$2"/*) return 0 ;; esac
-  case "$2/" in "$1"/*) return 0 ;; esac
-  return 1
+# a 就是 b，或在 b 之下。按文件系统身份（设备号 + inode，即 test -ef）比，不按路径拼写比：
+# macOS 默认卷不区分大小写，iwork-remote 与 IWORK-REMOTE 拼写不同却是同一目录。
+# 从 a 的物理路径一级级往上走到 /，每一级都和 b 比一次。a、b 都要存在；b 不存在时 -ef 恒为假。
+rh_is_within() { # a b
+  local p
+  p=$(cd -P "$1" && pwd) || return 1
+  while :; do
+    if [ "$p" -ef "$2" ]; then return 0; fi
+    [ "$p" != / ] || return 1
+    p=$(dirname "$p")
+  done
 }
 
 # 根目录这个锚点：在任何写操作之前核。ROOT 不存在时只在 ~/work 下建这一层，不建 ~/work。
+# 和 T11 检出（~/work/iWork）的关系按文件系统身份判：ROOT 不能是它、不能在它之下、也不能是它的上级。
 # 核过之后 ROOT 和派生路径都换成物理路径。
 rh_check_root() {
-  local parent="$HOME/work" t11="$HOME/work/iWork" t11_real root_real e
-  if [ -e "$t11" ]; then t11_real=$(cd -P "$t11" && pwd) || rh_refuse "解析不了 $t11"; else t11_real=$t11; fi
+  local parent="$HOME/work" t11="$HOME/work/iWork" root_real e
+  # T11 是一个指向不存在之处的链接时，没法判它和 ROOT 的关系（ROOT 建出来可能正好是它指的地方），拒绝。
+  if [ -L "$t11" ] && [ ! -e "$t11" ]; then rh_refuse "$t11 是指向不存在之处的链接，判断不了和 $ROOT 的关系"; fi
   if [ ! -e "$ROOT" ] && [ ! -L "$ROOT" ]; then
     [ -d "$parent" ] || rh_refuse "$parent 不存在"
-    # 建之前先算它将来的物理路径（~/work 本身可能是链接）
-    root_real="$(cd -P "$parent" && pwd)/iwork-remote"
-    if rh_path_overlaps "$root_real" "$t11_real"; then rh_refuse "$ROOT 会建到 ${root_real}，和 T11 检出重叠"; fi
+    # 建之前：将建的 ROOT 的父目录不能是 T11 或在 T11 之下（~/work 本身可能是链接）
+    if [ -e "$t11" ] && rh_is_within "$parent" "$t11"; then rh_refuse "$parent 是 T11 检出或在它之内，不在这里建 $ROOT"; fi
     mkdir "$ROOT" || rh_refuse "建不了 $ROOT"
   fi
   [ ! -L "$ROOT" ] || rh_refuse "$ROOT 是符号链接"
   [ -d "$ROOT" ] || rh_refuse "$ROOT 不是目录"
   root_real=$(cd -P "$ROOT" && pwd) || rh_refuse "解析不了 $ROOT"
-  if rh_path_overlaps "$root_real" "$t11_real"; then
-    rh_refuse "$ROOT 解析到 ${root_real}，和 T11 检出 $t11_real 重叠"
+  if [ -e "$t11" ] && { rh_is_within "$ROOT" "$t11" || rh_is_within "$t11" "$ROOT"; }; then
+    rh_refuse "$ROOT 和 T11 检出 $t11 是同一目录或互相包含"
   fi
   for e in tasks repo.git heavy.lock heavy.holder repo.lock PERF_WINDOW; do
     [ ! -L "$root_real/$e" ] || rh_refuse "$root_real/$e 是符号链接"
@@ -469,29 +475,14 @@ ssh_plain_value() { # 键 值
   esac
 }
 
-# UserKnownHostsFile 本来就是空格分隔的多个路径，ssh -G 输出里分不出「一个带空格的路径」和「两个路径」。
-# ssh -G 会把路径展开成绝对路径，所以要求每一段都以 / 或 ~ 开头：带空格的单个路径拆开后后一段不满足，会被拒绝。
-known_hosts_value() { # 值
-  local f
-  set -f
-  for f in $1; do
-    if ! ssh_plain_value userknownhostsfile "$f"; then set +f; return 1; fi
-    case "$f" in
-      /* | '~'*) ;;
-      *)
-        set +f
-        echo "remote-heavy: ssh 配置里的 userknownhostsfile 解析出一段不是绝对路径：$(printf '%q' "$f")（known_hosts 路径不能含空白）" >&2
-        return 1 ;;
-    esac
-  done
-  set +f
-}
-
 # 由 `ssh -G <别名>` 解析出的有效配置里只挑连接要的几项，拼成 SSH_ARGS；之后 ssh 用 -F /dev/null 运行，
 # 不再读用户或系统的 ssh 配置，配置里的 SendEnv、SetEnv、LocalForward、ProxyCommand 等都进不来。
+# UserKnownHostsFile 不转写：它是空格分隔的多个路径，ssh -G 打印时丢了引号，「一个带空格的路径」和「两个路径」
+# 打出来一模一样，猜不出边界。ssh 调用不传它，用 ssh 在 -F /dev/null 下的默认值；用户配置对这台主机改过它
+# （有效值和默认值不同）就拒绝，宁可连不上也不猜。
 # 第二个参数只给自测用：指定解析时读的配置文件。
 ssh_args_for() { # 主机别名 [配置文件]
-  local alias=$1 cfg=${2:-} conf line key val hostname="" user="" port=""
+  local alias=$1 cfg=${2:-} conf line key val hostname="" user="" port="" known_hosts="" default_known_hosts=""
   if [ -n "$cfg" ]; then
     conf=$(ssh -G -F "$cfg" "$alias" 2>/dev/null) || { echo "remote-heavy: ssh -G $alias 失败" >&2; return 2; }
   else
@@ -509,7 +500,7 @@ ssh_args_for() { # 主机别名 [配置文件]
       certificatefile) ssh_plain_value "$key" "$val" || return 2; SSH_ARGS+=(-o "CertificateFile=$val") ;;
       identitiesonly) SSH_ARGS+=(-o "IdentitiesOnly=$val") ;;
       hostkeyalias) ssh_plain_value "$key" "$val" || return 2; SSH_ARGS+=(-o "HostKeyAlias=$val") ;;
-      userknownhostsfile) known_hosts_value "$val" || return 2; SSH_ARGS+=(-o "UserKnownHostsFile=$val") ;;
+      userknownhostsfile) known_hosts=$val ;;
       proxycommand | proxyjump)
         [ "$val" = none ] || { echo "remote-heavy: $alias 配了 ${key}，本脚本不经代理连接" >&2; return 2; } ;;
     esac
@@ -517,6 +508,11 @@ ssh_args_for() { # 主机别名 [配置文件]
   case "$hostname" in '' | *[!A-Za-z0-9.:-]*) echo "remote-heavy: hostname 不合法：$(printf '%q' "$hostname")" >&2; return 2 ;; esac
   case "$user" in '' | *[!A-Za-z0-9._-]*) echo "remote-heavy: user 不合法：$(printf '%q' "$user")" >&2; return 2 ;; esac
   rh_is_uint "$port" || { echo "remote-heavy: port 不合法：$(printf '%q' "$port")" >&2; return 2; }
+  default_known_hosts=$(ssh -F /dev/null -G "$hostname" 2>/dev/null | sed -n 's/^userknownhostsfile //p')
+  if [ -z "$default_known_hosts" ] || [ "$known_hosts" != "$default_known_hosts" ]; then
+    echo "remote-heavy: ssh 配置给 $alias 改了 UserKnownHostsFile（$(printf '%q' "$known_hosts")，默认是 $(printf '%q' "$default_known_hosts")）；本脚本只用默认的 known_hosts，请去掉这项配置或把主机密钥放进默认文件" >&2
+    return 2
+  fi
   SSH_ARGS+=(-o "HostName=$hostname" -o "User=$user" -o "Port=$port"
     -o BatchMode=yes -o StrictHostKeyChecking=yes -o ForwardAgent=no -o ForwardX11=no
     -o ClearAllForwardings=yes -o PermitLocalCommand=no -o RequestTTY=no
@@ -897,6 +893,50 @@ FAKE
   rr anchors-ok --task t-a "$pushed" -- /bin/sh -c 'exit 0'
   check "对照：锚点恢复后能跑" [ "$rc" -eq 0 ]
 
+  # 大小写别名：macOS 默认卷不区分大小写，T11 链到 .../IWORK-REMOTE 时和 ROOT 是同一目录，拼写却不同。
+  # 卷区分大小写时这两格造不出来，跳过（不计数）。
+  mkdir "$tmp/caseprobe"
+  if [ -d "$tmp/CASEPROBE" ]; then
+    mv "$home/work/iWork" "$home/work/iWork.aside"
+    # 已有 ROOT：T11 是它的大小写别名，clean 不许删，run、list 也拒绝
+    ln -s "$home/work/IWORK-REMOTE" "$home/work/iWork"
+    echo keep >"$root/t11-sentinel"
+    need "对照：别名与 ROOT 是同一目录（test -ef）" [ "$home/work/iWork" -ef "$root" ]
+    need "对照：两者的物理路径拼写不同" [ "$(cd -P "$home/work/iWork" && pwd)" != "$(cd -P "$root" && pwd)" ]
+    rh case-clean clean t-a
+    check "大小写别名、已有 ROOT：clean 拒绝" [ "$rc" -eq 2 ]
+    check "大小写别名、已有 ROOT：任务目录与 T11 哨兵都还在" test -d "$root/tasks/t-a" -a -e "$root/t11-sentinel"
+    rr case-run --task t-a "$pushed" -- /bin/sh -c "touch '$out/ran-case'"
+    check "大小写别名、已有 ROOT：run 拒绝" test "$rc" -eq 2 -a ! -e "$out/ran-case"
+    rh case-list list
+    check "大小写别名、已有 ROOT：list 拒绝" [ "$rc" -eq 2 ]
+    rm "$root/t11-sentinel"
+    # 互相包含（同样借大小写别名，拼写比较看不出来）：T11 在 ROOT 之内、ROOT 在 T11 之内
+    rm "$home/work/iWork"
+    ln -s "$home/work/IWORK-REMOTE/tasks" "$home/work/iWork"
+    rr case-inside --task t-a "$pushed" -- /bin/sh -c "touch '$out/ran-case'"
+    check "大小写别名、T11 在 ROOT 之内：run 拒绝" test "$rc" -eq 2 -a ! -e "$out/ran-case"
+    rm "$home/work/iWork"
+    ln -s "$home/WORK" "$home/work/iWork"
+    rh case-above clean t-a
+    check "大小写别名、ROOT 在 T11 之内：clean 拒绝且任务目录还在" test "$rc" -eq 2 -a -d "$root/tasks/t-a"
+    rm "$home/work/iWork"
+    ln -s "$home/work/IWORK-REMOTE" "$home/work/iWork"
+    # ROOT 未建：T11 链到将来 ROOT 的大小写别名（此刻指向不存在之处），list 不许建出 ROOT 和 tasks
+    mv "$root" "$root.aside"
+    rh case-list-new list
+    check "大小写别名、ROOT 未建：list 拒绝" [ "$rc" -eq 2 ]
+    check "大小写别名、ROOT 未建：没建出 ROOT（也就没在 T11 里建 tasks）" [ ! -e "$root" ]
+    rr case-run-new --task t-a "$pushed" -- /bin/sh -c "touch '$out/ran-case'"
+    check "大小写别名、ROOT 未建：run 拒绝" test "$rc" -eq 2 -a ! -e "$out/ran-case" -a ! -e "$root"
+    mv "$root.aside" "$root"
+    rm "$home/work/iWork"
+    mv "$home/work/iWork.aside" "$home/work/iWork"
+    check "大小写别名用例后 T11 哨兵完好" sentinel_intact
+  else
+    echo "  skip  大小写别名两格（这个卷区分大小写）"
+  fi
+
   # --- clean ---
   rh clean clean t-a
   check "clean 成功" [ "$rc" -eq 0 ]
@@ -935,16 +975,19 @@ CFG
   check "IdentityFile 含空格：拒绝" not ssh_args_for rhq "$tmp/ssh_config_space" 2>/dev/null
   printf 'Host rhq\n  HostName 192.0.2.10\n  User u\n  CertificateFile "/tmp/a\x27b"\n' >"$tmp/ssh_config_quote"
   check "CertificateFile 含引号：拒绝" not ssh_args_for rhq "$tmp/ssh_config_quote" 2>/dev/null
-  printf 'Host rhq\n  HostName 192.0.2.10\n  User u\n  UserKnownHostsFile "/tmp/kh dir/known_hosts"\n' >"$tmp/ssh_config_kh1"
-  check "UserKnownHostsFile 单个路径含空格：拒绝（不拆成两个）" not ssh_args_for rhq "$tmp/ssh_config_kh1" 2>/dev/null
-  printf 'Host rhq\n  HostName 192.0.2.10\n  User u\n  UserKnownHostsFile /tmp/kh1 ~/.ssh/kh2\n' >"$tmp/ssh_config_kh2"
-  need "多个 known_hosts：解析成功" ssh_args_for rhq "$tmp/ssh_config_kh2"
-  eff=$(ssh -G "${SSH_ARGS[@]}" rhq 2>/dev/null)
-  local kh_orig kh_ours
-  kh_orig=$(ssh -G -F "$tmp/ssh_config_kh2" rhq 2>/dev/null | grep '^userknownhostsfile ')
-  kh_ours=$(grep '^userknownhostsfile ' <<<"$eff")
-  check "多个 known_hosts 往返后与原配置的有效值相同（两个路径）" \
-    sh -c '[ "$1" = "$2" ] && [ "$(printf "%s" "$1" | wc -w)" -eq 3 ]' _ "$kh_orig" "$kh_ours"
+  # known_hosts：不从配置转写，只用 ssh 的默认值；配置改过它就拒绝（两种写法 ssh -G 打出来一模一样，没法猜）
+  printf 'Host rhq\n  HostName 192.0.2.10\n  User u\n  UserKnownHostsFile "/tmp/kh /x/known_hosts"\n' >"$tmp/ssh_config_kh1"
+  printf 'Host rhq\n  HostName 192.0.2.10\n  User u\n  UserKnownHostsFile /tmp/kh /x/known_hosts\n' >"$tmp/ssh_config_kh2"
+  need "对照：一个带空格的路径和两个路径，ssh -G 打出来一样" sh -c \
+    "[ \"\$(ssh -G -F '$tmp/ssh_config_kh1' rhq 2>/dev/null | grep ^userknownhostsfile)\" = \"\$(ssh -G -F '$tmp/ssh_config_kh2' rhq 2>/dev/null | grep ^userknownhostsfile)\" ]"
+  check "UserKnownHostsFile 一个带空格的路径：拒绝" not ssh_args_for rhq "$tmp/ssh_config_kh1" 2>/dev/null
+  check "UserKnownHostsFile 两个路径：拒绝" not ssh_args_for rhq "$tmp/ssh_config_kh2" 2>/dev/null
+  printf 'Host rhq\n  HostName 192.0.2.10\n  User u\n' >"$tmp/ssh_config_kh0"
+  need "UserKnownHostsFile 用默认值：接受" ssh_args_for rhq "$tmp/ssh_config_kh0"
+  check "发出去的参数里没有 UserKnownHostsFile" not sh -c 'printf "%s\n" "$@" | grep -q UserKnownHostsFile' _ "${SSH_ARGS[@]}"
+  check "有效 known_hosts 就是 -F /dev/null 下的默认值" sh -c '[ "$1" = "$2" ] && [ -n "$1" ]' _ \
+    "$(ssh -G "${SSH_ARGS[@]}" rhq 2>/dev/null | grep ^userknownhostsfile)" \
+    "$(ssh -F /dev/null -G 192.0.2.10 2>/dev/null | grep ^userknownhostsfile)"
   printf 'Host rhproxy\n  HostName 192.0.2.11\n  ProxyCommand nc %%h %%p\n' >"$tmp/ssh_config_proxy"
   check "配了 ProxyCommand 时拒绝" not ssh_args_for rhproxy "$tmp/ssh_config_proxy" 2>/dev/null
 
