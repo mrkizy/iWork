@@ -29,7 +29,8 @@
 # 只用 ssh 和 git：不开端口（ClearAllForwardings）、不转发 agent、不改系统设置与钥匙串。
 # 信任边界：
 #   本机 → ssh：ssh 用用户自己的配置连接 mac120（主机信任、known_hosts、吊销、身份文件都是用户的设置，脚本
-#     不碰不改）。脚本只保证两件事：本机环境变量不随连接发出（ssh 在 env -i 下启动，SendEnv 没有东西可发；
+#     不碰不改）。脚本只保证两件事：本机环境变量基本不随连接发出（ssh 在 env -i 下启动，只留 HOME、PATH、
+#     SSH_AUTH_SOCK；用户配置里若写了 SendEnv * 之类，这三个的值会发出去，别的本机变量没有可发的；
 #     配置里写死的 SetEnv 是用户自己写的值，不是本机进程环境）；不转发 agent、X11、端口（命令行 -o，见 SSH_OPTS）。
 #   远端 git：rh_git 在 env -i 下跑，不读全局与系统 git 配置，关掉凭据助手、askpass 与终端提示；要鉴权就直接失败。
 #   远端命令：env -i，只带 rh_command_env 列出的变量。
@@ -173,11 +174,33 @@ rh_disjoint() { # a b
   [ "$r" -eq 1 ]
 }
 
+# 路径的物理形式，原样不丢字符，结果放在 RH_PHYS：$(…) 会吃掉末尾换行，所以在 pwd 后面垫一个点再去掉；
+# 结果也不能经 $(…) 返回（同样会被吃掉），所以放进变量。
+rh_physical_exact() { # 路径
+  local p
+  p=$(cd -P "$1" 2>/dev/null && pwd -P && echo .) || return 1
+  p=${p%.}
+  RH_PHYS=${p%$'\n'}
+}
+
+# 路径里有换行或其他控制字符时，$(…)、dirname 这些处理没法无损表达它（尾换行会被吃掉，名字只差尾换行的
+# 两个目录会被认成同一个）。锚点相关的路径（原样与物理形式）只要含控制字符就拒绝，不去想办法表达。
+rh_refuse_unrepresentable() { # 说明 路径
+  case "$2" in *[[:cntrl:]]*) rh_refuse "$1 的路径含换行或控制字符，不支持：$(printf '%q' "$2")" ;; esac
+  [ -e "$2" ] || return 0
+  rh_physical_exact "$2" || rh_refuse "解析不了 $1 的物理路径（权限不够等），判断不了它和 ROOT 的关系：$(printf '%q' "$2")"
+  case "$RH_PHYS" in *[[:cntrl:]]*) rh_refuse "$1 的物理路径含换行或控制字符，不支持：$(printf '%q' "$RH_PHYS")" ;; esac
+}
+
 # 根目录这个锚点：在任何写操作之前核。ROOT 不存在时只在 ~/work 下建这一层，不建 ~/work。
 # 和 T11 检出（~/work/iWork）的关系按文件系统身份判：ROOT 不能是它、不能在它之下、也不能是它的上级。
 # 核过之后 ROOT 和派生路径都换成物理路径。
 rh_check_root() {
   local parent="$HOME/work" t11="$HOME/work/iWork" root_real e
+  rh_refuse_unrepresentable HOME "$HOME"
+  rh_refuse_unrepresentable "~/work" "$parent"
+  rh_refuse_unrepresentable ROOT "$ROOT"
+  rh_refuse_unrepresentable "T11 检出" "$t11"
   # T11 是一个指向不存在之处的链接时，没法判它和 ROOT 的关系（ROOT 建出来可能正好是它指的地方），拒绝。
   if [ -L "$t11" ] && [ ! -e "$t11" ]; then rh_refuse "$t11 是指向不存在之处的链接，判断不了和 $ROOT 的关系"; fi
   if [ ! -e "$ROOT" ] && [ ! -L "$ROOT" ]; then
@@ -189,6 +212,7 @@ rh_check_root() {
       [ "$r" -eq 1 ] || rh_refuse "判断不了 $parent 是否在 T11 检出之内，或它就在里面（结果 ${r}），不建 $ROOT"
     fi
     mkdir "$ROOT" || rh_refuse "建不了 $ROOT"
+    rh_refuse_unrepresentable ROOT "$ROOT"
   fi
   [ ! -L "$ROOT" ] || rh_refuse "$ROOT 是符号链接"
   [ -d "$ROOT" ] || rh_refuse "$ROOT 不是目录"
@@ -896,6 +920,37 @@ FAKE
     echo "  skip  T11 读不进去两格（chmod 000 挡不住当前用户）"
   fi
   chmod 755 "$tmp/permprobe"
+
+  # 路径里的换行：$(…) 会吃掉末尾换行，名字只差尾换行的两个真目录会被认成同一个。
+  # 造法：~/work 链到「w<换行>」，旁边另有一个真目录「w」；T11 链到 ~/work 本身（ROOT 的上级）。
+  # 不拒绝的话，往上走时从 w<换行> 跳到了 w，判成互不包含，clean 会删掉 T11 里的东西。
+  local nl=$'\n'
+  mkdir -p "$tmp/xw/w"
+  mv "$home/work" "$tmp/xw/w$nl"
+  ln -s "$tmp/xw/w$nl" "$home/work"
+  mv "$home/work/iWork" "$tmp/iWork.aside"
+  ln -s "$tmp/xw/w$nl" "$home/work/iWork"
+  need "对照：t-a 的任务目录此刻在（经 T11 也够得着）" test -d "$home/work/iWork/iwork-remote/tasks/t-a"
+  rh nl-clean clean t-a
+  check "路径带尾换行：clean 拒绝" [ "$rc" -eq 2 ]
+  check "路径带尾换行：T11 里的任务目录还在" test -d "$tmp/xw/w$nl/iwork-remote/tasks/t-a"
+  rr nl-run --task t-a "$pushed" -- /bin/sh -c "touch '$out/ran-nl'"
+  check "路径带尾换行：run 拒绝且命令没跑" test "$rc" -eq 2 -a ! -e "$out/ran-nl"
+  rm "$home/work/iWork"
+  mv "$tmp/iWork.aside" "$home/work/iWork"
+  rm "$home/work"
+  mv "$tmp/xw/w$nl" "$home/work"
+  check "尾换行用例后 T11 哨兵完好" sentinel_intact
+  # 只有物理路径的最末尾带换行（T11 链到「t11<换行>」，旁边有真目录「t11」）：取物理路径时尾换行不能丢
+  mkdir -p "$tmp/t11" "$tmp/t11$nl"
+  mv "$home/work/iWork" "$tmp/iWork.aside"
+  ln -s "$tmp/t11$nl" "$home/work/iWork"
+  rr nl-tail --task t-a "$pushed" -- /bin/sh -c "touch '$out/ran-nl'"
+  check "T11 物理路径末尾带换行：run 拒绝" test "$rc" -eq 2 -a ! -e "$out/ran-nl"
+  check "T11 物理路径末尾带换行：拒绝理由点名控制字符" grep -q '控制字符' "$out/nl-tail"
+  rm "$home/work/iWork"
+  mv "$tmp/iWork.aside" "$home/work/iWork"
+  check "末尾换行用例后 T11 哨兵完好" sentinel_intact
 
   # 大小写别名：macOS 默认卷不区分大小写，T11 链到 .../IWORK-REMOTE 时和 ROOT 是同一目录，拼写却不同。
   # 卷区分大小写时这两格造不出来，跳过（不计数）。
