@@ -11,11 +11,6 @@ use super::{DAEMON_NAME, FormVerdict, PackageForm};
 
 pub struct ManifestForm;
 
-/// 清单里的二进制名对应的文件名（Windows 加 `.exe`）。
-fn binary_file(name: &str) -> String {
-    format!("{name}{}", std::env::consts::EXE_SUFFIX)
-}
-
 impl PackageForm for ManifestForm {
     fn name(&self) -> &'static str {
         "manifest"
@@ -40,7 +35,7 @@ impl PackageForm for ManifestForm {
             return FormVerdict::Incomplete(format!("清单没登记 {DAEMON_NAME} 的身份"));
         }
         for (name, listed) in &manifest.binaries {
-            let file = exe_dir.join(binary_file(name));
+            let file = exe_dir.join(crate::install::program_file(name));
             let on_disk = match peer::file_image_ids(&file, Want::All) {
                 Ok(ids) => ids,
                 Err(e) => return FormVerdict::Incomplete(format!("{name} 读不了：{e}")),
@@ -63,7 +58,9 @@ pub(crate) mod tests {
         let entries: Vec<String> = binaries
             .iter()
             .map(|b| {
-                let ids = peer::file_image_ids(&dir.join(binary_file(b)), Want::All).unwrap();
+                let ids =
+                    peer::file_image_ids(&dir.join(crate::install::program_file(b)), Want::All)
+                        .unwrap();
                 let list: Vec<String> = ids.iter().map(|i| format!("\"{i}\"")).collect();
                 format!("\"{b}\":[{}]", list.join(","))
             })
@@ -79,7 +76,7 @@ pub(crate) mod tests {
     /// 放一个「二进制」：真实的可执行文件（本测试程序）的拷贝；`variant` 不同时内容不同。
     /// macOS 上用不同签名标识做 ad-hoc 重签，cdhash 随之不同（尾部追加字节改不了 cdhash）。
     pub(crate) fn place_binary(dir: &Path, name: &str, variant: &str) -> PathBuf {
-        let path = dir.join(binary_file(name));
+        let path = dir.join(crate::install::program_file(name));
         let staged = dir.join(format!(".{name}.staged"));
         std::fs::copy(std::env::current_exe().unwrap(), &staged).unwrap();
         if cfg!(target_os = "macos") {
@@ -205,7 +202,7 @@ pub(crate) mod tests {
         place_binary(d.path(), "iwork-daemon", "a");
         place_binary(d.path(), "iwork-client", "c");
         write_manifest(d.path(), &["iwork-daemon", "iwork-client"]);
-        std::fs::remove_file(d.path().join(binary_file("iwork-client"))).unwrap();
+        std::fs::remove_file(d.path().join(crate::install::program_file("iwork-client"))).unwrap();
         assert!(matches!(
             ManifestForm.check(d.path()),
             FormVerdict::Incomplete(_)

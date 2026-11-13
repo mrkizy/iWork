@@ -166,6 +166,28 @@ pub(crate) fn verify_bundle(app: &Path) -> Result<(), String> {
     check(status, "SecStaticCodeCheckValidity（整包）")
 }
 
+/// 磁盘上一个程序文件的签名者。和 [`identify_code`] 同一段判法：签名信息里有证书取叶证书，没有取 cdhash，钉成代码
+/// 要求后对文件做全量静态校验（不验包资源，理由同 [`check_image_file`]）。对象是静态代码，没有「运行中」那一步。
+pub(crate) fn file_signer(path: &Path) -> SignerIdentity {
+    let checked = static_code_at(path).and_then(|code| {
+        let claim = claimed_identity(&copy_signing_information(&code)?)?;
+        let requirement = requirement_for(&claim)?;
+        // SAFETY: code、requirement 都是有效的 CF 对象，调用期间由守卫持有。
+        let status = unsafe {
+            SecStaticCodeCheckValidity(
+                code.as_ptr(),
+                K_SEC_CS_DO_NOT_VALIDATE_RESOURCES,
+                requirement.as_ptr(),
+            )
+        };
+        check(status, "SecStaticCodeCheckValidity（文件）")?;
+        Ok(claim.into_signer())
+    });
+    checked.unwrap_or_else(|reason| SignerIdentity::Unavailable {
+        reason: format!("{reason}：{}", path.display()),
+    })
+}
+
 fn static_code_at(path: &Path) -> Result<Cf, String> {
     let bytes = path.as_os_str().as_bytes();
     // SAFETY: 指针与长度来自同一个切片；返回 +1 引用交给 Cf。
@@ -312,7 +334,8 @@ fn claimed_identity(info: &Cf) -> Result<Claim, String> {
     }
 }
 
-fn confirm_running(code: &Cf, claim: Claim) -> Result<SignerIdentity, String> {
+/// 把声称的身份编成代码要求对象。
+fn requirement_for(claim: &Claim) -> Result<Cf, String> {
     let text = cf_string(&claim.requirement_text())?;
     let mut requirement: SecRef = ptr::null();
     // SAFETY: text 是有效 CFString；出参成功时是 +1 引用，交给 Cf 释放。
@@ -325,8 +348,11 @@ fn confirm_running(code: &Cf, claim: Claim) -> Result<SignerIdentity, String> {
     };
     check(status, "SecRequirementCreateWithString")?;
     // SAFETY: 上面成功，requirement 非空且 +1。
-    let requirement =
-        unsafe { Cf::adopt(requirement) }.ok_or("SecRequirementCreateWithString 返回空")?;
+    unsafe { Cf::adopt(requirement) }.ok_or_else(|| "SecRequirementCreateWithString 返回空".into())
+}
+
+fn confirm_running(code: &Cf, claim: Claim) -> Result<SignerIdentity, String> {
+    let requirement = requirement_for(&claim)?;
     check_image_file(code, &requirement)?;
     // SAFETY: code、requirement 都是有效的 CF 对象，调用期间由守卫持有。
     let status = unsafe {

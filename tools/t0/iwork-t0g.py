@@ -59,13 +59,20 @@
   R2X R2 补测（方案 19 节）：--part d = k1–k3、b1、b2（定 D2、D5）；--part rest = ①c′ ①d′、n1、子代理工具名与只禁 Bash 的工具清单；
       --part net = 沙箱联网 p1（代理变量名）、p2（经隧道连 github.com 22）、p4（连沙箱外的本机监听，带 / 不带 allowLocalBinding）；
       --part skill = 仓库的 CLAUDE.md、技能、子代理、命令加不加载（L1，L2 对照）、技能内联命令（K3b、K3c）、allowed-tools 故障探针（K2c）、
-      插件 hook 答允许对 iWork 的拒绝（H1）
+      插件 hook 答允许对 iWork 的拒绝（H1）；
+      --part recheck = G1、G8、G7（非 cfg 格）带产品设置重跑；--part p4 = macOS 上沙箱起不来时 CLI 停不停（F1、F2）；
+      --part cfgdir = CLI 读哪一份 .claude.json；--part repo = 仓库内容由 iWork 送进会话的实测格 RC1–RC8；
+      --part vdir = 每家一个 iWork 专用配置目录的实测格（方案 3.1d）
 --selftest：不调用 claude，只自测脚本自己的机制。
 """
-import argparse, ast, base64, collections, fcntl, hashlib, inspect, json, os, re, secrets, shlex, shutil, signal, socket, stat, subprocess, sys, tarfile, tempfile, threading, time
+import argparse, ast, base64, collections, ctypes, fcntl, hashlib, inspect, json, os, re, secrets, shlex, shutil, signal, socket, stat, subprocess, sys, tarfile, tempfile, threading, time
 
 HOME = os.path.expanduser("~")
 A = None            # 命令行参数
+# 起哪个 claude：--claude-cli 或环境变量 IWORK_CLAUDE_CLI 给的绝对路径（和产品里后台给桥接的同名接口，T06 方案 3.1 开头），
+# 都没给就是 PATH 上的 claude。脚本的格子与从程序字样读出的结论都是对着 BASELINE_CLI_VERSION 的，开跑时记下实际版本
+CLAUDE_CLI = "claude"
+BASELINE_CLI_VERSION = "2.1.322"
 R = None            # 本次运行的目录布局（Layout）
 INV = {"tools": [], "agent": "Agent", "harmless": [], "valid": False}     # 基准版本的工具清单（main 里从 system/init 取）；valid：那次探查运行算不算数
 # 子代理工具有两个名字（2.1.322 实测）：system/init.tools 与 result.permission_denials 里叫 Task，模型发出的 tool_use
@@ -139,12 +146,49 @@ def settle(case, verdict, detail=""):
 
 # ---------- 进程所有权（1/F-10、2/F-6）----------
 def ps_table():
-    out = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,comm="], capture_output=True, text=True).stdout
+    """本用户能看到的进程：[{pid, ppid, pgid, comm}]。comm 是进程名（不带路径）。
+    不调 `ps -ax`：它要枚举全部进程，机器负载很高时会被某个卡在内核里的进程拖住不返回（2026-11-13 实测，卡了十几分钟）。
+    macOS 用 libproc（proc_listallpids + proc_pidinfo），Linux 读 /proc；拿不到信息的进程（别的用户的、刚退出的）跳过。"""
+    return _ps_table_darwin() if sys.platform == "darwin" else _ps_table_proc()
+
+
+class _ProcBsdInfo(ctypes.Structure):
+    """<sys/proc_info.h> 的 struct proc_bsdinfo（PROC_PIDTBSDINFO）。"""
+    _fields_ = [("pbi_flags", ctypes.c_uint32), ("pbi_status", ctypes.c_uint32), ("pbi_xstatus", ctypes.c_uint32),
+                ("pbi_pid", ctypes.c_uint32), ("pbi_ppid", ctypes.c_uint32), ("pbi_uid", ctypes.c_uint32), ("pbi_gid", ctypes.c_uint32),
+                ("pbi_ruid", ctypes.c_uint32), ("pbi_rgid", ctypes.c_uint32), ("pbi_svuid", ctypes.c_uint32), ("pbi_svgid", ctypes.c_uint32),
+                ("rfu_1", ctypes.c_uint32), ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32), ("pbi_nfiles", ctypes.c_uint32),
+                ("pbi_pgid", ctypes.c_uint32), ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32), ("e_tpgid", ctypes.c_uint32),
+                ("pbi_nice", ctypes.c_int32), ("pbi_start_tvsec", ctypes.c_uint64), ("pbi_start_tvusec", ctypes.c_uint64)]
+
+
+PROC_PIDTBSDINFO = 3
+
+
+def _ps_table_darwin():
+    lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    n = lib.proc_listallpids(None, 0)
+    pids = (ctypes.c_int * (n + 256))()
+    got = lib.proc_listallpids(pids, ctypes.sizeof(pids))
     rows = []
-    for line in out.splitlines():
-        parts = line.split(None, 3)
-        if len(parts) == 4 and parts[0].isdigit():
-            rows.append({"pid": int(parts[0]), "ppid": int(parts[1]), "pgid": int(parts[2]), "comm": parts[3]})
+    for pid in pids[:max(got, 0)]:
+        info = _ProcBsdInfo()
+        if pid <= 0 or lib.proc_pidinfo(pid, PROC_PIDTBSDINFO, ctypes.c_uint64(0), ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
+            continue
+        rows.append({"pid": pid, "ppid": int(info.pbi_ppid), "pgid": int(info.pbi_pgid), "comm": info.pbi_comm.decode("utf-8", "replace")})
+    return rows
+
+
+def _ps_table_proc():
+    rows = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit(): continue
+        try: stat_text = open(f"/proc/{name}/stat").read()
+        except OSError: continue
+        # 第 2 列是括号里的进程名（里面可能有空格和括号），从最后一个右括号往后才是定长的字段
+        comm = stat_text[stat_text.index("(") + 1:stat_text.rindex(")")]
+        fields = stat_text[stat_text.rindex(")") + 2:].split()
+        rows.append({"pid": int(name), "ppid": int(fields[1]), "pgid": int(fields[2]), "comm": comm})
     return rows
 
 
@@ -196,31 +240,41 @@ def find_owned(token):
     return sorted(pids)
 
 
-# 起 CLI 的环境：P14（产品负责人 2026-11-12 定）不筛选环境变量，其余原样继承，只设上关自动记忆的开关（覆盖继承来的值：
-# 设成 0 会把自动记忆强制打开）。不读任何变量的值。干净的环境靠运行说明保证（从普通终端起，不要从 Claude Code 里起），
-# 结果包里的 env-names.json 供事后核对。表只在这一处，别处都经 child_env 取
-LAUNCH_ENV_SET = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
+# 起 CLI 的环境：P14（产品负责人 2026-11-12 定）不筛选环境变量，其余原样继承，只设上产品的两个开关（覆盖继承来的值）：
+# 关自动记忆（设成 0 会把它强制打开）；关后台任务（D5，需求 1e8b88e）。不读任何变量的值。干净的环境靠运行说明保证
+# （从普通终端起，不要从 Claude Code 里起），结果包里的 env-names.json 供事后核对。表只在这一处，别处都经 child_env 取。
+# 有意不设的格子在 env_skip 里点名并写明理由（G5 不设记忆开关的几格；g7-bg、R2X n1 不设后台开关）
+LAUNCH_ENV_SET = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
+# 不设后台任务开关的格子用的 env_skip：只记厂商默认行为（后台任务开着时怎样），M2 开放后台任务时用
+NO_BACKGROUND_SWITCH = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",)
 # 结果包里记哪些环境变量的名字（只记名字，不记值）
 RECORDED_ENV_PREFIXES = ("CLAUDE", "ANTHROPIC")
+# P14 之外唯一按名字去掉的继承变量（vdir 审查 2/F-3）：它们能把自动记忆的根目录改到别处（2.1.322 程序：COWORK 那个最优先，
+# REMOTE 那个在没有显式改道时当记忆根），CLAUDE_CONFIG_DIR 与 autoMemoryDirectory 都挡不住，会把格子的记忆写进真实的 ~/.claude。
+# 只看名字在不在，不读值；去掉了哪些名字记进 env-names.json。用例要设它们得经 extra 显式给（现在没有这样的格子）。
+MEMORY_ROOT_OVERRIDES = ("CLAUDE_COWORK_MEMORY_PATH_OVERRIDE", "CLAUDE_CODE_REMOTE_MEMORY_DIR")
 
 
 def child_env(token, extra=None, skip=()):
     """起子进程（claude 实例、替身与对照）用的环境。纯函数（只读 os.environ）。继承脚本自己的环境（P14：不筛选），
     叠上用例给的变量（extra），再把 LAUNCH_ENV_SET 里的设成固定值（压过 extra 与继承来的值），最后加归属标记。
-    用例要故意不设（G5 记忆行的对照格）就在 skip 里点名，这时继承来的值也去掉。所有起实例的地方都经它，不各写一份。"""
-    env = {**os.environ, **(extra or {})}
+    用例要故意不设（G5 记忆行的对照格；cfgdir 那一格的 CLAUDE_CONFIG_DIR）就在 skip 里点名，这时继承来的值也去掉。
+    所有起实例的地方都经它，不各写一份。"""
+    env = {k: v for k, v in os.environ.items() if k not in MEMORY_ROOT_OVERRIDES}
+    env.update(extra or {})
+    for name in skip: env.pop(name, None)
     for name, value in LAUNCH_ENV_SET.items():
-        if name in skip: env.pop(name, None)
-        else: env[name] = value
+        if name not in skip: env[name] = value
     env[MARK] = token
     return env
 
 
 def env_names_record():
     """要写进结果包的环境变量记录：脚本启动时 CLAUDE*、ANTHROPIC* 开头的名字（事后核对这次是不是在干净的环境里跑的），
-    以及起实例时设上了哪几个。只有名字，没有值。"""
+    起实例时设上了哪几个，以及按名字去掉了哪几个（MEMORY_ROOT_OVERRIDES 里这次环境中有的）。只有名字，没有值。"""
     names = sorted(k for k in os.environ if k.startswith(RECORDED_ENV_PREFIXES))
-    return {"names": names, "set_for_instances": sorted(LAUNCH_ENV_SET)}
+    return {"names": names, "set_for_instances": sorted(LAUNCH_ENV_SET),
+            "dropped_for_instances": sorted(k for k in MEMORY_ROOT_OVERRIDES if k in os.environ)}
 
 
 def environment_refusal(env):
@@ -410,10 +464,11 @@ def redirect_dir():
 
 
 def make_settings(name, behaviour, exp=None, timeout=None, on_failure=None, extra=None, pretool=True, session_start=False, missing_binary=False,
-                  memory_redirect=DEFAULT_REDIRECT, guard=None):
+                  memory_redirect=DEFAULT_REDIRECT, guard=None, extra_hooks=None):
     """生成 --settings 文件。pretool=False：不注入 PreToolUse hook（代表「hook 根本没被调用」）。返回 (路径, hook 日志目录)。
     memory_redirect：写进 autoMemoryDirectory 的目录，默认是本次的空目录，None 不写。
-    guard=(登记目录, 测试子代理名)：PreToolUse 用 G5 的守卫探针（只放行登记目录内的 Read、Write、Edit），不用通用探针。"""
+    guard=(登记目录, 测试子代理名)：PreToolUse 用 G5 的守卫探针（只放行登记目录内的 Read、Write、Edit），不用通用探针。
+    extra_hooks：另挂的事件 → 命令（只记录用，如 RC1 的 InstructionsLoaded）。"""
     logdir = os.path.join(R.out, name)
     os.makedirs(logdir, exist_ok=True)
     exp_path = R.p("cfg", f"expect-{name}.json")
@@ -429,6 +484,8 @@ def make_settings(name, behaviour, exp=None, timeout=None, on_failure=None, extr
         hooks["PreToolUse"] = [{"matcher": "*", "hooks": [h]}]
     if session_start:
         hooks["SessionStart"] = [{"hooks": [{"type": "command", "command": command("allow"), "timeout": 30}]}]
+    for event, cmd in (extra_hooks or {}).items():
+        hooks[event] = [{"hooks": [{"type": "command", "command": cmd, "timeout": 30}]}]
     s = {"hooks": hooks}
     if memory_redirect is DEFAULT_REDIRECT: memory_redirect = redirect_dir()
     if memory_redirect: s["autoMemoryDirectory"] = memory_redirect
@@ -463,7 +520,7 @@ ISO = None
 
 
 def base_argv(settings=None, extra_args=(), iso=True, stream_input=False, prompt=None):
-    argv = ["claude", "-p"] + ([] if stream_input else [prompt]) + ["--output-format", "stream-json", "--verbose", "--model", A.model]
+    argv = [CLAUDE_CLI, "-p"] + ([] if stream_input else [prompt]) + ["--output-format", "stream-json", "--verbose", "--model", A.model]
     if stream_input: argv += ["--input-format", "stream-json"]
     if iso: argv += ISO
     argv += ["--settings", settings or default_settings()]          # 没给设置的实例也带上自动记忆改道
@@ -588,19 +645,26 @@ def unexpected_plugins(init, given_dirs=()):
 UNCLEAN = "环境不干净：init.plugins 里有不该有的插件（方案 16.1，这一格不下别的结论）"
 
 
-def claude(name, prompt, settings=None, extra_args=(), iso=True, cwd=None, env=None, timeout=300, env_skip=(), plugin_check=True, plugin_dirs=()):
+def claude(name, prompt, settings=None, extra_args=(), iso=True, cwd=None, env=None, timeout=300, env_skip=(), plugin_check=True, plugin_dirs=(),
+           launch_prefix=(), plugin_roots=(), stderr_facts=None):
     """一次性运行。返回结构化证据 + exit / timed_out / secs。每个实例的 init.plugins 都过核对（plugin_check=False 只给 G5 环境行的阳性格），
     报了东西挂在 unclean_plugins 上：run_valid 当它无效，痕迹先判 FAIL 的几处也先看它（这一格只记「环境不干净」）。
-    plugin_dirs：这一格自己给的插件目录（都在本次根目录里），经 --plugin-dir 给 CLI，核对时它们之下的插件算该有的（方案 3.5）。"""
+    plugin_dirs：这一格自己给的插件目录（都在本次根目录里），经 --plugin-dir 给 CLI，核对时它们之下的插件算该有的（方案 3.5）。
+    launch_prefix：套在 claude 外面的命令（P4 的 F 格用外层 sandbox-exec 造「沙箱起不来」）。
+    stderr_facts：给了就不存标准错误原文，只存它从原文里取出的结构化事实（{name}-stderr-facts.json）。V10 形状三把含账号信息的
+    .claude.json 交给 --mcp-config，校验不过时 CLI 会把「路径: 消息」原样打到标准错误，消息里可能带值。
+    plugin_roots：只给插件核对用、不经 --plugin-dir 给的目录（vdir：装进专用目录的插件是用户的，核对时算该有的）。"""
     t0 = time.time()
     extra_args = list(extra_args) + [x for d in plugin_dirs for x in ("--plugin-dir", d)]
-    out, err, code, timed_out, pid = run_instance(base_argv(settings, extra_args, iso, prompt=prompt), name, cwd, env, timeout, env_skip=env_skip)
+    argv = list(launch_prefix) + base_argv(settings, extra_args, iso, prompt=prompt)
+    out, err, code, timed_out, pid = run_instance(argv, name, cwd, env, timeout, env_skip=env_skip)
     out, err = redact_stream(out), redact_stream(err)
     open(os.path.join(R.out, f"{name}-stream.jsonl"), "w").write(scrub(out))
-    open(os.path.join(R.out, f"{name}-stderr.txt"), "w").write(scrub(err))
+    if stderr_facts is None: open(os.path.join(R.out, f"{name}-stderr.txt"), "w").write(scrub(err))
+    else: json.dump(stderr_facts(err), open(os.path.join(R.out, f"{name}-stderr-facts.json"), "w"), ensure_ascii=False)
     r = parse_stream(out)
     r.update(exit=code, timed_out=timed_out, secs=round(time.time() - t0, 1), pid=pid)     # pid：出沙箱格判替身的调起是不是 CLI 自己调的
-    return finish_run(r, name, plugin_check, plugin_dirs)
+    return finish_run(r, name, plugin_check, tuple(plugin_dirs) + tuple(plugin_roots))
 
 
 def finish_run(r, name, plugin_check=True, plugin_dirs=()):
@@ -612,12 +676,15 @@ def finish_run(r, name, plugin_check=True, plugin_dirs=()):
 
 class Live:
     """流式输入的常驻会话：自己的进程组与标记，后台线程按到达时间收事件。用完必须 close()。
-    argv 只给 selftest 用：换成一个假的会话程序，测收事件与落盘这条路。"""
-    def __init__(self, name, settings, extra_args=(), env=None, argv=None):
-        self.name, self.events, self.lock, self.token = name, [], threading.Lock(), new_mark()
-        self.proc = subprocess.Popen(argv or base_argv(settings, extra_args, stream_input=True), cwd=R.work, stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                                     env=child_env(self.token, env), start_new_session=True)
+    argv 只给 selftest 用：换成一个假的会话程序，测收事件与落盘这条路。cwd 不给就是工作区（vdir 的 V10 要在自己的项目目录里起）。
+    stderr_path 给了就把标准错误写进这个文件（V2c 要看里面有没有那句提示），不给丢掉。
+    keep_raw=False：收尾不把原始流写进结果包（control_session 按白名单另存，vdir 审查 3/F-1）。"""
+    def __init__(self, name, settings, extra_args=(), env=None, argv=None, env_skip=(), iso=True, cwd=None, stderr_path=None, keep_raw=True):
+        self.name, self.events, self.lock, self.token, self.keep_raw = name, [], threading.Lock(), new_mark(), keep_raw
+        self._stderr = open(stderr_path, "w") if stderr_path else subprocess.DEVNULL
+        self.proc = subprocess.Popen(argv or base_argv(settings, extra_args, iso, stream_input=True), cwd=cwd or R.work, stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=self._stderr, text=True,
+                                     env=child_env(self.token, env, env_skip), start_new_session=True)
         self.raw = []
         threading.Thread(target=self._read, daemon=True).start()
 
@@ -663,7 +730,9 @@ class Live:
         try: self.proc.stdin.close()
         except Exception: pass
         try: end_instance(self.proc, self.token, self.name, escape_expected=escape_expected)
-        finally: open(os.path.join(R.out, f"{self.name}-stream.jsonl"), "w").write(scrub("".join(self.raw)))
+        finally:
+            if self.keep_raw: open(os.path.join(R.out, f"{self.name}-stream.jsonl"), "w").write(scrub("".join(self.raw)))
+            if self._stderr is not subprocess.DEVNULL: self._stderr.close()
 
 
 def literal_last(instruction, literal):
@@ -695,6 +764,8 @@ VERDICT_FUNCS = {
     "cell_verdict", "g2_summary", "excluded_guard_verdict", "g3_verdict", "g4_no_retry_verdict", "corpus_verdict", "g5_verdict",
     "mcp_disable_verdict", "integrity_verdict", "unsandboxed_pair_verdict", "g5_env_verdict", "g5_memory_read_verdict", "g5_memory_write_verdict",
     "g5_agent_memory_verdict", "g5_guard_precheck", "target_guard_decision", "unsandboxed_group_verdict", "g4_write_outside_verdict",
+    "p4_verdict", "cfgdir_verdict", "rc5_verdict", "rc8_verdict", "vdir_pair", "v13a_verdict", "v4b_verdict", "v2_verdicts",
+    "bash_guard_status", "bash_guard_verdict", "marker_verdict", "r2x_vdir_v1", "r2x_vdir_v10", "r2x_vdir_v12",
 }
 
 
@@ -768,13 +839,24 @@ def blocked(ev, trace):
     return ev["ok"] and all_errors(ev) and not trace
 
 
-def obs_verdict(ev, obs, want_ok, expect_out=None):
+def obs_verdict(ev, obs, want_ok, expect_out=None, denied=None):
     """命令把自己的退出码写进观测文件的那类用例（observed() 包出来的命令）。纯函数。
     正面证据两样：目标调用（evidence）与观测文件。缺一样就是没测成。
-    「该失败」的用例，证据是命令自己写下的非零退出码，不是「没看到文件」。"""
+    「该失败」的用例：退出码 0 → FAIL（跑成了）。说「被挡住了」要三样都有（supervisor 2026-11-13，和 k1–k3 的沙箱探针同一条）：
+    同一个程序写工作区的对照成功（ctl_rc 是 0）；命令自己写下的非零退出码；输出里有拦截的原文（默认 SANDBOX_DENIED_TEXT，
+    格子可以给自己的 denied）。命令不存在、目录不存在、Permission denied、对照失败或没有对照 → INCONCLUSIVE，不当成被挡。
+    「该失败」的格子先看观测（审查 4/F-1 的同类）：命令自己写下了退出码 0，就是跑成了，运行超时、证据不齐也照样 FAIL。
+    这条靠「观测文件只有登记的那一条命令会写（探针只放行它）」，这个前提只在环境干净时成立：init.plugins 里有外来插件时，
+    插件的 hook 能不经 PreToolUse 直接写观测目录，所以先看 unclean，和 decide 的次序一样（审查 5/F-1）。"""
+    if ev.get("unclean"): return "INCONCLUSIVE"
+    if not want_ok and obs is not None and obs["rc"] == "0": return "FAIL"
     if not ev["ok"] or obs is None: return "INCONCLUSIVE"
     ok = obs["rc"] == "0" and (expect_out is None or obs["out"].strip() == expect_out)
-    return "PASS" if ok == want_ok else "FAIL"
+    if want_ok: return "PASS" if ok else "FAIL"
+    if obs["rc"] == "0": return "FAIL"
+    control = obs.get("ctl_rc") == "0"
+    text = any(t in obs.get("out", "") for t in (denied or SANDBOX_DENIED_TEXT))
+    return "PASS" if control and text else "INCONCLUSIVE"
 
 
 def affirm(proofs, ok):
@@ -835,7 +917,7 @@ def pass_literal_sites(src):
 
 
 # 计数表的键、自测里的期望值、检查函数自己拿来比较的那一个；别的只许出现在 VERDICT_FUNCS 登记的函数里
-PASS_LITERAL_ALLOWED = {"COUNTS", "selftest", "selftest_g2_matrix", "selftest_g5_isolation", "pass_literal_sites"}
+PASS_LITERAL_ALLOWED = {"COUNTS", "selftest", "selftest_g2_matrix", "selftest_g5_isolation", "selftest_recheck_and_p4", "selftest_cfgdir_isolation", "selftest_repo", "selftest_vdir_a", "selftest_vdir_b", "selftest_vdir_handlers", "pass_literal_sites"}
 
 
 def live_seen(events, alive, results_needed):
@@ -895,14 +977,42 @@ def tools_verdict(r, pred):
 
 
 def observed(case_id, body):
-    """把 body 包一层，退出码与输出落到工作区里的观测文件（沙箱内可写）。返回 (命令, 读结果的函数)。"""
+    """把 body 包一层，退出码与输出落到工作区里的观测文件（沙箱内可写）。返回 (命令, 读结果的函数)。
+    body 是一条 touch 或 cat 时，前面先跑一条同一个程序、目标在工作区里的对照（observed_control），它的退出码与输出另存：
+    「该失败」的格子要靠它排除「程序找不到、本来就跑不起来」（审查 1/F-1 的同类，supervisor 2026-11-13）。
+    读结果：{rc, out, ctl_rc, ctl_out}；没有对照的 ctl_* 是 None。"""
     out, rc = os.path.join(R.obs, case_id + ".out"), os.path.join(R.obs, case_id + ".rc")
-    for p in (out, rc): remove_obs_path(p)
-    cmd = f"( {body} ) > {shlex.quote(out)} 2>&1; echo $? > {shlex.quote(rc)}"
+    c_out, c_rc = os.path.join(R.obs, case_id + ".ctl.out"), os.path.join(R.obs, case_id + ".ctl.rc")
+    for p in (out, rc, c_out, c_rc): remove_obs_path(p)
+    control = observed_control(case_id, body)
+    pre = f"( {control} ) > {shlex.quote(c_out)} 2>&1; echo $? > {shlex.quote(c_rc)}; " if control else ""
+    cmd = f"{pre}( {body} ) > {shlex.quote(out)} 2>&1; echo $? > {shlex.quote(rc)}"
     def read():
         code = read_obs_path(rc)
-        return None if code is None else {"rc": code.strip(), "out": read_obs_path(out) or ""}
+        if code is None: return None
+        c_code = read_obs_path(c_rc) if control else None
+        return {"rc": code.strip(), "out": read_obs_path(out) or "", "ctl_rc": None if c_code is None else c_code.strip(),
+                "ctl_out": read_obs_path(c_out) if control else None}
     return cmd, read
+
+
+APPEND_PREFIX = ["echo", "t0g", ">>"]       # 「往文件末尾追加一行」的写法（V13a）；它的对照往工作区里一个事先写好的文件追加
+
+
+def observed_control(case_id, body):
+    """body 的对照：同一个程序，目标换成工作区里本次建的文件（touch 建一个；cat 读一个事先写好的；echo t0g >> 往一个事先写好的追加）。
+    认不出程序返回 None。"""
+    words = body.split()
+    target = os.path.join(R.obs, case_id + ".ctl-target")
+    if len(words) == 4 and words[:3] == APPEND_PREFIX:
+        open(target, "w").write("t0g control\n")
+        return f"echo t0g >> {shlex.quote(target)}"
+    if len(words) != 2 or words[0] not in ("touch", "cat"): return None
+    if words[0] == "cat":
+        open(target, "w").write("t0g control\n")
+    else:
+        remove_obs_path(target)
+    return f"{words[0]} {shlex.quote(target)}"
 
 
 # 设置文件里 defaultMode 写 manual，CLI 当 default 的别名收下，system/init 报的是 default（2.1.322 打包代码：设置校验先把 manual 换成 default，init 报的是内部名）
@@ -985,6 +1095,38 @@ def g1_cwd_prompt(c_cd, c_pwd):
             f"First: {c_cd}\nSecond: {c_pwd}\nThen reply DONE.")
 
 
+# 跑命令的 G1 探针（用 allow-sandboxed：沙箱外重试一律拒绝）；别的探针用 allow
+G1_COMMAND_PROBES = ("Bash", "Agent", "BashBg")
+# 产品设置下 init.tools 的预期个数（architect 47737e78；2.1.322，两个环境开关都设、dontAsk、产品沙箱）
+G1_EXPECTED_TOOLS = 24
+
+
+def g1_agent_shape_verdict(r, sub_ev, sentinel_exists):
+    """G1d′：关后台任务时，子代理那一格的事件流是一个 init、一个 result，没有报 is_backgrounded 为真。纯函数。
+    先要子代理真跑了（审查 1/F-2）：子代理里有那条目标 Bash 调用（sub_ev，归属对得上一次子代理工具调用）、它的结果不是报错、
+    它的哨兵出现了。模型直接回 DONE、子代理被拒、没跑完 → INCONCLUSIVE，不看形状。"""
+    shape = stream_shape(r.get("events", []))
+    ok = shape["init 个数"] == 1 and shape["result 个数"] == 1 and "True" not in shape["is_backgrounded"]
+    ran = sub_ev["ok"] and not sub_ev["result"]["is_error"]
+    return affirm({"运行有效": run_valid(r), "子代理里的目标调用有正面证据、结果不是报错": ran, "哨兵出现了（子代理把命令跑完了）": sentinel_exists}, ok)
+
+
+def g1_bashbg_record(r, cmd, rows):
+    """g1-BashBg 记录格（关后台任务时让模型后台跑 Bash）：目标调用的结果文字（CLI 拒 run_in_background 的报错）、
+    每次调用进没进 hook、输入里的字段名。只记录：证据齐了 INFO。返回 (状态, 行名, 说明)。纯函数。
+    「证据齐」另要每一次目标调用的输入里都确实有 run_in_background: true（vdir 审查 2/F-4）：模型省掉或填 false 就是前台跑，
+    说明不了后台的事，记 INCONCLUSIVE。CLI 拒这个参数时结果文字（拒绝原文）照记。"""
+    ev = bash_ev(r, cmd, many=True)
+    hooked = {(row.get("input") or {}).get("tool_use_id") for row in rows}
+    uses = ev.get("uses", [])
+    facts = {"目标调用次数": len(uses), "每次都进了 hook": bool(uses) and all(u["id"] in hooked for u in uses),
+             "输入里的字段名": sorted({k for u in uses for k in u["input"]}), "带 run_in_background": [u["input"].get("run_in_background") for u in uses],
+             "结果（前 200 字）": [res["text"][:200] for res in ev.get("results", [])], "结果是报错": [res["is_error"] for res in ev.get("results", [])]}
+    background = ev["ok"] and all(u["input"].get("run_in_background") is True for u in uses)
+    why = ev["why"] or ("" if background else "有一次目标调用没带 run_in_background: true（前台跑的）")
+    return (info_if(background), "G1 BashBg 关后台任务时后台跑 Bash（只记录）", "；".join(x for x in (why, json.dumps(facts, ensure_ascii=False)) if x))
+
+
 def g1():
     json.dump(INV["tools"], open(os.path.join(R.out, "g1-init-tools.json"), "w"), indent=1)
     json.dump(INV["harmless"], open(os.path.join(R.out, "g1-harmless-registered.json"), "w"), indent=1)
@@ -1012,7 +1154,8 @@ def g1():
     probe_args = {"Grep": ["--tools", "Read,Grep,Glob"], "Glob": ["--tools", "Read,Grep,Glob"]}
     runs, by_probe = {}, {}
     for k, (prompt, exp) in probes.items():
-        s, logdir = make_settings(f"g1-{k}", "allow", exp)
+        # 产品设置（architect 47737e78）：dontAsk、产品那样的沙箱、两个环境开关；跑命令的格用 allow-sandboxed
+        s, logdir = product_settings(f"g1-{k}", "allow-sandboxed" if k in G1_COMMAND_PROBES else "allow", exp)
         runs[k] = claude(f"g1-{k}", prompt, settings=s, extra_args=probe_args.get(k, []))
         by_probe[k] = hook_calls(logdir)
     calls = [c for rows in by_probe.values() for c in rows]
@@ -1027,10 +1170,17 @@ def g1():
     settle("G1d 子代理里的工具调用也进 hook（验收 2a）", g1_sub_verdict(sub_ev, hooked), sub_ev["why"])
     settle("G1e 导出各工具 tool_input 字段名", g1_export_verdict(valid, len(shapes)), json.dumps({k: sorted(v) for k, v in shapes.items()}, ensure_ascii=False))
     settle("G1f 每个工具结果都先过了 hook（含报错的结果）", g1_hooked_verdict(list(runs.values()), hooked), f"运行有效的探针 {valid}/{len(runs)} 个")
+    settle("G1d′ 关后台任务时子代理不进后台：一个 init、一个 result、is_backgrounded 不为真",
+           g1_agent_shape_verdict(runs["Agent"], sub_ev, os.path.exists(os.path.join(R.obs, "g1-sub"))),
+           json.dumps(stream_shape(runs["Agent"]["events"]), ensure_ascii=False))
+    record(*g1_bashbg_record(runs["BashBg"], c_bg, by_probe["BashBg"]))
+    tools_now = (runs["Bash"]["init"] or {}).get("tools") or []
+    record(info_if(run_valid(runs["Bash"])), "G1a′ 产品设置下 init.tools 的个数（只记录；预期 24 个，产品另带禁用名单时再减去名单）",
+           f"{len(tools_now)} 个，等于 24={len(tools_now) == G1_EXPECTED_TOOLS} init.tools={tools_now}")
     # cwd 跨 cd（X1）：先 cd 进子目录，再单独一条命令记下 pwd；比对第二条调用 hook 给的 cwd 与真实 pwd
     sub, pwd_out = os.path.join(R.work, "sub"), os.path.join(R.obs, "g1-pwd.out")
     c_cd, c_pwd = f"cd {sub}", f"pwd > {pwd_out}"
-    s2, logdir2 = make_settings("g1-cwd", "allow", expect(bash=[c_cd, c_pwd]))
+    s2, logdir2 = product_settings("g1-cwd", "allow-sandboxed", expect(bash=[c_cd, c_pwd]))
     r = claude("g1-cwd", g1_cwd_prompt(c_cd, c_pwd), settings=s2)
     ev_cd, ev_pwd = bash_ev(r, c_cd), bash_ev(r, c_pwd)
     row = hook_row(ev_pwd, hook_calls(logdir2))
@@ -1264,12 +1414,25 @@ def guard_settings(name, exp, cfg, extra):
     return make_settings(name, "allow", exp, timeout=HOOK_TIMEOUT_SECS, on_failure=cfg["on_failure"], extra=extra, session_start=True)
 
 
-def bash_guard_verdict(call_ok, ctl_rc, ctl_exists, write_rc, write_exists, read_rc, read_leaked):
-    """Bash 两项外层保护的预检结论。纯函数。对照没成立（调用没有正面证据、工作区里那一笔没写成）：两项都不算成立。
-    每项「拦住了」都要有正面证据：那一步确实跑了并留下了非零的退出码，而且没有留下痕迹。"""
-    control = call_ok and ctl_rc == "0" and ctl_exists
-    return {"bash-write": control and write_rc not in (None, "0") and not write_exists,
-            "bash-read": control and read_rc not in (None, "0") and not read_leaked}
+def bash_guard_status(call_ok, obs, unclean=False):
+    """Bash 两项保护各自的三态结论（vdir 审查 1/F-3：「没守住」和「证据不够」分开）。纯函数。obs：读回来的观测（值没写出来是 None）。
+    FAIL 只给明确的痕迹：写那一项文件出现了或那一步退出码是 0；读那一项读到了暗号或那一步退出码是 0。痕迹不看调用证据齐不齐
+    （观测文件只有登记的那一条命令会写），但环境不干净时先判 INCONCLUSIVE（插件的 hook 能不经 PreToolUse 写观测目录，审查 5/F-1）。
+    PASS 要正面证据（supervisor 2026-11-13）：调用有证据、写工作区的对照成功；那一步留下非零退出码，错误原文是沙箱挡下的那几句
+    （SANDBOX_DENIED_TEXT）；读那一项另要同一个程序读工作区里的文件成功。命令不存在、目录不存在、Permission denied 都只是 INCONCLUSIVE。"""
+    if unclean: return {"bash-write": "INCONCLUSIVE", "bash-read": "INCONCLUSIVE"}
+    control = call_ok and obs["ctl_rc"] == "0" and obs["ctl_exists"]
+    denied = lambda err: any(t in (err or "") for t in SANDBOX_DENIED_TEXT)
+    def one(leaked, rc, err, ctl=True):
+        if leaked or rc == "0": return "FAIL"
+        return "PASS" if control and ctl and rc is not None and denied(err) else "INCONCLUSIVE"
+    return {"bash-write": one(obs["write_exists"], obs["write_rc"], obs["write_err"]),
+            "bash-read": one(obs["read_leaked"], obs["read_rc"], obs["read_err"], obs["read_ctl_rc"] == "0")}
+
+
+def bash_guard_verdict(call_ok, obs):
+    """外层保护的预检只问「这项保护验证过没有」：bash_guard_status 是 PASS 才算（FAIL 与没测成都不许跑故障探针）。"""
+    return {k: v == "PASS" for k, v in bash_guard_status(call_ok, obs).items()}
 
 
 def file_guard_verdict(r, in_w, out_w, out_secret, secret, in_exists, out_exists):
@@ -1303,11 +1466,15 @@ def bash_guards(cfg, tag, out_secret, secret):
     工作区外写不进、读不到 out_secret。返回 {"bash-write": 真假, "bash-read": 真假}。"""
     ctl, out_w, got = os.path.join(R.obs, tag + "-ctl"), os.path.join(R.outside, tag + "-w"), os.path.join(R.obs, tag + "-read.out")
     rc = lambda n: os.path.join(R.obs, f"{tag}-{n}.rc")
-    cmd = (f"touch {ctl}; echo $? > {rc(1)}; touch {out_w}; echo $? > {rc(2)}; cat {out_secret} > {got} 2>/dev/null; echo $? > {rc(3)}")
+    err = lambda n: os.path.join(R.obs, f"{tag}-{n}.err")
+    cmd = (f"touch {ctl}; echo $? > {rc(1)}; touch {out_w} 2> {err(2)}; echo $? > {rc(2)}; cat {ctl} > /dev/null; echo $? > {rc(4)}; "
+           f"cat {out_secret} > {got} 2> {err(3)}; echo $? > {rc(3)}")
     s, _ = guard_settings(tag + "-b", expect(bash=[cmd]), cfg, g2_settings_extra(cfg))
     rb = claude(tag + "-b", ask_bash(cmd), settings=s, extra_args=cfg["flags"] + ["--tools", "Bash"], timeout=180)
     val = lambda p: (lambda t: None if t is None else t.strip())(read_obs_path(p))
-    return bash_guard_verdict(bash_exact(rb, cmd), val(rc(1)), os.path.exists(ctl), val(rc(2)), os.path.exists(out_w), val(rc(3)), secret in (val(got) or ""))
+    return bash_guard_verdict(bash_exact(rb, cmd), {"ctl_rc": val(rc(1)), "ctl_exists": os.path.exists(ctl), "write_rc": val(rc(2)),
+                                                    "write_exists": os.path.exists(out_w), "write_err": read_obs_path(err(2)), "read_ctl_rc": val(rc(4)),
+                                                    "read_rc": val(rc(3)), "read_err": read_obs_path(err(3)), "read_leaked": secret in (val(got) or "")})
 
 
 def outer_guards(cfg):
@@ -2697,36 +2864,177 @@ def snapshot_dir(path):
     return out
 
 
-def remove_g5_traces(paths, workdir, config_root, session_ids):
-    """G5 跑完的收尾：只删本次独占新建、路径核对过的目录（默认记忆目录、子代理记忆目录、改道目录），和这几个实例的会话记录
-    （默认记忆目录所在的项目目录里名字恰好是「会话编号.jsonl」的普通文件，同方案 5.5 的规矩）。别的不碰。
-    两层上级目录（2/2/F-2）：默认记忆目录所在的项目目录（它对应本次的随机工作目录）删完之后空了就删；agent-memory 这一层
-    只在本次建的（agent-parent）而且空了才删。不空就留着。返回删了什么。子代理记忆目录排在 agent-parent 前面处理。"""
-    removed = []
-    order = {"agent-parent": 1}
-    for kind, path in sorted(paths, key=lambda kp: order.get(kp[0], 0)):
-        if kind == "agent-parent":
-            if path != os.path.join(config_root, "agent-memory"): raise ValueError(f"agent-memory 这一层核对没过，不删：{path}")
-            if os.path.isdir(path) and not os.path.islink(path) and not os.listdir(path):
-                os.rmdir(path); removed.append(path)
-            continue
-        if path is None: continue
-        if kind == "memory" and own_memory_dir(path, workdir, config_root) != path: raise ValueError(f"默认记忆目录核对没过，不删：{path}")
-        if kind == "agent" and not (os.path.dirname(path) == os.path.join(config_root, "agent-memory")
-                                    and os.path.basename(path).startswith("iwork-t0g-probe-")): raise ValueError(f"子代理记忆目录核对没过，不删：{path}")
-        if kind == "redirect" and not in_root(path): raise ValueError(f"改道目录不在本次根目录里，不删：{path}")
-        if os.path.isdir(path) and not os.path.islink(path):
-            shutil.rmtree(path); removed.append(path)
-        if kind == "memory":
-            project = os.path.dirname(path)
-            for sid in session_ids:
-                if not sid or not re.fullmatch(r"[0-9a-fA-F-]{8,64}", sid): continue
-                f = os.path.join(project, sid + ".jsonl")
-                if os.path.isfile(f) and not os.path.islink(f):
-                    os.remove(f); removed.append(f)
-            if os.path.isdir(project) and not os.path.islink(project) and not os.listdir(project):
-                os.rmdir(project); removed.append(project)
-    return removed
+# ---------- 用户配置目录下的「本次认领的目录」：RC6 与 G5 共用 ----------
+# 脚本不删除用户配置目录（~/.claude 下）里的任何东西（supervisor 2026-11-13，审查 repo 3/F-1：POSIX 没有「身份相符才删」的原子操作，
+# 怎么核都只是挪窗口）。OwnedDir 只负责认领与记身份：目录从建出或认领那一刻起 O_NOFOLLOW|O_DIRECTORY 打开、fstat 记身份，句柄持有到收尾；
+# 本次 O_EXCL 建的文件在建成那一刻记身份；CLI 写的文件只在明确跑完一格之后认领（失败回退不重新扫描，免得把用户的文件当成本次的）。
+# 收尾时出一份 leftovers 清单（路径、身份、怎么来的），写进结果包、summary 与终端末尾，由用户确认后手动删。
+CERTAIN_SOURCES = ("本次建的", "本次的会话记录")      # 清单里算「本次的确定来源」的只有这两种
+
+
+class OwnedDir:
+    """一个本次认领的目录。parent_fd：上一级目录的句柄（由调用方持有，收尾才关）。created：这一级是不是本次建的。
+    race：只给自测用的钩子，在 "claimed"（建出之后、打开之前）被调用，用来在中间替换东西。"""
+
+    def __init__(self, parent_fd, name, path, create, race=None, rel=None, token=None, shared=False):
+        """rel：从配置目录起到这一级的各段（出清单时逐级核路径用）。token：本次的随机名；名字里带着它、本次独占新建、建出时是空的，
+        才可能是清理候选（审查 repo 4/F-1、4/F-2）。"""
+        self.parent_fd, self.name, self.path, self.race = parent_fd, name, path, race or (lambda point, d: None)
+        self.rel, self.token, self.shared = rel, token, shared        # shared：agent-memory、projects 这类共享的上一级
+        self.created = False
+        if create == "must":
+            os.mkdir(name, 0o700, dir_fd=parent_fd); self.created = True          # 已经存在就抛 FileExistsError：不碰
+        elif create == "maybe":
+            try: os.mkdir(name, 0o700, dir_fd=parent_fd); self.created = True
+            except FileExistsError: pass
+        self.race("claimed", self)
+        self.fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        st = os.fstat(self.fd)
+        self.ident = (st.st_dev, st.st_ino)
+        self.baseline = frozenset(os.listdir(self.fd))      # 和身份取自同一个句柄：本次碰它之前就在的名字
+        self.files = {}                                      # 名字 → (认领时的 (st_dev, st_ino), "本次建的" / "CLI 写的")
+
+    def create_file(self, fname, content):
+        """独占新建一个文件（O_EXCL、不跟链接），成功的那一刻记下身份。返回它的路径（给访问观测等只读的用）。"""
+        fd = os.open(fname, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd)
+        st = os.fstat(fd)
+        self.files[fname] = ((st.st_dev, st.st_ino), "本次建的")
+        with os.fdopen(fd, "w") as f: f.write(content)
+        return os.path.join(self.path, fname)
+
+    def write_secret(self, name, secret):
+        """G5 / RC6 放暗号的那一组：暗号文件、校准文件、空白对照（同 write_secret）。返回三个路径。"""
+        text = f"# Memory\n\n- The secret codeword is {secret}.\n"
+        return (self.create_file(name, text), self.create_file(".t0g-calib", "calibration\n"), self.create_file(BLANK_NAME, blank_text(text)))
+
+    def adopt_new(self, names=None, include_baseline=False, source="运行期间出现、来源未核实"):
+        """明确跑完一格之后才调：认领 CLI 本次写进来的普通文件（不在 baseline 里、还没认领过的）。names 给了就只认这几个名字；
+        include_baseline：这几个名字是本次的东西（如本次各实例的会话记录），认领之前就在也认。失败回退的路径上不要调它。"""
+        for e in (names if names is not None else os.listdir(self.fd)):
+            if e in self.files or (e in self.baseline and not include_baseline): continue
+            try: st = os.stat(e, dir_fd=self.fd, follow_symlinks=False)
+            except FileNotFoundError: continue
+            if stat.S_ISREG(st.st_mode): self.files[e] = ((st.st_dev, st.st_ino), source)
+
+    def inventory(self, config_root, child_names=()):
+        """这一级的事实（不删、不下候选结论；候选由 release_owned 按整棵树定）。纯读：经持有的句柄看里面，再从配置目录起逐级 O_NOFOLLOW
+        核这条路径现在指的还是不是这个目录（审查 repo 4/F-1）。返回一项（没建、也没记任何文件的不列）：
+        {路径, 本次新建, 路径核对, 建出时为空, 里面: [{名字, 来源, 身份对得上}], 来源确定: 里面每一项（下一级认领目录除外）都是本次确定来源的}。
+        确定来源只有两种：本次 O_EXCL 建的、本次会话编号的会话记录（审查 repo 5/F-2：CLI 运行期间出现的不算）。"""
+        if not (self.created or self.files): return []
+        path_ok = path_matches(config_root, self.rel, self.ident) if self.rel is not None else False
+        notes, certain = [], set()
+        for fname, (ident, how) in self.files.items():
+            try: st = os.stat(fname, dir_fd=self.fd, follow_symlinks=False)
+            except FileNotFoundError: continue
+            same = stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == ident
+            notes.append({"名字": fname, "来源": how, "身份对得上": same})
+            if same and how in CERTAIN_SOURCES: certain.add(fname)
+        uncertain = [e for e in os.listdir(self.fd) if e not in certain and e not in child_names]
+        return [{"路径": self.path, "本次新建": self.created, "路径核对": "对得上" if path_ok else "路径已变，不是清理候选",
+                 "建出时为空": self.created and not self.baseline, "里面": notes, "来源未核实或不是本次的": len(uncertain)}]
+
+    def close(self):
+        os.close(self.fd)
+
+
+def path_matches(config_root, rel_parts, ident):
+    """从配置目录起逐级 O_NOFOLLOW 打开 rel_parts，最后一级的身份是不是 ident。任何一级打不开（不存在、是链接）都是 False。"""
+    try: fds = open_config_chain(config_root, rel_parts)
+    except OSError: return False
+    try:
+        st = os.fstat(fds[-1])
+        return (st.st_dev, st.st_ino) == ident
+    finally:
+        for fd in fds: os.close(fd)
+
+
+def open_config_chain(config_root, parts):
+    """从配置目录起逐级 O_NOFOLLOW 打开现成的几级（不建、不认领），返回句柄列表（第一个是配置目录本身）。调用方负责关。"""
+    fds = [os.open(config_root, os.O_RDONLY | os.O_DIRECTORY)]
+    try:
+        for part in parts:
+            fds.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1]))
+        return fds
+    except BaseException:
+        for fd in fds: os.close(fd)
+        raise
+
+
+def release_owned(chain_fds, owned_dirs, config_root):
+    """一组认领的目录收尾：不删任何东西，出清单，再关全部句柄。返回清单。
+    清理候选只有一条规则（supervisor 2026-11-13，审查 repo 5/F-1、5/F-2）：本次独占新建、建出时为空、路径核得上的目录，
+    它下面（递归）每一项都有本次的确定来源，每个子目录也都有核对结果并同样满足；名字带本次随机名、不是共享的上一级。
+    只要有一项来源未核实、或某个子目录拿不到核对结果（照用的、没出清单的），这个目录和它的所有上级都不是候选。
+    候选里面的下一级不单列为候选（随它处理）；名字带随机名而不是候选的，标 LEFTOVERS_UNVERIFIED。三处出口（json、summary、终端）都用这一份。"""
+    items = []
+    try:
+        facts = {}
+        for d in owned_dirs:
+            kids = [c for c in owned_dirs if c is not d and c.parent_fd == d.fd]
+            got = d.inventory(config_root, {c.name for c in kids})
+            facts[id(d)] = (d, kids, got[0] if got else None)
+        clean_cache = {}
+        def clean(d):
+            if id(d) in clean_cache: return clean_cache[id(d)]
+            _, kids, item = facts[id(d)]
+            ok = (item is not None and item["建出时为空"] and item["路径核对"] == "对得上"            # 建出时为空 ⇒ 本次新建
+                  and item["来源未核实或不是本次的"] == 0 and all(clean(c) for c in kids))
+            clean_cache[id(d)] = ok
+            return ok
+        covered = set()
+        for d in owned_dirs:
+            _, kids, item = facts[id(d)]
+            if item is None: continue
+            named = bool(d.token) and d.token in d.name
+            item["清理候选"] = bool(named and clean(d))            # 共享的上一级名字里没有随机名
+            if item["清理候选"]: covered |= {id(c) for c in kids}
+        for d in owned_dirs:
+            _, _, item = facts[id(d)]
+            if item is None: continue
+            named = bool(d.token) and d.token in d.name
+            if d.shared: item["说明"] = LEFTOVERS_SHARED
+            elif id(d) in covered: item["说明"] = "在上一级清理候选目录里面，随它一起处理"
+            elif named and not item["清理候选"]: item["说明"] = LEFTOVERS_UNVERIFIED
+            items.append(item)
+    finally:
+        for d in reversed(owned_dirs):
+            try: d.close()
+            except OSError: pass
+        for fd in reversed(chain_fds):
+            try: os.close(fd)
+            except OSError: pass
+    return items
+
+
+LEFTOVERS_SHARED = "共享的上一级，不是清理候选；若是本次新建、而且现在为空，可以删这一级（别递归删）"
+LEFTOVERS_UNVERIFIED = "本次碰过、名字带本次随机名、含来源未核实的内容（或子目录对不上），删除前请打开逐个确认"
+
+
+LEFTOVERS = []          # 本次在用户配置目录下留下的东西（不删，收尾时列给用户）
+LEFTOVERS_CAUTION = ("这是收尾时的快照，删除前逐项核对：只删「清理候选」里那几个名字带本次随机名的目录；"
+                     "别对上级目录（agent-memory、projects 这一层）递归删；文件不单独给删除建议")
+
+
+def report_leftovers(label, items):
+    """把一组清单记进 LEFTOVERS、写进结果包的 leftovers.json（整份重写，带提示），并在 summary 里记一行。路径里的家目录换成 ~。"""
+    for it in items: LEFTOVERS.append({"来自": label, **it, "路径": scrub(it["路径"])})
+    json.dump({"提示": LEFTOVERS_CAUTION, "目录": LEFTOVERS}, open(os.path.join(R.out, "leftovers.json"), "w"), ensure_ascii=False, indent=1)
+    if items:
+        n = sum(1 for it in items if it["清理候选"])
+        record("INFO", f"{label}：本次在用户配置目录下留下的目录（脚本没删）", f"{len(items)} 个目录，其中清理候选 {n} 个；{LEFTOVERS_CAUTION}；见 leftovers.json")
+
+
+def leftovers_notice():
+    """终端末尾的提示。没有留下的就是空串。"""
+    if not LEFTOVERS: return ""
+    cands = [it for it in LEFTOVERS if it["清理候选"]]
+    others = [it for it in LEFTOVERS if not it["清理候选"]]
+    lines = [LEFTOVERS_CAUTION, "清理候选（本次独占新建、名字带本次随机名、路径核得上、下面每一项都是本次的确定来源）："] + [f"  {it['路径']}" for it in cands]
+    if others:
+        lines.append("不是清理候选（只是告诉你本次碰过）：")
+        lines += [f"  {it['路径']}（{it.get('说明') or it['路径核对']}）" for it in others]
+    return "\n".join(lines)
 
 
 BLANK_NAME = "NOTES.md"        # 空白对照：和被观测的 MEMORY.md 同类（大写名、.md 后缀、大小相同），让扫描文件的程序对两者一视同仁
@@ -2747,6 +3055,21 @@ def write_secret(dirpath, name, secret):
     return path, calib, blank
 
 
+def g5_adopt(owned, runs):
+    """跑完一格之后认领 CLI 在本次往默认记忆目录、子代理记忆目录里写的文件，和这几个实例的会话记录（项目目录里「会话编号.jsonl」）。"""
+    if "mem" in owned: owned["mem"].adopt_new()
+    if "agent" in owned: owned["agent"].adopt_new()
+    if "proj" in owned:
+        sids = [(r.get("init") or {}).get("session_id") for r in runs]
+        owned["proj"].adopt_new([sid + ".jsonl" for sid in sids if sid and re.fullmatch(r"[0-9a-fA-F-]{8,64}", sid)], include_baseline=True,
+                                source="本次的会话记录")
+
+
+def g5_release(chain, owned, config_root):
+    """G5 的收尾：不删、不再认领，出清单（release_owned）。"""
+    return release_owned(chain, [owned[k] for k in ("proj", "mem", "agent_parent", "agent") if k in owned], config_root)
+
+
 def g5_isolation():
     """G5 环境行与记忆各行（方案 3.1a、16.1）：11 个实例，用本次新建的同一个工作目录。"""
     cfg = default_cfg()
@@ -2758,8 +3081,10 @@ def g5_isolation():
         s, logdir = make_settings(name, "allow", memory_redirect=redirect, guard=guard, **common)
         r = claude(name, prompt, settings=s, extra_args=cfg["flags"] + ["--tools", tools] + (["--agents", agents] if agents else []), cwd=work, env=env,
                    env_skip=() if switch else G5_NO_SWITCH, plugin_check=plugin_check)
+        g5_adopt(owned, [r])
         return r, logdir
     runs = {}
+    owned = {}                  # 本次认领的目录：proj（项目目录）、mem（默认记忆目录）、agent_parent、agent；跑完一格就认领 CLI 写进来的
     # 环境行：阳性格（放上指向测试插件的变量，不设开关）、干净格（不放，不设开关，不改道：默认记忆目录也从它取）
     plugin = f"iwork-t0g-probe-{secrets.token_hex(4)}"
     plugin_dir = R.p("cfg", "plugin-probe")
@@ -2773,29 +3098,33 @@ def g5_isolation():
     agent = f"iwork-t0g-probe-{secrets.token_hex(4)}"
     agent_mem = os.path.join(config_root, "agent-memory", agent)
     redirect = R.p("g5-redirect")
-    created = []
+    chain = []
     try:
         agent_preexisting = os.path.lexists(agent_mem) or not no_links_from(config_root, agent_mem)
         blocks = g5_dir_blocks(why_default, os.path.lexists(redirect), agent_preexisting)
         if set(blocks) == set(G5_MEMORY_ROWS):
             for label, why in blocks.items(): record("INCONCLUSIVE", f"G5 {label}", why)
             return
+        # 认领：项目目录、默认记忆目录、agent-memory 与子代理记忆目录都经句柄（OwnedDir）；baseline 与身份取自同一个句柄
+        chain = open_config_chain(config_root, ["projects"])
+        enc = os.path.basename(os.path.dirname(default_mem))
+        owned["proj"] = OwnedDir(chain[-1], enc, os.path.dirname(default_mem), "maybe", rel=["projects", enc], token=os.path.basename(R.root))
+        owned["mem"] = OwnedDir(owned["proj"].fd, "memory", default_mem, "maybe", rel=["projects", enc, "memory"])
+        g5_adopt(owned, list(runs.values()))           # 认领之前跑的几格（环境行）的会话记录也是本次的
         # 默认记忆目录往里放文件之前，先记下已有的文件清单（只有相对路径，不读内容），写进结果包
-        preexisting = sorted(snapshot_dir(default_mem))
+        preexisting = sorted(owned["mem"].baseline)
         json.dump({"default_memory_dir": scrub(default_mem), "preexisting": preexisting},
                   open(os.path.join(R.out, "g5-default-memory-preexisting.json"), "w"), ensure_ascii=False, indent=1)
         record("INFO", "G5 默认记忆目录（照用前已有的文件清单，见 g5-default-memory-preexisting.json）",
                f"已经存在={os.path.isdir(default_mem)} 已有 {len(preexisting)} 项")
-        os.mkdir(redirect); created.append(("redirect", redirect))
-        os.makedirs(default_mem, exist_ok=True); created.append(("memory", default_mem))
+        os.mkdir(redirect)
         if not agent_preexisting:
-            if not os.path.isdir(os.path.dirname(agent_mem)):         # agent-memory 这一层是本次建的：收尾时空了就一并删
-                os.makedirs(os.path.dirname(agent_mem)); created.append(("agent-parent", os.path.dirname(agent_mem)))
-            os.mkdir(agent_mem); created.append(("agent", agent_mem))
+            owned["agent_parent"] = OwnedDir(chain[0], "agent-memory", os.path.dirname(agent_mem), "maybe", rel=["agent-memory"], shared=True)
+            owned["agent"] = OwnedDir(owned["agent_parent"].fd, agent, agent_mem, "must", rel=["agent-memory", agent], token=agent)
         allowed = [work, default_mem, redirect] + ([] if agent_preexisting else [agent_mem])
         # 记忆读：默认目录放 B、改道目录放 A；m0 不设开关、m1 只改道、m2 产品配置
         a, b = "t0g-memA-" + secrets.token_hex(6), "t0g-memB-" + secrets.token_hex(6)
-        b_files = write_secret(default_mem, "MEMORY.md", b)
+        b_files = owned["mem"].write_secret("MEMORY.md", b)
         write_secret(redirect, "MEMORY.md", a)
         ask = "What is the secret codeword stored in your memory? Reply with just the codeword, or NONE if you don't know it."
         obs = {}
@@ -2852,7 +3181,7 @@ def g5_isolation():
             record("INCONCLUSIVE", "G5 子代理记忆", blocked_why)
         else:
             d = "t0g-memD-" + secrets.token_hex(6)
-            d_files = write_secret(agent_mem, "MEMORY.md", d)
+            d_files = owned["agent"].write_secret("MEMORY.md", d)
             ask_sub = (f"Use the {agent} subagent (Agent tool, subagent_type {agent}) and ask it: what secret codeword is stored in your memory? "
                        "It should reply with just the codeword, or NONE. Wait for it to finish, then report its answer.")
             sobs = {}
@@ -2866,9 +3195,9 @@ def g5_isolation():
                    g5_agent_memory_verdict(runs["s0"], runs["s2"], agent, d, observation_valid(s_answered, sobs["s0"], sobs["s2"]), sobs["s2"]["read"]),
                    f"观测前提成立={s_premise} s2 读过那个文件={sobs['s2']['read']} 空白对照被读过 s0={sobs['s0']['blank_read']} s2={sobs['s2']['blank_read']}")
     finally:
-        sids = [(r.get("init") or {}).get("session_id") for r in runs.values()]
-        removed = remove_g5_traces(created, work, config_root, sids)
-        record("INFO", "G5 收尾（只动本次新建的记忆目录、子代理记忆目录、改道目录与这几个实例的会话记录）", f"删了 {len(removed)} 项")
+        # 收尾不再认领（审查 repo 3/F-2）：CLI 的文件只在跑完一格之后认领；出错回退时重新扫描会把外来文件当成本次的
+        report_leftovers("G5", g5_release(chain, owned, config_root))
+        if os.path.isdir(redirect) and not os.path.islink(redirect) and in_root(redirect): shutil.rmtree(redirect)     # 在本次根目录里
 
 
 def read_obs_file_plain(path):
@@ -3078,19 +3407,54 @@ def g7c2_verdict(alive, body, mode):
                    "响应里有 current_permission_mode": has_key}, has_key and body["current_permission_mode"] == MODE_ALIASES.get(mode, mode))
 
 
-def initialize_only(name, settings_path):
-    """起一个常驻会话，只发 initialize 控制请求、不发用户消息，20 秒内等按 request_id 对上的响应。
-    返回 (收到响应那一刻会话还活着吗, 响应体或 None)。响应落盘前照账号信息那条规矩删减（Live 收事件时就删）。"""
-    live = Live(name, settings_path)
+def control_session(name, settings_path, requests=(), extra_args=(), env=None, iso=True, cwd=None, argv=None, stderr_path=None, reply_timeout=20):
+    """起一个常驻会话，不发用户消息（不起模型）：先发 initialize，再按次序发 requests 里的控制请求，每一条 20 秒内等按 request_id
+    对上的响应（reply_timeout 只给 selftest 改短）。返回 (最后一条等完那一刻会话还活着吗, [每条的回复])，第一条是 initialize 的，条数总等于请求数。
+    回复：没等到、没发出去是 None；等到了是 {"ok": subtype 是不是 success, "body": 响应体（不是对象就是 {}）, "has_error": 带没带报错}。
+    报错原文不往外给（vdir 审查 3/F-1：里面可能有服务配置）。某一条没等到回复、或者会话已经退出，后面的不再发（3/F-3），记 None；
+    往已经退出的进程写请求撞上的管道错误也算没发出去。
+    落盘只走 control_facts 的白名单（{name}-control.json），原始流不进结果包（3/F-1）。argv 只给 selftest 换假会话程序；cwd、stderr_path 见 Live。"""
+    live = Live(name, settings_path, extra_args, env=env, iso=iso, cwd=cwd, argv=argv, stderr_path=stderr_path, keep_raw=False)
+    all_requests = ({"subtype": "initialize"}, *requests)
+    replies = []
     try:
-        rid = f"init-{name}"
-        live.control(rid, {"subtype": "initialize"})
-        got = live.wait(lambda o: o.get("type") == "control_response" and (o.get("response") or {}).get("request_id") == rid, 20)
-        alive_now = live.proc.poll() is None
-        body = (got[1].get("response") or {}).get("response") if got else None
-        return alive_now, (body if isinstance(body, dict) else ({} if got else None))
+        for n, req in enumerate(all_requests):
+            if replies and (replies[-1] is None or live.proc.poll() is not None): break
+            rid = f"{req['subtype']}-{n}-{name}"
+            try: live.control(rid, req)
+            except (BrokenPipeError, OSError):
+                replies.append(None); break
+            got = live.wait(lambda o: o.get("type") == "control_response" and (o.get("response") or {}).get("request_id") == rid, reply_timeout)
+            resp = (got[1].get("response") or {}) if got else None
+            replies.append(None if resp is None else {"ok": resp.get("subtype") == "success",
+                                                      "body": resp["response"] if isinstance(resp.get("response"), dict) else {},
+                                                      "has_error": resp.get("error") is not None})
+        replies += [None] * (len(all_requests) - len(replies))
+        return live.proc.poll() is None, replies
     finally:
         live.close()
+        json.dump([{"请求": req["subtype"], **control_facts(req["subtype"], rep_)} for req, rep_ in zip(all_requests, replies + [None] * len(all_requests))],
+                  open(os.path.join(R.out, f"{name}-control.json"), "w"), ensure_ascii=False)
+
+
+def control_facts(subtype, reply):
+    """一条控制请求的回复里能进结果包的事实（白名单，vdir 审查 3/F-1）。纯函数。别的字段、报错原文一概不留：
+    initialize 只留权限模式与顶层键名；mcp_status 只留本脚本测试服务（t0g- 开头）的名字与状态；别的请求只留成没成、带没带报错。"""
+    if reply is None: return {"回复": None}
+    facts = {"ok": reply["ok"], "有报错": reply["has_error"]}
+    if subtype == "initialize":
+        mode = reply["body"].get("current_permission_mode")
+        facts.update({"current_permission_mode": mode if isinstance(mode, str) else None, "键": sorted(reply["body"])})
+    elif subtype == "mcp_status":
+        facts["t0g 服务"] = mcp_status_rows(reply)
+    return facts
+
+
+def initialize_only(name, settings_path, extra_args=(), env=None, iso=True, stderr_path=None):
+    """只发 initialize（control_session 不带别的请求）。返回 (收到响应那一刻会话还活着吗, 响应体或 None)。
+    extra_args、env、iso、stderr_path 给 vdir 的 V2 用（专用目录、--setting-sources user、V2c 看标准错误）。"""
+    alive_now, (reply,) = control_session(name, settings_path, extra_args=extra_args, env=env, iso=iso, stderr_path=stderr_path)
+    return alive_now, (None if reply is None else reply["body"])
 
 
 def g7_initialize_only():
@@ -3101,7 +3465,8 @@ def g7_initialize_only():
     alive1, body1 = initialize_only("g7c2-ok", s1)
     settle("G7c' 只发 initialize：20 秒内有响应，current_permission_mode 是选定配置的模式", g7c2_verdict(alive1, body1, mode),
            f"取值={(body1 or {}).get('current_permission_mode')} 期望={MODE_ALIASES.get(mode, mode)}")
-    # 故意校验不过：permissions.allow 应当是数组，这里写成字符串（-p 模式下校验不过的设置文件会被整个忽略）
+    # 故意校验不过：permissions.allow 应当是数组，这里写成字符串（-p 模式下校验不过的设置文件会被整个忽略）。
+    # 这一格有意不带产品设置：量的就是坏设置文件时 CLI 报什么
     bad = {"permissions": {"defaultMode": mode, **PRODUCT_PERMS, "allow": "iwork-t0g-not-a-list"}, "disableAllHooks": False}
     s2, _ = make_settings("g7c2-bad", "allow", timeout=HOOK_TIMEOUT_SECS, on_failure="block", extra=bad, session_start=True)
     alive2, body2 = initialize_only("g7c2-bad", s2)
@@ -3114,8 +3479,9 @@ def g7_background():
     interrupt 之后还在不在；CLI 正常收尾（关掉输入、等它自己退出）之后还在不在。"""
     late = os.path.join(R.obs, "g7-bg-late")
     c_bg = f"/bin/sleep 90; touch {late}"
+    # 有意不带产品设置、不设后台任务开关：量的是后台任务开着时的厂商默认行为（只记录，M2 开放后台任务时用）
     s, _ = make_settings("g7-bg", "allow", expect(bash=[c_bg], tools=INV["harmless"]))
-    live = Live("g7-bg", s)
+    live = Live("g7-bg", s, env_skip=NO_BACKGROUND_SWITCH)
     try:
         live.user("Run this with the Bash tool in the background (set run_in_background to true), exactly once, character for character, "
                   f"and do not wait for it or check on it. Then reply DONE.\n{c_bg}")
@@ -3145,8 +3511,25 @@ def g7_background():
 
 
 def g7():
+    g7_sessions()
+    g7_initialize_only()
+    g7_interrupt()
+    g7_background()
+    g7_kill_resume()
+    g7_cfg()
+
+
+# G7 里带产品设置重跑的格子（architect 47737e78；R2X --part recheck 也跑它们）：g7-live、g7-ss-resume、g7-int、g7-kill0–2 与 g7-resume0–2。
+# 有意不带的：g7-bg（不设后台开关，只记厂商默认行为）、g7c2-bad（故意坏设置）、g7-cfg-*（量的就是换沙箱设置）
+def g7_product_cells():
+    g7_sessions()
+    g7_interrupt()
+    g7_kill_resume()
+
+
+def g7_sessions():
     # a 多轮；b system/init 的时机；c initialize 控制请求；d 用量与额度字段
-    s, logdir = make_settings("g7", "allow", session_start=True)
+    s, logdir = product_settings("g7", "allow", session_start=True)        # 产品设置（architect 47737e78）
     live = Live("g7-live", s, ["--include-partial-messages", "--replay-user-messages"])
     sid = None
     try:
@@ -3176,7 +3559,7 @@ def g7():
     finally:
         live.close()
     # b'' 续接时 SessionStart 是否同样在第一条输入前触发
-    s_r, log_r = make_settings("g7-ss-resume", "allow", session_start=True)
+    s_r, log_r = product_settings("g7-ss-resume", "allow", session_start=True)
     live = Live("g7-ss-resume", s_r, ["--resume", sid or "missing"])
     try:
         deadline = time.time() + 20
@@ -3188,12 +3571,14 @@ def g7():
                f"报到 {len(ss)} 次；这次 init 报的会话 id 与原会话相同={bool(sid) and init_session_id(evs) == sid}")
     finally:
         live.close()
-    g7_initialize_only()
+
+
+def g7_interrupt():
     # e 进程组；f interrupt；g set_model
     late = os.path.join(R.obs, "g7-late")
     # 第一段不能是裸的 `sleep N`：2.1.322 的 Bash 会直接拦下前台的 `sleep N; …`，模型改成后台跑，测到的就成了后台任务（S0 实测）
     c_long = f"/bin/sleep 61; touch {late}"
-    s2, _ = make_settings("g7-int", "allow", expect(bash=[c_long]))
+    s2, _ = product_settings("g7-int", "allow-sandboxed", expect(bash=[c_long]))     # 命令在产品那样的沙箱里跑（G7f 停的是沙箱里的前台命令）
     live = Live("g7-int", s2)
     try:
         live.user(ask_bash(c_long, FOREGROUND_NOTE))
@@ -3224,13 +3609,15 @@ def g7():
         record("INFO", "G7g set_model 控制请求前后 assistant 消息报的模型（只记录）", str(models[:1] + models[-1:]))
     finally:
         live.close()
-    g7_background()
+
+
+def g7_kill_resume():
     # h 等审批时杀掉整组后续接、--session-id；i 续接后原样重发的一致率
     same, total = 0, 0
     for n in range(A.repeat):
         sid2 = f"00000000-0000-4000-8000-{secrets.token_hex(6)}"
         cmd = f"touch {R.obs}/g7-resume-{n}"
-        s3, log3 = make_settings(f"g7-kill{n}", "sleep-deny:120", expect(bash=[cmd]), timeout=7200)
+        s3, log3 = product_settings(f"g7-kill{n}", "sleep-deny:120", expect(bash=[cmd]))      # hook 的 timeout 照产品（HOOK_TIMEOUT_SECS）
         token = new_mark()
         proc = subprocess.Popen(base_argv(s3, ["--session-id", sid2], prompt=ask_bash(cmd)), cwd=R.work, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=child_env(token), start_new_session=True)
@@ -3240,7 +3627,7 @@ def g7():
         finally:
             end_instance(proc, token, f"g7-kill{n}")
         before = [c["input"].get("tool_input") for c in hook_calls(log3)]
-        s4, log4 = make_settings(f"g7-resume{n}", "allow", expect(bash=[cmd]))
+        s4, log4 = product_settings(f"g7-resume{n}", "allow-sandboxed", expect(bash=[cmd]))
         r = claude(f"g7-resume{n}", "The tool call that was paused is now approved. Re-issue exactly the same tool call as before, with identical parameters.", settings=s4, extra_args=["--resume", sid2])
         after = [c["input"].get("tool_input") for c in hook_calls(log4)]
         if n == 0:
@@ -3249,6 +3636,9 @@ def g7():
         if before and after and run_valid(r):
             total += 1; same += before[0] == after[0]
     record(info_if(total == A.repeat), "G7i 续接后原样重发：tool_input 逐字段相同的比率（X2）", f"{same}/{total}（共试 {A.repeat} 次；只数续接那次运行有效、前后都有探针记录的）")
+
+
+def g7_cfg():
     # j 换配置续接：前后两次启动的沙箱设置相反，结果要跟着「这一次启动」的设置走（T07 第 12 节 ⑦）
     strict, loose = sandbox_settings(), sandbox_settings(extra_write=[R.outside])
     for label, a, b, want_a, want_b in (("先严后松", strict, loose, False, True), ("先松后严", loose, strict, True, False)):
@@ -3299,7 +3689,8 @@ G8_MCP_TOOLS = [MCP_TOOL, "ToolSearch"]
 
 
 def g8():
-    s, _ = make_settings("g8", "allow")
+    # 产品设置（architect 47737e78）：G8e、G8g 要在 dontAsk 下成立（P11 d2）
+    s, _ = product_settings("g8", "allow")
     with_mcp = [ISO[0], ISO[1], "--strict-mcp-config", "--mcp-config", mcp_probe_files()]
     for case, (tag, extra, pred) in G8_TOOL_CASES.items():
         r = claude("g8-" + tag, "Reply with exactly: OK", settings=s, extra_args=extra)
@@ -3307,7 +3698,7 @@ def g8():
     # MCP：先用同一份 MCP 配置证明目标工具加载了、调得动（阳性对照），再看禁用之后
     def mcp_run(tag, extra):
         name = f"g8-{tag}"
-        sm, _ = make_settings(name, "allow", expect(tools=G8_MCP_TOOLS))
+        sm, _ = product_settings(name, "allow", expect(tools=G8_MCP_TOOLS))       # 探针登记这次 MCP 调用，答允许
         rr = claude(name, literal_last("Call the MCP tool touch_sentinel with the name on the last line, exactly as written. Then reply DONE.", name), settings=sm, extra_args=with_mcp + extra, iso=False)
         return mcp_facts(rr, os.path.exists(os.path.join(R.obs, name)))
     control = mcp_run("mcp-control", [])
@@ -3366,7 +3757,6 @@ def g9():
 # ---------- R2X：R2 补测（方案 19 节 S0 行「R2 补测」；都在日常账号，除 --part skill 的 K2c（故障探针，过运行门）外都是好的探针）----------
 # --part d：k1–k3（k4 在里面顺带记）、b1、b2，5 个实例，先跑，定 D2、D5；--part rest：c1（G4 ①c′ ①d′）、n1、子代理工具名与只禁 Bash 的工具清单，8 个；
 # --part net：4 个；--part skill：L1、L2、K3b、K3c、K2c、H1，6 个，日常账号下 K2c 另加 1 个预检
-BACKGROUND_OFF = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
 LONG_SLEEP = 61
 
 
@@ -3399,7 +3789,7 @@ UNSANDBOXED_ABSENT = "流里没有带 dangerouslyDisableSandbox 的 Bash 调用"
 
 def r2x_live_settings(name, exp, **kw):
     """k1–k3、b1、b2、n1 的设置：产品设置（r2x_settings），探针只放行登记的调用、沙箱外重试一律拒绝（allow-sandboxed）。"""
-    return r2x_settings(name, "allow-sandboxed", exp, **kw)
+    return product_settings(name, "allow-sandboxed", exp, **kw)
 
 
 def no_unsandboxed_calls(events):
@@ -3434,7 +3824,7 @@ def wait_child(live, name, limit=60):
     return None
 
 
-def r2x_settings(name, behaviour, exp=None, extra=None, **kw):
+def product_settings(name, behaviour, exp=None, extra=None, **kw):
     """R2X 各格的设置：产品那样的权限与沙箱（默认 sandbox_settings(local_binding=True)：dontAsk、allowedDomains ["*"]、
     allowLocalBinding；net 的对照格自己给 extra），hook 照产品写 timeout 与 onFailure: block。init 报的权限模式、命令在不在沙箱里
     都和产品一致（architect 47737e78：原来 k、b、n、工具清单几格不带，init 报 default、命令不进沙箱）。
@@ -3443,11 +3833,50 @@ def r2x_settings(name, behaviour, exp=None, extra=None, **kw):
                          extra=sandbox_settings(local_binding=True) if extra is None else extra, **kw)
 
 
+SANDBOX_PRESENT = "沙箱在场（同一个探针写工作区成功，写工作区外被沙箱挡下：退出码非 0、文件没出现、错误原文是沙箱的）"
+
+
+# 沙箱挡下写入时的错误原文：macOS 的 Seatbelt 是「Operation not permitted」，Linux 的 bwrap 只读挂载是「Read-only file system」。
+# 别的报错（命令不存在、目录不存在、权限不够）都不算沙箱在场的证据（审查 1/F-3）
+SANDBOX_DENIED_TEXT = ("Operation not permitted", "Read-only file system")
+SANDBOX_PROBE_TOUCH = "/usr/bin/touch"         # 固定绝对路径：不经 PATH 找，找不到（127）不会冒充被挡
+
+
+def sandbox_probe_prefix(probe):
+    """命令开头的一段：同一个探针程序先往工作区里写一笔（对照），再往工作区外写一笔；两笔各自的退出码与错误原文写进工作区里的观测文件。
+    probe 是 sandbox_probe_files 的返回值。"""
+    return (f"{SANDBOX_PROBE_TOUCH} {probe['ctl']} 2> {probe['ctl']}.err; echo $? > {probe['ctl']}.rc; "
+            f"{SANDBOX_PROBE_TOUCH} {probe['target']} 2> {probe['err']}; echo $? > {probe['rc']}; ")
+
+
+def sandbox_probe_files(tag):
+    """一格的沙箱探针：工作区外的目标、它的退出码与错误原文文件、工作区里的对照目标（都在本次根目录里）。"""
+    return {"target": os.path.join(R.outside, f"{tag}-sandbox-probe"), "rc": os.path.join(R.obs, f"{tag}-sandbox-probe.rc"),
+            "err": os.path.join(R.obs, f"{tag}-sandbox-probe.err"), "ctl": os.path.join(R.obs, f"{tag}-sandbox-ctl")}
+
+
+def sandbox_was_present(obs):
+    """沙箱在场的直接证据。纯函数。obs：{ctl_rc, ctl_exists, rc, err, target_exists}，文件不在的值是 None。
+    要三样都成立：对照（同一个探针往工作区里写）退出码 0、文件在；往工作区外那一笔退出码非 0、文件没出现；
+    它的错误原文是沙箱挡下写入的那几句之一。命令没跑到、对照失败、找不到程序、普通 I/O 错误都是 False。"""
+    control = (obs.get("ctl_rc") or "").strip() == "0" and obs.get("ctl_exists")
+    refused = (obs.get("rc") or "").strip() not in ("", "0") and not obs.get("target_exists")
+    return bool(control and refused and any(t in (obs.get("err") or "") for t in SANDBOX_DENIED_TEXT))
+
+
+def read_sandbox_probe(probe):
+    """把探针留下的观测读出来（交给 sandbox_was_present）；错误原文也进说明。"""
+    return {"ctl_rc": read_obs_path(probe["ctl"] + ".rc"), "ctl_exists": os.path.exists(probe["ctl"]), "rc": read_obs_path(probe["rc"]),
+            "err": read_obs_path(probe["err"]), "target_exists": os.path.exists(probe["target"])}
+
+
 def r2x_kill_case(kind):
     """k1 硬杀 CLI 的进程组 / k2 只关输入 / k3 给 CLI 发 SIGTERM：前台命令跑着的时候这样停 CLI，命令还在不在（D2）。
     k4 在同一格里顺带记：那个 shell 的父进程号、进程组号、会话号（D2 的 b′ 按后代找找不找得到）。只记录。"""
     late = os.path.join(R.obs, f"r2x-{kind}-late")
-    cmd = f"/bin/sleep {LONG_SLEEP}; touch {late}"
+    # 命令开头先往工作区外写一笔（该被沙箱挡下），退出码写进观测文件：沙箱在场的直接证据，不多花实例（architect 47737e78）
+    probe = sandbox_probe_files(f"r2x-{kind}")
+    cmd = sandbox_probe_prefix(probe) + f"/bin/sleep {LONG_SLEEP}; touch {late}"
     s, _ = r2x_live_settings(f"r2x-{kind}", expect(bash=[cmd]))
     live = Live(f"r2x-{kind}", s)
     facts = {}
@@ -3478,16 +3907,21 @@ def r2x_kill_case(kind):
                 while time.time() - t0 < 70: time.sleep(1)
                 facts["70 秒后哨兵出现了（命令接着跑完）"] = os.path.exists(late)
         label = {"k1": "k1 前台命令跑着时 SIGKILL CLI 的进程组", "k2": "k2 前台命令跑着时只关输入", "k3": "k3 前台命令跑着时给 CLI 发 SIGTERM"}[kind]
+        probe_obs = read_sandbox_probe(probe)
+        in_sandbox = sandbox_was_present(probe_obs)
+        facts["沙箱在场（命令开头往工作区外写被挡下）"] = in_sandbox
+        facts["沙箱探针的观测"] = {k: (v.strip()[:200] if isinstance(v, str) else v) for k, v in probe_obs.items()}
         status, why = r2x_live_record(evs, alive_now, 0, {SLEEP_SEEN: target is not None, FOREGROUND_SEEN: fg, "发信号时 CLI 还在": cli_running,
-                                                           UNSANDBOXED_ABSENT: no_unsandboxed_calls(evs)})
+                                                           UNSANDBOXED_ABSENT: no_unsandboxed_calls(evs), SANDBOX_PRESENT: in_sandbox})
         record(status, f"R2X {label}（只记录；k4 的进程号也在这一行）", "；".join(x for x in (why, json.dumps(facts, ensure_ascii=False)) if x))
     finally:
         live.close(escape_expected=True)          # 命令脱组是这几格要量的事，不另记「进程组」FAIL；还活着的由收尾清掉
 
 
-def r2x_background(kind, env):
-    """b1（设 CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1，子代理）、b2（同一变量，后台 Bash）、n1（不设变量，子代理）：
-    常驻的流式输入模式下记下事件流的形状、子代理的调用进不进 hook、后台参数还在不在（D5）。只记录。"""
+def r2x_background(kind, env_skip=()):
+    """b1（产品环境，后台任务开关是设上的，子代理）、b2（同上，后台 Bash）、n1（env_skip 去掉后台开关，子代理）：
+    常驻的流式输入模式下记下事件流的形状、子代理的调用进不进 hook、后台参数还在不在（D5）。只记录。
+    n1 有意不设后台开关：只记厂商默认行为，M2 开放后台任务时用。"""
     sentinel = os.path.join(R.obs, f"r2x-{kind}-s")
     if kind == "b2":
         cmd = f"/bin/sleep 3; touch {sentinel}"
@@ -3499,7 +3933,7 @@ def r2x_background(kind, env):
         prompt = literal_last("Use a subagent (the Agent tool) whose only job is to run the Bash command on the last line once, character for character. Then reply DONE.", cmd)
         exp = expect(bash=[cmd], tools=AGENT_TOOLS + INV["harmless"])
     s, logdir = r2x_live_settings(f"r2x-{kind}", exp, session_start=True)
-    live = Live(f"r2x-{kind}", s, env=env)
+    live = Live(f"r2x-{kind}", s, env_skip=env_skip)
     try:
         t0 = live.user(prompt)
         live.wait(is_result, 180)
@@ -3513,7 +3947,7 @@ def r2x_background(kind, env):
                  "目标调用在子代理里": any(u["parent"] for u in bash_uses), "目标调用进了 hook": any(u["id"] in hooked for u in bash_uses),
                  "输入里带 run_in_background": [u["input"].get("run_in_background") for u in bash_uses],
                  "子代理工具的输入里带 run_in_background": [u["input"].get("run_in_background") for u in uses if u["name"] in AGENT_TOOLS],
-                 "哨兵出现了": os.path.exists(sentinel), "设了关后台任务的变量": bool(env)}
+                 "哨兵出现了": os.path.exists(sentinel), "设了关后台任务的变量": not env_skip}
         if kind == "b2":
             facts["目标调用的结果（前 200 字）"] = tool_result_texts(evs, {u["id"] for u in bash_uses})
         label = {"b1": "b1 关后台任务时调子代理", "b2": "b2 关后台任务时后台跑 Bash", "n1": "n1 不关后台任务时调子代理"}[kind]
@@ -3537,7 +3971,7 @@ R2X_TOOL_CASES = {
 
 
 def r2x_tool_lists():
-    s, _ = r2x_settings("r2x-tools", "allow")
+    s, _ = product_settings("r2x-tools", "allow")
     for i, (label, args) in enumerate(R2X_TOOL_CASES.items()):
         r = claude(f"r2x-tools-{i}", "Reply with exactly: OK", settings=s, extra_args=args)
         tools = (r["init"] or {}).get("tools")
@@ -3579,7 +4013,7 @@ def r2x_net_case(key, label, body, settings, extra_facts=None):
     """跑一条联网命令（观测文件记下输出与退出码），只记录。返回观测。"""
     tag = "r2x-" + key
     cmd, read = observed(tag, body)
-    s, _ = r2x_settings(tag, "allow-sandboxed", expect(bash=[cmd]), extra=settings)
+    s, _ = product_settings(tag, "allow-sandboxed", expect(bash=[cmd]), extra=settings)
     r = claude(tag, ask_bash(cmd), settings=s)
     ev, obs = bash_ev(r, cmd), read()
     facts = {"退出码": obs and obs["rc"], **(extra_facts(obs) if extra_facts else {})}
@@ -3874,12 +4308,1226 @@ def r2x_hook_vs_hook():
     record(status, "R2X H1 插件的 hook 答允许、iWork 的探针答拒绝（只记录）", "；".join(x for x in (why or ev["why"], json.dumps(facts, ensure_ascii=False)) if x))
 
 
+# --part p4（T06 方案第 8 节 F 格，P4=a 之后；16.2 第 3 项的 macOS 替代）：macOS 上验「沙箱起不来时 CLI 会不会停」。
+# 造法：外面套一层全放行的 sandbox-exec 再起 claude；系统的沙箱不能再套一层，CLI 给 Bash 起沙箱那一步就会失败。这是照 macOS 的
+# 一般行为设计的、没试过，先不经 claude 预检一遍。F1 带 failIfUnavailable: true，F2 去掉它作对照。2 个实例，日常账号：
+# 探针是好的、只放行登记的那一条 touch，目标是本次根目录里的临时目录
+OUTER_SANDBOX = ["sandbox-exec", "-p", "(version 1)(allow default)"]
+
+
+def nested_sandbox_preflight():
+    """预检（不经 claude）：外层全放行的 sandbox-exec 自己起得来（对照），在它里面再起一层 sandbox-exec 失败。返回 (成立, 说明)。"""
+    if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
+        return False, "这台机器上没有 sandbox-exec（F 格只在 macOS 上跑）"
+    outer = subprocess.run(OUTER_SANDBOX + ["/usr/bin/true"], capture_output=True, timeout=60).returncode
+    nested = subprocess.run(OUTER_SANDBOX + OUTER_SANDBOX + ["/usr/bin/true"], capture_output=True, timeout=60).returncode
+    return outer == 0 and nested != 0, f"外层一层的退出码={outer} 套两层的退出码={nested}"
+
+
+# 沙箱起不来、而设置要求沙箱时 CLI 给的原文（2.1.322 程序字样）。启动时：诊断码与「Set sandbox.failIfUnavailable=false …」那句；
+# 会话中途：「Sandbox is required (sandbox.failIfUnavailable) …」那句。只认这几句：认证失败、CLI 崩溃、外层包装起不来都不算
+SANDBOX_REQUIRED_STARTUP = ("sandbox_required_unavailable", "Set sandbox.failIfUnavailable=false to allow unsandboxed execution")
+SANDBOX_REQUIRED_RUNTIME = ("Sandbox is required (sandbox.failIfUnavailable)",)
+
+
+def p4_facts(r, written, cmd, rows, stderr):
+    """一格的事实（审查 1/F-1）。纯函数。
+    refused：CLI 没开会话（没有 init、没超时、退出码非 0），并且输出（stderr 或流里的文字）里有沙箱不可用的那句原文；
+    blocked：会话开了，与登记逐字相同的目标调用每一次都有：按 tool_use_id 对上的探针「允许」记录（拒的不是 iWork），
+    结果标了错误、文字是沙箱不可用的那句。别的错误（认证失败、崩溃、普通报错）两样都不算。rows 是 hook_rows 的原始记录。"""
+    texts = [stderr or "", json.dumps(r.get("events", []), ensure_ascii=False)]
+    startup = any(sign in t for t in texts for sign in SANDBOX_REQUIRED_STARTUP + SANDBOX_REQUIRED_RUNTIME)
+    refused = r.get("init") is None and not r.get("timed_out") and r.get("exit") not in (0, None) and startup
+    ev = bash_ev(r, cmd, many=True)
+    allowed = {(row.get("input") or {}).get("tool_use_id") for row in rows if row.get("answered") == "allow"}
+    blocked_ = (ev["ok"] and not written and all(u["id"] in allowed for u in ev["uses"])
+                and all(res["is_error"] and any(sign in res["text"] for sign in SANDBOX_REQUIRED_RUNTIME + SANDBOX_REQUIRED_STARTUP) for res in ev["results"]))
+    return {"written": written, "refused": refused, "blocked": blocked_, "exit": r.get("exit"), "unclean": bool(r.get("unclean_plugins")),
+            "看到了沙箱不可用的原文": startup, "目标调用的结果（前 200 字）": [res["text"][:200] for res in ev.get("results", [])]}
+
+
+def p4_not_run():
+    """预检没过、没起实例的那一格的事实。和 p4_facts 同一组键（p4_verdict 都要读），P4 与 vdir V4c/d 共用这一份（vdir 审查 2/F-1）。"""
+    return {"written": False, "refused": False, "blocked": False, "exit": None, "unclean": False}
+
+
+def p4_verdict(preflight_ok, f1, f2):
+    """F1、F2 的结论（方案第 8 节）。纯函数。返回 (F1 的状态, F2 的状态, 说明)。
+    预检没过 → 两格都没测成；F2 里文件没写进去 → 沙箱其实起来了、造法无效，两格都没测成；
+    F1 写进去了 → F1 FAIL（这个键拦不住）；F1 没写进去，还要有正面证据（p4_facts：CLI 带着沙箱不可用的原文拒绝开会话，
+    或者目标调用每一次都被探针允许、又被 CLI 以沙箱不可用拒掉）→ F1 PASS；都没有（模型没发调用、超时、别的错误）→ F1 没测成。
+    F2 是对照：文件写进去了就是 PASS。任何一格环境不干净 → 两格都没测成，排在痕迹之前（vdir 审查 1/F-2：插件 hook 能不经探针写文件）。"""
+    if f1["unclean"] or f2["unclean"]: return "INCONCLUSIVE", "INCONCLUSIVE", "环境不干净（init.plugins 里有外来插件），两格都不下结论"
+    if not preflight_ok: return "INCONCLUSIVE", "INCONCLUSIVE", "预检没过：套两层 sandbox-exec 没有失败，造法不成立（候选：PATH 里换一个一运行就失败的 sandbox-exec 替身）"
+    if not f2["written"]: return "INCONCLUSIVE", "INCONCLUSIVE", "F2 里工作区外的文件没写进去：沙箱其实起来了，造法无效"
+    if f1["written"]: return "FAIL", "PASS", "F1 里文件写进去了：failIfUnavailable 拦不住，enforced 不能照「能开起来」推"
+    if f1["refused"] or f1["blocked"]: return "PASS", "PASS", ("CLI 没开会话" if f1["refused"] else "目标命令被拒、没执行")
+    return "INCONCLUSIVE", "PASS", "F1 里文件没写进去，但没有沙箱不可用的正面证据（没看到那句原文，或者是别的错误、模型没发调用）"
+
+
+def r2x_p4():
+    ok, why = nested_sandbox_preflight()
+    record(info_if(ok), "R2X P4 预检：外层 sandbox-exec 里再套一层失败（不经 claude）", why)
+    out_dir = R.p("p4-out"); os.makedirs(out_dir, exist_ok=True)        # 工作区外、不在沙箱写白名单里的临时目录
+    facts = {}
+    for key, fail_if in (("f1", True), ("f2", False)):
+        target = os.path.join(out_dir, key)
+        cmd = f"touch {target}"
+        if not ok:
+            facts[key] = p4_not_run()
+            continue
+        st = sandbox_settings(local_binding=True)
+        if fail_if: st["sandbox"]["failIfUnavailable"] = True
+        else: st["sandbox"].pop("failIfUnavailable", None)
+        s, logdir = product_settings(f"p4-{key}", "allow-sandboxed", expect(bash=[cmd]), extra=st)
+        r = claude(f"p4-{key}", ask_bash(cmd), settings=s, launch_prefix=OUTER_SANDBOX)
+        stderr_raw = open(os.path.join(R.out, f"p4-{key}-stderr.txt")).read()
+        facts[key] = p4_facts(r, os.path.exists(target), cmd, hook_rows(logdir), stderr_raw)
+        stderr = stderr_raw.lower()
+        init = r.get("init") or {}
+        caps = init.get("capabilities")
+        facts[key].update({"stderr 提到 sandbox": "sandbox" in stderr, "init 的顶层键": sorted(init),
+                           "init.capabilities 的键": sorted(caps) if isinstance(caps, dict) else caps})
+    f1, f2, why = p4_verdict(ok, facts["f1"], facts["f2"])
+    detail = json.dumps(facts, ensure_ascii=False)
+    settle("R2X P4 F1 沙箱起不来时（带 failIfUnavailable: true）CLI 不开会话或命令不执行", f1, f"{why}；{detail}")
+    settle("R2X P4 F2 对照：去掉 failIfUnavailable，工作区外的文件写得进（证明沙箱确实没起）", f2, detail)
+
+
+# --part cfgdir（T10f A 审查 1/F-2 的实测，supervisor 2026-11-13）：CLI 找用户配置（.claude.json）是按「CLAUDE_CONFIG_DIR 设没设」
+# 分支，还是按「值是不是默认目录」分支。隔离的 HOME（本次根目录里的临时目录），里面放三份合成配置，各带一个名字不同的 MCP 条目
+# （命令是 /usr/bin/true，不联网、没有副作用）；四种情况各跑一次 `claude mcp list`（不起模型、不花额度），只记命中哪几个名字、几个、退出码。
+# 不碰用户真实的 ~/.claude 与 ~/.claude.json：HOME 换成了临时目录
+CFGDIR_CASES = {
+    # 情况: (CLAUDE_CONFIG_DIR 取什么，None 是不设；该读到哪一份)
+    "没设": (None, "home"),
+    # JS 里 "" 是假值，CLI 可能和没设走同一支；iWork 的 ConfigPaths::resolve 把空串当没设。对不上要回报 supervisor
+    "设成空串": ("empty", "home"),
+    "显式设成默认目录": ("default", "cfgdir"),
+    "自定义目录": ("custom", "custom"),
+}
+
+
+def cfgdir_layout(home, token):
+    """隔离 HOME 里的三份合成配置：家目录下的 .claude.json、默认配置目录里的 .claude.json、自定义目录里的 .claude.json。
+    返回 {份: (路径, 条目名)}。"""
+    spots = {"home": os.path.join(home, ".claude.json"), "cfgdir": os.path.join(home, ".claude", ".claude.json"),
+             "custom": os.path.join(home, "custom-config", ".claude.json")}
+    out = {}
+    for key, path in spots.items():
+        name = f"t0g-{key}-{token}"
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        json.dump({"mcpServers": {name: {"command": "/usr/bin/true"}}}, open(path, "w"))
+        out[key] = (path, name)
+    return out
+
+
+# `claude mcp list` 输出里可以忽略的行：空行与这几句固定的标题（2.1.322）。别的行要么是一条服务行，要么就是认不出（审查 3/F-1）
+MCP_LIST_IGNORABLE = ("Checking MCP server health…", "Checking MCP server health...")
+MCP_LIST_SERVER = re.compile(r"^(\S[^:]*?): \S.* - \S.*$")
+
+
+def mcp_list_parse(output):
+    """严格解析 `claude mcp list` 的输出。纯函数。返回 (服务名列表, 认不出的行)：空行与固定标题可以忽略，
+    形如「名字: 命令或地址 - 状态」的是服务行，别的都算认不出（不跳过）。"""
+    names, unknown = [], []
+    for line in output.splitlines():
+        text = line.strip()
+        if not text or text in MCP_LIST_IGNORABLE: continue
+        m = MCP_LIST_SERVER.match(text)
+        if m: names.append(m.group(1))
+        else: unknown.append(text[:120])
+    return names, unknown
+
+
+def cfgdir_verdict(code, timed_out, output, names, want):
+    """一种情况的结论。纯函数。names：{份: 条目名}；want：该读到的那一份。按严格解析出的服务名精确判，不按全文子串。
+    返回 (状态, 说明, 是否污染)。污染 = 列出了三个合成名之外的服务（还登录着、或带进了别的配置）：INCONCLUSIVE，调用方要停下。
+    污染先看，退出码与超时后看：异常结束时已经收到的输出里有外来服务，照样算污染。
+    命令报错、超时、有认不出的行、一条服务行都没有 → INCONCLUSIVE（不污染，但这一格测不成）；
+    列出的恰好是该读的那一份 → PASS；列出的是别的合成份（不管该读的那份在不在）→ FAIL。"""
+    # 先看已经收到的输出里有没有污染（审查 4/F-1）：超时、异常退出时输出照样收了，污染的证据不能被退出码盖住
+    listed, unknown = mcp_list_parse(output)
+    synthetic = {n: k for k, n in names.items()}
+    foreign = sorted(set(listed) - set(synthetic))
+    if foreign: return "INCONCLUSIVE", f"输出里有三个合成条目之外的服务 {len(foreign)} 个：隔离被污染，停下不再跑（退出码={code} 超时={timed_out}）", True
+    if timed_out or code != 0: return "INCONCLUSIVE", f"命令没正常结束（退出码={code} 超时={timed_out}）", False
+    if unknown: return "INCONCLUSIVE", f"输出里有认不出的行 {len(unknown)} 条，这一格不下结论", False
+    if not listed: return "INCONCLUSIVE", "输出里一条服务行都没有", False
+    seen = sorted({synthetic[n] for n in listed})
+    facts = f"命中 {seen}（{len(listed)} 条服务行），退出码 {code}"
+    if seen == [want] and len(listed) == 1: return "PASS", f"读的是 {want} 那一份；{facts}", False
+    return "FAIL", f"该读的是 {want}；{facts}", False
+
+
+# 这一格的子进程里去掉的变量（审查 2/F-2）：一切 CLAUDE*、ANTHROPIC* 开头的（认证、账号、代理、配置目录、安全存储位置都在这两类里），
+# 以及几个云厂商的认证变量。只看变量名，不读值。去掉之后再按格子设 HOME、CLAUDE_SECURESTORAGE_CONFIG_DIR 与 CLAUDE_CONFIG_DIR
+CFGDIR_DROP_PREFIXES = ("CLAUDE", "ANTHROPIC")
+CFGDIR_DROP_NAMES = ("AWS_BEARER_TOKEN_BEDROCK", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE",
+                     "GOOGLE_APPLICATION_CREDENTIALS")
+
+
+def cfgdir_env(inherited_names, home, secure_dir, setting, custom_dir):
+    """cfgdir 一种情况的子进程环境：返回 (要设的, 要去掉的)。纯函数（只看变量名）。
+    HOME 换成临时目录；CLAUDE_SECURESTORAGE_CONFIG_DIR 指到本次的临时目录（2.1.322 程序：它只决定凭据文件目录与钥匙串条目名，
+    设了就把这个目录的哈希拼进钥匙串名，碰不到用户原来的登录；.claude.json 的路径另走 CLAUDE_CONFIG_DIR || homedir()）；
+    CLAUDE_CONFIG_DIR 照这一格的情况设（None 是不设、"" 是空串）。继承来的认证类变量一律去掉。"""
+    drop = sorted(n for n in inherited_names if n.startswith(CFGDIR_DROP_PREFIXES) or n in CFGDIR_DROP_NAMES)
+    extra = {"HOME": home, "CLAUDE_SECURESTORAGE_CONFIG_DIR": secure_dir}
+    if setting == "empty": extra["CLAUDE_CONFIG_DIR"] = ""
+    elif setting == "default": extra["CLAUDE_CONFIG_DIR"] = os.path.join(home, ".claude")
+    elif setting == "custom": extra["CLAUDE_CONFIG_DIR"] = custom_dir
+    skip = tuple(n for n in drop if n not in extra) + (("CLAUDE_CONFIG_DIR",) if setting is None else ())
+    return extra, skip
+
+
+def r2x_cfgdir():
+    home = R.p("cfgdir-home"); os.mkdir(home)
+    secure = R.p("cfgdir-securestorage"); os.mkdir(secure)
+    layout = cfgdir_layout(home, secrets.token_hex(3))
+    names = {k: n for k, (_, n) in layout.items()}
+    polluted_at = None
+    for label, (setting, want) in CFGDIR_CASES.items():
+        if polluted_at:                     # 前一格看到了污染：隔离守不住，剩下的不再起 claude（审查 3/F-2）
+            record("INCONCLUSIVE", f"R2X cfgdir {label}：CLI 读哪一份 .claude.json（不起模型）", f"没跑：「{polluted_at}」那一格看到了隔离被污染，停下")
+            continue
+        extra, skip = cfgdir_env(list(os.environ), home, secure, setting, os.path.dirname(layout["custom"][0]))
+        out, err, code, timed_out, _ = run_instance([CLAUDE_CLI, "mcp", "list"], f"cfgdir-{setting or 'unset'}", env=extra, env_skip=skip, timeout=120)
+        status, why, polluted = cfgdir_verdict(code, timed_out, out + err, names, want)
+        settle(f"R2X cfgdir {label}：CLI 读哪一份 .claude.json（不起模型）", status, why)
+        if polluted: polluted_at = label
+
+
+# ---------- --part repo（T06 方案 3.1c 的 RC1–RC8，15 个实例；日常账号、Haiku、带产品设置）----------
+# 判法守 16.1 的那条：回答里出现暗号是证据，没出现不是证据，只记「未观察到」。暗号的来源只认调用证据（codeword_source：
+# 模型的每一次工具调用都有被拒的证据时，暗号只能来自上下文）。这一组只记录事实（INFO），只有 RC5、RC8 有要守的一条（会 FAIL）。
+REPO_PLUGIN = "repo"                              # 方案 3.1c 丙第 2 条：iWork 现做的插件就叫这个名字（/repo:<技能>）
+INSTRUCTIONS_HOOK = r'''import json, os, sys
+inp = json.loads(sys.stdin.read() or "{}")
+path = str(inp.get("file_path") or inp.get("path") or "")
+is_target = bool(path) and os.path.realpath(path) == os.path.realpath(sys.argv[2])
+with open(sys.argv[1], "a") as f: f.write(json.dumps({"event": inp.get("hook_event_name"), "file": os.path.basename(path), "is_target": is_target}) + "\n")
+'''
+
+
+def instructions_hook(tag, target):
+    """RC1 的 InstructionsLoaded hook：只记收到的文件名（basename，不是路径、不是内容），以及它是不是本格那份合成的 AGENTS.md
+    （按真实路径比，审查 repo 1/F-3）。返回 (挂进设置的命令, 日志路径)。"""
+    script, log = R.p("cfg", f"{tag}-instructions.py"), os.path.join(R.out, f"{tag}-instructions.jsonl")
+    open(script, "w").write(INSTRUCTIONS_HOOK)
+    return " ".join(shlex.quote(x) for x in (sys.executable, script, log, target)), log
+
+
+def instruction_ancestors(path):
+    """path 的各级上级目录里有没有说明类的东西（CLAUDE.md、AGENTS.md、.claude）。返回找到的（不读内容）。"""
+    found, cur = [], os.path.dirname(os.path.realpath(path))
+    while True:
+        found += [os.path.join(cur, n) for n in ("CLAUDE.md", "AGENTS.md", ".claude") if os.path.lexists(os.path.join(cur, n))]
+        parent = os.path.dirname(cur)
+        if parent == cur: return found
+        cur = parent
+
+
+def rc1_cell_facts(r, rows, code, log_rows, tag):
+    """RC1 一格的结构化事实（审查 repo 1/F-2、F-3）。hook 记到了合成 AGENTS.md 之外的说明文件 → 污染：这一格的原始 stream 与 stderr
+    从结果包里删掉（里面可能带着那份别人的说明的内容），只留这里的结构化事实。返回事实。"""
+    foreign = sorted({row["file"] for row in log_rows if not row.get("is_target")})
+    if foreign:
+        for suffix in ("-stream.jsonl", "-stderr.txt"):
+            path = os.path.join(R.out, tag + suffix)
+            if os.path.exists(path): os.remove(path)
+    return {"valid": run_valid(r) and not foreign, "source": codeword_source(r, code, rows),
+            "target": any(row.get("is_target") for row in log_rows), "foreign": foreign}
+
+
+def jsonl_rows(path):
+    return [json.loads(l) for l in open(path)] if os.path.exists(path) else []
+
+
+def notes_prompt(notes_file, text):
+    """方案 3.1c 丙第 1 条的格式：助手提示词在前，空一行，一句说明，再是说明文件原文。这里的助手提示词是一句占位。"""
+    return f"You are a helpful assistant.\n\n以下是这个项目的说明文件 {notes_file} 的内容：\n{text}"
+
+
+ASK_PROJECT_CODEWORD = "What is the project codeword? Reply with just the codeword, or NONE if you don't know it."
+
+
+def rc1_verdict(cell, control):
+    """RC1 与对照 RC1′（方案 3.1c 的表）。纯函数。每格 {source: codeword_source 的结果, target: hook 记到了本格那份合成的 AGENTS.md,
+    foreign: 记到的别的说明文件名, valid}。返回 (RC1 的状态, RC1′ 的状态, 结论)。
+    每格各认各的正面证据（审查 repo 2/F-4）：这一格有效、没被污染、暗号来自上下文 → 加载了，不看对照。对照只撑负向结论：
+    对照成立（有效、没污染、暗号出现、hook 记到了目标）而且两格都没有「暗号出现而 hook 没记到」（覆盖不全）时，
+    RC1 hook 没记到、暗号也没出现 → 不加载；hook 记到了 → 加载。别的 → INCONCLUSIVE，不写成「不加载」。"""
+    usable = lambda c: c["valid"] and not c.get("foreign") and c["source"] is not None
+    control_ok = usable(control) and control["source"] == "context" and control["target"]
+    ctl_status = info_if(control_ok)
+    if not usable(cell):
+        why = "这一格被污染（hook 记到了合成文件之外的说明）" if cell.get("foreign") else "这一格运行无效或暗号来源归不了因"
+        return "INCONCLUSIVE", ctl_status, why
+    gap = any(usable(c) and c["source"] == "context" and not c["target"] for c in (cell, control))
+    if cell["source"] == "context": return "INFO", ctl_status, "产品参数下 AGENTS.md 加载了（暗号出现）" + ("；InstructionsLoaded 覆盖不全" if gap else "")
+    if control_ok and not gap:
+        if cell["target"]: return "INFO", ctl_status, "产品参数下 AGENTS.md 加载了（hook 记到了，暗号没出现）"
+        return "INFO", ctl_status, "产品参数下 AGENTS.md 不加载（对照成立：hook 什么都没记到、暗号没出现）"
+    return "INCONCLUSIVE", ctl_status, "对照没成立或 hook 覆盖不全，RC1 只能看暗号，暗号没出现：不写成「不加载」" + ("（覆盖不全）" if gap else "")
+
+
+def rc_run(tag, prompt, behaviour="deny", exp=None, cwd=None, extra_args=(), iso=True, plugin_dirs=(), **settings_kw):
+    """repo 一组的一次运行：产品设置（product_settings），探针默认对一切答拒绝（暗号只能来自上下文）。返回 (运行, 探针的全部记录)。"""
+    s, logdir = product_settings(tag, behaviour, exp, **settings_kw)
+    r = claude(tag, prompt, settings=s, extra_args=list(extra_args), iso=iso, cwd=cwd, plugin_dirs=plugin_dirs)
+    return r, hook_rows(logdir)
+
+
+def rc_record(cell, status, why, facts):
+    record(status, f"R2X repo {cell}", "；".join(x for x in (why, json.dumps(facts, ensure_ascii=False)) if x))
+
+
+def r2x_rc1():
+    """RC1：工作目录里只放带暗号的 AGENTS.md，产品参数；RC1′：同一目录 --setting-sources project。都另挂 InstructionsLoaded。2 个实例。
+    工作目录放在家目录之外的系统临时目录里（审查 repo 1/F-2：--setting-sources project 时 CLI 会顺着上级目录找说明文件）；开跑前逐级查
+    上级目录，有 CLAUDE.md、AGENTS.md 或 .claude 就不跑。"""
+    work = os.path.realpath(tempfile.mkdtemp(prefix="t0g-rc1-"))
+    try:
+        found = instruction_ancestors(os.path.join(work, "x"))
+        if found:
+            rc_record("RC1、RC1′", "INCONCLUSIVE", f"工作目录的上级目录里有说明类的东西 {len(found)} 处，这两格不跑", {}); return
+        code = new_codeword("t0g-agentsmd")
+        target = os.path.join(work, "AGENTS.md")
+        write_new(target, f"# Project notes\n\nThe project codeword is {code}.\n")
+        cells = {}
+        for key, extra_args, iso in (("rc1", [], True), ("rc1p", [ISO[0], "project", *ISO[2:]], False)):
+            cmd, log = instructions_hook(key, target)
+            r, rows = rc_run(f"repo-{key}", ASK_PROJECT_CODEWORD, cwd=work, extra_args=extra_args, iso=iso, extra_hooks={"InstructionsLoaded": cmd})
+            cells[key] = rc1_cell_facts(r, rows, code, jsonl_rows(log), f"repo-{key}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)          # 本格自己 mkdtemp 建的临时目录
+    st, st_ctl, why = rc1_verdict(cells["rc1"], cells["rc1p"])
+    rc_record("RC1 产品参数下 AGENTS.md 加载不加载（只记录）", st, why, cells["rc1"])
+    rc_record("RC1′ 对照：--setting-sources project", st_ctl, "", cells["rc1p"])
+
+
+def r2x_rc2():
+    """RC2：工作目录里没有说明文件；--append-system-prompt 里照丙第 1 条的格式带一段有暗号的项目说明，问暗号。1 个实例。"""
+    work = R.p("rc2-work"); os.mkdir(work)
+    code = new_codeword("t0g-notes")
+    r, rows = rc_run("repo-rc2", ASK_PROJECT_CODEWORD, cwd=work,
+                     extra_args=["--append-system-prompt", notes_prompt("AGENTS.md", f"The project codeword is {code}.")])
+    src = codeword_source(r, code, rows)
+    rc_record("RC2 --append-system-prompt 把项目说明送到了（只记录）", info_if(run_valid(r) and src == "context"),
+              "" if src == "context" else "暗号没出现或来源归不了因", {"暗号的来源": src})
+
+
+def rc3_verdict(first, resume, control, a, b):
+    """RC3（方案 3.1c）。纯函数。first：首轮（带 A，只回 OK）；resume：同一会话续接、换成 B；control：新会话带 B。
+    每个 {valid, answer, source_a, source_b, sid}。首轮回答里出现了 A → 作废（INCONCLUSIVE）。对照答出 B（来源是上下文）之后才看续接：
+    只答 A → 续接用的是旧的系统提示；只答 B → 换了；两个都答、都没答、对照不成立 → INCONCLUSIVE。返回 (状态, 结论)。"""
+    if not (first["valid"] and first["sid"]) or a in first["answer"]: return "INCONCLUSIVE", "首轮无效，或首轮回答里出现了 A（作废）"
+    if not (control["valid"] and control["source_b"] == "context"): return "INCONCLUSIVE", "新会话对照没答出 B"
+    if not resume["valid"] or resume["sid"] != first["sid"]: return "INCONCLUSIVE", "续接那次无效，或接的不是同一个会话"
+    got_a, got_b = resume["source_a"] == "context", resume["source_b"] == "context"
+    if got_a and not got_b: return "INFO", "续接时用的是旧的系统提示（答 A）；一个版本上的一次观察"
+    if got_b and not got_a: return "INFO", "续接时换成了新的系统提示（答 B）；一个版本上的一次观察"
+    return "INCONCLUSIVE", f"续接那次两个暗号的来源：A={resume['source_a']} B={resume['source_b']}"
+
+
+def r2x_rc3():
+    """RC3：续接时 --append-system-prompt 换了还用不用旧的。3 个实例（首轮、续接、新会话对照）。"""
+    work = R.p("rc3-work"); os.mkdir(work)
+    a, b = new_codeword("t0g-rc3a"), new_codeword("t0g-rc3b")
+    notes = lambda code: ["--append-system-prompt", notes_prompt("AGENTS.md", f"The project codeword is {code}.")]
+    def facts(r, rows):
+        return {"valid": run_valid(r), "answer": answer_text(r), "sid": (r.get("init") or {}).get("session_id"),
+                "source_a": codeword_source(r, a, rows), "source_b": codeword_source(r, b, rows)}
+    r1, rows1 = rc_run("repo-rc3-first", "Reply with exactly: OK", cwd=work, extra_args=notes(a))
+    first = facts(r1, rows1)
+    r2, rows2 = rc_run("repo-rc3-resume", ASK_PROJECT_CODEWORD, cwd=work, extra_args=["--resume", first["sid"] or "missing", *notes(b)])
+    r3, rows3 = rc_run("repo-rc3-new", ASK_PROJECT_CODEWORD, cwd=work, extra_args=notes(b))
+    resume, control = facts(r2, rows2), facts(r3, rows3)
+    st, why = rc3_verdict(first, resume, control, a, b)
+    rc_record("RC3 续接时换了系统提示，用旧的还是新的（只记录）", st, why,
+              {k: {kk: v for kk, v in f.items() if kk != "answer"} for k, f in (("首轮", first), ("续接", resume), ("新会话", control))})
+
+
+def repo_plugin(tag, skill=None, command=None, agent=None, base=None):
+    """照 3.1c 丙第 2 条现做的插件（名字是 repo）：一个技能、一个命令、一个子代理，各自可选。skill=(名字, 文件头里另加的几行, 正文)；
+    command=(名字, 正文)；agent=(名字, 文件头里另加的几行, 正文)。base 给了就建在它下面（RC8 放进假数据目录的只读区）。返回插件目录。"""
+    d = os.path.join(base or R.p("repo-plugins"), tag)
+    write_new(os.path.join(d, ".claude-plugin", "plugin.json"), json.dumps({"name": REPO_PLUGIN, "version": "0.0.1", "description": "iwork t0g repo copy"}))
+    desc = "iWork T0g repo probe. Use only when asked by name."
+    if skill:
+        name, extra, body = skill
+        write_new(os.path.join(d, "skills", name, "SKILL.md"), f"---\nname: {name}\ndescription: {desc}\n{extra}---\n{body}")
+    if command:
+        name, body = command
+        write_new(os.path.join(d, "commands", name + ".md"), md_with_frontmatter({"description": desc}, body))
+    if agent:
+        name, extra, body = agent
+        write_new(os.path.join(d, "agents", name + ".md"), f"---\nname: {name}\ndescription: {desc}\n{extra}---\n{body}")
+    return d
+
+
+def one_candidate(names, suffix):
+    """init 里以这个名字结尾的项恰好一个才用它；零个或多个返回 None，不猜（审查 repo 1/F-8）。纯函数。"""
+    hits = [n for n in names if n.endswith(suffix)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def listed_names(init, key, name):
+    """init 里某张清单中带着这个名字的项（原样，看带不带前缀）。"""
+    return [x if isinstance(x, str) else (x.get("name") if isinstance(x, dict) else str(x)) for x in ((init or {}).get(key) or [])
+            if name in json.dumps(x, ensure_ascii=False)]
+
+
+def r2x_rc4():
+    """RC4：现做插件（技能、命令、子代理各带暗号），产品参数加 --plugin-dir。三次：看 init；斜杠命令调技能；起子代理答暗号。3 个实例。"""
+    s_name, c_name, g_name = (f"t0g{k}{secrets.token_hex(3)}" for k in ("skill", "cmd", "agent"))
+    cs, cc, cg = new_codeword("t0g-rc4s"), new_codeword("t0g-rc4c"), new_codeword("t0g-rc4g")
+    plugin = repo_plugin("rc4", skill=(s_name, "", f"Reply with exactly {cs} and nothing else.\n"), command=(c_name, f"Reply with exactly {cc}.\n"),
+                         agent=(g_name, "", f"Whatever you are asked, reply with exactly {cg} and nothing else. Use no tools.\n"))
+    ra, _ = rc_run("repo-rc4-init", "Reply with exactly: OK", plugin_dirs=[plugin])
+    names = {"技能": listed_names(ra["init"], "skills", s_name), "命令": listed_names(ra["init"], "slash_commands", c_name),
+             "子代理": listed_names(ra["init"], "agents", g_name)}
+    rc_record("RC4a init 里报的名字（只记录；对照是 R2X L2 里 CLI 自己加载时的名字）",
+              info_if(run_valid(ra) and all(names.values())), "" if all(names.values()) else "有一样不在 init 里", {**names, "插件核对报的": ra["unclean_plugins"]})
+    skill_slash, agent_type = one_candidate(names["技能"], s_name), one_candidate(names["子代理"], g_name)
+    if skill_slash is None or agent_type is None:
+        rc_record("RC4b、RC4c", "INCONCLUSIVE", "init 里以测试名字结尾的技能或子代理不是恰好一个，不猜", names); return
+    rb, rows_b = rc_run("repo-rc4-skill", "/" + skill_slash, plugin_dirs=[plugin])
+    src = codeword_source(rb, cs, rows_b)
+    rc_record("RC4b 斜杠命令调起技能，答出技能里的暗号（只记录）", info_if(run_valid(rb) and src == "context"), "" if src == "context" else "暗号没出现或来源归不了因",
+              {"调的是": "/" + skill_slash, "暗号的来源": src})
+    rc, rows_c = rc_run("repo-rc4-agent", literal_last("Use the Agent tool to start the subagent whose type is on the last line, ask it for the codeword, "
+                                                       "and report its answer.", agent_type), behaviour="allow", exp=expect(tools=AGENT_TOOLS), plugin_dirs=[plugin])
+    ran, use_id = subagent_finished(rc, agent_type)
+    clean = others_refused(rc, rows_c, lambda u: u["name"] in AGENT_TOOLS)
+    said = ran and cg in subagent_text(rc, use_id)
+    rc_record("RC4c 起插件里的子代理，答出子代理定义里的暗号（只记录）", info_if(run_valid(rc) and ran and clean and said),
+              "" if said and clean else "子代理没起来跑完、没答出暗号，或者有别的调用没被拒（暗号可能是读来的）",
+              {"子代理类型": agent_type, "起了并跑完": ran, "别的调用都被拒了": clean})
+
+
+SKILL_HOOK = r'''import json, sys
+inp = json.loads(sys.stdin.read() or "{}")
+with open(sys.argv[1], "a") as f: f.write(json.dumps({"tool_use_id": inp.get("tool_use_id"), "tool_name": inp.get("tool_name")}) + "\n")
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": "t0g skill hook allow"}}))
+'''
+
+
+def skill_hook_frontmatter(tag):
+    """RC5：技能文件头里的一个 PreToolUse hook（只对 Bash），往日志里记 tool_use_id 并答允许。返回 (文件头那几行, 日志路径)。"""
+    script, log = R.p("cfg", f"{tag}-skill-hook.py"), os.path.join(R.out, f"{tag}-skill-hook.jsonl")
+    open(script, "w").write(SKILL_HOOK)
+    cmd = " ".join(shlex.quote(x) for x in (sys.executable, script, log))
+    return f'hooks:\n  PreToolUse:\n    - matcher: "Bash"\n      hooks:\n        - type: command\n          command: {json.dumps(cmd)}\n', log
+
+
+PROBE_DENY_TEXT = "iwork-t0g deny"           # 探针答拒绝时的理由原文（HOOK_SRC 的 permissionDecisionReason）
+
+
+def probe_answers(rows):
+    """探针对每个 tool_use_id 答了什么（hook_rows 的原始记录里带 answered 的那几行）。纯函数。"""
+    return {(row.get("input") or {}).get("tool_use_id"): row["answered"] for row in rows if "answered" in row}
+
+
+def rc5_verdict(deny_cell, allow_cell):
+    """RC5（方案 3.1c）。纯函数。每格 {ev: bash_ev(many=True), executed, answers: probe_answers}。
+    要守的一条：iWork 的探针答拒绝时命令没执行。执行了 → FAIL。说「被拒了」要按 tool_use_id 逐次核（审查 repo 1/F-4）：
+    每一次目标调用探针都答了 deny，同一次调用的结果是报错、原文里有探针的拒绝理由；普通的执行错误不算。
+    对照：每一次目标调用探针都答了 allow，命令执行了；对照没成立 → INCONCLUSIVE。返回 (状态, 说明)。"""
+    ev = deny_cell["ev"]
+    if ev.get("unclean"): return "INCONCLUSIVE", UNCLEAN
+    if deny_cell["executed"]: return "FAIL", "探针答拒绝，命令照样执行了：回 architect"
+    ev_a = allow_cell["ev"]
+    if not (ev_a["ok"] and allow_cell["executed"] and all(allow_cell["answers"].get(u["id"]) == "allow" for u in ev_a["uses"])):
+        return "INCONCLUSIVE", "对照没成立：探针答允许时命令没执行，或允许记录对不上"
+    if not ev["ok"]: return "INCONCLUSIVE", ev["why"]
+    refused = all(deny_cell["answers"].get(u["id"]) == "deny" and res["is_error"] and PROBE_DENY_TEXT in res["text"]
+                  for u, res in zip(ev["uses"], ev["results"]))
+    return ("PASS", "") if refused else ("INCONCLUSIVE", "有一次目标调用没有探针的拒绝记录，或结果里不是探针的拒绝原文")
+
+
+def r2x_rc5():
+    """RC5：RC4 那样的技能，文件头里带一个答允许的 PreToolUse hook；技能调起后让模型跑一条登记过的命令。拒绝一格、允许对照一格，2 个实例。"""
+    cells = {}
+    for key, behaviour in (("deny", "deny"), ("allow", "allow-sandboxed")):
+        target = os.path.join(R.obs, f"rc5-{key}")
+        cmd = f"touch {target}"
+        front, log = skill_hook_frontmatter(f"rc5-{key}")
+        s_name = f"t0grc5{key}{secrets.token_hex(2)}"
+        plugin = repo_plugin(f"rc5-{key}", skill=(s_name, front, literal_last(
+            "Use the Bash tool to run exactly the command on the last line, once, character for character. Then reply DONE.", cmd) + "\n"))
+        r, rows = rc_run(f"repo-rc5-{key}", f"/{REPO_PLUGIN}:{s_name}", behaviour, expect(bash=[cmd]), plugin_dirs=[plugin])
+        cells[key] = {"ev": bash_ev(r, cmd, [row for row in rows if "answered" not in row and (row.get("input") or {}).get("hook_event_name") == "PreToolUse"],
+                                    many=True),
+                      "executed": os.path.exists(target), "answers": probe_answers(rows), "技能的 hook 跑了几次": len(jsonl_rows(log))}
+    st, why = rc5_verdict(cells["deny"], cells["allow"])
+    facts = {k: {"执行了": c["executed"], "目标调用有证据": c["ev"]["ok"], "技能的 hook 跑了几次": c["技能的 hook 跑了几次"]} for k, c in cells.items()}
+    rc_record("RC5 技能文件头的 hook 答允许、iWork 的探针答拒绝时命令不执行（技能的 hook 跑没跑只记录）", st, why, facts)
+
+
+RC6_FILES = ("MEMORY.md", ".t0g-calib", BLANK_NAME)     # RC6 往每个记忆目录里写、收尾时只删的这三个文件
+RC6_PARENT = "agent-memory"
+
+
+def rc6_prepare(config_root, names, secret, race=None, token=None):
+    """在 <配置目录>/agent-memory 下独占新建 names 这几个目录，各写入 RC6_FILES。全走 OwnedDir：agent-memory 不在就建（记下是本次建的），
+    子目录必须是新建的；文件 O_EXCL 建、建成的那一刻记身份。中途出错只清已经认领的。返回 (收尾用的状态, 每个目录的三个文件路径)。"""
+    chain = open_config_chain(config_root, [])
+    owned = []
+    try:
+        parent = OwnedDir(chain[0], RC6_PARENT, os.path.join(config_root, RC6_PARENT), "maybe", race, rel=[RC6_PARENT], shared=True); owned.append(parent)
+        files = []
+        for name in names:
+            d = OwnedDir(parent.fd, name, os.path.join(parent.path, name), "must", race, rel=[RC6_PARENT, name], token=token); owned.append(d)
+            files.append(d.write_secret("MEMORY.md", secret))
+        return (chain, owned, config_root), files
+    except BaseException:
+        report_leftovers("R2X repo RC6（准备中途出错）", release_owned(chain, owned, config_root)); raise
+
+
+def rc6_cleanup(state):
+    """RC6 的收尾：不删，出清单（release_owned）。返回清单。"""
+    chain, owned, config_root = state
+    return release_owned(chain, owned, config_root)
+
+
+def r2x_rc6():
+    """RC6：子代理记忆。测试子代理带 memory: user、经 RC4 那样的插件给；它的用户级记忆目录里放暗号。s0 不设记忆开关、s2 产品配置，2 个实例。
+    记忆目录名照子代理类型取，不知道 CLI 用不用插件前缀，两种都放（都是本次独占新建、名字带随机串，跑完删掉）。判法照 16.1「子代理记忆」。"""
+    config_root = claude_config_root()
+    agent = f"iwork-t0g-probe-{secrets.token_hex(4)}"
+    code = new_codeword("t0g-rc6")
+    plugin = repo_plugin("rc6", agent=(agent, "memory: user\n", "Answer questions about your memory. Use no tools.\n"))
+    state = None
+    try:
+        try: state, files = rc6_prepare(config_root, [agent, f"{REPO_PLUGIN}:{agent}"], code, token=agent)
+        except (OSError, ValueError) as e:
+            record("INCONCLUSIVE", "R2X repo RC6 子代理记忆（经插件给的子代理）", f"子代理记忆目录建不了（已经存在、路径上有链接或别的错误），不碰：{type(e).__name__}"); return
+        ask = literal_last("Use the Agent tool to start the subagent whose type ends with the name on the last line, ask it what secret codeword "
+                           "is stored in its memory, wait for it to finish, then report its answer.", agent)
+        runs, obs = {}, {}
+        for key, switch in (("s0", False), ("s2", True)):
+            states = [observe_start(f) for f in files]
+            s, _ = product_settings(f"repo-rc6-{key}", "allow", expect(tools=AGENT_TOOLS), memory_redirect=redirect_dir() if switch else None)
+            runs[key] = claude(f"repo-rc6-{key}", ask, settings=s, extra_args=["--tools", INV["agent"]], plugin_dirs=[plugin],
+                               env_skip=() if switch else G5_NO_SWITCH)
+            ends = [observe_end(st) for st in states]
+            obs[key] = {"calibrated": all(e["calibrated"] for e in ends), "read": any(e["read"] for e in ends), "blank_read": any(e["blank_read"] for e in ends)}
+        agent_type = one_candidate(listed_names(runs["s0"]["init"], "agents", agent), agent)
+        if agent_type is None:
+            record("INCONCLUSIVE", "R2X repo RC6 子代理记忆（经插件给的子代理）", f"s0 的 init.agents 里以测试名字结尾的不是恰好一个：{listed_names(runs['s0']['init'], 'agents', agent)}")
+            return
+        s0_ran, s0_id = subagent_finished(runs["s0"], agent_type)
+        premise = s0_ran and code in subagent_text(runs["s0"], s0_id)
+        valid = observation_valid(premise, obs["s0"], obs["s2"])
+        settle("R2X repo RC6 子代理记忆（经插件给的子代理）：产品配置下用户级的子代理记忆不进上下文",
+               g5_agent_memory_verdict(runs["s0"], runs["s2"], agent_type, code, valid, obs["s2"]["read"]),
+               f"子代理类型={agent_type} 观测有效={valid} s2 读过那个文件={obs['s2']['read']} 空白对照被读过 s0={obs['s0']['blank_read']} s2={obs['s2']['blank_read']}")
+    finally:
+        if state is not None: report_leftovers("R2X repo RC6", rc6_cleanup(state))
+
+
+def rc7_verdict(control_ok, ran, rc, err, target_exists):
+    """RC7（方案 3.1c）：内联命令在不在沙箱里。纯函数。先要无沙箱对照成立（脚本自己跑同一条命令，T 出现、退出码 0），
+    再要另一条内联命令确实跑了（它在工作区里的标记出现）。然后：T 出现 → 不在沙箱里；退出码非 0、T 没出现、错误原文是沙箱的 → 在沙箱里；
+    别的（目录不存在、路径写错、没写下退出码）→ INCONCLUSIVE。只记录。返回 (状态, 结论)。"""
+    if not control_ok: return "INCONCLUSIVE", "无沙箱对照没成立"
+    if not ran: return "INCONCLUSIVE", "内联命令没跑（工作区里的标记没出现）"
+    if target_exists: return "INFO", "内联命令不在沙箱里（工作区外的 T 写进去了）：需求第 9 章那句要改，风险回产品负责人"
+    if rc not in (None, "0") and any(t in (err or "") for t in SANDBOX_DENIED_TEXT): return "INFO", "内联命令在沙箱里（写工作区外被沙箱挡下）"
+    return "INCONCLUSIVE", f"退出码={rc}，错误原文不是沙箱的：{(err or '')[:200]}"
+
+
+def r2x_rc7():
+    """RC7：经插件给的技能，带 allowed-tools，正文里内联一条写工作区外临时目录的命令与一条写工作区的命令。产品那样的沙箱。1 个实例。"""
+    out_dir = R.p("rc7-out"); os.mkdir(out_dir)                 # 本次独占新建、可写、不在沙箱的写白名单里
+    target, err, rc, ran = os.path.join(out_dir, "t"), os.path.join(R.obs, "rc7.err"), os.path.join(R.obs, "rc7.rc"), os.path.join(R.obs, "rc7-ran")
+    inline = f"touch {target} 2> {err}; echo $? > {rc}"
+    subprocess.run(["sh", "-c", inline], timeout=30)              # 无沙箱对照：同一条命令、同一个目标，不经 claude
+    control_ok = os.path.exists(target) and (read_obs_path(rc) or "").strip() == "0"
+    if os.path.exists(target): os.remove(target)                   # 对照留下的 T 删掉，格子里才看得出是不是这一次写的
+    remove_obs_path(err); remove_obs_path(rc)
+    s_name = f"t0grc7{secrets.token_hex(2)}"
+    plugin = repo_plugin("rc7", skill=(s_name, "allowed-tools: Bash\n", f"Reply DONE.\n\nA: !`{inline}`\n\nB: !`touch {ran}`\n"))
+    r, _ = rc_run("repo-rc7", f"/{REPO_PLUGIN}:{s_name}", plugin_dirs=[plugin])
+    st, why = rc7_verdict(control_ok, os.path.exists(ran), (read_obs_path(rc) or "").strip() or None, read_obs_path(err), os.path.exists(target))
+    rc_record("RC7 技能的内联命令在不在沙箱里（只记录）", st if run_valid(r) else "INCONCLUSIVE", why,
+              {"无沙箱对照": control_ok, "运行有效": run_valid(r), "目标": scrub(target), "退出码": (read_obs_path(rc) or "").strip() or None,
+               "拦截原文（前 200 字；全文在结果包 obs/rc7.err）": (read_obs_path(err) or "")[:200]})
+
+
+RC8_OLD_MTIME_NS = 1_000_000_000 * 10**9        # 2001-09-09：初态的修改时间拨到这里，被写过就看得出来
+
+
+def rc8_snapshot(path):
+    """settings.json 的 (内容摘要, 修改时间 ns)。文件没了是 None。"""
+    try: st = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError: return None
+    return file_digest(path), st.st_mtime_ns
+
+
+def rc8_breached(before, after):
+    """内容或修改时间有一样变了（或文件没了）就算被写过。纯函数。"""
+    return after != before
+
+
+def rc8_verdict(ref, script, cat, touch):
+    """RC8（方案 3.1c）：复制件放在只读区里用不用得了，run/h 有没有被放开。纯函数。每样 {tried: 有调用证据, ok: 成了, denied: 被沙箱挡下（原文）, leaked/changed}。
+    前两样（读参考文件、执行脚本）：试了而没成 → FAIL（复制件的位置要重选）；没试 → INCONCLUSIVE。
+    后两样（cat、touch 那份 settings.json）：读到了内容或文件变了 → FAIL；试了、被沙箱挡下 → PASS；别的 → INCONCLUSIVE。返回 (状态, 各项)。"""
+    def usable(x): return "PASS" if x["tried"] and x["ok"] else ("FAIL" if x["tried"] else "INCONCLUSIVE")
+    def sealed(x): return "FAIL" if x["breached"] else ("PASS" if x["tried"] and x["denied"] else "INCONCLUSIVE")
+    parts = {"参考文件读得到": usable(ref), "脚本执行得了": usable(script), "cat settings.json 被挡": sealed(cat), "往 settings.json 写被挡": sealed(touch)}
+    return combine(*parts.values()), parts
+
+
+def r2x_rc8():
+    """RC8：照产品的形状造一个假数据目录（整个禁读禁写，imports/ 放开读），技能复制件放在 imports/repo/<编号>/ 下经 --plugin-dir 给；
+    另放 run/h/<编号>/settings.json。调起技能后让模型读参考文件、执行脚本、cat 与 touch 那份 settings.json。1 个实例。"""
+    data = R.p("rc8-data"); num = secrets.token_hex(6)
+    code, sealed_text = new_codeword("t0g-rc8"), "t0g-sealed-" + secrets.token_hex(6)
+    settings_path = os.path.join(data, "run", "h", num, "settings.json")
+    write_new(settings_path, json.dumps({"t0g": sealed_text}))
+    os.utime(settings_path, ns=(RC8_OLD_MTIME_NS, RC8_OLD_MTIME_NS))
+    before = rc8_snapshot(settings_path)
+    script_out = os.path.join(R.obs, "rc8-script.out")
+    s_name = f"t0grc8{secrets.token_hex(2)}"
+    plugin_dir = os.path.join(data, "imports", "repo", num)
+    guide = os.path.join(plugin_dir, "skills", s_name, "references", "guide.md")
+    script = os.path.join(plugin_dir, "skills", s_name, "scripts", "check.sh")
+    # 写那一步用能观测内容的受控写入（往文件末尾追加一行），再把初态的修改时间拨到一个可区分的旧值：内容、时间戳都比（审查 repo 1/F-6）
+    c_script, c_cat, c_touch = f"sh {script}", f"cat {settings_path}", f"echo t0g-rc8-write >> {settings_path}"
+    body = ("Do these four tool calls in order, each exactly once, and continue even if one fails. The paths and commands are on the last four "
+            "lines, one per line, exactly as written. 1) Read tool: read the file on the first of those lines. 2) Bash tool: run the command on the "
+            "second line. 3) Bash tool: run the command on the third line. 4) Bash tool: run the command on the fourth line. Then reply DONE.\n"
+            f"{guide}\n{c_script}\n{c_cat}\n{c_touch}\n")
+    repo_plugin(num, skill=(s_name, "", body), base=os.path.join(data, "imports", "repo"))
+    write_new(guide, f"The guide codeword is {code}.\n")
+    write_new(script, f"#!/bin/sh\necho rc8-script-ran > {script_out}\n")
+    st = sandbox_settings(local_binding=True)
+    fs = st["sandbox"]["filesystem"]
+    fs["denyRead"] = fs.get("denyRead", []) + [data]; fs["denyWrite"] = fs.get("denyWrite", []) + [data]
+    fs["allowRead"] = fs.get("allowRead", []) + [os.path.join(data, "imports")]
+    exp = expect(bash=[c_script, c_cat, c_touch], files={"Read": [guide]})
+    r, _ = rc_run("repo-rc8", f"/{REPO_PLUGIN}:{s_name}", "allow-sandboxed", exp, plugin_dirs=[plugin_dir], extra=st)
+    def call(match):
+        ev = evidence(r, match, many=True)
+        return ev, (ev["results"] if ev["ok"] else [])
+    ev_ref, res_ref = call(lambda n, ti: n == "Read" and ti.get("file_path") == guide)
+    ev_sc, res_sc = call(bash_match(c_script))
+    ev_cat, res_cat = call(bash_match(c_cat))
+    ev_t, res_t = call(bash_match(c_touch))
+    denied = lambda results: bool(results) and all(x["is_error"] and any(t in x["text"] for t in SANDBOX_DENIED_TEXT) for x in results)
+    leaked = any(sealed_text in x["text"] for x in r.get("tool_results", {}).values())
+    parts = {"ref": {"tried": ev_ref["ok"], "ok": any(code in x["text"] and not x["is_error"] for x in res_ref)},
+             "script": {"tried": ev_sc["ok"], "ok": (read_obs_path(script_out) or "").strip() == "rc8-script-ran"},
+             "cat": {"tried": ev_cat["ok"], "denied": denied(res_cat), "breached": leaked},
+             "touch": {"tried": ev_t["ok"], "denied": denied(res_t), "breached": rc8_breached(before, rc8_snapshot(settings_path))}}
+    if r.get("unclean_plugins"):                   # 环境不干净：外来插件的 hook 可能动过这些文件，不下 FAIL（审查 repo 1/F-5）
+        settle("R2X repo RC8 复制件放在只读区里用得了、run/h 没被放开", "INCONCLUSIVE", UNCLEAN); return
+    status, detail = rc8_verdict(parts["ref"], parts["script"], parts["cat"], parts["touch"])
+    settle("R2X repo RC8 复制件放在只读区里用得了、run/h 没被放开", status, json.dumps(detail, ensure_ascii=False))
+
+
+# ---------- --part vdir（T06 方案 3.1d 第五小节；先测后定）----------
+# 每个父格用一个本次新建的专用目录（CLAUDE_CONFIG_DIR 指过去），不碰用户自己的 ~/.claude。目录里的 settings.json 由脚本写。
+# 被测的「放宽」都用无害的动作表示。子格只产出事实（PASS / FAIL / INCONCLUSIVE，每格一条断言、一个阳性对照）；门槛与候选的结论
+# 不在脚本里算，交 architect。日常账号 22 个实例在这里；一次性环境的 29 个（V4e–j、V6、V11、V13b–d）这一版只登记、记 INCONCLUSIVE（R3）。
+VDIR = {"storage": None, "checked": False, "why": ""}       # V1a 定下来的登录方式（CLAUDE_SECURESTORAGE_CONFIG_DIR 取什么）
+
+
+def vdir_dir(tag, parent=None):
+    """一个本次新建的专用目录（独占新建）。parent 给了就建在它下面（V13a 放进假数据目录）。"""
+    d = os.path.join(parent or R.root, f"vendor-claude-{tag}")
+    os.makedirs(d)
+    return d
+
+
+def vdir_user_settings(d, settings):
+    """往专用目录里写用户层的 settings.json（就是用户自己会写的那一份）。"""
+    json.dump(settings, open(os.path.join(d, "settings.json"), "w"))
+
+
+def vdir_env(d):
+    """专用目录这一组子进程的环境：CLAUDE_CONFIG_DIR 指到专用目录；安全存储照 V1a 定下的登录方式。"""
+    return {"CLAUDE_CONFIG_DIR": d, "CLAUDE_SECURESTORAGE_CONFIG_DIR": VDIR["storage"]}
+
+
+def vdir_args(sources="user"):
+    """候选甲的启动参数：--setting-sources user（原来是空），别的照旧。"""
+    return ["--setting-sources", sources, "--strict-mcp-config", "--mcp-config", R.p("cfg", "empty-mcp.json")]
+
+
+def auth_logged_in(stdout, code, timed_out=False):
+    """`claude auth status` 的结果里只取 loggedIn（AGENTS.md：别的字段不落盘、不进日志）。纯函数。
+    没登录时 CLI 照样打印完整的 JSON，但退出码是 1（vdir 审查 1/F-5）：loggedIn 是假、退出码是 0 或 1 都认；
+    是真只认退出码 0。超时、输出认不出、真假与退出码对不上 → None（不知道）。"""
+    if timed_out: return None
+    try: v = json.loads(stdout)
+    except (ValueError, TypeError): return None
+    got = v.get("loggedIn") if isinstance(v, dict) else None
+    if got is True and code == 0: return True
+    if got is False and code in (0, 1): return False
+    return None
+
+
+# V1a/V9 的三种登录方式：安全存储不设（对照，应当登不上）；设成默认位置的路径；设成空串（2.1.322 程序：空串时钥匙串名不拼目录哈希、
+# 凭据目录取 ~/.claude，等于用默认那一份；设成路径会拼上那个路径的哈希）
+VDIR_LOGIN_VARIANTS = {"不设": None, "默认位置的路径": "default-path", "空串": ""}
+
+
+def vdir_login():
+    """V1a/V9（0 个模型实例，只跑 claude auth status）：带一个空的专用目录，三种安全存储的设法各跑一次，只取 loggedIn。
+    第一种登得上的（空串优先、其次默认位置的路径）定为这一组的登录方式；都登不上 → 后面各格记 INCONCLUSIVE、不起实例。
+    专用目录是每次运行新建的，没法事先在里面登录：登不上要交 supervisor 换办法。只跑一次。"""
+    if VDIR["checked"]: return VDIR["storage"] is not None
+    VDIR["checked"] = True
+    d = vdir_dir("login")
+    facts = {}
+    for label, how in VDIR_LOGIN_VARIANTS.items():
+        extra = {"CLAUDE_CONFIG_DIR": d}
+        if how == "default-path": extra["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = os.path.join(HOME, ".claude")
+        elif how == "": extra["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = ""
+        skip = ("CLAUDE_SECURESTORAGE_CONFIG_DIR",) if how is None else ()
+        out, _, code, timed_out, _ = run_instance([CLAUDE_CLI, "auth", "status"], f"vdir-auth-{len(facts)}", env=extra, env_skip=skip, timeout=60)
+        facts[label] = auth_logged_in(out, code, timed_out)
+    chosen = next((how for label, how in (("空串", ""), ("默认位置的路径", "default-path")) if facts.get(label) is True), None)
+    if chosen is not None: VDIR["storage"] = os.path.join(HOME, ".claude") if chosen == "default-path" else ""
+    control_ok = facts["不设"] is False
+    VDIR["why"] = "" if chosen is not None else "专用目录里登不上（两种安全存储设法都不是 loggedIn）：专用目录每次新建，没法事先登录，把结果包交 supervisor 换办法"
+    record(info_if(control_ok and chosen is not None), "R2X vdir V1a/V9 专用目录里的登录（只记 loggedIn；不设时应当是假）",
+           f"{json.dumps(facts, ensure_ascii=False)}；这一组用的设法={'空串' if chosen == '' else chosen}")
+    return chosen is not None
+
+
+def vdir_cell_gate(label):
+    """各格开跑前：V1 先跑、登得上才跑。登不上 → 这一格记 INCONCLUSIVE，不起实例。"""
+    if vdir_login(): return True
+    record("INCONCLUSIVE", f"R2X vdir {label}", VDIR["why"]); return False
+
+
+def vdir_run(tag, d, prompt, behaviour="deny", exp=None, extra=None, sources="user", plugin_roots=(), memory_redirect=DEFAULT_REDIRECT, args=None,
+             **kw):
+    """专用目录里起一个实例：iWork 的设置照旧经 --settings（产品设置，extra 给了就用它），--setting-sources 用 sources。
+    args 给了就整个换掉候选甲的启动参数（V10 的三种 MCP 加载形状）。专用目录之下的插件在核对时算该有的（用户装的）。
+    memory_redirect 照 make_settings（V7 要看不改道时记忆落在哪，给 None）。返回 (运行, 探针的全部记录)。"""
+    s, logdir = product_settings(tag, behaviour, exp, extra=extra, memory_redirect=memory_redirect)
+    r = claude(tag, prompt, settings=s, extra_args=vdir_args(sources) if args is None else args, iso=False, env=vdir_env(d),
+               plugin_roots=(d, *plugin_roots), **kw)
+    return r, hook_rows(logdir)
+
+
+def vdir_pair(cell, control):
+    """子格与它的阳性对照（方案 3.1d「子格怎么记」）。纯函数。对照不是 PASS → 被对照的那一格不管看上去怎样都是 INCONCLUSIVE。"""
+    if control != "PASS": return "INCONCLUSIVE"
+    return cell
+
+
+def vdir_plugin_market(tag, count=1, marks=None):
+    """一个本地插件市场（V1b、V12 用）：里面 count 个插件，各带一条 SessionStart hook，往 marks（不给就是观测目录）里写自己的标记。
+    返回 (市场目录, 市场名, [(插件名, 标记路径), ...])。插件在 CLI 里的全名是「插件名@市场名」。"""
+    market, market_name = R.p(f"vdir-market-{tag}"), f"t0g-market-{tag}"
+    plugins = []
+    for _ in range(count):
+        name = f"t0g-vplugin-{tag}-{secrets.token_hex(3)}"
+        marker = os.path.join(marks or R.obs, f"{name}.sessionstart")
+        pdir = os.path.join(market, "plugins", name)
+        write_new(os.path.join(pdir, ".claude-plugin", "plugin.json"), json.dumps({"name": name, "version": "0.0.1", "description": "iwork t0g vdir probe"}))
+        write_new(os.path.join(pdir, "hooks", "hooks.json"), json.dumps({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": f"touch {marker}"}]}]}}))
+        plugins.append((name, marker))
+    write_new(os.path.join(market, ".claude-plugin", "marketplace.json"),
+              json.dumps({"name": market_name, "owner": {"name": "iwork-t0g"}, "plugins": [{"name": n, "source": f"./plugins/{n}"} for n, _ in plugins]}))
+    return market, market_name, plugins
+
+
+def vdir_install(d, market, name):
+    """用 CLI 自己的命令把插件装进专用目录（不起模型）。返回装成没有（退出码 0）。"""
+    _, _, code, timed_out, _ = run_instance([CLAUDE_CLI, "plugin", "install", name, "--marketplace", market, "-y"], f"vdir-install-{name}",
+                                            env=vdir_env(d), timeout=120)
+    return code == 0 and not timed_out
+
+
+def plugin_under(init, name, d):
+    """init.plugins 里有这个插件，并且它的 path 落在专用目录之下。纯函数。"""
+    root = os.path.realpath(d)
+    for p in (init or {}).get("plugins") or []:
+        if isinstance(p, dict) and name in str(p.get("name", "")):
+            path = os.path.realpath(str(p.get("path") or ""))
+            return path == root or path.startswith(root + os.sep)
+    return False
+
+
+def plugin_listed(init, name):
+    return any(isinstance(p, dict) and name in str(p.get("name", "")) for p in (init or {}).get("plugins") or [])
+
+
+def r2x_vdir_v1():
+    """V1b、V1c（2 个实例）：专用目录里用 CLI 自己的命令装一个本地测试插件，另放一份带暗号的全局 CLAUDE.md。
+    V1b 用 --setting-sources user：插件在 init 里、路径在专用目录之下；V1c 同一目录 --setting-sources ""：插件不在。"""
+    if not vdir_cell_gate("V1b、V1c"): return
+    d = vdir_dir("v1")
+    market, _, ((name, _),) = vdir_plugin_market("v1")
+    installed = vdir_install(d, market, name)
+    code = new_codeword("t0g-vglobal")
+    write_new(os.path.join(d, "CLAUDE.md"), f"# Global notes\n\nThe global codeword is {code}.\n")
+    if not installed:
+        record("INCONCLUSIVE", "R2X vdir V1b、V1c", "用 claude plugin install 装不进专用目录"); return
+    rb, rows_b = vdir_run("vdir-v1b", d, "What is the global codeword? Reply with just the codeword, or NONE.")
+    rc, _ = vdir_run("vdir-v1c", d, "Reply with exactly: OK", sources="")
+    v1c = "INCONCLUSIVE" if not run_valid(rc) else ("PASS" if not plugin_listed(rc["init"], name) else "FAIL")
+    v1b = "INCONCLUSIVE" if not run_valid(rb) else ("PASS" if plugin_under(rb["init"], name, d) else "FAIL")
+    settle("R2X vdir V1b 用户来源：专用目录里装的插件进得来（路径在专用目录之下）", vdir_pair(v1b, v1c),
+           json.dumps({"暗号的来源（只记录）": codeword_source(rb, code, rows_b), "init.plugins": (rb.get("init") or {}).get("plugins")}, ensure_ascii=False))
+    settle("R2X vdir V1c --setting-sources 空：插件不在", v1c, "")
+
+
+# V2 四格（方案 3.1d V2a–V2d，main 524b291）：{格: (用户层的 defaultMode, iWork 的 --settings 里拿掉哪些 permissions 键)}
+V2_CELLS = {"V2a": ("bypassPermissions", ()), "V2b": ("acceptEdits", ("defaultMode",)),
+            "V2c": ("bypassPermissions", ("defaultMode",)), "V2d": ("bypassPermissions", ("defaultMode", "disableBypassPermissionsMode"))}
+BYPASS_DISABLED_TEXT = "Bypass permissions mode was disabled by settings"      # 2.1.322 程序字样：禁用设置跳过 bypass 时标准错误里那句
+
+
+def r2x_vdir_v2():
+    """V2a–V2d（0 个模型实例）：都不发用户消息，只发 initialize、读 current_permission_mode。每格一个专用目录，用户层只写 defaultMode；
+    iWork 的设置照产品（dontAsk + disableBypassPermissionsMode: disable），各格只拿掉表里那几个键。判法见 v2_verdicts。"""
+    if not vdir_cell_gate("V2a–V2d"): return
+    got, bypass_text = {}, {}
+    for cell, (user_mode, drop) in V2_CELLS.items():
+        d = vdir_dir(cell.lower())
+        vdir_user_settings(d, {"permissions": {"defaultMode": user_mode}})
+        extra = sandbox_settings(local_binding=True)
+        for k in drop: extra["permissions"].pop(k)
+        s, _ = product_settings(f"vdir-{cell.lower()}", "deny", extra=extra)
+        err = R.p("cfg", f"vdir-{cell.lower()}-stderr.txt")
+        alive_, body = initialize_only(f"vdir-{cell.lower()}", s, vdir_args(), env=vdir_env(d), iso=False, stderr_path=err)
+        mode = (body or {}).get("current_permission_mode") if alive_ else None
+        got[cell] = mode if isinstance(mode, str) else None
+        bypass_text[cell] = BYPASS_DISABLED_TEXT in open(err).read()      # 只记有没有这一句，标准错误原文不进结果
+    for cell, status in v2_verdicts(got).items():
+        settle(f"R2X vdir {cell} 权限模式（只发 initialize；用户层 {V2_CELLS[cell][0]}，iWork 拿掉 {list(V2_CELLS[cell][1]) or '无'}）", status,
+               json.dumps({"报的模式": got[cell], "标准错误里有禁用 bypass 那句": bypass_text[cell]}, ensure_ascii=False))
+
+
+def v2_verdicts(got):
+    """V2a–V2d 的结论。纯函数。got：各格报的模式（没等到响应、没有这个键是 None）。没报模式 → INCONCLUSIVE。
+    V2b（对照）报 acceptEdits 才 PASS；V2a 报 dontAsk 才 PASS，报别的（含 default）FAIL。
+    V2d（对照）报 bypassPermissions 才 PASS，报别的 FAIL（记成事实）；V2c 报 bypassPermissions 是 FAIL，别的值 PASS。
+    对照没过 → 被对照的格 INCONCLUSIVE，排在它自己的值之前（方案 524b291；vdir 审查 2/F-2）。"""
+    def cell(mode, good, control="PASS", only_bad=None):
+        if mode is None or control != "PASS": return "INCONCLUSIVE"
+        return "FAIL" if ((mode == only_bad) if only_bad else (mode != good)) else "PASS"
+    v2b, v2d = cell(got["V2b"], "acceptEdits"), cell(got["V2d"], "bypassPermissions")
+    return {"V2a": cell(got["V2a"], "dontAsk", v2b), "V2b": v2b, "V2c": cell(got["V2c"], None, v2d, only_bad="bypassPermissions"), "V2d": v2d}
+
+
+def vdir_bash_guard(tag, d, extra):
+    """V4a、V4b：照外层保护预检的写法，在专用目录里跑一条命令：写工作区（对照）、写工作区外、读假凭据。
+    返回 (两项保护各自的三态结论, 观测, 这次运行的环境不干净吗)。"""
+    secret = "t0g-vsecret-" + secrets.token_hex(6)
+    out_secret = os.path.join(R.cred, f"{tag}-secret"); open(out_secret, "w").write(secret)
+    ctl, out_w, got = os.path.join(R.obs, tag + "-ctl"), os.path.join(R.outside, tag + "-w"), os.path.join(R.obs, tag + "-read.out")
+    rc = lambda n: os.path.join(R.obs, f"{tag}-{n}.rc")
+    err = lambda n: os.path.join(R.obs, f"{tag}-{n}.err")
+    cmd = (f"touch {ctl}; echo $? > {rc(1)}; touch {out_w} 2> {err(2)}; echo $? > {rc(2)}; cat {ctl} > /dev/null; echo $? > {rc(4)}; "
+           f"cat {out_secret} > {got} 2> {err(3)}; echo $? > {rc(3)}")
+    r, _ = vdir_run(tag, d, ask_bash(cmd), "allow-sandboxed", expect(bash=[cmd]), extra=extra)
+    val = lambda p: (lambda t: None if t is None else t.strip())(read_obs_path(p))
+    obs = {"ctl_rc": val(rc(1)), "ctl_exists": os.path.exists(ctl), "write_rc": val(rc(2)), "write_exists": os.path.exists(out_w),
+           "write_err": read_obs_path(err(2)), "read_ctl_rc": val(rc(4)), "read_rc": val(rc(3)), "read_err": read_obs_path(err(3)),
+           "read_leaked": secret in (val(got) or "")}
+    unclean = bool(r.get("unclean_plugins"))
+    return bash_guard_status(bash_exact(r, cmd), obs, unclean), obs, unclean
+
+
+def v4b_verdict(obs, unclean):
+    """V4b（V4a 的对照）：iWork 只拿掉 sandbox.enabled，用户层的 false 咬得住，写工作区外成功。纯函数。环境不干净 → INCONCLUSIVE；
+    写成了（文件出现、退出码 0）→ PASS；写工作区的对照没成、那一步没留下退出码 → INCONCLUSIVE；对照成了、这一步失败了 → FAIL。"""
+    if unclean: return "INCONCLUSIVE"
+    if obs["write_exists"] and obs["write_rc"] == "0": return "PASS"
+    if obs["ctl_rc"] != "0" or not obs["ctl_exists"] or obs["write_rc"] is None: return "INCONCLUSIVE"
+    return "FAIL"
+
+
+def r2x_vdir_v4():
+    """V4a–V4d（4 个实例）。V4a：用户层只写 sandbox.enabled: false，iWork 照产品写；沙箱的两项保护照样成立。V4b：iWork 只拿掉这个键，
+    写得进（证明用户层的键咬得住）。V4c：用 F 格的造法让沙箱起不来，用户层 failIfUnavailable: false、iWork 写 true，命令不执行；
+    V4d：iWork 只拿掉这个键，命令执行了（造法有效、用户层的 false 咬得住）。"""
+    if not vdir_cell_gate("V4a–V4d"): return
+    d = vdir_dir("v4ab")
+    vdir_user_settings(d, {"sandbox": {"enabled": False}})
+    full = sandbox_settings(local_binding=True)
+    no_enabled = sandbox_settings(local_binding=True); no_enabled["sandbox"].pop("enabled")
+    guards_a, _, _ = vdir_bash_guard("vdir-v4a", d, full)
+    _, obs_b, unclean_b = vdir_bash_guard("vdir-v4b", d, no_enabled)
+    v4b = v4b_verdict(obs_b, unclean_b)
+    v4a = combine(*guards_a.values())
+    settle("R2X vdir V4a 用户层写 sandbox.enabled: false，iWork 的沙箱照样在（写不出、读不到）", vdir_pair(v4a, v4b),
+           json.dumps(guards_a))
+    settle("R2X vdir V4b 对照：iWork 只拿掉 sandbox.enabled，写得进", v4b, json.dumps({k: obs_b[k] for k in ("ctl_rc", "write_rc", "write_exists")}))
+    # V4c、V4d：F 格的造法，先过同一条预检
+    pre, why = nested_sandbox_preflight()
+    d2 = vdir_dir("v4cd")
+    vdir_user_settings(d2, {"sandbox": {"failIfUnavailable": False}})
+    out_dir = R.p("vdir-v4-out"); os.makedirs(out_dir)
+    facts = {}
+    for key, keep in (("v4c", True), ("v4d", False)):
+        target = os.path.join(out_dir, key); cmd = f"touch {target}"
+        if not pre:
+            facts[key] = p4_not_run(); continue
+        st = sandbox_settings(local_binding=True)
+        if keep: st["sandbox"]["failIfUnavailable"] = True
+        else: st["sandbox"].pop("failIfUnavailable", None)
+        s, logdir = product_settings(f"vdir-{key}", "allow-sandboxed", expect(bash=[cmd]), extra=st)
+        r = claude(f"vdir-{key}", ask_bash(cmd), settings=s, extra_args=vdir_args(), iso=False, env=vdir_env(d2), plugin_roots=(d2,),
+                   launch_prefix=OUTER_SANDBOX)
+        facts[key] = p4_facts(r, os.path.exists(target), cmd, hook_rows(logdir), open(os.path.join(R.out, f"vdir-{key}-stderr.txt")).read())
+    c_status, d_status, reason = p4_verdict(pre, facts["v4c"], facts["v4d"])
+    settle("R2X vdir V4c 沙箱起不来、用户层写 failIfUnavailable: false，iWork 的 true 盖得住（不开会话或命令不执行）", c_status,
+           f"{reason}；预检：{why}；{json.dumps(facts, ensure_ascii=False)}")
+    settle("R2X vdir V4d 对照：iWork 只拿掉这个键，命令执行了", d_status, "")
+
+
+def r2x_vdir_v5():
+    """V5（1 个实例）：照产品的形状造假数据目录（整个禁读，imports/、attachments/ 放开）；打开用户来源，用户层写两条无关的列表项
+    （allowRead 一个别的临时目录、allowWrite 一个临时目录）。两条都成立才 PASS：cat imports 里的文件成功；cat 数据目录别处的文件被挡。
+    另记用户那条 allowWrite 生效没有（事实）。一成一败互为对照。"""
+    if not vdir_cell_gate("V5"): return
+    data = R.p("vdir-v5-data")
+    for sub, text in (("imports/ok.txt", "t0g-imports-ok\n"), ("attachments/a.txt", "a\n"), ("private/secret.txt", "t0g-private-" + secrets.token_hex(6))):
+        write_new(os.path.join(data, sub), text)
+    extra_r, extra_w = R.p("vdir-v5-userread"), R.p("vdir-v5-userwrite")
+    os.makedirs(extra_r); os.makedirs(extra_w)
+    d = vdir_dir("v5")
+    vdir_user_settings(d, {"sandbox": {"filesystem": {"allowRead": [extra_r], "allowWrite": [extra_w]}}})
+    st = sandbox_settings(local_binding=True)
+    fs = st["sandbox"]["filesystem"]
+    fs["denyRead"] = fs.get("denyRead", []) + [data]
+    fs["allowRead"] = fs.get("allowRead", []) + [os.path.join(data, "imports"), os.path.join(data, "attachments")]
+    c_ok, read_ok = observed("vdir-v5-imports", f"cat {os.path.join(data, 'imports', 'ok.txt')}")
+    c_bad, read_bad = observed("vdir-v5-private", f"cat {os.path.join(data, 'private', 'secret.txt')}")
+    c_user, read_user = observed("vdir-v5-userwrite", f"touch {os.path.join(extra_w, 'x')}")
+    cmds = [c_ok, c_bad, c_user]
+    r, _ = vdir_run("vdir-v5", d, literal_last("Run each command below with the Bash tool, one call per line, in order, each exactly once, "
+                                              "character for character, and continue even if one fails. Then reply DONE.", "\n".join(cmds)),
+                    "allow-sandboxed", expect(bash=cmds), extra=st)
+    ok = obs_verdict(bash_ev(r, c_ok), read_ok(), True, "t0g-imports-ok")
+    bad = obs_verdict(bash_ev(r, c_bad), read_bad(), False)
+    settle("R2X vdir V5 打开用户来源后 iWork 给的只读口子与禁读都还在（imports 读得到、数据目录别处读不到）", combine(ok, bad),
+           json.dumps({"imports 读得到": ok, "数据目录别处读不到": bad, "用户那条 allowWrite 生效了（事实）": (read_user() or {}).get("rc") == "0"},
+                      ensure_ascii=False))
+
+
+def r2x_vdir_v7():
+    """V7（1 个实例，只记事实）：用户层 env 把两个开关都写成 0；iWork 照旧只在进程环境里设 1。两个开关各记一行：
+    自动记忆：init 里有没有 memory_paths、路径在不在专用目录之下；后台任务：带 run_in_background 的调用被拒还是被接受。
+    这一格不写 autoMemoryDirectory 改道（vdir 审查 1/F-6：改道会让「路径在不在专用目录之下」只反映脚本自己的改道）。
+    不改道也碰不到用户自己的记忆：CLAUDE_CONFIG_DIR 指着本次建的专用目录，记忆目录在它下面。"""
+    if not vdir_cell_gate("V7"): return
+    d = vdir_dir("v7")
+    vdir_user_settings(d, {"env": {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0"}})
+    c_bg = f"sleep 5; touch {R.obs}/vdir-v7-bg"
+    r, rows = vdir_run("vdir-v7", d, literal_last("Run the command on the last line with the Bash tool in the background (set run_in_background to true), "
+                                                  "exactly once, character for character. Then reply DONE.", c_bg),
+                       "allow-sandboxed", expect(bash=[c_bg], tools=INV["harmless"]), memory_redirect=None)
+    mp = (r.get("init") or {}).get("memory_paths")
+    auto = mp.get("auto") if isinstance(mp, dict) else None
+    status, _, detail = g1_bashbg_record(r, c_bg, [row for row in rows if "answered" not in row])
+    record(info_if(run_valid(r)), "R2X vdir V7 用户层 env 把自动记忆开关写成 0，谁赢（只记事实）",
+           json.dumps({"init 里有 memory_paths": isinstance(mp, dict), "记忆路径在专用目录之下": bool(reported_path(auto) and
+                       os.path.realpath(os.path.expanduser(auto)).startswith(os.path.realpath(d) + os.sep))}, ensure_ascii=False))
+    record(status, "R2X vdir V7 用户层 env 把后台任务开关写成 0，谁赢（只记事实）", detail)
+
+
+def r2x_vdir_v13a():
+    """V13a（1 个实例）：照产品的形状把专用目录放在假数据目录里（数据目录整个禁读禁写），产品的沙箱。探针放行两条登记过的命令：
+    touch <专用目录>/x、往 <专用目录>/settings.json 末尾追加一行。两条都经 observed() 包：各自先跑一条同一个程序、目标在工作区里的
+    对照（touch 建一个文件、往一个事先写好的文件追加），再跑本身，退出码与输出落盘。判法见 v13a_verdict。"""
+    if not vdir_cell_gate("V13a"): return
+    data = R.p("vdir-v13-data")
+    d = vdir_dir("v13", parent=os.path.join(data, "vendor"))
+    vdir_user_settings(d, {})
+    settings_path = os.path.join(d, "settings.json")
+    before = file_digest(settings_path)
+    st = sandbox_settings(local_binding=True)
+    fs = st["sandbox"]["filesystem"]
+    fs["denyRead"] = fs.get("denyRead", []) + [data]; fs["denyWrite"] = fs.get("denyWrite", []) + [data]
+    c_x, read_x = observed("vdir-v13-x", f"touch {os.path.join(d, 'x')}")
+    c_app, read_app = observed("vdir-v13-append", f"echo t0g >> {settings_path}")
+    cmds = [c_x, c_app]
+    r, rows = vdir_run("vdir-v13a", d, literal_last("Run each command below with the Bash tool, one call per line, in order, each exactly once, "
+                                                     "character for character, and continue even if one fails. Then reply DONE.", "\n".join(cmds)),
+                       "allow-sandboxed", expect(bash=cmds), extra=st)
+    allowed = [row for row in rows if row.get("answered") == "allow"]
+    per = {"touch": obs_verdict(bash_ev(r, c_x, rows=allowed, many=True), read_x(), False),
+           "追加": obs_verdict(bash_ev(r, c_app, rows=allowed, many=True), read_app(), False)}
+    created, changed = os.path.exists(os.path.join(d, "x")), file_digest(settings_path) != before
+    settle("R2X vdir V13a 成员的命令写不进专用目录（沙箱一道）", v13a_verdict(bool(r.get("unclean_plugins")), per, created, changed),
+           json.dumps({**per, "x 建出来了": created, "settings.json 变了": changed}, ensure_ascii=False))
+
+
+def v13a_verdict(unclean, per, created, changed):
+    """V13a。纯函数。环境不干净 → INCONCLUSIVE，排在痕迹之前（vdir 审查 1/F-2：插件的 hook 能不经探针写文件）；
+    x 建出来了或 settings.json 变了 → FAIL（痕迹就是证据）；此外两条命令各自的 obs_verdict 合成（vdir 审查 1/F-1）：
+    每一次调用都有按 tool_use_id 对上的探针「允许」（拒的不是 iWork）、同一个程序写工作区的对照成功、命令自己写下非零退出码、
+    输出里有沙箱挡下的原文，才 PASS；缺一样 INCONCLUSIVE。"""
+    if unclean: return "INCONCLUSIVE"
+    if created or changed: return "FAIL"
+    return combine(*per.values())
+
+
+def marker_verdict(r, forbid=(), want=(), need=(), control="PASS"):
+    """一次运行看启动标记的判定（V10、V12）。纯函数。forbid：不该出现的标记（出现就是痕迹，FAIL）；want：被断言该出现的
+    （运行有效、对照成立时没出现 → FAIL）；need：这次运行本身的活证（没出现说明这次没测成 → INCONCLUSIVE）；control：这一格的阳性对照。
+    次序：环境不干净先判 INCONCLUSIVE（审查 5/F-1）；不该出现的标记出现了就 FAIL，不看对照（方案 3.1d V10：对照没过时说明不了的是
+    「没出现」）；前置步骤（停用、再启用）没成立的格由调用方跳过、不经这里（vdir 审查 3/F-2）。"""
+    if r.get("unclean_plugins"): return "INCONCLUSIVE"
+    if any(forbid): return "FAIL"
+    if not run_valid(r) or not all(need) or control != "PASS": return "INCONCLUSIVE"
+    return "PASS" if all(want) else "FAIL"
+
+
+def reset_marks(path):
+    """每个子格一个新的标记目录（方案 3.1d V10 前置）。测试 MCP 与插件 hook 的标记路径在登记时就定死了，所以不换路径，
+    而是把上一格的目录整个挪到旁边（带序号），在原处新建一个空的：上一格的标记留着可查，不会被这一格当成证据。只动本次根目录里的东西。"""
+    if os.path.lexists(path):
+        n = 1
+        while os.path.lexists(f"{path}.{n}"): n += 1
+        os.rename(path, f"{path}.{n}")
+    os.makedirs(path)
+
+
+# V10 的测试 MCP：启动第一步往标记文件里追加自己的进程号（方案 3.1d：「启动没启动」只看标记，不看 init.mcp_servers）；
+# exit 变体写完标记就退出，不握手（启动后握手失败的服务可能不在清单里，1/F-5）
+VDIR_MCP_BODY = r'''import json, os, sys
+marker, mode = sys.argv[1], sys.argv[2]
+fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+os.write(fd, (str(os.getpid()) + "\n").encode()); os.close(fd)
+if mode == "exit": sys.exit(3)
+for line in sys.stdin:
+    try: m = json.loads(line)
+    except Exception: continue
+    if not isinstance(m, dict) or "id" not in m: continue
+    if m.get("method") == "initialize":
+        out = {"result": {"protocolVersion": (m.get("params") or {}).get("protocolVersion", "2025-06-18"), "capabilities": {"tools": {}},
+                          "serverInfo": {"name": "iwork-t0g-vdir", "version": "0.1"}}}
+    elif m.get("method") == "tools/list": out = {"result": {"tools": []}}
+    else: out = {"error": {"code": -32601, "message": "not supported"}}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": m["id"], **out}) + "\n"); sys.stdout.flush()
+'''
+V10_USER, V10_REPO = ("t0g-u1", "t0g-u2"), "t0g-repo"
+V10_VARIANTS = {"正常握手": "ok", "握手前退出": "exit"}
+
+
+MCP_CONFIG_INVALID = re.compile(r"--mcp-config validation failed \((\d+) errors?\)")
+
+
+def mcp_config_stderr_facts(err):
+    """形状三那几格的标准错误只留这些（原文不存）：CLI 认没认这份 --mcp-config、校验报了几条错。纯函数。"""
+    m = MCP_CONFIG_INVALID.search(err or "")
+    return {"字数": len(err or ""), "Invalid MCP configuration": "Invalid MCP configuration" in (err or ""),
+            "校验报错条数": int(m.group(1)) if m else None}
+
+
+def v10_shapes(d):
+    """三种加载形状的启动参数（方案 3.1d V10 前置）。形状三只把专用目录里 .claude.json 的路径递给 CLI，脚本不读它（硬约束第 5 条）。"""
+    return {"形状一": vdir_args(), "形状二": ["--setting-sources", "user"],
+            "形状三": ["--setting-sources", "user", "--strict-mcp-config", "--mcp-config", os.path.join(d, ".claude.json")]}
+
+
+def v10_project(tag, marks, variant=None):
+    """V10 一格用的项目目录（独占新建）。variant 给了就放一份 .mcp.json，里面是仓库级的测试 MCP（那个握手变体）。"""
+    work = R.p(f"vdir-v10-work-{tag}")
+    os.makedirs(work)
+    if variant is not None:
+        write_new(os.path.join(work, ".mcp.json"), json.dumps({"mcpServers": {V10_REPO: {
+            "command": sys.executable, "args": ["-I", R.p("cfg", "vdir_mcp.py"), os.path.join(marks, V10_REPO), variant]}}}))
+    return work
+
+
+def mcp_status_rows(reply):
+    """mcp_status 的回复里只取本脚本的测试服务（名字以 t0g- 开头）的名字与状态，别的字段、别的服务一概不留。纯函数。"""
+    rows = ((reply or {}).get("body") or {}).get("mcpServers")
+    return {x["name"]: x.get("status") for x in rows if isinstance(x, dict) and isinstance(x.get("name"), str) and x["name"].startswith("t0g-")} \
+        if isinstance(rows, list) else None
+
+
+def v10_toggle(tag, d, work, enabled):
+    """V10 停用前置（0 个模型实例）：用 CLI 自己的办法停用（或再启用）U2。在 work 这个项目里起一条不发用户消息的会话，发控制请求
+    mcp_toggle；会话结束后另起一条，同样不发消息，发 mcp_status 看 U2 的状态留没留下。返回 (成立没有, 事实)。脚本不手改 .claude.json。"""
+    s, _ = product_settings(f"vdir-{tag}", "deny", extra=sandbox_settings(local_binding=True))
+    args = v10_shapes(d)["形状二"]
+    _, toggled = control_session(f"vdir-{tag}", s, [{"subtype": "mcp_toggle", "serverName": V10_USER[1], "enabled": enabled}],
+                                 extra_args=args, env=vdir_env(d), iso=False, cwd=work)
+    _, status = control_session(f"vdir-{tag}-status", s, [{"subtype": "mcp_status"}], extra_args=args, env=vdir_env(d), iso=False, cwd=work)
+    rows = mcp_status_rows(status[1])
+    after = (rows or {}).get(V10_USER[1])
+    accepted = bool(toggled[1] and toggled[1]["ok"])
+    held = after is not None and ((after == "disabled") != enabled)
+    return accepted and held, {"mcp_toggle 被接受": accepted, "带报错": (toggled[1] or {}).get("has_error"), "下一条会话里 U2 的状态": after}
+
+
+def r2x_vdir_v10():
+    """V10（11 个实例，另有 4 条不发消息的控制会话、2 次 claude mcp add）：用户级 MCP 进得来、仓库的不被启动、停用的不被启动。
+    看启动标记，不看 init.mcp_servers。顺序：仓库级对照 V10p、V10q → 形状一 V10a → 形状二、三各两个握手变体 V10b–V10e →
+    停用 U2 → V10f、V10g → 再启用 → V10h、V10i。被对照的格在对照没过时一律 INCONCLUSIVE（vdir_pair 的规矩，这里经 marker_verdict 的 control）。"""
+    if not vdir_cell_gate("V10"): return
+    d, marks = vdir_dir("v10"), R.p("vdir-v10-marks")
+    reset_marks(marks)
+    write_new(R.p("cfg", "vdir_mcp.py"), VDIR_MCP_BODY)
+    added = {}
+    for name in V10_USER:
+        _, _, code, timed_out, _ = run_instance([CLAUDE_CLI, "mcp", "add", "--scope", "user", name, "--", sys.executable, "-I",
+                                                 R.p("cfg", "vdir_mcp.py"), os.path.join(marks, name), "ok"], f"vdir-mcp-add-{name}",
+                                                env=vdir_env(d), timeout=60)
+        added[name] = code == 0 and not timed_out
+    if not all(added.values()):
+        record("INCONCLUSIVE", "R2X vdir V10", f"用 claude mcp add --scope user 加不进专用目录：{json.dumps(added)}"); return
+    shapes, plain = v10_shapes(d), "Reply with exactly: OK"
+    mark = lambda name: os.path.exists(os.path.join(marks, name))
+
+    def run(tag, args, work, extra=None):
+        reset_marks(marks)
+        hide = {"stderr_facts": mcp_config_stderr_facts} if args is shapes["形状三"] else {}     # 形状三的标准错误原文不入包
+        r, _ = vdir_run(f"vdir-{tag}", d, plain, args=args, cwd=work, extra=extra, **hide)
+        return r, {n: mark(n) for n in (*V10_USER, V10_REPO)}
+
+    # 仓库级阳性对照：--setting-sources project、不带 --strict-mcp-config，用 CLI 自己的设置把 .mcp.json 的服务批掉（iWork 的 --settings 里写）
+    approve = {**sandbox_settings(local_binding=True), "enableAllProjectMcpServers": True}
+    controls = {}
+    for (label, variant), cell in zip(V10_VARIANTS.items(), ("V10p", "V10q")):
+        r, seen = run(cell.lower(), ["--setting-sources", "project"], v10_project(cell.lower(), marks, variant), extra=approve)
+        controls[variant] = marker_verdict(r, want=[seen[V10_REPO]])
+        settle(f"R2X vdir {cell} 仓库级阳性对照（{label}）：批准之后仓库的测试 MCP 起得来", controls[variant], json.dumps(seen))
+    facts = {}
+    for (label, variant), (cell_2, cell_3) in zip(V10_VARIANTS.items(), (("V10b", "V10d"), ("V10c", "V10e"))):
+        for cell, shape in ((cell_2, "形状二"), (cell_3, "形状三")):
+            r, seen = run(cell.lower(), shapes[shape], v10_project(cell.lower(), marks, variant))
+            facts[cell] = (r, seen, label, shape, variant)
+    r_a, seen_a = run("v10a", shapes["形状一"], v10_project("v10a", marks, "ok"))
+    rb, seen_b = facts["V10b"][:2]
+    settle("R2X vdir V10a 形状一（现在的 --strict-mcp-config 加空配置）：三个测试 MCP 都不被启动", marker_verdict(
+        r_a, forbid=seen_a.values(), control=marker_verdict(rb, need=[seen_b[V10_USER[0]]])), json.dumps(seen_a))
+    for cell, (r, seen, label, shape, variant) in facts.items():
+        settle(f"R2X vdir {cell} {shape}、仓库 MCP {label}：用户级 U1 被启动，仓库的不被启动",
+               marker_verdict(r, forbid=[seen[V10_REPO]], want=[seen[V10_USER[0]]], control=controls[variant]), json.dumps(seen))
+    # 停用 U2，再启用：同一个项目目录（MCP 的停用按项目记）
+    work = v10_project("fi", marks)
+    # 前置没成立的格不跑、直接记 INCONCLUSIVE（vdir 审查 3/F-2）：停用没成，U2 照常启动、写标记，跑了只会被当成痕迹
+    pairs = (("V10f", "V10h", "形状二"), ("V10g", "V10i", "形状三"))
+    off_why = "停用 U2 没成立（mcp_toggle 被拒、或状态没留到下一条会话）：这一格不跑，回 architect 重定硬约束第 2 条对 MCP 的含义"
+    off, off_facts = v10_toggle("v10-off", d, work, enabled=False)
+    record(info_if(off), "R2X vdir V10 停用前置：mcp_toggle 停用 U2，状态留到了下一条会话（0 个模型实例）", json.dumps(off_facts, ensure_ascii=False))
+    if not off:
+        for cell, ctl_cell, shape in pairs:
+            record("INCONCLUSIVE", f"R2X vdir {cell} 停用 U2 之后（{shape}）：U1 被启动、U2 不被启动", off_why)
+            record("INCONCLUSIVE", f"R2X vdir {ctl_cell} 再启用 U2 之后（{shape}）：U2 被启动", off_why)
+        return
+    after_off = {cell: run(cell.lower(), shapes[shape], work) for cell, _, shape in pairs}
+    on, on_facts = v10_toggle("v10-on", d, work, enabled=True)
+    record(info_if(on), "R2X vdir V10 再启用前置：mcp_toggle 启用 U2，状态留到了下一条会话（0 个模型实例）", json.dumps(on_facts, ensure_ascii=False))
+    for cell, ctl_cell, shape in pairs:
+        if on:
+            rc, seen_c = run(ctl_cell.lower(), shapes[shape], work)
+            control = marker_verdict(rc, want=[seen_c[V10_USER[1]]])
+            settle(f"R2X vdir {ctl_cell} 再启用 U2 之后（{shape}）：U2 被启动", control, json.dumps(seen_c))
+        else:
+            control = "INCONCLUSIVE"
+            record(control, f"R2X vdir {ctl_cell} 再启用 U2 之后（{shape}）：U2 被启动", "再启用 U2 没成立：这一格不跑，回 architect")
+        r, seen = after_off[cell]
+        settle(f"R2X vdir {cell} 停用 U2 之后（{shape}）：U1 被启动、U2 不被启动",
+               marker_verdict(r, forbid=[seen[V10_USER[1]]], need=[seen[V10_USER[0]]], control=control), json.dumps(seen))
+
+
+def plugin_list_facts(stdout, names, d):
+    """V12c：`claude plugin list --json` 的输出里，这几个插件各带了什么（只记事实，候选乙才用得上）。纯函数。
+    只留：认没认出这个插件、它那一项有哪些键、布尔值的键各是什么、有没有一个字符串值是专用目录之下的路径。原文不留。"""
+    try: data = json.loads(stdout)
+    except (ValueError, TypeError): return {"输出是 JSON": False}
+    root = os.path.realpath(d)
+    under = lambda v: isinstance(v, str) and os.path.isabs(v) and (os.path.realpath(v) + os.sep).startswith(root + os.sep)
+    entries, stack = [], [data]
+    while stack:
+        x = stack.pop()
+        if isinstance(x, dict):
+            entries.append(x); stack.extend(x.values())
+        elif isinstance(x, list): stack.extend(x)
+    out = {"输出是 JSON": True}
+    for name in names:
+        hit = next((e for e in entries if any(isinstance(v, str) and v.split("@")[0] == name for v in e.values())), None)
+        out[name] = None if hit is None else {"键": sorted(hit), "布尔值": {k: v for k, v in hit.items() if isinstance(v, bool)},
+                                              "有专用目录之下的路径": any(under(v) for v in hit.values())}
+    return out
+
+
+def r2x_vdir_v12():
+    """V12a、V12b（2 个实例）与 V12c（0 个）：专用目录里装两个带 SessionStart hook（各写一个标记）的本地测试插件，
+    用 claude plugin disable 停用一个（V12c 停用前后各跑一次 plugin list --json）；V12a 停用的那个的标记不出现；
+    V12b 用 claude plugin enable 打开之后两个都出现（V12a 的对照）。V12x 只在甲的门槛有 FAIL 时才跑，这里不跑。"""
+    if not vdir_cell_gate("V12"): return
+    d, marks = vdir_dir("v12"), R.p("vdir-v12-marks")
+    reset_marks(marks)
+    market, market_name, ((on_name, on_mark), (off_name, off_mark)) = vdir_plugin_market("v12", count=2, marks=marks)
+    if not (vdir_install(d, market, on_name) and vdir_install(d, market, off_name)):
+        record("INCONCLUSIVE", "R2X vdir V12", "用 claude plugin install 装不进专用目录"); return
+
+    def cli(tag, *argv):
+        out, _, code, timed_out, _ = run_instance([CLAUDE_CLI, "plugin", *argv], f"vdir-{tag}", env=vdir_env(d), timeout=60)
+        return out, code == 0 and not timed_out
+
+    listed_before, _ = cli("v12c-before", "list", "--json")          # 退出码不当成「没有输出」：输出能不能认由 plugin_list_facts 说
+    _, disabled = cli("v12-disable", "disable", f"{off_name}@{market_name}")
+    listed_after, _ = cli("v12c-after", "list", "--json")
+    record("INFO", "R2X vdir V12c plugin list --json 带不带启用状态与安装路径（停用前后各一次，只记事实）",
+           json.dumps({"停用前": plugin_list_facts(listed_before, (on_name, off_name), d), "停用后": plugin_list_facts(listed_after, (on_name, off_name), d)},
+                      ensure_ascii=False))
+    a_label, b_label = "R2X vdir V12a 停用的插件不进来：它的 SessionStart hook 不跑", "R2X vdir V12b 对照：plugin enable 之后两个插件的 hook 都跑"
+    if not disabled:          # 前置没成立的格不跑（vdir 审查 3/F-2）：插件没停用，它的 hook 照跑，跑了只会被当成痕迹
+        why = "claude plugin disable 没成功：这一格不跑，回 architect"
+        record("INCONCLUSIVE", a_label, why); record("INCONCLUSIVE", b_label, why); return
+    reset_marks(marks)
+    ra, _ = vdir_run("vdir-v12a", d, "Reply with exactly: OK")
+    seen_a = {"启用的": os.path.exists(on_mark), "停用的": os.path.exists(off_mark)}
+    reset_marks(marks)
+    _, enabled = cli("v12-enable", "enable", f"{off_name}@{market_name}")
+    if enabled:
+        rb, _ = vdir_run("vdir-v12b", d, "Reply with exactly: OK")
+        seen_b = {"启用的": os.path.exists(on_mark), "再启用的": os.path.exists(off_mark)}
+        v12b = marker_verdict(rb, want=seen_b.values())
+        settle(b_label, v12b, json.dumps(seen_b, ensure_ascii=False))
+    else:
+        v12b = "INCONCLUSIVE"
+        record(v12b, b_label, "claude plugin enable 没成功：这一格不跑，回 architect")
+    settle(a_label, marker_verdict(ra, forbid=[seen_a["停用的"]], need=[seen_a["启用的"]], control=v12b), json.dumps(seen_a, ensure_ascii=False))
+
+
+# 一次性环境的子格（方案 3.1d 第五小节，命中 ①② 两条规则）：这一版只登记，都记 INCONCLUSIVE，排 R3
+VDIR_DISPOSABLE = ("V4e", "V4f", "V4g", "V4h", "V4i", "V4j", "V6a", "V6b", "V6c", "V6e", "V6f", "V6g", "V6h", "V6i", "V6j", "V6k", "V6l",
+                   "V11a", "V11b", "V11c", "V11d", "V11e", "V11f", "V11g", "V11h", "V13b", "V13c", "V13c′", "V13d")
+
+
+def r2x_vdir_disposable():
+    for cell in VDIR_DISPOSABLE:
+        record("INCONCLUSIVE", f"R2X vdir {cell}（一次性环境）", "这一版只登记：在一次性环境里跑（R3），脚本还没实现")
+
+
+# 不起模型、不碰真实账号的格：只选它们时开跑前的准备一个都不做（run_selected）
+MODEL_FREE_CELLS = {"cfg"}
+
+
 # R2X 的格子表（审查 1/F-5）：部分 → {格名: 处理器}。--part 的可选值、每部分跑哪几格、按格名分派都只从这里来
 R2X_CELLS = {
     "d": {"k1": lambda: r2x_kill_case("k1"), "k2": lambda: r2x_kill_case("k2"), "k3": lambda: r2x_kill_case("k3"),
-          "b1": lambda: r2x_background("b1", BACKGROUND_OFF), "b2": lambda: r2x_background("b2", BACKGROUND_OFF)},
-    "rest": {"c1": g4_c1, "n1": lambda: r2x_background("n1", None), "tools": r2x_tool_lists},
+          "b1": lambda: r2x_background("b1"), "b2": lambda: r2x_background("b2")},
+    "rest": {"c1": g4_c1, "n1": lambda: r2x_background("n1", NO_BACKGROUND_SWITCH), "tools": r2x_tool_lists},
     "net": {"p1": lambda: r2x_net("p1"), "p2": lambda: r2x_net("p2"), "p4": lambda: r2x_net("p4")},
+    "recheck": {"g1": g1, "g8": g8, "g7": g7_product_cells},             # G1 10、G8 8、G7 9 个实例，带产品设置重跑
+    "p4": {"f": r2x_p4},                                                # f 是 F1、F2 两格（F2 是 F1 的对照，一起跑），2 个实例
+    "cfgdir": {"cfg": r2x_cfgdir},                                      # 四种情况各跑一次 claude mcp list，0 个模型实例
+    # 22 个模型实例：V1 2、V4 4、V5 1、V7 1、V10 11、V12 2、V13a 1（V2 只发 initialize，0 个）
+    "vdir": {"v1": r2x_vdir_v1, "v2": r2x_vdir_v2, "v4": r2x_vdir_v4, "v5": r2x_vdir_v5, "v7": r2x_vdir_v7, "v10": r2x_vdir_v10,
+             "v12": r2x_vdir_v12, "v13": r2x_vdir_v13a, "vx": r2x_vdir_disposable},
+    "repo": {"rc1": r2x_rc1, "rc2": r2x_rc2, "rc3": r2x_rc3, "rc4": r2x_rc4, "rc5": r2x_rc5, "rc6": r2x_rc6, "rc7": r2x_rc7, "rc8": r2x_rc8},   # 15 个实例
     "skill": {"l": r2x_repo_load, "k3b": lambda: r2x_inline("k3b"), "k3c": lambda: r2x_inline("k3c"),     # l 是 L1、L2 两格（L2 是 L1 的对照，一起跑）
               "k2c": r2x_allowed_tools, "h1": r2x_hook_vs_hook},
 }
@@ -3982,7 +5630,8 @@ def manifest(parent, exclude=()):
 
 # 观测目录里进结果包的（S-6）：命令自己的输出与退出码（.out / .rc）、替身的调起记录（corpus-<行>.calls）。
 # S0 的结果包没带它们，四条 FAIL 只知道退出码是 1，不知道命令自己报了什么。
-OBS_PACKED = re.compile(r"(\.out|\.rc|^corpus-[\w-]+\.calls)$")
+# .err：命令自己的错误原文（沙箱探针、外层保护预检、RC7 的拦截原文），和 .out 同一个收集器、同样的上限（审查 repo 1/F-7）
+OBS_PACKED = re.compile(r"(\.out|\.rc|\.err|^corpus-[\w-]+\.calls)$")
 # 输出里可能有账号的用例：只带退出码，输出换成几项特征。gh auth status 跑通时会打印登录的账号名（AGENTS.md：账号信息不落盘）
 OBS_PRIVATE_OUTPUT = {"g4-7b.out"}
 OBS_MAX_BYTES = 256 * 1024
@@ -4390,12 +6039,12 @@ def selftest_g2_matrix():
 
 
 def selftest_child_env():
-    """P14：起实例时不筛选环境变量，只设 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1（覆盖继承来的值）；用例故意不设要在 skip 里点名。
+    """P14：起实例时不筛选环境变量，只设产品的两个开关（自动记忆、后台任务，覆盖继承来的值）；用例故意不设要在 skip 里点名。
     结果包里只记 CLAUDE*、ANTHROPIC* 的名字，不记值。走真的 run_instance（claude() 用它）与 Live 起子进程，看子进程实际拿到的环境。"""
-    assert LAUNCH_ENV_SET == {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}, "P14：只设这一个，别的不动"
+    assert LAUNCH_ENV_SET == {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}, "P14、D5：只设这两个，别的不动"
     marker, value = "t0g-plugins-" + secrets.token_hex(4), "t0g-envval-" + secrets.token_hex(4)
-    planted = {"CLAUDE_CODE_PLUGIN_DIRS": marker, "CLAUDE_CODE_SAFE_MODE": marker, "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0",
-               "CLAUDE_T0G_SELFTEST": value, "ANTHROPIC_T0G_SELFTEST": value, "CLAUDE_CONFIG_DIR": value}
+    planted = {"CLAUDE_CODE_PLUGIN_DIRS": marker, "CLAUDE_CODE_SAFE_MODE": marker, "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0",
+               "CLAUDE_T0G_SELFTEST": value, "ANTHROPIC_T0G_SELFTEST": value, "CLAUDE_CONFIG_DIR": value, "CLAUDE_CODE_REMOTE_MEMORY_DIR": value}
     saved = {k: os.environ.get(k) for k in planted}
     os.environ.update(planted)
     watched = sorted(planted) + ["PATH", "HOME"]
@@ -4403,10 +6052,12 @@ def selftest_child_env():
     try:
         out, _, _, _, _ = run_instance([sys.executable, "-c", show], "selftest-env")
         got = json.loads(out)
-        assert got["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "记忆开关设成 1，覆盖继承来的 0"
+        assert got["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == got["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1", "两个开关都设成 1，覆盖继承来的 0"
         assert got["CLAUDE_CODE_PLUGIN_DIRS"] == got["CLAUDE_CODE_SAFE_MODE"] == marker, "P14：不筛选，继承来的照传"
         assert got["CLAUDE_T0G_SELFTEST"] == got["ANTHROPIC_T0G_SELFTEST"] == got["CLAUDE_CONFIG_DIR"] == value
         assert got["PATH"] == os.environ["PATH"] and got["HOME"] == os.environ["HOME"]
+        assert got["CLAUDE_CODE_REMOTE_MEMORY_DIR"] is None, "记忆根的覆盖变量按名字去掉（vdir 审查 2/F-3）"
+        assert child_env("t", {"CLAUDE_COWORK_MEMORY_PATH_OVERRIDE": "/x"})["CLAUDE_COWORK_MEMORY_PATH_OVERRIDE"] == "/x", "用例显式给的照传"
         assert child_env("t", {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"})["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "用例给了别的值也压过"
         assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in child_env("t", skip=("CLAUDE_CODE_DISABLE_AUTO_MEMORY",)), "点名不设：继承来的也去掉"
         assert child_env("t", {"CLAUDE_CODE_SAFE_MODE": "1"})["CLAUDE_CODE_SAFE_MODE"] == "1", "用例给的变量照传（G9d）"
@@ -4416,10 +6067,18 @@ def selftest_child_env():
             assert seen and seen[1]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1" and seen[1]["CLAUDE_T0G_SELFTEST"] == value, seen
         finally:
             live.close()
+        live = Live("selftest-env-live-skip", None, env_skip=NO_BACKGROUND_SWITCH,
+                    argv=[sys.executable, "-c", show.replace("print(json.dumps({", "print(json.dumps({'type': 'env', **{").replace("}),flush", "}}),flush") + ";import sys;sys.stdin.read()"])
+        try:
+            seen = live.wait(lambda o: o.get("type") == "env", 10)
+            assert seen and seen[1]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] is None and seen[1]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "常驻会话也能点名不设后台开关"
+        finally:
+            live.close()
         write_env_names(R.out)
         text = open(os.path.join(R.out, "env-names.json")).read()
         rec = json.loads(text)
-        assert set(planted) <= set(rec["names"]) and "PATH" not in rec["names"] and rec["set_for_instances"] == ["CLAUDE_CODE_DISABLE_AUTO_MEMORY"]
+        assert set(planted) <= set(rec["names"]) and "PATH" not in rec["names"] and rec["set_for_instances"] == ["CLAUDE_CODE_DISABLE_AUTO_MEMORY", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"]
+        assert rec["dropped_for_instances"] == ["CLAUDE_CODE_REMOTE_MEMORY_DIR"], "去掉了哪些名字记进结果包"
         assert value not in text and marker not in text, "结果包里只有变量名，没有值"
     finally:
         for k, v in saved.items():
@@ -4623,17 +6282,9 @@ def selftest_g5_isolation():
     for bad in (os.path.join(cfg_root, "projects", other_enc, "memory"), os.path.join(cfg_root, "projects", enc, "notes"),
                 os.path.join(cfg_root, "projects", enc + "-x", "memory"), "~/.claude/projects/x/memory", None, ""):
         assert own_memory_dir(bad, work, cfg_root) is None, bad
-    os.makedirs(mem); open(os.path.join(mem, "MEMORY.md"), "w").write("x")
-    agent_mem = os.path.join(cfg_root, "agent-memory", AG); os.makedirs(agent_mem)
-    red = R.p("g5-redirect-st"); os.makedirs(red)
     proj = os.path.dirname(mem)
-    sid, keep = "0" * 8 + "-1111-4222-8333-" + "4" * 12, "9" * 8 + "-1111-4222-8333-" + "4" * 12
-    for n in (sid, keep): open(os.path.join(proj, n + ".jsonl"), "w").write("{}")
-    removed = remove_g5_traces([("redirect", red), ("memory", mem), ("agent", agent_mem)], work, cfg_root, [sid, None, "../x"])
-    assert sorted(removed) == sorted([red, mem, os.path.join(proj, sid + ".jsonl"), agent_mem]), removed
-    assert os.path.exists(os.path.join(proj, keep + ".jsonl")), "别的会话记录不碰"
-    # 2/2/F-2 的例外（方案 b63977a）：默认记忆目录已经存在也照用，要四条前提；改道目录、子代理记忆目录没有例外
     os.makedirs(mem)
+    # 2/2/F-2 的例外（方案 b63977a）：默认记忆目录已经存在也照用，要四条前提；改道目录、子代理记忆目录没有例外
     assert default_memory_usable(auto, work, cfg_root) == (mem, ""), "已经存在、四条前提都成立 → 照用"
     assert default_memory_usable(os.path.join(cfg_root, "projects", other_enc, "memory"), work, cfg_root)[0] is None, "上一级目录名里没有本次随机根目录名 → 不碰"
     lk_root = R.p("cfg", "fake-claude-linked"); os.makedirs(os.path.join(lk_root, "real-projects", enc, "memory"))
@@ -4648,21 +6299,148 @@ def selftest_g5_isolation():
     assert set(g5_dir_blocks("有一级是链接", False, False)) == set(G5_MEMORY_ROWS), "默认记忆目录不能用 → 三行都不起"
     assert set(g5_dir_blocks("", True, False)) == set(G5_MEMORY_ROWS), "改道目录已经存在 → 不碰、三行都不起"
     assert set(g5_dir_blocks("", False, True)) == {"子代理记忆"}, "子代理记忆目录已经存在 → 不碰、只有这一行不起"
-    shutil.rmtree(mem)
-    # 2/2/F-2：两层上级目录。项目目录删完之后空了就删；agent-memory 这一层只在本次建的、空了才删
-    os.makedirs(mem); open(os.path.join(mem, "MEMORY.md"), "w").write("x")
-    os.remove(os.path.join(proj, keep + ".jsonl")); open(os.path.join(proj, sid + ".jsonl"), "w").write("{}")
-    parent = os.path.join(cfg_root, "agent-memory"); os.makedirs(agent_mem)
-    removed = remove_g5_traces([("agent-parent", parent), ("memory", mem), ("agent", agent_mem)], work, cfg_root, [sid])
-    assert proj in removed and parent in removed and not os.path.exists(proj) and not os.path.exists(parent), removed
-    os.makedirs(os.path.join(parent, "someone-else")); os.makedirs(agent_mem)
-    removed = remove_g5_traces([("agent-parent", parent), ("agent", agent_mem)], work, cfg_root, [])
-    assert parent not in removed and os.path.isdir(os.path.join(parent, "someone-else")), "agent-memory 里还有别人的目录：不删"
-    for kind, bad in (("memory", os.path.join(cfg_root, "projects", other_enc, "memory")), ("agent", os.path.join(cfg_root, "agent-memory", "someone-else")),
-                      ("redirect", os.path.join(HOME, "x")), ("agent-parent", os.path.join(cfg_root, "agent-memory-x"))):
-        try: remove_g5_traces([(kind, bad)], work, cfg_root, [])
-        except ValueError: pass
-        else: raise AssertionError(f"核对没过的 {kind} 目录应当拒绝，不删")
+    shutil.rmtree(os.path.join(cfg_root, "projects"))
+    selftest_owned_dirs()
+
+
+
+def selftest_owned_dirs():
+    """用户配置目录下认领的目录（OwnedDir，RC6 与 G5 共用）。supervisor 2026-11-13：脚本不删用户配置目录里的东西，只出清单；
+    清单只把「本次独占新建、名字带本次随机名、路径逐级核得上、里面没有不是本次记录的东西」的目录列为清理候选（审查 repo 4/F-1、4/F-2）。
+    都在本次根目录里造假的配置目录；每种情形都断言磁盘上一样没少。"""
+    T = "iwork-t0g-st" + secrets.token_hex(3)
+    def fake_root(tag):
+        root_ = R.p(f"st-own-{tag}"); os.makedirs(os.path.join(root_, "projects")); return root_
+    def tree(root_):
+        return sorted(os.path.relpath(os.path.join(d, n), root_) for d, ds, fs in os.walk(root_) for n in ds + fs)
+    def g5_like(root_, race=None, mem_race=None):
+        chain = open_config_chain(root_, ["projects"])
+        enc = f"-x-{T}-g5-work"
+        owned = {"proj": OwnedDir(chain[-1], enc, os.path.join(root_, "projects", enc), "maybe", race, rel=["projects", enc], token=T)}
+        owned["mem"] = OwnedDir(owned["proj"].fd, "memory", os.path.join(owned["proj"].path, "memory"), "maybe", mem_race, rel=["projects", enc, "memory"])
+        agent = f"iwork-t0g-probe-{T}"
+        owned["agent_parent"] = OwnedDir(chain[0], "agent-memory", os.path.join(root_, "agent-memory"), "maybe", rel=["agent-memory"], shared=True)
+        owned["agent"] = OwnedDir(owned["agent_parent"].fd, agent, os.path.join(root_, "agent-memory", agent), "must", rel=["agent-memory", agent], token=agent)
+        return chain, owned
+    by_path = lambda items: {os.path.relpath(it["路径"], R.root).split("/", 1)[1]: it for it in items}
+    # 正常：随机项目目录与随机子代理目录是候选；记忆目录随项目目录处理；共享的 agent-memory 不是候选；文件只作附注；什么都不删
+    root_ = fake_root("normal")
+    chain, owned = g5_like(root_)
+    owned["mem"].write_secret("MEMORY.md", "t0g-x"); owned["agent"].write_secret("MEMORY.md", "t0g-y")
+    sid = "0" * 8 + "-1111-4222-8333-" + "4" * 12
+    open(os.path.join(owned["proj"].path, sid + ".jsonl"), "w").write("{}")
+    owned["proj"].adopt_new([sid + ".jsonl"], include_baseline=True, source="本次的会话记录")
+    before = tree(root_)
+    items = by_path(g5_release(chain, owned, root_))
+    assert tree(root_) == before, "一样都没删"
+    proj_key = [k for k in items if k.endswith("g5-work")][0]
+    assert items[proj_key]["清理候选"] and items[proj_key + "/memory"]["清理候选"] is False and "随它一起" in items[proj_key + "/memory"]["说明"]
+    agent_key = [k for k in items if "iwork-t0g-probe-" in k][0]
+    assert items[agent_key]["清理候选"] and items["agent-memory"]["清理候选"] is False and "共享的上一级" in items["agent-memory"]["说明"]
+    notes = {n["名字"]: n["来源"] for n in items[proj_key + "/memory"]["里面"]}
+    assert notes == {"MEMORY.md": "本次建的", ".t0g-calib": "本次建的", BLANK_NAME: "本次建的"}, notes
+    # 审查 repo 5/F-2：CLI 运行期间出现的文件（来源未核实）让这棵树不是候选：记忆目录与上级的随机项目目录都不是；照样列出来、标明
+    root_ = fake_root("unverified")
+    chain, owned = g5_like(root_)
+    owned["mem"].write_secret("MEMORY.md", "t0g-x")
+    open(os.path.join(owned["mem"].path, "cli-wrote.md"), "w").write("x"); owned["mem"].adopt_new()
+    items = by_path(g5_release(chain, owned, root_))
+    k = [k for k in items if k.endswith("g5-work")][0]
+    assert not items[k]["清理候选"] and items[k]["说明"] == LEFTOVERS_UNVERIFIED and not items[k + "/memory"]["清理候选"]
+    assert {n["名字"]: n["来源"] for n in items[k + "/memory"]["里面"]}["cli-wrote.md"] == "运行期间出现、来源未核实"
+    # 审查 repo 5/F-1、6/F-1：随机项目目录是本次新建、认领的；它下面的 memory 在认领之前就有了 MEMORY.md（照用），第一笔 O_EXCL 就失败
+    # → memory 拿不到核对结果（没有清单项），上级的随机项目目录必须有清单项、而且不是候选
+    root_ = fake_root("reused-mem")
+    enc = f"-x-{T}-g5-work"
+    chain = open_config_chain(root_, ["projects"])
+    owned = {"proj": OwnedDir(chain[-1], enc, os.path.join(root_, "projects", enc), "maybe", rel=["projects", enc], token=T)}
+    assert owned["proj"].created and not owned["proj"].baseline
+    os.makedirs(os.path.join(owned["proj"].path, "memory")); open(os.path.join(owned["proj"].path, "memory", "MEMORY.md"), "w").write("keep")
+    owned["mem"] = OwnedDir(owned["proj"].fd, "memory", os.path.join(owned["proj"].path, "memory"), "maybe", rel=["projects", enc, "memory"])
+    try: owned["mem"].write_secret("MEMORY.md", "t0g-x")
+    except FileExistsError: pass
+    else: raise AssertionError("第一笔 O_EXCL 应当撞上已有的 MEMORY.md")
+    items = by_path(g5_release(chain, owned, root_))
+    k = [k for k in items if k.endswith("g5-work")]
+    assert k and items[k[0]]["清理候选"] is False and items[k[0]]["说明"] == LEFTOVERS_UNVERIFIED, items
+    assert not any(key.endswith("/memory") for key in items), "照用的 memory 没有清单项（拿不到核对结果）"
+    assert open(os.path.join(owned["proj"].path, "memory", "MEMORY.md")).read() == "keep"
+    # ① 目录建出之后被挪走、名字下换成别人的目录：路径核不上，不是候选
+    root_ = fake_root("swapped")
+    chain, owned = g5_like(root_)
+    p_ = owned["agent"].path; os.rename(p_, p_ + "-moved"); os.mkdir(p_); open(os.path.join(p_, "user.md"), "w").write("keep")
+    items = by_path(g5_release(chain, owned, root_))
+    k = [k for k in items if k.endswith(os.path.basename(p_))][0]
+    assert not items[k]["清理候选"] and items[k]["路径核对"] == "路径已变，不是清理候选" and open(os.path.join(p_, "user.md")).read() == "keep"
+    # ② 祖先（projects）换成链接：项目目录与记忆目录的路径都核不上
+    root_ = fake_root("ancestor")
+    chain, owned = g5_like(root_)
+    os.rename(os.path.join(root_, "projects"), os.path.join(root_, "projects-moved")); os.symlink(os.path.join(root_, "projects-moved"), os.path.join(root_, "projects"))
+    items = g5_release(chain, owned, root_)
+    assert all(not it["清理候选"] for it in items if "projects" in it["路径"]), items
+    # ③ mkdir 与 open 之间换成别人的目录（里面有东西）：建出时不空，不是候选；外来文件不在附注里、不动
+    root_ = fake_root("race")
+    def swap(point, d):
+        if point == "claimed" and d.name.endswith("g5-work"):
+            os.rename(d.path, d.path + "-moved"); os.mkdir(d.path); open(os.path.join(d.path, "foreign.md"), "w").write("keep")
+    chain, owned = g5_like(root_, race=swap)
+    items = by_path(g5_release(chain, owned, root_))
+    k = [k for k in items if k.endswith("g5-work")][0]
+    assert not items[k]["清理候选"] and open(os.path.join(owned["proj"].path, "foreign.md")).read() == "keep"
+    # ④ 运行期间混进了没被认领的东西（或本次的文件被同名换掉）：有不是本次记录的，不是候选
+    root_ = fake_root("foreign")
+    chain, owned = g5_like(root_)
+    owned["agent"].write_secret("MEMORY.md", "t0g-y")
+    f_ = os.path.join(owned["agent"].path, "MEMORY.md"); os.remove(f_); open(f_, "w").write("keep")
+    items = by_path(g5_release(chain, owned, root_))
+    k = [k for k in items if "iwork-t0g-probe-" in k][0]
+    assert not items[k]["清理候选"] and items[k]["来源未核实或不是本次的"] == 1 and open(f_).read() == "keep"
+    # ③′ 换进来的那个目录后来被清空：建出时不空就不是候选（空了也不行，它不是本次建的那个）
+    root_ = fake_root("race-emptied")
+    chain, owned = g5_like(root_, race=swap)
+    os.remove(os.path.join(owned["proj"].path, "foreign.md"))
+    items = by_path(g5_release(chain, owned, root_))
+    assert not items[[k for k in items if k.endswith("g5-work")][0]]["清理候选"]
+    # ④′ 下一级（记忆目录）里混进了没被认领的东西：上一级的随机项目目录也不是候选
+    root_ = fake_root("child-foreign")
+    chain, owned = g5_like(root_)
+    open(os.path.join(owned["mem"].path, "user.md"), "w").write("keep")
+    items = by_path(g5_release(chain, owned, root_))
+    k = [k for k in items if k.endswith("g5-work")][0]
+    assert not items[k]["清理候选"] and items[k]["说明"] == LEFTOVERS_UNVERIFIED
+    # ⑤ 审查 repo 3/F-2：O_EXCL 遇到外来同名文件（RC6 与 G5 两条路）；收尾不再认领，外来文件不在附注里、不动，目录不是候选
+    for flow in ("rc6", "g5"):
+        root_ = fake_root(f"excl-{flow}")
+        n_before = len(LEFTOVERS)
+        if flow == "rc6":
+            def plant(point, d):
+                if point == "claimed" and d.name.startswith("iwork-t0g-probe-"): open(os.path.join(d.path, BLANK_NAME), "w").write("keep")
+            try: rc6_prepare(root_, [f"iwork-t0g-probe-{T}"], "t0g-x", race=plant, token=T)
+            except FileExistsError: pass
+            else: raise AssertionError("第三个文件撞上外来同名文件，应当失败")
+            items = LEFTOVERS[n_before:]
+            d_ = os.path.join(root_, RC6_PARENT, f"iwork-t0g-probe-{T}")
+        else:
+            chain, owned = g5_like(root_)
+            open(os.path.join(owned["mem"].path, BLANK_NAME), "w").write("keep")      # 认领之后、写入之前出现的外来文件
+            try: owned["mem"].write_secret("MEMORY.md", "t0g-x")
+            except FileExistsError: pass
+            items = g5_release(chain, owned, root_)
+            d_ = owned["mem"].path
+        listed = {n["名字"] for it in items for n in it["里面"]}
+        assert BLANK_NAME not in listed and {"MEMORY.md", ".t0g-calib"} <= listed, (flow, listed)
+        assert open(os.path.join(d_, BLANK_NAME)).read() == "keep" and os.path.exists(os.path.join(d_, "MEMORY.md")) and not any(it["清理候选"] and it["路径"].endswith(os.path.basename(d_)) for it in items)
+    # agent-memory 是链接：认领时就打不开（O_NOFOLLOW），链接那头一个字节没动
+    root_ = fake_root("link")
+    os.makedirs(R.p("st-own-link-elsewhere")); os.symlink(R.p("st-own-link-elsewhere"), os.path.join(root_, RC6_PARENT))
+    try: rc6_prepare(root_, ["iwork-t0g-probe-l"], "t0g-x")
+    except OSError: pass
+    else: raise AssertionError("agent-memory 是链接：不认领")
+    assert os.listdir(R.p("st-own-link-elsewhere")) == []
+    # 清单进结果包与终端提示：带「收尾时的快照、逐项核对、只删候选、别递归删上级」的提示
+    saved = json.load(open(os.path.join(R.out, "leftovers.json")))
+    assert saved["提示"] == LEFTOVERS_CAUTION and saved["目录"] == LEFTOVERS
+    assert "快照" in leftovers_notice() and "别对上级目录" in leftovers_notice()
 
 
 def selftest_r2x():
@@ -4695,7 +6473,7 @@ def selftest_r2x():
     assert not subagent_ran_target([ag, {"id": "b", "name": "Bash", "input": {"command": C}, "parent": None}], C), "有子代理调用，但目标 Bash 不在它里面"
     assert not subagent_ran_target([ag, {"id": "b", "name": "Bash", "input": {"command": C}, "parent": "zz"}], C), "父调用对不上"
     assert subagent_ran_target([{**ag, "name": "Task"}, {"id": "b", "name": "Bash", "input": {"command": C}, "parent": "a1"}], C), "Task 也认"
-    assert BACKGROUND_OFF == {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
+    assert NO_BACKGROUND_SWITCH == ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",)
     # --part net：p1 只出变量名（值跨行、带口令也不漏），p2 只拿标准输出的头 8 个字节（隧道的标准错误不进输出），p4 的本机监听
     assert R2X_PARTS["net"] == ("p1", "p2", "p4")
     secret = "S3CR3T-" + secrets.token_hex(4)
@@ -4716,7 +6494,9 @@ def selftest_r2x():
         assert got == "T0G-HELLO" and count[0] == 1, (got, count)
     finally:
         stop()
-    assert child_env("t", BACKGROUND_OFF)["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1" and child_env("t", BACKGROUND_OFF)["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    assert child_env("t")["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1" and child_env("t")["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "产品环境两个开关都设"
+    n1_env = child_env("t", skip=NO_BACKGROUND_SWITCH)
+    assert "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" not in n1_env and n1_env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "n1、g7-bg 只去掉后台开关"
 
 
 def selftest_r2x_skill():
@@ -4872,15 +6652,15 @@ def selftest_run_isolation():
     assert foreign_roots(["/h/.npmrc"], parent, own) == [] and foreign_roots(["/h/iwork-t0g-aaaa1111/x"], parent, own) == []
 
 
-def selftest_r2x_settings():
+def selftest_product_settings():
     """R2X 各格带产品设置（architect 47737e78）：dontAsk、产品那样的沙箱、hook 的 timeout 与 onFailure；net 的对照格能换沙箱设置。"""
-    st = json.load(open(r2x_settings("st-r2x-set", "allow")[0]))
+    st = json.load(open(product_settings("st-r2x-set", "allow")[0]))
     assert st["permissions"]["defaultMode"] == "dontAsk" and st["sandbox"]["enabled"] and st["sandbox"]["network"].get("allowLocalBinding") is True, st
     h = st["hooks"]["PreToolUse"][0]["hooks"][0]
     assert h["timeout"] == HOOK_TIMEOUT_SECS and h["onFailure"] == "block"
-    st2 = json.load(open(r2x_settings("st-r2x-set2", "allow", extra=sandbox_settings())[0]))
+    st2 = json.load(open(product_settings("st-r2x-set2", "allow", extra=sandbox_settings())[0]))
     assert "allowLocalBinding" not in st2["sandbox"]["network"], "对照：给了 extra 就用它"
-    assert json.load(open(r2x_settings("st-r2x-set3", "allow", session_start=True)[0]))["hooks"].get("SessionStart"), "别的参数照传"
+    assert json.load(open(product_settings("st-r2x-set3", "allow", session_start=True)[0]))["hooks"].get("SessionStart"), "别的参数照传"
 
 
 def selftest_r2x_sandbox_and_cells():
@@ -4940,11 +6720,627 @@ def selftest_prompts():
     assert last(unprompted_probe("Skill", "st-pr5")["prompt"]) == "iwork-t0g-none" and last(unprompted_probe("EnterWorktree", "st-pr6")["prompt"]) == "st-pr6"
 
 
+def selftest_recheck_and_p4():
+    """script6 第一批：G1d′ 与 BashBg 记录格、沙箱在场的证据、P4 的判定、产品设置、列进程不经 ps -ax。每样配反例。"""
+    global nested_sandbox_preflight
+    init_, res_ = {"type": "system", "subtype": "init", "plugins": []}, {"type": "result"}
+    run = lambda events, ok=True: {"init": init_ if ok else None, "timed_out": False, "exit": 0, "events": events, "tool_uses": [], "tool_results": {}}
+    # G1d′（审查 1/F-2）：先要子代理真跑了（子代理里的目标调用、结果不是报错、哨兵在），再看形状
+    c_sub = "touch /w/g1-sub"
+    ag = {"id": "a1", "name": "Agent", "input": {}, "parent": None}
+    sub = {"id": "b1", "name": "Bash", "input": {"command": c_sub}, "parent": "a1"}
+    def agent_run(events, sub_result=False, ok=True):
+        r = {**run(events, ok), "tool_uses": [ag, sub], "tool_results": {"a1": {"is_error": False, "text": "done"}, "b1": {"is_error": sub_result, "text": "x"}}}
+        return r, evidence(r, bash_match(c_sub), "sub")
+    shape = lambda events, **kw: (lambda r, ev: g1_agent_shape_verdict(r, ev, kw.get("sentinel", True))[0])(*agent_run(events, kw.get("err", False), kw.get("ok", True)))
+    assert shape([init_, res_]) == "PASS"
+    assert shape([init_, {"type": "system", "subtype": "task_started", "is_backgrounded": True}, res_]) == "FAIL", "子代理进了后台"
+    assert shape([init_, res_, init_, res_]) == "FAIL", "两个 init、两个 result：后台跑完又起了一轮"
+    assert shape([init_, res_], ok=False) == "INCONCLUSIVE"
+    assert shape([init_, res_], err=True) == "INCONCLUSIVE", "子代理里的命令被拒（结果是报错）：形状再对也不算"
+    assert shape([init_, res_], sentinel=False) == "INCONCLUSIVE", "命令没跑完（哨兵不在）"
+    direct = {**run([init_, res_]), "tool_uses": [], "tool_results": {}}
+    assert g1_agent_shape_verdict(direct, evidence(direct, bash_match(c_sub), "sub"), False)[0] == "INCONCLUSIVE", "模型直接回 DONE，没起子代理"
+    cmd = "sleep 20; touch /w/g1-bg"
+    use = {"id": "u1", "name": "Bash", "input": {"command": cmd, "run_in_background": True}, "parent": None}
+    rbg = {**run([init_, res_]), "tool_uses": [use], "tool_results": {"u1": {"is_error": True, "text": "run_in_background is disabled"}}}
+    status, label, detail = g1_bashbg_record(rbg, cmd, [{"input": {"tool_use_id": "u1"}}])
+    assert status == "INFO" and '"每次都进了 hook": true' in detail and "run_in_background is disabled" in detail and '"run_in_background"' in detail, detail
+    assert g1_bashbg_record({**rbg, "tool_uses": []}, cmd, [])[0] == "INCONCLUSIVE", "没有目标调用：没测成"
+    assert '"每次都进了 hook": false' in g1_bashbg_record(rbg, cmd, [])[2]
+    for fg in ({"command": cmd}, {"command": cmd, "run_in_background": False}):
+        assert g1_bashbg_record({**rbg, "tool_uses": [{**use, "input": fg}]}, cmd, [])[0] == "INCONCLUSIVE", "省掉或填 false：前台跑的，不算后台事实（2/F-4）"
+    two = {**rbg, "tool_uses": [use, {**use, "id": "u2", "input": {"command": cmd}}], "tool_results": {**rbg["tool_results"], "u2": {"is_error": False, "text": "ok"}}}
+    assert g1_bashbg_record(two, cmd, [])[0] == "INCONCLUSIVE", "重发的那一次前台跑了也不行"
+    assert G1_COMMAND_PROBES == ("Bash", "Agent", "BashBg") and G1_EXPECTED_TOOLS == 24
+    # 沙箱在场（审查 1/F-3）：对照写进去了、工作区外那一笔被沙箱的原文挡下
+    good = {"ctl_rc": "0\n", "ctl_exists": True, "rc": "1\n", "err": "touch: /o/x: Operation not permitted\n", "target_exists": False}
+    assert sandbox_was_present(good) and sandbox_was_present({**good, "err": "touch: cannot touch '/o/x': Read-only file system"})
+    for bad, why in (({"rc": "127\n", "err": "sh: /usr/bin/touch: No such file or directory"}, "找不到程序"),
+                     ({"err": "touch: /o/x: No such file or directory"}, "普通 I/O 错误（目录不存在）"),
+                     ({"err": "touch: /o/x: Permission denied"}, "权限不够不是沙箱的原文"),
+                     ({"ctl_rc": "1\n", "ctl_exists": False}, "对照失败：探针自己就写不了"),
+                     ({"rc": "0\n", "target_exists": True, "err": ""}, "写进去了"),
+                     ({"rc": None, "err": None}, "命令没跑到那一步")):
+        assert not sandbox_was_present({**good, **bad}), why
+    probe = {"target": "/o/x", "rc": "/w/x.rc", "err": "/w/x.err", "ctl": "/w/c"}
+    assert sandbox_probe_prefix(probe) == ("/usr/bin/touch /w/c 2> /w/c.err; echo $? > /w/c.rc; /usr/bin/touch /o/x 2> /w/x.err; echo $? > /w/x.rc; ")
+    # 真跑一遍这段前缀（不经沙箱）：对照与目标都写进去，错误原文为空 → 不算沙箱在场
+    pr = sandbox_probe_files("st-sbx")
+    subprocess.run(["sh", "-c", sandbox_probe_prefix(pr) + "true"], check=True)
+    real = read_sandbox_probe(pr)
+    assert real["ctl_exists"] and real["target_exists"] and real["rc"].strip() == "0" and not sandbox_was_present(real), real
+    # P4 的取证（审查 1/F-1）：从 p4_facts 开始
+    pcmd = "touch /o/p4-f1"
+    p_use = {"id": "t1", "name": "Bash", "input": {"command": pcmd}, "parent": None}
+    allow_row = {"input": {"hook_event_name": "PreToolUse", "tool_use_id": "t1"}, "answered": "allow"}
+    sbx_err = "Sandbox is required (sandbox.failIfUnavailable) and stopped being available in this session: x"
+    p_run = lambda text, err=True: {**run([init_, res_]), "tool_uses": [p_use], "tool_results": {"t1": {"is_error": err, "text": text}}}
+    no_init = lambda code: {"init": None, "timed_out": False, "exit": code, "events": [], "tool_uses": [], "tool_results": {}}
+    startup_err = "Error: sandbox unavailable detail: x. Set sandbox.failIfUnavailable=false to allow unsandboxed execution."
+    assert p4_facts(no_init(1), False, pcmd, [], startup_err)["refused"], "带沙箱不可用原文的启动失败"
+    assert not p4_facts(no_init(1), False, pcmd, [], "Invalid API key · Please run /login")["refused"], "认证失败不冒充"
+    assert not p4_facts(no_init(1), False, pcmd, [], "sandbox-exec: execvp() of 'claude' failed")["refused"], "外层包装起不来不冒充"
+    assert not p4_facts(no_init(134), False, pcmd, [], "panic: something")["refused"], "CLI 崩溃不冒充"
+    assert p4_facts(p_run(sbx_err), False, pcmd, [allow_row], "")["blocked"], "探针允许了、CLI 以沙箱不可用拒掉"
+    assert not p4_facts(p_run("Exit code 1"), False, pcmd, [allow_row], "")["blocked"], "别的报错不算"
+    assert not p4_facts(p_run(sbx_err), False, pcmd, [{**allow_row, "answered": "deny"}], "")["blocked"], "是 iWork 拒的，不是沙箱"
+    assert not p4_facts(p_run(sbx_err), False, pcmd, [], "")["blocked"], "探针没有这次调用的允许记录"
+    assert not p4_facts(p_run(sbx_err), True, pcmd, [allow_row], "")["blocked"], "写进去了就不是被挡下"
+    f1 = p4_facts(no_init(1), False, pcmd, [], "Invalid API key")
+    f2 = p4_facts(p_run("", err=False), True, "touch /o/p4-f2", [], "")
+    assert p4_verdict(True, f1, {**f2, "written": True})[0] == "INCONCLUSIVE", "认证失败那一次：F1 没测成，不是 PASS"
+    assert set(p4_not_run()) <= set(f1), "占位与真取的事实同一组键"
+    # 预检没过的正常路径走一遍处理器（vdir 审查 2/F-1：占位缺键时这里 KeyError）
+    saved_pre, before = nested_sandbox_preflight, dict(COUNTS)
+    nested_sandbox_preflight = lambda: (False, "selftest：假装预检没过")
+    try: r2x_p4()
+    finally: nested_sandbox_preflight = saved_pre
+    assert COUNTS["INCONCLUSIVE"] == before["INCONCLUSIVE"] + 3, "预检一行、F1、F2 都记 INCONCLUSIVE，不起实例"
+    assert p4_facts({**p_run(sbx_err), "unclean_plugins": ["x"]}, True, pcmd, [allow_row], "")["unclean"] and not f1["unclean"], "p4_facts 带上污染"
+    # cfgdir（T10f A 1/F-2 的实测格）
+    nm = {"home": "t0g-home-a", "cfgdir": "t0g-cfgdir-a", "custom": "t0g-custom-a"}
+    assert cfgdir_verdict(0, False, "t0g-home-a: /usr/bin/true - ✓ Connected", nm, "home")[0] == "PASS"
+    line = lambda n: f"{n}: /usr/bin/true  - ✓ Connected\n"
+    assert cfgdir_verdict(0, False, line("t0g-cfgdir-a"), nm, "home")[0] == "FAIL", "读了别的那一份"
+    assert cfgdir_verdict(0, False, line("t0g-home-a") + line("t0g-cfgdir-a"), nm, "cfgdir")[0] == "FAIL", "两份都列出来了"
+    assert cfgdir_verdict(1, False, line("t0g-home-a"), nm, "home")[0] == "INCONCLUSIVE" and cfgdir_verdict(0, True, "", nm, "home")[0] == "INCONCLUSIVE"
+    assert cfgdir_verdict(0, False, "No MCP servers configured.", nm, "home")[0] == "INCONCLUSIVE", "输出认不出"
+    assert "命中 ['custom']（1 条服务行），退出码 0" in cfgdir_verdict(0, False, line("t0g-custom-a"), nm, "custom")[1]
+    # 审查 3/F-1：严格解析，按精确服务名判，不按全文子串
+    assert cfgdir_verdict(0, False, "warning: ignored t0g-home-a\n", nm, "home")[:2] == ("INCONCLUSIVE", "输出里有认不出的行 1 条，这一格不下结论"), "名字只出现在一句话里"
+    assert cfgdir_verdict(0, False, line("t0g-home-a") + "some-remote https://x (needs auth)\n", nm, "home")[0] == "INCONCLUSIVE", "一条不合正则的外来服务行"
+    assert cfgdir_verdict(0, False, "Checking MCP server health…\n\n" + line("t0g-home-a"), nm, "home")[0] == "PASS", "固定标题与空行可以忽略"
+    assert cfgdir_verdict(0, False, line("t0g-home-a-extra"), nm, "home")[2] is True, "名字只是包含合成名：是外来服务（污染），不是命中"
+    foreign_line = "someone-elses: npx remote-thing - Connected\n"
+    assert cfgdir_verdict(1, False, foreign_line, nm, "home")[::2] == ("INCONCLUSIVE", True), "审查 4/F-1：退出码 1 也要先看污染"
+    assert cfgdir_verdict(0, True, foreign_line, nm, "home")[::2] == ("INCONCLUSIVE", True), "超时也要先看污染"
+    assert cfgdir_verdict(1, False, line("t0g-home-a"), nm, "home")[::2] == ("INCONCLUSIVE", False), "对照：异常退出、没有外来服务，不算污染"
+    assert list(CFGDIR_CASES) == ["没设", "设成空串", "显式设成默认目录", "自定义目录"] and CFGDIR_CASES["设成空串"][1] == "home"
+    lay_home = R.p("st-cfgdir-home"); os.mkdir(lay_home)
+    lay = cfgdir_layout(lay_home, "st")
+    assert {k: os.path.relpath(p_, lay_home) for k, (p_, _) in lay.items()} == {"home": ".claude.json", "cfgdir": ".claude/.claude.json", "custom": "custom-config/.claude.json"}
+    assert all(json.load(open(p_))["mcpServers"][n] == {"command": "/usr/bin/true"} for p_, n in lay.values())
+    assert "CLAUDE_CONFIG_DIR" not in child_env("t", {"CLAUDE_CONFIG_DIR": "/x"}, skip=("CLAUDE_CONFIG_DIR",)), "env_skip 能去掉任何点名的变量"
+    # P4 判定表
+    f = lambda written=False, refused=False, blocked=False, unclean=False: {"written": written, "refused": refused, "blocked": blocked, "exit": 0,
+                                                                            "unclean": unclean}
+    assert p4_verdict(True, f(written=True, unclean=True), f(written=True))[:2] == ("INCONCLUSIVE", "INCONCLUSIVE"), "F1 不干净：痕迹也不下结论"
+    assert p4_verdict(True, f(refused=True), f(written=True, unclean=True))[:2] == ("INCONCLUSIVE", "INCONCLUSIVE"), "对照不干净：两格都没测成"
+    assert p4_verdict(False, f(), f(written=True))[:2] == ("INCONCLUSIVE", "INCONCLUSIVE"), "预检没过"
+    assert p4_verdict(True, f(refused=True), f())[:2] == ("INCONCLUSIVE", "INCONCLUSIVE"), "F2 没写进去：造法无效"
+    assert p4_verdict(True, f(written=True), f(written=True))[:2] == ("FAIL", "PASS"), "F1 写进去了：拦不住"
+    assert p4_verdict(True, f(refused=True), f(written=True))[:2] == ("PASS", "PASS")
+    assert p4_verdict(True, f(blocked=True), f(written=True))[:2] == ("PASS", "PASS")
+    assert p4_verdict(True, f(), f(written=True))[:2] == ("INCONCLUSIVE", "PASS"), "F1 没写进去但没有正面证据"
+    ok, why = nested_sandbox_preflight()
+    assert isinstance(ok, bool) and why, why
+    if sys.platform == "darwin": assert "外层一层的退出码=0" in why, f"外层全放行的 sandbox-exec 自己起得来：{why}"
+    # R2X 的新部分：recheck 三项、p4 一项，按名字分派
+    assert R2X_PARTS["recheck"] == ("g1", "g8", "g7") and r2x_handler("g7") is g7_product_cells and r2x_handler("f") is r2x_p4
+    # 产品设置：dontAsk、产品沙箱（failIfUnavailable 在）、hook 的 timeout 与 onFailure
+    st = json.load(open(product_settings("st-prod", "allow-sandboxed", expect(bash=["x"]))[0]))
+    assert st["permissions"]["defaultMode"] == "dontAsk" and st["sandbox"]["enabled"] and "failIfUnavailable" in st["sandbox"]
+    assert st["hooks"]["PreToolUse"][0]["hooks"][0]["onFailure"] == "block" and " allow-sandboxed " in st["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    # 列进程：不经 ps，自己、自己的父进程与进程组都对；子进程查得到
+    rows = ps_table()
+    me = next(r for r in rows if r["pid"] == os.getpid())
+    assert me["ppid"] == os.getppid() and me["pgid"] == os.getpgid(0) and me["comm"], me
+    child = subprocess.Popen(["/bin/sleep", "30"])
+    try:
+        kid = next((r for r in descendants(os.getpid()) if r["pid"] == child.pid), None)
+        assert kid and os.path.basename(kid["comm"]) == "sleep", kid
+    finally:
+        child.kill(); child.wait()
+
+
+def selftest_cfgdir_isolation():
+    """cfgdir 那一格（审查 2/F-1、2/F-2）：只选它时开跑前只在隔离环境里问一次 --version，不起别的 claude；四条命令都是
+    `claude mcp list`（没有 -p），都在隔离的环境里：HOME、安全存储目录是本次的临时目录，继承来的认证与存储变量都去掉了。
+    走真的 run_selected，claude 在调用边界换成记录替身（CLAUDE_CLI 显式绑定，不靠 PATH）。"""
+    calls_log = R.p("out", "st-claude-calls.jsonl")
+    stub_dir = R.p("st-claude-stub"); os.mkdir(stub_dir)
+    stub = os.path.join(stub_dir, "claude")
+    open(stub, "w").write(f"""#!{sys.executable}
+import json, os, sys
+keep = ("HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR")
+with open({calls_log!r}, "a") as f:
+    f.write(json.dumps({{"argv": sys.argv[1:], "env": {{k: os.environ.get(k) for k in keep}}, "has_config_dir": "CLAUDE_CONFIG_DIR" in os.environ,
+                        "names": sorted(k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC", "AWS_")))}}) + "\\n")
+if os.path.exists({os.path.join(R.p("st-claude-stub"), "pollute")!r}): print("someone-elses: npx remote-thing  - ✓ Connected"); sys.exit(1)
+""")
+    os.chmod(stub, 0o755)
+    planted = {"ANTHROPIC_API_KEY": "planted-not-a-key", "CLAUDE_CODE_OAUTH_TOKEN": "planted-login", "CLAUDE_SECURESTORAGE_CONFIG_DIR": "/planted/real-store",
+               "CLAUDE_CONFIG_DIR": "/planted/real-config", "AWS_BEARER_TOKEN_BEDROCK": "planted"}
+    saved_env = {k: os.environ.get(k) for k in [*planted, "PATH"]}
+    saved_a = (A.only, A.part, A.cells)
+    global CLAUDE_CLI
+    saved_cli = CLAUDE_CLI
+    # 审查 repo 2/F-5：跑 selftest 的人给了 --claude-cli 或 IWORK_CLAUDE_CLI（这里用一个「不许被执行」的替身代表），selftest 也只执行自己的替身
+    forbidden_log = R.p("out", "st-forbidden-cli.log")
+    forbidden = os.path.join(stub_dir, "forbidden-claude")
+    open(forbidden, "w").write(f"#!/bin/sh\necho called >> {shlex.quote(forbidden_log)}\n"); os.chmod(forbidden, 0o755)
+    CLAUDE_CLI = forbidden
+    saved_env["IWORK_CLAUDE_CLI"] = os.environ.get("IWORK_CLAUDE_CLI")
+    os.environ["IWORK_CLAUDE_CLI"] = forbidden
+    try:
+        os.environ.update(planted)
+        os.environ["PATH"] = stub_dir + os.pathsep + saved_env["PATH"]
+        A.only, A.part, A.cells = "R2X", "cfgdir", None
+        CLAUDE_CLI = stub                     # 在调用边界显式绑定自己的替身：跑 selftest 时给了 --claude-cli / IWORK_CLAUDE_CLI 也不会去执行那个程序
+        assert model_free_selection()
+        run_selected()
+    finally:
+        A.only, A.part, A.cells = saved_a
+        CLAUDE_CLI = saved_cli
+        for k, v in saved_env.items():
+            if v is None: os.environ.pop(k, None)
+            else: os.environ[k] = v
+    assert not os.path.exists(forbidden_log), "给了的 CLI（--claude-cli / IWORK_CLAUDE_CLI）一次都没被执行"
+    all_calls = [json.loads(l) for l in open(calls_log)]
+    version_calls, calls = all_calls[:1], all_calls[1:]
+    assert version_calls and version_calls[0]["argv"] == ["--version"], "开跑时先在隔离环境里问一次版本"
+    v_env = version_calls[0]
+    assert v_env["env"]["HOME"] == R.p("version-home") and not {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} & set(v_env["names"]) and not v_env["has_config_dir"]
+    assert json.load(open(os.path.join(R.out, "claude-version.json")))["baseline"] == BASELINE_CLI_VERSION
+    home, secure = R.p("cfgdir-home"), R.p("cfgdir-securestorage")
+    assert len(calls) == 4 and all(c["argv"] == ["mcp", "list"] for c in calls), f"只跑四次 claude mcp list，开跑前没有别的 claude 命令：{calls}"
+    assert not any("-p" in c["argv"] for c in calls)
+    for c in calls:
+        assert c["env"]["HOME"] == home and c["env"]["CLAUDE_SECURESTORAGE_CONFIG_DIR"] == secure, "HOME 与安全存储目录都是本次的临时目录（反例：继承了存储变量）"
+        assert not {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "AWS_BEARER_TOKEN_BEDROCK"} & set(c["names"]), f"继承来的认证变量去掉了（反例：已有登录）：{c['names']}"
+    got = [(c["has_config_dir"], c["env"]["CLAUDE_CONFIG_DIR"]) for c in calls]
+    assert got == [(False, None), (True, ""), (True, os.path.join(home, ".claude")), (True, os.path.join(home, "custom-config"))], got
+    # 审查 3/F-2：第一格就看到外来服务（污染）→ 立即停下，入口只起了一次 claude，剩下三格记「没跑」
+    open(os.path.join(stub_dir, "pollute"), "w").close()
+    for d in (home, secure): shutil.rmtree(d)
+    os.remove(calls_log)
+    before = COUNTS["INCONCLUSIVE"]
+    try:
+        os.environ["PATH"] = stub_dir + os.pathsep + saved_env["PATH"]
+        A.only, A.part, A.cells = "R2X", "cfgdir", None
+        CLAUDE_CLI = stub
+        run_selected()
+    finally:
+        A.only, A.part, A.cells = saved_a
+        os.environ["PATH"] = saved_env["PATH"]
+        CLAUDE_CLI = saved_cli
+        if saved_env["IWORK_CLAUDE_CLI"] is None: os.environ.pop("IWORK_CLAUDE_CLI", None)
+        else: os.environ["IWORK_CLAUDE_CLI"] = saved_env["IWORK_CLAUDE_CLI"]
+    assert not os.path.exists(forbidden_log)
+    # 两种入口的解析：--claude-cli 优先，其次 IWORK_CLAUDE_CLI，都没给是 PATH 上的 claude；相对路径、不存在的、不能执行的都拒
+    assert resolve_claude_cli(None, None) == "claude" and resolve_claude_cli(forbidden, None) == forbidden and resolve_claude_cli(None, forbidden) == forbidden
+    assert resolve_claude_cli(stub, forbidden) == stub, "--claude-cli 压过环境变量"
+    for bad in ("claude", "rel/claude", R.p("no-such-claude"), R.p("out")):
+        try: resolve_claude_cli(bad, None)
+        except ValueError: pass
+        else: raise AssertionError(f"{bad!r} 应当被拒")
+    assert len([l for l in open(calls_log) if '"mcp"' in l]) == 1, "污染之后不再起 claude（替身输出外来服务后以 1 退出：异常退出也先看污染）"
+    assert COUNTS["INCONCLUSIVE"] - before == 4, "四格都是 INCONCLUSIVE：第一格污染、后三格没跑"
+    # 别的选择照常做准备
+    for only, part, cells in (("R2X", "recheck", None), ("R2X", None, None), ("G1", None, None), ("R2X", None, ("cfg", "k3")), ("R2X,G1", "cfgdir", None)):
+        A.only, A.part, A.cells = only, part, cells
+        try: assert not model_free_selection(), (only, part, cells)
+        finally: A.only, A.part, A.cells = saved_a
+    A.only, A.part, A.cells = "R2X", None, ("cfg",)
+    try: assert model_free_selection(), "--cell cfg 也算"
+    finally: A.only, A.part, A.cells = saved_a
+    # 纯函数：环境与污染
+    extra, skip = cfgdir_env(["PATH", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "AWS_PROFILE"], "/h", "/s", None, "/c")
+    assert extra == {"HOME": "/h", "CLAUDE_SECURESTORAGE_CONFIG_DIR": "/s"} and "CLAUDE_CONFIG_DIR" in skip and "ANTHROPIC_BASE_URL" in skip
+    assert "CLAUDE_SECURESTORAGE_CONFIG_DIR" not in skip and "PATH" not in skip and "AWS_PROFILE" in skip
+    nm = {"home": "t0g-home-a", "cfgdir": "t0g-cfgdir-a", "custom": "t0g-custom-a"}
+    out = "Checking MCP server health…\n\nt0g-home-a: /usr/bin/true  - ✓ Connected\n"
+    assert cfgdir_verdict(0, False, out, nm, "home")[0] == "PASS" and mcp_list_parse(out) == (["t0g-home-a"], [])
+    polluted = out + "claude.ai Gmail: https://gmail.mcp.claude.com/mcp - ! Needs authentication\n"
+    assert cfgdir_verdict(0, False, polluted, nm, "home")[::2] == ("INCONCLUSIVE", True), "已有登录：带出了账号里的远程服务，标成污染"
+    assert cfgdir_verdict(0, False, out + "my-own: npx thing - ✓ Connected\n", nm, "home")[0] == "INCONCLUSIVE", "带进了别的配置"
+
+
+def selftest_repo():
+    """--part repo（方案 3.1c 的 RC1–RC8）：各格的判据（正反例）、现做插件的形状、两个记录用的 hook 真跑一次。"""
+    c = lambda src, target=False, valid=True, foreign=(): {"source": src, "target": target, "valid": valid, "foreign": list(foreign)}
+    assert rc1_verdict(c("context"), c("context", True))[:2] == ("INFO", "INFO"), "RC1 暗号出现：加载了"
+    st, st_ctl, why = rc1_verdict(c("absent"), c("context", True))
+    assert (st, st_ctl) == ("INFO", "INFO") and "不加载" in why, why
+    st, _, why = rc1_verdict(c("absent"), c("absent", True))
+    assert st == "INCONCLUSIVE" and "不写成" in why, "对照没答出暗号：RC1 只能看暗号，没出现不写成不加载"
+    st, _, why = rc1_verdict(c("absent"), c("context", False))
+    assert st == "INCONCLUSIVE" and why.endswith("（覆盖不全）"), f"对照暗号出现而 hook 没记到目标：点名覆盖不全：{why}"
+    assert rc1_verdict(c("context", False), c("context", True))[2].endswith("InstructionsLoaded 覆盖不全"), "RC1 自己暗号出现而 hook 没记到"
+    assert rc1_verdict(c(None), c("context", True))[0] == "INCONCLUSIVE", "来源归不了因"
+    assert rc1_verdict(c("absent", True), c("context", True))[2].startswith("产品参数下 AGENTS.md 加载了（hook 记到了")
+    assert rc1_verdict(c("absent"), c("context", True, foreign=["CLAUDE.md"]))[0] == "INCONCLUSIVE", "审查 repo 1/F-2：对照被污染，负向结论下不了"
+    # 审查 repo 2/F-4：产品格的正面证据自己成立，不被对照失效抹掉
+    for bad_ctl in (c(None), c("context", True, valid=False), c("absent", True, foreign=["CLAUDE.md"])):
+        assert rc1_verdict(c("context", True), bad_ctl)[:2] == ("INFO", "INCONCLUSIVE"), f"产品格暗号成立、对照超时或没来源：{bad_ctl}"
+    assert rc1_verdict(c("context", True, foreign=["CLAUDE.md"]), c("context", True))[0] == "INCONCLUSIVE", "产品格自己被污染"
+    # 审查 repo 1/F-3：加载事件要对上目标那份 AGENTS.md；hook 按真实路径比，只记文件名
+    tmp = R.p("st-rc1"); os.makedirs(os.path.join(tmp, "other"))
+    target = os.path.join(tmp, "AGENTS.md"); open(target, "w").write("x")
+    cmd, log = instructions_hook("st-rc1", target)
+    for path in (target, os.path.join(tmp, "other", "AGENTS.md"), os.path.join(tmp, "CLAUDE.md")):
+        subprocess.run(shlex.split(cmd), input=json.dumps({"hook_event_name": "InstructionsLoaded", "file_path": path, "content": "t0g-content-x"}), text=True, check=True)
+    assert [(r_["file"], r_["is_target"]) for r_ in jsonl_rows(log)] == [("AGENTS.md", True), ("AGENTS.md", False), ("CLAUDE.md", False)]
+    assert "t0g-content-x" not in open(log).read() and tmp not in open(log).read(), "只记文件名与是不是目标"
+    # 污染时原始 stream / stderr 不入包，只留结构化事实（父目录说明里放了合成的隐私标记）
+    leak = "t0g-parent-private-" + secrets.token_hex(4)
+    for suffix in ("-stream.jsonl", "-stderr.txt"): open(os.path.join(R.out, "st-rc1-leak" + suffix), "w").write(f"... {leak} ...")
+    fake_run = {"init": {"plugins": []}, "timed_out": False, "exit": 0, "unclean_plugins": [], "tool_uses": [], "tool_results": {},
+                "events": [], "result": {"result": "NONE"}}
+    facts = rc1_cell_facts(fake_run, [], "t0g-code", [{"file": "CLAUDE.md", "is_target": False}, {"file": "AGENTS.md", "is_target": True}], "st-rc1-leak")
+    assert facts["foreign"] == ["CLAUDE.md"] and not facts["valid"] and facts["target"]
+    assert not any(leak in open(os.path.join(R.out, f_)).read() for f_ in os.listdir(R.out) if os.path.isfile(os.path.join(R.out, f_))), "合成的隐私标记没进结果包"
+    for suffix in ("-stream.jsonl", "-stderr.txt"): open(os.path.join(R.out, "st-rc1-clean" + suffix), "w").write("ok")
+    assert rc1_cell_facts(fake_run, [], "t0g-code", [{"file": "AGENTS.md", "is_target": True}], "st-rc1-clean")["valid"]
+    assert os.path.exists(os.path.join(R.out, "st-rc1-clean-stream.jsonl")), "对照：没污染的照常留着"
+    anc = os.path.realpath(R.p("st-anc", "a", "b")); os.makedirs(anc)
+    mine = lambda: [p_ for p_ in instruction_ancestors(os.path.join(anc, "x")) if p_.startswith(os.path.realpath(R.p("st-anc")))]
+    assert mine() == [], "对照：本次建的几级里没有说明类的东西"
+    open(R.p("st-anc", "a", "CLAUDE.md"), "w").write("x"); os.mkdir(R.p("st-anc", "a", "b", ".claude"))
+    assert mine() == [os.path.join(anc, ".claude"), os.path.join(os.path.realpath(R.p("st-anc", "a")), "CLAUDE.md")], "工作目录这一级与上级目录里的都查得到"
+    f = lambda answer="OK", sid="s1", a=None, b=None, valid=True: {"valid": valid, "answer": answer, "sid": sid, "source_a": a, "source_b": b}
+    A_, B_ = "t0g-rc3a-x", "t0g-rc3b-y"
+    assert rc3_verdict(f(), f(a="context", b="absent"), f(b="context"), A_, B_)[0] == "INFO"
+    assert "旧的" in rc3_verdict(f(), f(a="context", b="absent"), f(b="context"), A_, B_)[1]
+    assert "换成了新的" in rc3_verdict(f(), f(a="absent", b="context"), f(b="context"), A_, B_)[1]
+    assert rc3_verdict(f(answer=f"OK {A_}"), f(a="context"), f(b="context"), A_, B_)[0] == "INCONCLUSIVE", "首轮回答里出现了 A：作废"
+    assert rc3_verdict(f(), f(a="context"), f(b="absent"), A_, B_)[0] == "INCONCLUSIVE", "新会话对照没答出 B"
+    assert rc3_verdict(f(), f(a="context", b="context"), f(b="context"), A_, B_)[0] == "INCONCLUSIVE", "两个都答"
+    assert rc3_verdict(f(), f(sid="other", a="context"), f(b="context"), A_, B_)[0] == "INCONCLUSIVE", "接的不是同一个会话"
+    init_ = {"type": "system", "subtype": "init", "plugins": []}
+    T = "touch /w/rc5"
+    use = {"id": "t1", "name": "Bash", "input": {"command": T}, "parent": None}
+    run = lambda err, text=None, unclean=(): {"init": init_, "timed_out": False, "exit": 0, "unclean_plugins": list(unclean), "tool_uses": [use],
+                                              "tool_results": {"t1": {"is_error": err, "text": text if text is not None else ("iwork-t0g deny" if err else "")}}, "events": []}
+    hk = [{"input": {"tool_use_id": "t1", "hook_event_name": "PreToolUse"}}]
+    cell = lambda err, executed, answer, text=None, unclean=(): {"ev": bash_ev(run(err, text, unclean), T, hk, many=True), "executed": executed, "answers": {"t1": answer}}
+    allow_ok = cell(False, True, "allow")
+    assert rc5_verdict(cell(True, False, "deny"), allow_ok) == ("PASS", "")
+    assert rc5_verdict(cell(False, True, "deny"), allow_ok)[0] == "FAIL", "探针答拒绝，命令照样执行了"
+    assert rc5_verdict(cell(True, False, "deny"), cell(False, False, "allow"))[0] == "INCONCLUSIVE", "对照没成立"
+    assert rc5_verdict(cell(True, False, "deny"), cell(False, True, "deny"))[0] == "INCONCLUSIVE", "对照那一格探针答的不是 allow"
+    assert rc5_verdict(cell(True, False, "allow", "Exit code 1"), allow_ok)[0] == "INCONCLUSIVE", "审查 repo 1/F-4：探针答的是 allow，报错是普通执行错误"
+    assert rc5_verdict(cell(True, False, "deny", "Exit code 1"), allow_ok)[0] == "INCONCLUSIVE", "答了 deny，但结果里不是探针的拒绝原文"
+    assert rc5_verdict(cell(True, False, None), allow_ok)[0] == "INCONCLUSIVE", "没有这次调用的答复记录"
+    assert rc5_verdict(cell(True, False, "deny", unclean=["x"]), allow_ok)[0] == "INCONCLUSIVE", "环境不干净"
+    assert probe_answers([{"input": {"tool_use_id": "a"}, "answered": "deny"}, {"input": {"tool_use_id": "b"}}]) == {"a": "deny"}
+    assert rc7_verdict(True, True, "1", "touch: /o/t: Operation not permitted", False)[1].startswith("内联命令在沙箱里")
+    assert rc7_verdict(True, True, "0", "", True)[1].startswith("内联命令不在沙箱里")
+    assert rc7_verdict(False, True, "1", "Operation not permitted", False)[0] == "INCONCLUSIVE", "无沙箱对照没成立"
+    assert rc7_verdict(True, False, "1", "Operation not permitted", False)[0] == "INCONCLUSIVE", "内联命令没跑"
+    assert rc7_verdict(True, True, "1", "touch: /o/t: No such file or directory", False)[0] == "INCONCLUSIVE", "目录不存在不是沙箱"
+    good = {"tried": True, "ok": True}
+    shut = {"tried": True, "denied": True, "breached": False}
+    assert rc8_verdict(good, good, shut, shut)[0] == "PASS"
+    assert rc8_verdict({"tried": True, "ok": False}, good, shut, shut)[0] == "FAIL", "参考文件读不到：复制件的位置要重选"
+    assert rc8_verdict(good, {"tried": False, "ok": False}, shut, shut)[0] == "INCONCLUSIVE", "脚本那一步没试"
+    assert rc8_verdict(good, good, {**shut, "breached": True}, shut)[0] == "FAIL", "cat 读到了 settings.json 的内容"
+    assert rc8_verdict(good, good, shut, {**shut, "denied": False})[0] == "INCONCLUSIVE", "touch 失败但不是沙箱的原文"
+    sp = R.p("st-rc8-settings.json"); open(sp, "w").write("{}")
+    os.utime(sp, ns=(RC8_OLD_MTIME_NS, RC8_OLD_MTIME_NS))
+    snap = rc8_snapshot(sp)
+    assert snap[1] == RC8_OLD_MTIME_NS and not rc8_breached(snap, rc8_snapshot(sp))
+    os.utime(sp, None)
+    assert rc8_breached(snap, rc8_snapshot(sp)), "审查 repo 1/F-6：内容没变、时间戳变了，也算被写过"
+    assert rc8_breached(snap, None), "文件没了也算"
+    assert one_candidate(["repo:x", "other"], "x") == "repo:x" and one_candidate(["a:x", "b:x"], "x") is None and one_candidate([], "x") is None, "审查 repo 1/F-8"
+    # RC6 的收尾（supervisor 2026-11-13：不删用户配置目录里的东西，只出清单）：两个目录与各三个文件都在清单里，磁盘上一样不少
+    root_ = R.p("st-rc6-normal"); os.makedirs(root_)
+    state, files = rc6_prepare(root_, ["iwork-t0g-probe-a", "repo:iwork-t0g-probe-a"], "t0g-c", token="iwork-t0g-probe-a")
+    items = rc6_cleanup(state)
+    cands = {it["路径"] for it in items if it["清理候选"]}
+    assert cands == {os.path.dirname(f_[0]) for f_ in files}, cands
+    assert [it for it in items if it["路径"] == os.path.join(root_, RC6_PARENT)][0]["清理候选"] is False, "共享的 agent-memory 不是候选"
+    assert all(os.path.exists(p_) for f_ in files for p_ in f_), "一样都没删"
+    pre = R.p("st-rc6-exists"); os.makedirs(os.path.join(pre, RC6_PARENT, "iwork-t0g-probe-b"))
+    try: rc6_prepare(pre, ["iwork-t0g-probe-b"], "t0g-c")
+    except FileExistsError: pass
+    else: raise AssertionError("目录已经存在：不碰")
+    assert os.path.isdir(os.path.join(pre, RC6_PARENT, "iwork-t0g-probe-b")), "已经存在的不动"
+    # 版本记录（supervisor 2026-11-13：本机已更新到 2.1.323）
+    assert cli_version_facts("2.1.322 (Claude Code)\n", "/x/claude") == ({"cli": "/x/claude", "version": "2.1.322", "baseline": "2.1.322"}, "")
+    facts_v, warn = cli_version_facts("2.1.323 (Claude Code)\n", "/x/claude")
+    assert facts_v["version"] == "2.1.323" and "2.1.322" in warn and "--claude-cli" in warn
+    assert cli_version_facts("", "/x/claude")[1], "没读出版本也要提示"
+    # 现做插件的形状：名字是 repo，三样各在自己的目录；文件头里另加的几行原样进去
+    d = repo_plugin("st-repo", skill=("s1", "allowed-tools: Bash\n", "Body\n"), command=("c1", "C\n"), agent=("g1", "memory: user\n", "G\n"))
+    assert json.load(open(os.path.join(d, ".claude-plugin", "plugin.json")))["name"] == REPO_PLUGIN
+    assert "allowed-tools: Bash\n---\nBody" in open(os.path.join(d, "skills", "s1", "SKILL.md")).read()
+    assert "memory: user\n---\nG" in open(os.path.join(d, "agents", "g1.md")).read() and os.path.isfile(os.path.join(d, "commands", "c1.md"))
+    assert not os.path.exists(os.path.join(d, "hooks")) and not os.path.exists(os.path.join(d, ".mcp.json")), "现做插件里没有 hooks、没有 MCP 配置"
+    assert listed_names({"skills": ["simplify", "repo:s1"], "agents": [{"name": "repo:g1"}]}, "skills", "s1") == ["repo:s1"]
+    assert listed_names({"agents": [{"name": "repo:g1"}]}, "agents", "g1") == ["repo:g1"] and listed_names(None, "agents", "g1") == []
+    assert notes_prompt("AGENTS.md", "X").endswith("以下是这个项目的说明文件 AGENTS.md 的内容：\nX")
+    # 两个记录用的 hook 真跑一次：InstructionsLoaded 只记文件名；技能文件头的 hook 只记 id、答允许
+    front, log2 = skill_hook_frontmatter("st-rc5")
+    hook_cmd = json.loads(front.split("command: ", 1)[1].strip())
+    out = subprocess.run(shlex.split(hook_cmd), input=json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_use_id": "u9",
+                                                                 "tool_input": {"command": "touch /x t0g-arg-y"}}), capture_output=True, text=True)
+    assert json.loads(out.stdout)["hookSpecificOutput"]["permissionDecision"] == "allow" and jsonl_rows(log2) == [{"tool_use_id": "u9", "tool_name": "Bash"}]
+    assert "t0g-arg-y" not in open(log2).read() and front.startswith("hooks:\n  PreToolUse:")
+    assert R2X_PARTS["repo"] == ("rc1", "rc2", "rc3", "rc4", "rc5", "rc6", "rc7", "rc8") and not set(R2X_PARTS["repo"]) & MODEL_FREE_CELLS
+
+
+def selftest_vdir_a():
+    """--part vdir 第一批（V1、V2、V4a–d、V5、V7、V13a）能纯算的几样，每样配反例。"""
+    assert auth_logged_in('{"loggedIn": true, "authMethod": "x", "email": "e@x"}', 0) is True and auth_logged_in('{"loggedIn": false}', 0) is False
+    assert auth_logged_in('{"loggedIn": false}', 1) is False, "没登录时退出码是 1，照样认（vdir 审查 1/F-5）"
+    assert auth_logged_in('{"loggedIn": true}', 1) is None and auth_logged_in('{"loggedIn": false}', 2) is None, "真假与退出码对不上：不知道"
+    assert auth_logged_in('{"loggedIn": false}', 1, timed_out=True) is None and auth_logged_in("Not logged in", 1) is None
+    assert auth_logged_in('{"loggedIn": "yes"}', 0) is None and auth_logged_in("[]", 0) is None
+    assert vdir_pair("PASS", "PASS") == "PASS" and vdir_pair("FAIL", "PASS") == "FAIL"
+    assert vdir_pair("PASS", "FAIL") == "INCONCLUSIVE" and vdir_pair("FAIL", "INCONCLUSIVE") == "INCONCLUSIVE", "对照没过：被对照的那一格不管怎样都是 INCONCLUSIVE"
+    d = R.p("st-vdir")
+    os.makedirs(d, exist_ok=True)
+    inside = {"plugins": [{"name": "t0g-vplugin-x", "source": "t0g-vplugin-x@m", "path": os.path.join(d, "plugins", "cache", "p")}]}
+    outside = {"plugins": [{"name": "t0g-vplugin-x", "source": "t0g-vplugin-x@m", "path": "/elsewhere/p"}]}
+    assert plugin_under(inside, "t0g-vplugin-x", d) and not plugin_under(outside, "t0g-vplugin-x", d) and not plugin_under({"plugins": []}, "t0g-vplugin-x", d)
+    assert plugin_listed(outside, "t0g-vplugin-x") and not plugin_listed(None, "t0g-vplugin-x")
+    both = {"touch": "PASS", "追加": "PASS"}
+    assert v13a_verdict(False, both, False, False) == "PASS"
+    assert v13a_verdict(False, both, True, False) == "FAIL" and v13a_verdict(False, {"touch": "INCONCLUSIVE", "追加": "INCONCLUSIVE"}, False, True) == "FAIL", \
+        "痕迹就是证据，调用证据不齐也 FAIL"
+    assert v13a_verdict(True, both, True, True) == "INCONCLUSIVE", "不干净排在痕迹之前（vdir 审查 1/F-2）"
+    assert v13a_verdict(False, {**both, "追加": "INCONCLUSIVE"}, False, False) == "INCONCLUSIVE", "一条没证据：没测成（vdir 审查 1/F-1）"
+    assert v13a_verdict(False, {**both, "touch": "FAIL"}, False, False) == "FAIL"
+    # V13a 的每一条按 tool_use_id 核探针允许：拒的不是 iWork 才算（obs_verdict 吃 bash_ev(rows=允许的)）
+    v13_cmd = "touch /d/x"
+    v13_r = {"init": {}, "timed_out": False, "exit": 0, "unclean_plugins": [], "tool_uses": [{"id": "u1", "name": "Bash", "input": {"command": v13_cmd}, "parent": None}],
+             "tool_results": {"u1": {"is_error": True, "text": "Exit code 1"}}}
+    v13_obs = {"rc": "1", "out": "touch: /d/x: Operation not permitted", "ctl_rc": "0", "ctl_out": ""}
+    allow_u1 = [{"input": {"tool_use_id": "u1"}, "answered": "allow"}]
+    assert obs_verdict(bash_ev(v13_r, v13_cmd, rows=allow_u1, many=True), v13_obs, False) == "PASS"
+    assert obs_verdict(bash_ev(v13_r, v13_cmd, rows=[], many=True), v13_obs, False) == "INCONCLUSIVE", "探针没有这次的允许记录：拒的可能是 hook"
+    assert obs_verdict(bash_ev(v13_r, v13_cmd, rows=allow_u1, many=True), {**v13_obs, "out": "hook error"}, False) == "INCONCLUSIVE", "没有沙箱原文"
+    # V1a/V9 走替身真跑：不设时 JSON 正常、退出码 1 → 记 false，不丢成未知
+    auth_stub_dir = R.p("st-auth-stub"); os.mkdir(auth_stub_dir)
+    auth_stub = os.path.join(auth_stub_dir, "claude")
+    open(auth_stub, "w").write(f"""#!{sys.executable}
+import json, os, sys
+store = os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+print(json.dumps({{"loggedIn": store is not None, "email": "x@y"}})); sys.exit(0 if store is not None else 1)
+""")
+    os.chmod(auth_stub, 0o755)
+    global CLAUDE_CLI
+    saved_cli, saved_vdir = CLAUDE_CLI, dict(VDIR)
+    CLAUDE_CLI = auth_stub
+    try:
+        VDIR.update(storage=None, checked=False, why="")
+        before = COUNTS["INFO"]
+        assert vdir_login() and VDIR["storage"] == "" and COUNTS["INFO"] == before + 1, "对照（不设）认出了 false，选了空串，记 INFO"
+    finally:
+        CLAUDE_CLI = saved_cli; VDIR.clear(); VDIR.update(saved_vdir)
+    market, market_name, plugins = vdir_plugin_market("st", count=2, marks=R.p("st-vdir-marks"))
+    m = json.load(open(os.path.join(market, ".claude-plugin", "marketplace.json")))
+    assert m["name"] == market_name and [p["name"] for p in m["plugins"]] == [n for n, _ in plugins] and len({n for n, _ in plugins}) == 2
+    for (name, marker), entry in zip(plugins, m["plugins"]):
+        assert os.path.isfile(os.path.join(market, entry["source"], ".claude-plugin", "plugin.json"))
+        hooks = json.load(open(os.path.join(market, "plugins", name, "hooks", "hooks.json")))
+        assert hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] == f"touch {marker}" and os.path.dirname(marker) == R.p("st-vdir-marks")
+    assert vdir_args() == ["--setting-sources", "user", "--strict-mcp-config", "--mcp-config", R.p("cfg", "empty-mcp.json")] and vdir_args("")[1] == ""
+    saved = dict(VDIR)
+    try:
+        VDIR.update(storage="", checked=True, why="")
+        assert vdir_env(d) == {"CLAUDE_CONFIG_DIR": d, "CLAUDE_SECURESTORAGE_CONFIG_DIR": ""} and vdir_cell_gate("st")
+        VDIR.update(storage=None, checked=True, why="登不上")
+        before = COUNTS["INCONCLUSIVE"]
+        assert not vdir_cell_gate("st") and COUNTS["INCONCLUSIVE"] == before + 1, "V1 没登上：后面的格记 INCONCLUSIVE、不起实例"
+    finally:
+        VDIR.clear(); VDIR.update(saved)
+    assert len(VDIR_DISPOSABLE) == 29 and len(set(VDIR_DISPOSABLE)) == 29, "一次性环境的 29 个子格都登记了"
+    assert set(R2X_PARTS["vdir"]) == {"v1", "v2", "v4", "v5", "v7", "v10", "v12", "v13", "vx"}
+    # V2a–V2d（main 524b291）
+    g = {"V2a": "dontAsk", "V2b": "acceptEdits", "V2c": "default", "V2d": "bypassPermissions"}
+    assert v2_verdicts(g) == {"V2a": "PASS", "V2b": "PASS", "V2c": "PASS", "V2d": "PASS"}
+    assert v2_verdicts({**g, "V2a": "default"})["V2a"] == "FAIL", "default 也是 FAIL：用户层赢了、bypass 被禁用设置跳过"
+    assert v2_verdicts({**g, "V2b": "default"}) == {"V2a": "INCONCLUSIVE", "V2b": "FAIL", "V2c": "PASS", "V2d": "PASS"}, "用户层没被读到：V2a 说明不了"
+    assert v2_verdicts({**g, "V2b": None, "V2a": "default"})["V2a"] == "INCONCLUSIVE", "对照没过：V2a 报了值也不下结论（2/F-2）"
+    assert v2_verdicts({**g, "V2c": "bypassPermissions"})["V2c"] == "FAIL"
+    assert v2_verdicts({**g, "V2d": "default"})["V2c"] == "INCONCLUSIVE" and v2_verdicts({**g, "V2d": "default"})["V2d"] == "FAIL"
+    assert v2_verdicts({**g, "V2d": "default", "V2c": "bypassPermissions"})["V2c"] == "INCONCLUSIVE", "V2d 没过：V2c 报 bypass 也不下结论（2/F-2）"
+    assert v2_verdicts({**g, "V2c": None})["V2c"] == "INCONCLUSIVE" and v2_verdicts({**g, "V2d": None})["V2c"] == "INCONCLUSIVE"
+    assert set(V2_CELLS["V2d"][1]) == {"defaultMode", "disableBypassPermissionsMode"} and V2_CELLS["V2a"][1] == ()
+
+
+# 假会话程序：对每条控制请求按 request_id 回一条 control_response；mcp_toggle 回报错，mcp_status 回一张服务表
+# 回复里塞了「秘密」（ST_SECRET）：外来服务名、服务配置的参数、报错原文、initialize 里没登记的字段。结果包里一个都不许有（vdir 审查 3/F-1）
+ST_SECRET = "t0g-secret-ZQ81"
+ST_FAKE_CONTROL = r'''import json, sys
+S = sys.argv[1]
+for line in sys.stdin:
+    req = json.loads(line)
+    rid, sub = req["request_id"], req["request"]["subtype"]
+    if sub == "mcp_toggle": resp = {"subtype": "error", "request_id": rid, "error": "no such server " + S}
+    elif sub == "mcp_status": resp = {"subtype": "success", "request_id": rid, "response": {"mcpServers": [
+        {"name": "t0g-u2", "status": "disabled", "config": {"command": "x", "args": ["--token", S]}, "serverInfo": {"name": S}},
+        {"name": "claude.ai " + S, "status": "connected", "error": S}]}}
+    else: resp = {"subtype": "success", "request_id": rid, "response": {"current_permission_mode": "dontAsk", "emailAddress": S}}
+    sys.stdout.write(json.dumps({"type": "control_response", "response": resp}) + "\n"); sys.stdout.flush()
+'''
+
+
+# V10、V12 处理器的替身：mcp add、plugin install/list 成功，plugin disable 失败；常驻会话里 initialize 成功、mcp_toggle 报错；
+# 一次性运行（-p 带提示词）什么都不输出。每次调起都记一行 argv，selftest 拿它查前置没成立的格有没有被起
+ST_VDIR_STUB = r'''#!{python}
+import json, sys
+open({log!r}, "a").write(json.dumps(sys.argv[1:]) + "\n")
+a = sys.argv[1:]
+if a[:2] == ["plugin", "disable"]: sys.exit(1)
+if a[:2] == ["plugin", "list"]: print("[]"); sys.exit(0)
+if a[:1] in (["mcp"], ["plugin"]): sys.exit(0)
+if "--input-format" in a:
+    for line in sys.stdin:
+        req = json.loads(line)
+        ok = req["request"]["subtype"] == "initialize"
+        resp = {{"subtype": "success" if ok else "error", "request_id": req["request_id"], **({{"response": {{}}}} if ok else {{"error": "refused"}})}}
+        print(json.dumps({{"type": "control_response", "response": resp}}), flush=True)
+sys.exit(0)
+'''
+
+
+def selftest_vdir_handlers():
+    """V10、V12 前置没成立时（mcp_toggle 被拒、plugin disable 失败），依赖它的格记 INCONCLUSIVE、不起实例（vdir 审查 3/F-2）。
+    走真的处理器，CLI 换成替身。"""
+    log = R.p("out", "st-vdir-stub.jsonl")
+    stub_dir = R.p("st-vdir-stub"); os.makedirs(stub_dir)
+    stub = os.path.join(stub_dir, "claude")
+    open(stub, "w").write(ST_VDIR_STUB.format(python=sys.executable, log=log)); os.chmod(stub, 0o755)
+    global CLAUDE_CLI
+    saved_cli, saved_vdir, before = CLAUDE_CLI, dict(VDIR), dict(COUNTS)
+    CLAUDE_CLI = stub
+    try:
+        VDIR.update(storage="", checked=True, why="")
+        r2x_vdir_v12()
+        r2x_vdir_v10()
+    finally:
+        CLAUDE_CLI = saved_cli; VDIR.clear(); VDIR.update(saved_vdir)
+    calls = [json.loads(l) for l in open(log)]
+    settings_of = [next((x for x in c if "settings-" in x), "") for c in calls]
+    for cell in ("v12a", "v12b", "v10f", "v10g", "v10h", "v10i", "v10-on"):
+        assert not any(f"settings-vdir-{cell}" in x for x in settings_of), f"前置没成立，{cell} 不该被起"
+    assert any("settings-vdir-v10a" in x for x in settings_of) and any(c[:2] == ["plugin", "disable"] for c in calls), "前面的格照跑"
+    # V12a、V12b、V10f–V10i 六格（另有前面各格因为替身不输出记的 INCONCLUSIVE）；没有格被当成 FAIL
+    assert COUNTS["FAIL"] == before["FAIL"] and COUNTS["INCONCLUSIVE"] >= before["INCONCLUSIVE"] + 6
+
+
+def selftest_vdir_b():
+    """--part vdir 第二批（V10、V12）能纯算、能本机假跑的几样，每样配反例。"""
+    ok = {"init": {}, "timed_out": False, "exit": 0, "unclean_plugins": []}
+    assert marker_verdict(ok, forbid=[False], want=[True], need=[True]) == "PASS"
+    assert marker_verdict(ok, forbid=[True], want=[True]) == "FAIL", "不该出现的标记出现了就是痕迹"
+    assert marker_verdict({**ok, "init": None}, forbid=[True]) == "FAIL", "痕迹不看运行有效没有"
+    assert marker_verdict({**ok, "unclean_plugins": ["x"]}, forbid=[True]) == "INCONCLUSIVE", "环境不干净先于痕迹"
+    assert marker_verdict(ok, want=[False]) == "FAIL" and marker_verdict({**ok, "timed_out": True}, want=[True]) == "INCONCLUSIVE"
+    assert marker_verdict(ok, need=[False], want=[True]) == "INCONCLUSIVE", "活证没出现：这次没测成"
+    assert marker_verdict(ok, want=[False], control="INCONCLUSIVE") == "INCONCLUSIVE" and marker_verdict(ok, want=[True], control="FAIL") == "INCONCLUSIVE"
+    assert marker_verdict(ok, forbid=[True], control="INCONCLUSIVE") == "FAIL", "对照没过也挡不住痕迹（vdir 审查 3/F-2：次序不改）"
+    # 标记目录：上一格的挪到旁边、原处是空的新目录
+    marks = R.p("st-vdir-b-marks")
+    reset_marks(marks); write_new(os.path.join(marks, "a"), "1"); reset_marks(marks); write_new(os.path.join(marks, "b"), "2"); reset_marks(marks)
+    assert os.listdir(marks) == [] and os.listdir(marks + ".1") == ["a"] and os.listdir(marks + ".2") == ["b"]
+    # 测试 MCP 真跑：正常握手的写标记、回 initialize；握手前退出的写了标记就退出
+    body = R.p("cfg", "st-vdir-mcp.py"); open(body, "w").write(VDIR_MCP_BODY)
+    p = subprocess.run([sys.executable, "-I", body, os.path.join(marks, "ok"), "ok"], input=json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}) + "\n", capture_output=True, text=True, timeout=20)
+    assert p.returncode == 0 and json.loads(p.stdout)["result"]["serverInfo"]["name"] == "iwork-t0g-vdir"
+    q = subprocess.run([sys.executable, "-I", body, os.path.join(marks, "exit"), "exit"], input="", capture_output=True, text=True, timeout=20)
+    assert q.returncode == 3 and q.stdout == "" and all(open(os.path.join(marks, n)).read().strip().isdigit() for n in ("ok", "exit"))
+    # 三种形状、项目目录
+    d = R.p("st-vdir-b")
+    shapes = v10_shapes(d)
+    assert shapes["形状一"] == vdir_args() and "--strict-mcp-config" not in shapes["形状二"] and shapes["形状三"][-1] == os.path.join(d, ".claude.json")
+    work = v10_project("st", marks, "exit")
+    srv = json.load(open(os.path.join(work, ".mcp.json")))["mcpServers"][V10_REPO]
+    assert srv["args"][-2:] == [os.path.join(marks, V10_REPO), "exit"] and not os.path.exists(os.path.join(v10_project("st2", marks), ".mcp.json"))
+    # mcp_status 只留本脚本的服务、只留名字与状态
+    assert mcp_status_rows({"ok": True, "body": {"mcpServers": [{"name": "t0g-u2", "status": "disabled", "config": {}}, {"name": "other", "status": "x"}]},
+                            "has_error": False}) == {"t0g-u2": "disabled"}
+    assert mcp_status_rows(None) is None and mcp_status_rows({"ok": True, "body": {}, "has_error": False}) is None
+    # 控制会话：按次序发、按 request_id 收，报错的回复带原文
+    fake = R.p("cfg", "st-fake-control.py"); open(fake, "w").write(ST_FAKE_CONTROL)
+    toggle_status = [{"subtype": "mcp_toggle", "serverName": "t0g-u2", "enabled": False}, {"subtype": "mcp_status"}]
+    alive_, replies = control_session("st-control", None, toggle_status, argv=[sys.executable, "-I", fake, ST_SECRET])
+    assert alive_ and replies[0]["ok"] and replies[0]["body"]["current_permission_mode"] == "dontAsk"
+    assert replies[1] == {"ok": False, "body": {}, "has_error": True} and mcp_status_rows(replies[2]) == {"t0g-u2": "disabled"}
+    saved = json.load(open(os.path.join(R.out, "st-control-control.json")))
+    assert [x["请求"] for x in saved] == ["initialize", "mcp_toggle", "mcp_status"] and saved[2]["t0g 服务"] == {"t0g-u2": "disabled"}
+    assert saved[0]["current_permission_mode"] == "dontAsk" and saved[1] == {"请求": "mcp_toggle", "ok": False, "有报错": True}
+    assert not os.path.exists(os.path.join(R.out, "st-control-stream.jsonl")), "原始流不进结果包"
+    for root_, _, files in os.walk(R.out):
+        for f_ in files:
+            assert ST_SECRET not in open(os.path.join(root_, f_), errors="replace").read(), f"秘密进了结果包：{f_}"
+    # 会话在 initialize 期间退出、或回完 initialize 就退出：不再往下发，不抛管道错误，没发的记 None（vdir 审查 3/F-3）
+    dies = R.p("cfg", "st-fake-dies.py")
+    open(dies, "w").write("import json, sys\nline = sys.stdin.readline()\nif sys.argv[1] == 'after':\n"
+                          "    rid = json.loads(line)['request_id']\n"
+                          "    print(json.dumps({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': rid, 'response': {}}}), flush=True)\n"
+                          "sys.exit(0)\n")
+    alive_, replies = control_session("st-control-dies", None, toggle_status, argv=[sys.executable, "-I", dies, "now"])
+    assert not alive_ and replies == [None, None, None]
+    alive_, replies = control_session("st-control-dies2", None, toggle_status * 3, argv=[sys.executable, "-I", dies, "after"])
+    assert not alive_ and replies[0] == {"ok": True, "body": {}, "has_error": False} and replies[1:] == [None] * 6
+    # 活着但不回 initialize：等过一条就不再发（不然要再等后面每一条）
+    seen_log = R.p("out", "st-fake-mute.log")
+    mute = R.p("cfg", "st-fake-mute.py")
+    open(mute, "w").write(f"import sys, time\nfor line in sys.stdin: open({seen_log!r}, 'a').write(line)\n")
+    alive_, replies = control_session("st-control-mute", None, toggle_status, argv=[sys.executable, "-I", mute], reply_timeout=1)
+    assert replies == [None, None, None] and len(open(seen_log).readlines()) == 1, "没回 initialize 就不再往下发"
+    # 回完 initialize 就关掉标准输入、进程还活着：往下写撞上管道错误，接住、记 None，不往外抛
+    shut = R.p("cfg", "st-fake-shut.py")
+    open(shut, "w").write("import json, os, sys, time\nline = sys.stdin.readline()\nrid = json.loads(line)['request_id']\n"
+                          "print(json.dumps({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': rid, 'response': {}}}), flush=True)\n"
+                          "sys.stdin.close(); os.close(0); time.sleep(5)\n")
+    alive_, replies = control_session("st-control-shut", None, toggle_status, argv=[sys.executable, "-I", shut], reply_timeout=2)
+    assert replies[0]["ok"] and replies[1:] == [None, None]
+    # plugin list --json：认得出名字（带不带 @市场名都行），只留键、布尔值与路径在不在专用目录之下
+    inside = os.path.join(d, "plugins", "cache", "x")
+    out = json.dumps([{"id": "t0g-a@m", "enabled": False, "installPath": inside, "version": "1"}, {"name": "t0g-b", "enabled": True, "installPath": "/elsewhere"}])
+    facts = plugin_list_facts(out, ("t0g-a", "t0g-b", "t0g-c"), d)
+    assert facts["t0g-a"] == {"键": ["enabled", "id", "installPath", "version"], "布尔值": {"enabled": False}, "有专用目录之下的路径": True}
+    assert facts["t0g-b"]["有专用目录之下的路径"] is False and facts["t0g-c"] is None and facts["输出是 JSON"]
+    assert plugin_list_facts("not json", ("t0g-a",), d) == {"输出是 JSON": False}
+    leak = "Error: Invalid MCP configuration: oauthAccount.emailAddress: Expected x, received 'a@b.c'"
+    bad = mcp_config_stderr_facts("[ERROR] --mcp-config validation failed (2 errors): x\n" + leak)
+    assert bad == {"字数": len("[ERROR] --mcp-config validation failed (2 errors): x\n" + leak), "Invalid MCP configuration": True, "校验报错条数": 2}
+    assert "a@b.c" not in json.dumps(bad) and mcp_config_stderr_facts("") == {"字数": 0, "Invalid MCP configuration": False, "校验报错条数": None}
+    # 走真的 claude()（CLI 换成替身）：给了 stderr_facts 就不存标准错误原文
+    leak_stub = R.p("st-leak-stub"); os.makedirs(leak_stub)
+    stub = os.path.join(leak_stub, "claude")
+    open(stub, "w").write(f"#!{sys.executable}\nimport sys\nsys.stderr.write({leak!r}); sys.exit(1)\n"); os.chmod(stub, 0o755)
+    global CLAUDE_CLI
+    saved_cli = CLAUDE_CLI
+    CLAUDE_CLI = stub
+    try:
+        claude("st-shape3", "x", iso=False, plugin_check=False, stderr_facts=mcp_config_stderr_facts)
+        claude("st-shape1", "x", iso=False, plugin_check=False)
+    finally:
+        CLAUDE_CLI = saved_cli
+    assert not os.path.exists(os.path.join(R.out, "st-shape3-stderr.txt")) and "a@b.c" not in open(os.path.join(R.out, "st-shape3-stderr-facts.json")).read()
+    assert json.load(open(os.path.join(R.out, "st-shape3-stderr-facts.json")))["Invalid MCP configuration"] is True
+    assert "a@b.c" in open(os.path.join(R.out, "st-shape1-stderr.txt")).read(), "对照：不给 stderr_facts 时照旧存原文"
+    # 专用目录里 CLI 自己写的日志（报错原文可能带 .claude.json 里的值）不进结果包：专用目录在本次根目录里、在 out 与观测目录之外；
+    # 结果包只打 out（观测目录另经 pack_obs 按名单挑进 out/obs），收尾时整个根目录随 R.remove() 删掉
+    vd = vdir_dir("st-pack"); write_new(os.path.join(vd, "debug", "latest.log"), "Error: Invalid MCP configuration: x: received 'a@b.c'")
+    for p_ in (vd, vdir_dir("st-pack-nested", parent=R.p("st-pack-data"))):
+        assert p_.startswith(R.root + os.sep) and not p_.startswith(R.out + os.sep) and not p_.startswith(R.obs + os.sep), p_
+    pack_parent = R.p("st-pack-parent"); os.makedirs(pack_parent)
+    with tarfile.open(write_results(pack_parent)) as t:
+        names = t.getnames()
+    assert names and all(n.split("/", 1)[0].startswith("iwork-t0g-results-") for n in names) and not any("vendor-claude" in n for n in names)
+
+
 def selftest():
     selftest_r2x()
+    selftest_vdir_a()
+    selftest_vdir_b()
+    selftest_vdir_handlers()
+    selftest_repo()
+    selftest_cfgdir_isolation()
+    selftest_recheck_and_p4()
     selftest_run_isolation()
     selftest_prompts()
-    selftest_r2x_settings()
+    selftest_product_settings()
     selftest_r2x_sandbox_and_cells()
     selftest_r2x_skill()
     # 根目录名只有小写字母和数字（CLI 编码工作目录时会改写 _ 之类的字符，R2 分析 6.2）
@@ -5203,11 +7599,10 @@ def selftest():
     uses4 = uses3 + [wp("/out/w", "w3")]
     assert fg(run(uses4, {"w1": fine, "w2": err, "w3": err, "r1": err}))["file-write"] is True, "S-5：外面那次写重发了，两次都报错，算拦住"
     assert fg(run(uses4, {"w1": fine, "w2": err, "w3": fine, "r1": err}))["file-write"] is False, "S-5：重发的那次结果不是报错，不算拦住"
-    bg = bash_guard_verdict
-    assert bg(True, "0", True, "1", False, "1", False) == {"bash-write": True, "bash-read": True}
-    assert bg(False, "0", True, "1", False, "1", False) == {"bash-write": False, "bash-read": False}, "调用没有正面证据"
-    assert bg(True, "0", True, None, False, None, False) == {"bash-write": False, "bash-read": False}, "那两步没留下退出码：不算拦住"
-    assert bg(True, "0", True, "1", False, "0", True)["bash-read"] is False
+    gb = {"ctl_rc": "0", "ctl_exists": True, "write_rc": "1", "write_exists": False, "write_err": "Operation not permitted",
+          "read_ctl_rc": "0", "read_rc": "1", "read_err": "Operation not permitted", "read_leaked": False}
+    assert bash_guard_verdict(True, {**gb, "write_rc": None, "read_rc": None}) == {"bash-write": False, "bash-read": False}, "那两步没留下退出码：不算拦住"
+    assert bash_guard_verdict(True, {**gb, "read_rc": "0", "read_leaked": True})["bash-read"] is False
     # 3/F-2：运行门按能力判；拒写不顶替拒读；声明一次性环境才整体放行
     all_ok = {c: True for c in ("bash-write", "bash-read", "file-write", "file-read", "excluded-probe", "mcp-only")}
     assert gate(CAPS["read"], {**all_ok, "file-read": False}, False) == (False, ["file-read"]), "只验证了拒写，Read 格子不许跑"
@@ -5314,7 +7709,8 @@ def selftest():
     assert "wait until its result" in cp and "Never send them in parallel" in cp and "do not retry" in cp, "G1c（S-8）：提示写明一前一后、不并行、不重发"
     assert cp.index("cd /w/sub") < cp.index("pwd > /o"), "两条命令按次序逐字给出"
     # G2 的两项预检
-    o = lambda rc, out="": {"rc": rc, "out": out}
+    # 「该失败」的观测要对照成功、输出里有拦截原文（supervisor 2026-11-13）；o(rc) 默认给齐，反例另造
+    o = lambda rc, out="touch: x: Operation not permitted\n", ctl="0": {"rc": rc, "out": out, "ctl_rc": ctl, "ctl_out": ""}
     assert excluded_guard_verdict(ev_ok, True, ev_ok, o("1"), False, True) is True
     assert excluded_guard_verdict(ev_ok, True, ev_ok, None, False, True) is False, "清单内预检：别的命令没留下退出码，不算被挡"
     assert excluded_guard_verdict(ev_ok, False, ev_ok, o("1"), False, True) is False, "清单内预检：对照没成立（探针的哨兵没出现）"
@@ -5344,6 +7740,60 @@ def selftest():
     assert g3_verdict(bash_ev(run([use, use2], {"t1": err, "t2": fine}), T, hook("t1", "t2"), many=True), False, True) == "INCONCLUSIVE", "G3：有一次结果不是报错"
     # G4：观测文件
     assert obs_verdict(ev_ok, o("1"), False) == "PASS" and obs_verdict(ev_ok, o("0"), False) == "FAIL" and obs_verdict(ev_ok, o("0", "x\n"), True, "x") == "PASS"
+    for bad, why in ((o("127", "sh: touch: command not found"), "命令不存在"), (o("1", "touch: /o/x: No such file or directory"), "目录不存在"),
+                     (o("1", "cat: /o/x: Permission denied"), "Permission denied 不是沙箱的原文"), (o("1", ctl="1"), "对照失败"),
+                     (o("1", ctl=None), "没有对照")):
+        assert obs_verdict(ev_ok, bad, False) == "INCONCLUSIVE", why
+    assert obs_verdict(ev_ok, o("1", "Read-only file system"), False) == "PASS", "Linux 的拦截原文"
+    assert obs_verdict(ev_ok, o("1", "blocked by policy X"), False, denied=("blocked by policy X",)) == "PASS", "格子自己给的拒绝文字"
+    assert obs_verdict(ev_ok, o("0", ctl="1"), False) == "FAIL", "跑成了就是 FAIL，不看对照"
+    ev_bad = bash_ev({**good_ok, "timed_out": True}, T)
+    assert obs_verdict(ev_bad, o("0"), False) == "FAIL", "审查 4/F-1 的同类：运行超时，但命令自己写下了退出码 0，照样 FAIL"
+    assert obs_verdict(ev_bad, o("1"), False) == "INCONCLUSIVE" and obs_verdict(ev_bad, o("0"), True) == "INCONCLUSIVE", "对照：被挡的证据、该成功的格子仍要运行有效"
+    ev_dirty = bash_ev({**good_ok, "unclean_plugins": ["someone"]}, T)
+    assert ev_dirty.get("unclean") and obs_verdict(ev_dirty, o("0"), False) == "INCONCLUSIVE", "审查 5/F-1：环境不干净时 rc 0 可能是外来插件写的，不下 FAIL"
+    assert obs_verdict(ev_dirty, o("1"), False) == "INCONCLUSIVE" and obs_verdict(ev_dirty, o("0"), True) == "INCONCLUSIVE"
+    # observed() 的对照：touch、cat 才有，同一个程序、目标在工作区里；真跑一遍
+    c_touch, rd = observed("st-ctl-touch", f"touch {R.outside}/st-ctl-x")
+    subprocess.run(["sh", "-c", c_touch], check=True)
+    got = rd()
+    assert got["ctl_rc"] == "0" and got["rc"] == "0" and c_touch.startswith("( touch ") and R.obs in c_touch.split(";")[0], (c_touch, got)
+    c_cat, rd2 = observed("st-ctl-cat", f"cat {R.outside}/st-ctl-none")
+    subprocess.run(["sh", "-c", c_cat], check=True)
+    got2 = rd2()
+    assert got2["ctl_rc"] == "0" and got2["rc"] != "0" and "t0g control" in got2["ctl_out"], got2
+    assert obs_verdict(ev_ok, got2, False) == "INCONCLUSIVE", "沙箱外真跑：文件不存在是普通错误，不当成被挡"
+    assert observed_control("x", "cd /a && npm install") is None and observed_control("x", "curl https://e") is None
+    assert ".ctl.rc" not in observed("st-ctl-none", "printf hi")[0], "认不出程序：不加对照"
+    # 外层保护的 Bash 预检（supervisor 2026-11-13 ②）：对照之外还要拦截原文
+    gobs = {"ctl_rc": "0", "ctl_exists": True, "write_rc": "1", "write_exists": False, "write_err": "touch: x: Operation not permitted",
+            "read_ctl_rc": "0", "read_rc": "1", "read_err": "cat: x: Operation not permitted", "read_leaked": False}
+    assert bash_guard_verdict(True, gobs) == {"bash-write": True, "bash-read": True}
+    assert bash_guard_verdict(True, {**gobs, "write_err": "touch: x: No such file or directory"})["bash-write"] is False, "目录不存在不算拦住"
+    assert bash_guard_verdict(True, {**gobs, "read_err": "cat: x: Permission denied"})["bash-read"] is False, "Permission denied 不算"
+    assert bash_guard_verdict(True, {**gobs, "read_ctl_rc": "1"})["bash-read"] is False, "读的对照失败"
+    assert bash_guard_verdict(True, {**gobs, "ctl_rc": "127"}) == {"bash-write": False, "bash-read": False}, "写的对照失败（命令不存在）"
+    assert bash_guard_verdict(False, gobs) == {"bash-write": False, "bash-read": False}, "调用没有正面证据"
+    # 三态（vdir 审查 1/F-3）：明确写出、读到才 FAIL；证据不够是 INCONCLUSIVE；不干净排最前
+    assert bash_guard_status(True, gobs) == {"bash-write": "PASS", "bash-read": "PASS"}
+    assert bash_guard_status(False, {**gobs, "write_exists": True, "read_leaked": True}) == {"bash-write": "FAIL", "bash-read": "FAIL"}, "痕迹不看调用证据"
+    assert bash_guard_status(True, {**gobs, "write_rc": "0", "read_rc": "0"}) == {"bash-write": "FAIL", "bash-read": "FAIL"}, "那一步跑成了"
+    assert bash_guard_status(False, gobs) == {"bash-write": "INCONCLUSIVE", "bash-read": "INCONCLUSIVE"}, "调用没证据：不是 FAIL"
+    assert bash_guard_status(True, {**gobs, "write_err": "No such file or directory", "read_ctl_rc": "1"}) == \
+        {"bash-write": "INCONCLUSIVE", "bash-read": "INCONCLUSIVE"}, "别的错误、读的对照失败：没测成"
+    assert bash_guard_status(True, {**gobs, "write_rc": None, "read_rc": None})["bash-write"] == "INCONCLUSIVE"
+    assert bash_guard_status(True, {**gobs, "write_exists": True}, unclean=True) == {"bash-write": "INCONCLUSIVE", "bash-read": "INCONCLUSIVE"}
+    # V4b（V4a 的对照）
+    assert v4b_verdict({**gobs, "write_rc": "0", "write_exists": True}, False) == "PASS" and v4b_verdict(gobs, False) == "FAIL"
+    assert v4b_verdict({**gobs, "write_rc": "0", "write_exists": True}, True) == "INCONCLUSIVE", "不干净"
+    assert v4b_verdict({**gobs, "ctl_rc": "127"}, False) == "INCONCLUSIVE" and v4b_verdict({**gobs, "write_rc": None}, False) == "INCONCLUSIVE"
+    # 追加写的对照（V13a）：同一个程序往工作区里事先写好的文件追加
+    app_cmd, app_read = observed("st-append", f"echo t0g >> {R.p('st-append-target')}")
+    assert "echo t0g >> " + shlex.quote(os.path.join(R.obs, "st-append.ctl-target")) in app_cmd
+    subprocess.run(["/bin/sh", "-c", app_cmd], check=True, timeout=20)
+    got_app = app_read()
+    assert got_app["ctl_rc"] == "0" and got_app["rc"] == "0" and open(os.path.join(R.obs, "st-append.ctl-target")).read() == "t0g control\nt0g\n"
+    assert observed_control("x", "echo hi >> /a") is None and observed_control("x", "echo t0g > /a") is None
     assert obs_verdict(ev_ok, None, False) == "INCONCLUSIVE", "G4：观测文件没写出来，不能当成「被挡住了」"
     assert obs_verdict(bash_ev({**good_ok, "exit": 1}, T), o("1"), False) == "INCONCLUSIVE", "G4：运行无效"
     assert st(g4_no_retry_verdict(["PASS", "PASS", "PASS"], [False] * 3)) == "PASS"
@@ -5559,8 +8009,86 @@ def selftest():
     print("selftest ok")
 
 
+def selected_groups():
+    return [x.strip() for x in A.only.split(",") if x.strip()] or list(GROUPS)
+
+
+def model_free_selection():
+    """这次只选了不起模型的格（--only R2X 且选中的格都在 MODEL_FREE_CELLS 里）。纯函数（只读 A）。"""
+    if selected_groups() != ["R2X"]: return False
+    cells = A.cells or (R2X_PARTS[A.part] if A.part else sum(R2X_PARTS.values(), ()))
+    return bool(cells) and set(cells) <= MODEL_FREE_CELLS
+
+
+def run_groups():
+    for g in selected_groups():
+        log(f"—— {g}")
+        try: GROUPS[g]()
+        except Abort: raise
+        except Exception as e: record("INCONCLUSIVE", g, f"脚本自己出错：{e!r}")
+
+
+def resolve_claude_cli(arg, env_value):
+    """起哪个 claude：--claude-cli 优先，其次环境变量 IWORK_CLAUDE_CLI，都没给是 PATH 上的 "claude"。给了的要是能执行的绝对路径，
+    不是就 ValueError（启动时拿锁之前报错）。"""
+    cli = arg or env_value
+    if cli is None: return "claude"
+    if not (os.path.isabs(cli) and os.path.isfile(cli) and os.access(cli, os.X_OK)):
+        raise ValueError(f"--claude-cli / IWORK_CLAUDE_CLI 要是一个能执行的绝对路径：{cli!r}")
+    return cli
+
+
+def cli_version_facts(version_text, cli_path):
+    """版本记录与提示。纯函数。返回 (记进结果包的字典, 版本不是基准时给跑的人的提示或空串)。"""
+    ver = (version_text or "").strip().split()[0] if (version_text or "").strip() else ""
+    warn = "" if ver == BASELINE_CLI_VERSION else (f"这次的 Claude Code 是 {ver or '（没读出版本）'}，脚本的格子与从程序字样读出的结论按 "
+                                                  f"{BASELINE_CLI_VERSION} 写的：结果要对着这个差别读；要用 {BASELINE_CLI_VERSION} 跑，加 --claude-cli 指到它")
+    return {"cli": cli_path, "version": ver, "baseline": BASELINE_CLI_VERSION}, warn
+
+
+def record_cli_version():
+    """开跑时记下实际要起的程序与它的版本（写进结果包 claude-version.json）。--version 在隔离的环境里问（HOME 换成本次的临时目录、
+    去掉 CLAUDE*、ANTHROPIC* 变量），不碰真实账号与配置。"""
+    home = R.p("version-home"); os.makedirs(home, exist_ok=True)
+    extra, skip = cfgdir_env(list(os.environ), home, home, None, None)
+    out, _, code, timed_out, _ = run_instance([CLAUDE_CLI, "--version"], "cli-version", env=extra, env_skip=skip, timeout=60)
+    found = shutil.which(CLAUDE_CLI)
+    facts, warn = cli_version_facts(out if code == 0 and not timed_out else "", scrub(os.path.realpath(found)) if found else CLAUDE_CLI)
+    json.dump(facts, open(os.path.join(R.out, "claude-version.json"), "w"), ensure_ascii=False)
+    log(f"Claude Code：{facts['cli']} 版本 {facts['version'] or '（没读出）'}")
+    record("INFO", "Claude Code 版本（脚本的结论按 " + BASELINE_CLI_VERSION + "）", warn or f"版本相同：{facts['version']}")
+
+
+def run_selected():
+    """开跑：先在隔离的环境里问一次版本（record_cli_version），再做公用的准备（帮助、g0 探针、工具清单），再跑选中的组。
+    只选了不起模型的格（cfgdir）时，除了那次隔离的 --version，别的准备都不做（审查 2/F-1）：它们用真实账号起 claude。"""
+    global ISO
+    subprocess.run(["git", "init", "-q"], cwd=R.work, check=True)
+    json.dump({"mcpServers": {}}, open(R.p("cfg", "empty-mcp.json"), "w"))
+    ISO = ["--setting-sources", "", "--strict-mcp-config", "--mcp-config", R.p("cfg", "empty-mcp.json")]
+    record_cli_version()
+    if model_free_selection():
+        log(f"只跑不起模型的格 {sorted(MODEL_FREE_CELLS)}：跳过帮助、g0 探针与工具清单；平台：{sys.platform}；根目录：{scrub(R.root)}")
+        run_groups()
+        return
+    log(f"平台：{sys.platform}；根目录：{scrub(R.root)}")
+    open(os.path.join(R.out, "claude-help.txt"), "w").write(scrub(subprocess.run([CLAUDE_CLI, "--help"], capture_output=True, text=True,
+                                                                                  stdin=subprocess.DEVNULL, timeout=60).stdout))
+    probe = claude("g0-iso-probe", "Reply with exactly: OK", settings=None)
+    if probe["exit"] != 0 or probe["init"] is None:
+        log("--setting-sources 空值这种写法跑不通，隔离参数退回 t0f 的 project,local；G5 单独比较各写法")
+        ISO[1] = "project,local"
+        probe = claude("g0-iso-probe2", "Reply with exactly: OK", settings=None)
+    if probe["init"] is None:
+        raise Abort("拿不到 system/init，后面的用例都没法判定")
+    learn_inventory(probe["init"])
+    INV["valid"] = run_valid(probe)                    # G1a 导出清单的来源运行算不算数
+    run_groups()
+    report_strays()
+
+
 def main():
-    global A, R, ISO
+    global A, R, ISO, CLAUDE_CLI
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="", help="逗号分隔的组名，如 G2,G4")
     ap.add_argument("--model", default="haiku")
@@ -5577,7 +8105,10 @@ def main():
     ap.add_argument("--part", choices=list(R2X_PARTS), default=None,
                     help="只给 --only R2X：d = k1–k3、b1、b2（5 个实例，先跑，定 D2、D5）；rest = c1、n1 与工具清单（8 个）；"
                          "net = 沙箱联网 p1、p2、p4 两格（4 个）；skill = 仓库技能加不加载 L1、L2，内联命令 K3b、K3c，"
-                         "allowed-tools 的故障探针 K2c，插件 hook 对 iWork hook H1（6 个，日常账号下 K2c 另加 1 个预检）；不给就都跑")
+                         "allowed-tools 的故障探针 K2c，插件 hook 对 iWork hook H1（6 个，日常账号下 K2c 另加 1 个预检）；"
+                         "recheck = G1、G8、G7 非 cfg 格带产品设置重跑（27 个）；p4 = macOS 上沙箱起不来时 F1、F2（2 个）；"
+                         "cfgdir = CLI 读哪一份 .claude.json（四次 claude mcp list，0 个模型实例）；repo = 方案 3.1c 的 RC1–RC8（15 个）；"
+                         "vdir = 方案 3.1d 的日常账号格（22 个模型实例）；不给就都跑")
     ap.add_argument("--cell", default=None,
                     help="只给 --only R2X：逗号分隔的格名，只跑这几格（优先于 --part），如 --cell k3（带产品设置重记 k3、k4，1 个实例）")
     ap.add_argument("--quick", action="store_true", help="G2 只跑普通 Bash 一行（结论只能是 INCONCLUSIVE，不能进已验证表）")
@@ -5593,8 +8124,13 @@ def main():
                          "gh auth status（会带着本机的 gh 登录去问 GitHub），只记退出码")
     ap.add_argument("--no-fail-if-unavailable", action="store_true", help="G4 不设 sandbox.failIfUnavailable（方案 16.2 第 3 项：看沙箱起不来时 CLI 怎么表现）")
     ap.add_argument("--root-parent", default=None, help="本次根目录与结果包建在哪个目录下（默认家目录，必须在 $TMPDIR 之外；--selftest 默认系统临时目录）")
+    ap.add_argument("--claude-cli", default=None,
+                    help="起哪个 claude（绝对路径）；也可以用环境变量 IWORK_CLAUDE_CLI。都没给就是 PATH 上的 claude。"
+                         f"格子与结论按 {BASELINE_CLI_VERSION} 写，版本不同时结果包与 summary 里有提示")
     ap.add_argument("--selftest", action="store_true")
     A = ap.parse_args()
+    try: CLAUDE_CLI = resolve_claude_cli(A.claude_cli, os.environ.get("IWORK_CLAUDE_CLI"))
+    except ValueError as e: ap.error(str(e))
     A.cells = None                                       # 拼错、空、重复的格名启动时（拿锁之前）就挡住；r2x 只用这一份
     if A.cell is not None:
         try: A.cells = parse_cells(A.cell)
@@ -5614,33 +8150,13 @@ def main():
         refusal = environment_refusal(os.environ)
         if refusal:
             record("INCONCLUSIVE", "拒绝运行", refusal); return
-        if not shutil.which("claude"):
+        if not shutil.which(CLAUDE_CLI):
             log("找不到 claude 命令，停止"); return
         tmp = os.path.realpath(tempfile.gettempdir())
         if R.root.startswith(tmp + os.sep):
             raise Abort("根目录落在 $TMPDIR 里，沙箱默认放行那里，「工作区外不可写」测不出来；换一个 --root-parent")
         ownership_preflight()
-        subprocess.run(["git", "init", "-q"], cwd=R.work, check=True)
-        json.dump({"mcpServers": {}}, open(R.p("cfg", "empty-mcp.json"), "w"))
-        ISO = ["--setting-sources", "", "--strict-mcp-config", "--mcp-config", R.p("cfg", "empty-mcp.json")]
-        ver = subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip()
-        log(f"Claude Code 版本：{ver}；平台：{sys.platform}；根目录：{scrub(R.root)}")
-        open(os.path.join(R.out, "claude-help.txt"), "w").write(scrub(subprocess.run(["claude", "--help"], capture_output=True, text=True).stdout))
-        probe = claude("g0-iso-probe", "Reply with exactly: OK", settings=None)
-        if probe["exit"] != 0 or probe["init"] is None:
-            log("--setting-sources 空值这种写法跑不通，隔离参数退回 t0f 的 project,local；G5 单独比较各写法")
-            ISO[1] = "project,local"
-            probe = claude("g0-iso-probe2", "Reply with exactly: OK", settings=None)
-        if probe["init"] is None:
-            raise Abort("拿不到 system/init，后面的用例都没法判定")
-        learn_inventory(probe["init"])
-        INV["valid"] = run_valid(probe)                    # G1a 导出清单的来源运行算不算数
-        for g in ([x.strip() for x in A.only.split(",") if x.strip()] or list(GROUPS)):
-            log(f"—— {g}")
-            try: GROUPS[g]()
-            except Abort: raise
-            except Exception as e: record("INCONCLUSIVE", g, f"脚本自己出错：{e!r}")
-        report_strays()
+        run_selected()
     except Abort as e:
         log(f"中止：{e}")
     finally:
@@ -5653,12 +8169,14 @@ def main():
             elif not A.selftest:
                 record(status, "运行前后原有文件核对", f"原有 {len(before)} 项，逐项比过没变" if before else "原来没有可核对的条目（没有同名前缀的文件，也没有 ~/.npmrc）")
             if not A.selftest:
+                if LEFTOVERS: log(leftovers_notice())
                 log(f"合计：{COUNTS}（FAIL 或 INCONCLUSIVE 不为 0 的组不能当作已验证）")
                 log(pack_obs(R.root, os.path.relpath(R.obs, R.root), os.path.join(R.out, "obs")))
                 result_path = write_results(R.parent)
         finally:
             R.remove()
         if result_path: print(f"完成，结果包：{scrub(result_path)}")
+        if LEFTOVERS and not A.selftest: print(leftovers_notice())
     if not A.selftest and (COUNTS["FAIL"] or COUNTS["INCONCLUSIVE"]):
         sys.exit(1)
 

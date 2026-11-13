@@ -18,7 +18,9 @@ use iwork_proto::pb;
 use tokio::sync::{mpsc, oneshot, watch};
 
 pub use intent::{Effect, PickKind};
-pub use session::dial::{DialError, Dialer, DirectDialer};
+pub use session::dial::{
+    AppDialer, DesktopDialer, DesktopParts, DialError, Dialer, DialerParts, DirectDialer,
+};
 pub use session::{Clock, FrameError, Request, ShellEvent, Stats, tokio_clock};
 
 /// 会话的句柄。克隆便宜；全部句柄丢掉后会话结束。

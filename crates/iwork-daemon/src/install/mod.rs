@@ -14,11 +14,20 @@ use iwork_ipc::peer::{self, ImageId, MANIFEST_FILE, Manifest, SelfIdentity, Sign
 use iwork_ipc::rendezvous::{ExeStamp, ExitCode};
 
 pub mod manifest_form;
+pub mod package_check;
 #[cfg(target_os = "macos")]
 pub mod signed_bundle_form;
 
 /// 包里后台程序的名字（清单里的键；文件名另加平台的可执行后缀）。两种包的形态判装齐时都要求它在、并核验过。
 pub const DAEMON_NAME: &str = "iwork-daemon";
+
+/// 包里客户端程序的名字（清单里的键；文件名另加平台的可执行后缀）。包里只有这两个程序（T04p 方案 R1 对拍）。
+pub const CLIENT_NAME: &str = "iwork-client";
+
+/// 包里的程序：名字加上平台的可执行后缀之后的文件名。
+pub fn program_file(name: &str) -> String {
+    format!("{name}{}", std::env::consts::EXE_SUFFIX)
+}
 
 /// 磁盘上的清单。
 #[derive(Debug, Clone, PartialEq, Eq)]

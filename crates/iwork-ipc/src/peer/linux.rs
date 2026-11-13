@@ -35,6 +35,16 @@ pub(crate) fn running_image_id() -> Result<ImageId, PeerError> {
         .map_err(PeerError::SelfIdentity)
 }
 
+/// 磁盘上一个程序文件的签名者：Linux 没有代码签名，就是文件全文的 SHA-256（和 [`own_image`] 同一种身份）。
+pub(crate) fn file_signer(path: &Path) -> SignerIdentity {
+    match super::sha256_file(path) {
+        Ok(h) => SignerIdentity::Image(ImageId::Sha256(h)),
+        Err(e) => SignerIdentity::Unavailable {
+            reason: format!("读 {} 失败：{e}", path.display()),
+        },
+    }
+}
+
 /// socket 对端的身份：`SO_PEERCRED` 取 uid 与 pid，再按 pid 取运行中映像。
 ///
 /// 取不到凭据返回 `PeerError::Credentials`；凭据有了但映像取不到（对端已退出、`/proc` 不可读），

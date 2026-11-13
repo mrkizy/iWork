@@ -117,3 +117,13 @@ describe("发布层 CSP", () => {
     expect(JSON.stringify(effectiveConfig("build"))).not.toMatch(/devCsp/);
   });
 });
+
+// T04p 方案 R5：签名只在装配步骤里做。发布配置里写了签名身份，打包器会先把 .app 封印，装配再放后台就破了封印。
+describe("发布配置里没有签名身份", () => {
+  it("没有 signingIdentity", () => {
+    const bundle = (effectiveConfig("build") as { bundle?: { macOS?: Record<string, unknown> } }).bundle;
+    expect(bundle, "对照：发布配置里确实有 bundle 一节").toBeDefined();
+    expect(bundle?.macOS ?? {}).not.toHaveProperty("signingIdentity");
+    expect(JSON.stringify(effectiveConfig("build"))).not.toMatch(/signingIdentity/);
+  });
+});
