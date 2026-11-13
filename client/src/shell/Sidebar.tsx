@@ -208,7 +208,7 @@ export function Sidebar(props: { router: Router }) {
               setDeletingAssistant(undefined);
             }}
           >
-            和它的私聊记录会一起删除，不影响代码文件。
+            和它的私聊记录会一起删除，不影响代码文件。删除后无法恢复。
           </ConfirmDialog>
         )}
       </Show>

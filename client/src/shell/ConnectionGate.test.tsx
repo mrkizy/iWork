@@ -1,7 +1,7 @@
 // 连接类整页与「完全退出 iWork」确认框（步 7d）：文字、诊断行、出口都来自 ConnectionView；出口按 kind 接，
 // 没有实现的 kind（查看诊断）不画；整页时盖住侧栏与主区域。
 import { create, type MessageInitShape } from "@bufbuild/protobuf";
-import { fireEvent, render, screen } from "@solidjs/testing-library";
+import { fireEvent, render, screen, within } from "@solidjs/testing-library";
 import { describe, expect, it } from "vitest";
 import type { IntentKind } from "../bridge/intent";
 import {
@@ -106,6 +106,10 @@ describe("连接类整页", () => {
 
   it("「完全退出 iWork」：Rust 设了 quit_requested 才弹；确认发 confirm=true，取消发 false", () => {
     const acts = mount({ state: ConnectionState.LIVE }, true);
+    // ui-m1 2a 第 18 条 f 的原文与按钮
+    const dlg = screen.getByRole("alertdialog");
+    expect(dlg).toHaveTextContent("后台服务会一起停下，正在进行和排队中的回合都会取消。重新打开 iWork 后可以重新发送。");
+    expect(within(dlg).getAllByRole("button").map((b) => b.textContent)).toEqual(["取消", "完全退出"]);
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(acts).toEqual([{ case: "quit", value: { confirm: false } }]);
     acts.length = 0;

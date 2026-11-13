@@ -100,7 +100,11 @@ describe.skipIf(noFixtures)("侧栏的助手入口", () => {
     fireEvent.contextMenu(row("阿森"));
     fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
     expect(userActs(acts).some((a) => a.case === "deleteAssistant"), "确认前不发").toBe(false);
-    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "删除" }));
+    // ui-m1 2a 第 18 条 f 的原文与按钮
+    const dlg = screen.getByRole("alertdialog");
+    expect(dlg).toHaveTextContent("和它的私聊记录会一起删除，不影响代码文件。删除后无法恢复。");
+    expect(within(dlg).getAllByRole("button").map((b) => b.textContent)).toEqual(["取消", "删除"]);
+    fireEvent.click(within(dlg).getByRole("button", { name: "删除" }));
     expect(userActs(acts).filter((a) => a.case === "deleteAssistant")).toEqual([
       { case: "deleteAssistant", value: { assistantId: ID } },
     ]);

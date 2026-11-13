@@ -106,7 +106,7 @@ export function QuitConfirm() {
         onCancel={() => quit(false)}
         onConfirm={() => quit(true)}
       >
-        后台服务会一起停下，正在进行和排着的回合都会取消；重新打开 iWork 后可以再发。
+        后台服务会一起停下，正在进行和排队中的回合都会取消。重新打开 iWork 后可以重新发送。
       </ConfirmDialog>
     </Show>
   );
