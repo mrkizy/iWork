@@ -235,8 +235,11 @@ message AnchorsView {
   // 静止态的两个状态点：整个对话里还有等你处理的事 / 有失败的回合。
   bool has_waiting = 4;
   bool has_failed = 5;
-  // 跳到还没加载的地方、正在取那一段时的提示（Q18：原地不动加提示）；不在加载时不设。
+  // 跳到还没加载的地方、正在取那一段时给读屏的话（「正在定位到所选消息」，网页放进隐藏的 role="status"，
+  // 不显示文字）；不在加载时不设。
   optional string jump_loading = 6;
+  // 正在跳的那一处（AnchorItem.key）：那条刻度做「流光」，对话区顶端出进度线（ui-m1 2a 第 11 条）。不在加载时为空。
+  string jump_loading_key = 7;
 }
 
 enum AnchorKind {
@@ -989,6 +992,8 @@ message UiIntent {
     RelaunchIntent relaunch = 89;
     // 助手资料栏常驻时点「助手资料」手动收起（on = 收起）/ 展开：全局一个偏好，发 SetProfilePanelCollapsed。
     ToggleIntent set_profile_panel_collapsed = 97;
+    // 锚点列表里按 Home / End：以整个对话最早 / 最新的一处为中心重取（不跳转）。
+    AnchorBrowseEdge anchor_browse_edge = 98;
   }
 }
 
@@ -1044,6 +1049,13 @@ message JumpToLatest {
 message AnchorBrowse {
   string conversation_id = 1;
   string key = 2;
+}
+
+// Home / End：网页不知道窗口外最早、最新那一处的 key，只说要哪一头。
+message AnchorBrowseEdge {
+  string conversation_id = 1;
+  // 真 = 最新一头（End），假 = 最早一头（Home）。
+  bool latest = 2;
 }
 
 // 点了刻度或信息卡：跳到那一处（没加载就先取以它为中心的一段）。

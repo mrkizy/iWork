@@ -947,3 +947,86 @@ fn stale_anchor_window_must_not_consume_pending_relative() {
     anchors_arrive(&mut s, 20, &[10, 20], (false, false));
     assert_eq!(scroll_row(&s).as_deref(), Some("u10"));
 }
+
+/// 跳到没加载的一处时，视图给出正在跳的那一处的 key（刻度流光、顶端进度线用）和读屏的话；落地后都收掉
+/// （ui-m1 2a 第 11 条：不显示「正在取那一段…」这类文字）。
+#[test]
+fn jump_loading_names_the_anchor_being_reached() {
+    use iwork_client_core::derive::{self, Ctx};
+    let view = |s: &iwork_client_core::store::Store| {
+        let t = s.open.as_ref().unwrap();
+        derive::anchors::anchors(
+            s,
+            t,
+            Ctx {
+                now: std::time::SystemTime::UNIX_EPOCH,
+            },
+        )
+        .unwrap()
+    };
+    let mut s = store_with_open();
+    anchors_arrive(&mut s, 0, &[3, 5], (false, false));
+    assert_eq!(
+        (view(&s).jump_loading_key, view(&s).jump_loading),
+        (String::new(), None),
+        "对照：没在跳"
+    );
+    s.jump_to_anchor(CID, "3");
+    let v = view(&s);
+    assert_eq!(v.jump_loading_key, "3");
+    assert_eq!(v.jump_loading.as_deref(), Some("正在定位到所选消息"));
+    around_arrives(&mut s, 3);
+    let v = view(&s);
+    assert_eq!(
+        (v.jump_loading_key, v.jump_loading),
+        (String::new(), None),
+        "落地后收掉"
+    );
+}
+
+/// Home / End：网页不知道窗口外两头的 key，只说要哪一头；以最早一头为中心取到的窗口前面没有了，
+/// 以最新一头为中心取到的后面没有了（ui-m1 2a 第 11 条，产品负责人 2026-11-13 确认）。
+#[tokio::test(flavor = "multi_thread")]
+async fn browse_edge_fetches_either_end() {
+    let (_d, app, mut web, _dir) = start(&["anchors-unloaded"], 5000).await;
+    let cid = "c-anchors-long";
+    open(&app, cid, false).await;
+    until(&app, &mut web, "锚点到了", |s| s.anchors.is_some()).await;
+    assert!(
+        web.state.anchors.as_ref().unwrap().has_before,
+        "对照：打开时以最新为中心，前面还有"
+    );
+    let edge = |latest| {
+        I::AnchorBrowseEdge(pb::AnchorBrowseEdge {
+            conversation_id: cid.into(),
+            latest,
+        })
+    };
+    assert_eq!(intent(&app, edge(false)).await.error, None);
+    until(
+        &app,
+        &mut web,
+        "最早的那一段：前面没有了，第一处是第 0 轮",
+        |s| {
+            s.anchors.as_ref().is_some_and(|a| {
+                !a.has_before
+                    && a.items
+                        .first()
+                        .is_some_and(|i| i.preview.starts_with("第 0 轮"))
+            })
+        },
+    )
+    .await;
+    assert_eq!(intent(&app, edge(true)).await.error, None);
+    until(
+        &app,
+        &mut web,
+        "最新的那一段：后面没有了",
+        |s| {
+            s.anchors
+                .as_ref()
+                .is_some_and(|a| !a.has_after && a.has_before)
+        },
+    )
+    .await;
+}

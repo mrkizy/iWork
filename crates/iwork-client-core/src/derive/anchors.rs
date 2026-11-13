@@ -23,12 +23,18 @@ pub fn anchors(store: &Store, tl: &Timeline, ctx: Ctx) -> Option<pb::AnchorsView
         has_after: w.has_after,
         has_waiting: w.waiting_count > 0,
         has_failed: w.failed_count > 0,
-        // Q18：跳到没加载的地方时原地不动，加一行提示
+        // Q18：跳到没加载的地方时原地不动；被点的刻度流光、顶端进度线，读屏读一句
         jump_loading: tl
             .anchors
             .pending_jump
             .as_ref()
             .map(|_| text::ANCHOR_JUMP_LOADING.to_owned()),
+        jump_loading_key: tl
+            .anchors
+            .pending_jump
+            .as_ref()
+            .map(|j| key_of(&j.anchor))
+            .unwrap_or_default(),
     })
 }
 

@@ -55,6 +55,11 @@ pub enum Local {
         conversation_id: String,
         key: String,
     },
+    /// Home / End：以最早（`latest` 为假）或最新的一头为中心重取。
+    AnchorBrowseEdge {
+        conversation_id: String,
+        latest: bool,
+    },
     JumpToAnchor {
         conversation_id: String,
         key: String,
@@ -180,6 +185,10 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
         I::AnchorBrowse(x) => Action::Local(Local::AnchorBrowse {
             conversation_id: x.conversation_id,
             key: x.key,
+        }),
+        I::AnchorBrowseEdge(x) => Action::Local(Local::AnchorBrowseEdge {
+            conversation_id: x.conversation_id,
+            latest: x.latest,
         }),
         I::JumpToAnchor(x) => Action::Local(Local::JumpToAnchor {
             conversation_id: x.conversation_id,

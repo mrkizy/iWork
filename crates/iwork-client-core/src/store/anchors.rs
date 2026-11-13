@@ -12,6 +12,10 @@ pub const ANCHOR_SPAN: u32 = 60;
 pub const JUMP_PAGE: u32 = 50;
 /// 跳过去之后高亮多久（网页计时）。
 pub const HIGHLIGHT_MS: u32 = 1000;
+/// 以它为中心取锚点窗口就是整个对话最早的那一段（`around_seq` 取「不大于它的」与「大于它的」，seq 从 1 起）。
+pub const EARLIEST_CENTER: u64 = 1;
+/// 以它为中心就是最新的那一段（`ListAnchors.around_seq` 的约定）。
+pub const LATEST_CENTER: u64 = 0;
 
 /// 锚点的身份：`created_seq` 的十进制。三种锚点各自是不同的事件，seq 不会重。
 pub fn key_of(a: &pb::Anchor) -> String {
@@ -171,6 +175,15 @@ impl Anchors {
             e.cursor_dirty = true;
         }
         e
+    }
+
+    /// Home / End：以整个对话最早或最新的一头为中心重取（不跳转）。
+    pub fn browse_edge(&mut self, latest: bool) {
+        self.want_center = Some(if latest {
+            LATEST_CENTER
+        } else {
+            EARLIEST_CENTER
+        });
     }
 
     /// 翻看到了离窗口边缘不远的一处：以它为中心重取（不跳转）。

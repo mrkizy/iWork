@@ -652,8 +652,8 @@ mod composer_block_tests {
 
 // ---------- 消息锚点（方案 2.9） ----------
 
-/// 跳到还没加载的一处、正在取那一段时的提示（Q18：原地不动加提示）。
-pub const ANCHOR_JUMP_LOADING: &str = "正在加载那一处…";
+/// 跳到还没加载的一处、正在取那一段时给读屏的话（ui-m1 2a 第 11 条：不显示文字，刻度流光、顶端进度线）。
+pub const ANCHOR_JUMP_LOADING: &str = "正在定位到所选消息";
 
 pub fn anchor_kind(k: pb::AnchorKind) -> &'static str {
     match k {

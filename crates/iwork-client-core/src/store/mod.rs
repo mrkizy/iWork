@@ -549,6 +549,17 @@ impl Store {
         }
     }
 
+    /// Home / End：以整个对话最早或最新的一头为中心重取锚点窗口（不跳转）。
+    pub fn anchor_browse_edge(&mut self, conversation_id: &str, latest: bool) {
+        if let Some(t) = self
+            .open
+            .as_mut()
+            .filter(|t| t.conversation_id == conversation_id)
+        {
+            t.anchors.browse_edge(latest);
+        }
+    }
+
     /// 网页翻看到了离窗口边缘不远的一处：以它为中心重取（不跳转）。
     pub fn anchor_browse(&mut self, conversation_id: &str, key: &str) {
         if let Some(t) = self
