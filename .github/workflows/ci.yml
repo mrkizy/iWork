@@ -66,6 +66,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # 远端重测试脚本的自测（假 ssh，本机跑）：远端 mac120 是 macOS 自带的 bash 3.2，所以只在 macOS 上用 /bin/bash 跑
+      - name: remote-heavy 自测
+        if: runner.os == 'macOS'
+        run: /bin/bash scripts/remote-heavy.sh --selftest
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo test
