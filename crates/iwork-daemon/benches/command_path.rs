@@ -7,7 +7,10 @@
 //! - `command_roundtrip`：同一种提交（`SetPlayfulUi` 的 `GlobalSettingsChanged`）直接 `commit`，对经分发入口受理
 //!   （在途表进出 + 排在写队列里查回执 + 提交 + 回执）。两边的提交是同一笔，差的就是分发入口多出来的那一截。
 //!
-//! 两组都关 fullfsync（只比相对值，两边一样）。
+//! - `turn_start_read`（步 4）：会话线在每个回合开始前做的那次准备——三次读（回合、这一轮的请求、算快照的已提交
+//!   输入）与路径解析加快照重算（`prepare`）——各自的中位耗时。收尾那次读是改动探针的读，探针按 7/F-2 关着，不量。
+//!
+//! 都关 fullfsync（只比相对值，两边一样）。
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -31,6 +34,10 @@ use iwork_proto::pb;
 use iwork_store::{DataDir, ReadDefaults, SqliteProjector, SqliteStore, StoreConfig};
 
 type Store = SqliteStore<ProtoEventCodec>;
+
+#[path = "../../iwork-store/tests/support/fixtures.rs"]
+#[allow(dead_code)]
+mod fixtures;
 
 const N: usize = 2000;
 const ROUNDS: usize = 5;
@@ -166,6 +173,56 @@ fn ctx() -> ConnectionContext {
     }
 }
 
+type Gated = GatedStore<Store>;
+type Disp = Dispatcher<
+    Gated,
+    iwork_store::SqliteReadModel<ProtoEventCodec>,
+    ApprovalEngine<
+        SystemClock,
+        MonotonicIds<SystemClock>,
+        Gated,
+        AcpRuntime,
+        TokioTimer,
+        OsPathResolver,
+    >,
+>;
+
+/// 分发入口：真引擎 + 带闸存储 + 宿主开着。
+async fn dispatcher(raw: &Arc<Store>, gated: &Gated, dir: &tempfile::TempDir) -> Arc<Disp> {
+    let (engine, _) = ApprovalEngine::start(
+        EnginePorts {
+            clock: SystemClock::new(),
+            ids: MonotonicIds::new(SystemClock::new()),
+            store: gated.clone(),
+            reviewer: AcpRuntime::new(RuntimeLaunch {
+                program: PathBuf::from("/nonexistent"),
+                args: vec![],
+                env: vec![],
+            }),
+            timer: TokioTimer,
+            fs: OsPathResolver::new(dir.path().into(), false),
+        },
+        BTreeSet::new(),
+        |_, _| None,
+    )
+    .await
+    .unwrap();
+    Arc::new(Dispatcher::new(CommandPorts {
+        store: Arc::new(gated.clone()),
+        read: Arc::new(raw.read_model(ReadDefaults {
+            global_settings: iwork_domain::settings::GlobalSettings {
+                playful_ui: true,
+                autostart: false,
+                projects_root: dir.path().join("projects"),
+            },
+        })),
+        engine,
+        ids: Arc::new(MonotonicIds::new(SystemClock::new())),
+        clock: Arc::new(SystemClock::new()),
+        host: Arc::new(Open),
+    }))
+}
+
 fn command_roundtrip(rt: &tokio::runtime::Runtime) {
     let (mut direct, mut dispatched) = (Vec::new(), Vec::new());
     for round in 0..ROUNDS {
@@ -186,41 +243,7 @@ fn command_roundtrip(rt: &tokio::runtime::Runtime) {
         let dir = tempfile::tempdir().unwrap();
         let raw = open_store(&dir);
         let gated = GatedStore::new(raw.clone(), Arc::new(SealGate::default()));
-        let d = rt.block_on(async {
-            let (engine, _) = ApprovalEngine::start(
-                EnginePorts {
-                    clock: SystemClock::new(),
-                    ids: MonotonicIds::new(SystemClock::new()),
-                    store: gated.clone(),
-                    reviewer: AcpRuntime::new(RuntimeLaunch {
-                        program: PathBuf::from("/nonexistent"),
-                        args: vec![],
-                        env: vec![],
-                    }),
-                    timer: TokioTimer,
-                    fs: OsPathResolver::new(dir.path().into(), false),
-                },
-                BTreeSet::new(),
-                |_, _| None,
-            )
-            .await
-            .unwrap();
-            Dispatcher::new(CommandPorts {
-                store: Arc::new(gated),
-                read: Arc::new(raw.read_model(ReadDefaults {
-                    global_settings: iwork_domain::settings::GlobalSettings {
-                        playful_ui: true,
-                        autostart: false,
-                        projects_root: dir.path().join("projects"),
-                    },
-                })),
-                engine,
-                ids: Arc::new(MonotonicIds::new(SystemClock::new())),
-                clock: Arc::new(SystemClock::new()),
-                host: Arc::new(Open),
-            })
-        });
-        let d = Arc::new(d);
+        let d = rt.block_on(dispatcher(&raw, &gated, &dir));
         dispatched.push(rt.block_on(timed(|i| {
             let d = d.clone();
             async move {
@@ -258,6 +281,107 @@ fn command_roundtrip(rt: &tokio::runtime::Runtime) {
     );
 }
 
+/// 步 4：回合开始前的准备。夹具：内置助手 + 一个项目对话 + 经分发入口排上的一个回合。
+fn turn_start_read(rt: &tokio::runtime::Runtime) {
+    use iwork_daemon::host::ports::HostEnv;
+    use iwork_daemon::host::prepare::prepare;
+    use iwork_ports::read_model::ReadModelPort;
+    let dir = tempfile::tempdir().unwrap();
+    let raw = open_store(&dir);
+    let gated = GatedStore::new(raw.clone(), Arc::new(SealGate::default()));
+    let read = raw.read_model(ReadDefaults {
+        global_settings: iwork_domain::settings::GlobalSettings {
+            playful_ui: true,
+            autostart: false,
+            projects_root: dir.path().join("projects"),
+        },
+    });
+    let turn_id = rt.block_on(async {
+        iwork_daemon::assembly::register_builtin_assistant(&gated, &read, &SystemClock::new())
+            .await
+            .unwrap();
+        raw.commit(CommitRequest {
+            command_id: id(900_000),
+            actor: Actor("bench".into()),
+            events: vec![
+                iwork_domain::event::ProjectAdded {
+                    project: fixtures::project(7),
+                }
+                .into(),
+                iwork_domain::event::ConversationCreated {
+                    conversation: fixtures::project_conversation(10, 7),
+                }
+                .into(),
+            ],
+            outbox: vec![],
+        })
+        .await
+        .unwrap();
+        let d = dispatcher(&raw, &gated, &dir).await;
+        let r = d
+            .handle(
+                &ctx(),
+                pb::Request {
+                    request_id: 1,
+                    body: Some(pb::request::Body::Command(pb::Command {
+                        command_id: id(900_001).to_string(),
+                        kind: Some(pb::command::Kind::SendMessage(pb::SendMessage {
+                            conversation_id: fixtures::cid(10).to_string(),
+                            text: "hi".into(),
+                            attachment_ids: vec![],
+                        })),
+                    })),
+                },
+            )
+            .await;
+        assert!(matches!(r.body, Some(pb::response::Body::Accepted(_))));
+        let events = raw
+            .read_events(
+                iwork_ports::store::EventFilter::All,
+                iwork_domain::id::Seq(0),
+                1000,
+            )
+            .await
+            .unwrap();
+        events
+            .into_iter()
+            .find_map(|e| match e.event {
+                iwork_domain::event::DomainEvent::TurnQueued(q) => Some(q.turn.id),
+                _ => None,
+            })
+            .expect("排上了回合")
+    });
+    let env = HostEnv {
+        platform: HostEnv::platform(),
+        home: dir.path().join("home"),
+        data_dir: dir.path().join("data"),
+        tmp_dirs: vec![std::env::temp_dir()],
+    };
+    let fs = OsPathResolver::new(env.home.clone(), false);
+    let (mut reads, mut prepares) = (Vec::with_capacity(N), Vec::with_capacity(N));
+    rt.block_on(async {
+        for _ in 0..N {
+            let t = Instant::now();
+            let (turn, c) = read.turn_with_conversation(turn_id).await.unwrap().unwrap();
+            let _request = read.turn_request(turn.id).await.unwrap();
+            let inputs = read.snapshot_inputs(c.id).await.unwrap();
+            reads.push(t.elapsed().as_secs_f64() * 1e6);
+            let t = Instant::now();
+            let prepared = prepare(&env, &fs, &inputs, &turn).unwrap();
+            prepares.push(t.elapsed().as_secs_f64() * 1e6);
+            std::hint::black_box(prepared);
+        }
+    });
+    emit(
+        "turn_start_read",
+        serde_json::json!({
+            "samples": N,
+            "reads_median_us": median(reads),
+            "prepare_median_us": median(prepares),
+        }),
+    );
+}
+
 fn main() {
     let filter: Vec<String> = std::env::args()
         .skip(1)
@@ -279,6 +403,9 @@ fn main() {
     }
     if on("command_roundtrip") {
         command_roundtrip(&rt);
+    }
+    if on("turn_start_read") {
+        turn_start_read(&rt);
     }
     if let Ok(o) = std::process::Command::new("sysctl")
         .args(["-n", "vm.loadavg"])

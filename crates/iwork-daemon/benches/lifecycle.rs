@@ -8,7 +8,9 @@
 //! - `client_connect_cold`：后台没在跑，`Launcher::connect_or_launch` 从调用到连上；
 //! - `idle_cpu`：就绪后空闲 `IWORK_BENCH_IDLE_SECS`（默认 60）秒的 CPU 占用；
 //! - `write_commit_observer`：存储单事件提交，装真的 `PublishObserver`（转 pb、算路由、推给 ipc 的 Publisher）
-//!   与不装观察者交替各跑几轮，每次提交的中位耗时（热路径前后对比，AGENTS.md「性能」）。
+//!   与不装观察者交替各跑几轮，每次提交的中位耗时（热路径前后对比，AGENTS.md「性能」）。两种事件：
+//!   `GlobalSettingsChanged`（不叫醒谁）与 `ConversationDeleting`（在回合宿主的唤醒登记表里、也在引擎的流里，
+//!   观察者两个都叫醒）。每轮换先后。
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -17,7 +19,9 @@ use std::time::{Duration, Instant};
 
 use iwork_app::codec::ProtoEventCodec;
 use iwork_domain::common::Actor;
-use iwork_domain::event::GlobalSettingsChanged;
+use iwork_domain::event::{
+    ConversationCreated, ConversationDeleting, DomainEvent, GlobalSettingsChanged, ProjectAdded,
+};
 use iwork_domain::id::{CommandId, RawUlid};
 use iwork_ipc::client::{Client, ClientConfig};
 use iwork_ipc::peer::{SelfIdentity, TrustPolicy};
@@ -28,6 +32,10 @@ use iwork_proto::pb;
 use iwork_store::{DataDir, SqliteProjector, SqliteStore, StoreConfig};
 
 const DAEMON: &str = env!("CARGO_BIN_EXE_iwork-daemon");
+
+#[path = "../../iwork-store/tests/support/fixtures.rs"]
+#[allow(dead_code)]
+mod fixtures;
 
 fn median(mut v: Vec<f64>) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -130,22 +138,41 @@ fn seed(home: &Home, n: usize) {
 }
 
 fn request(cmd: u128, events: usize) -> CommitRequest {
-    CommitRequest {
-        command_id: CommandId::from_raw(RawUlid::from_parts(1_794_268_800_000, cmd)),
-        actor: Actor("bench".into()),
-        events: (0..events)
+    request_of(
+        cmd,
+        (0..events)
             .map(|i| {
                 GlobalSettingsChanged {
-                    playful_ui: Some(i % 2 == 0),
+                    playful_ui: Some(i.is_multiple_of(2)),
                     autostart: None,
                     projects_root: None,
                 }
                 .into()
             })
             .collect(),
+    )
+}
+
+fn request_of(cmd: u128, events: Vec<DomainEvent>) -> CommitRequest {
+    CommitRequest {
+        command_id: CommandId::from_raw(RawUlid::from_parts(1_794_268_800_000, cmd)),
+        actor: Actor("bench".into()),
+        events,
         outbox: vec![],
     }
 }
+
+/// 观察者那一组提交的事件。
+#[derive(Debug, Clone, Copy)]
+enum Load {
+    /// 谁都不叫醒
+    Settings,
+    /// 叫醒回合宿主与引擎（`conversation_deleting`）
+    Wakes,
+}
+
+const BENCH_PROJECT: u128 = 7;
+const BENCH_CONV: u128 = 10;
 
 fn open_store(data: &DataDir) -> SqliteStore<ProtoEventCodec> {
     let codec = Arc::new(ProtoEventCodec);
@@ -300,12 +327,35 @@ fn idle_cpu(rt: &tokio::runtime::Runtime, own: &SelfIdentity) {
 }
 
 /// 单事件提交的中位耗时（微秒）。`observer` 时装真的 `PublishObserver`，发布给一个真的 ipc `Publisher`（没有连接）。
-fn commits(rt: &tokio::runtime::Runtime, own: &SelfIdentity, observer: bool, n: usize) -> f64 {
+fn commits(
+    rt: &tokio::runtime::Runtime,
+    own: &SelfIdentity,
+    observer: bool,
+    load: Load,
+    n: usize,
+) -> f64 {
     let home = Home::new();
     let data = home.data();
     data.ensure_layout().unwrap();
     let store = Arc::new(open_store(&data));
     rt.block_on(async {
+        // 叫醒那一组要一个对话可删（重复的「进删除」投影照写）
+        store
+            .commit(request_of(
+                u128::MAX - 1,
+                vec![
+                    ProjectAdded {
+                        project: fixtures::project(BENCH_PROJECT),
+                    }
+                    .into(),
+                    ConversationCreated {
+                        conversation: fixtures::project_conversation(BENCH_CONV, BENCH_PROJECT),
+                    }
+                    .into(),
+                ],
+            ))
+            .await
+            .unwrap();
         if observer {
             let (_server, publisher) = Server::new(
                 ServerConfig::new("bench"),
@@ -324,8 +374,20 @@ fn commits(rt: &tokio::runtime::Runtime, own: &SelfIdentity, observer: bool, n: 
         }
         let mut us = Vec::with_capacity(n);
         for i in 0..n {
+            let req = match load {
+                Load::Settings => request(i as u128 + 1, 1),
+                Load::Wakes => request_of(
+                    i as u128 + 1,
+                    vec![
+                        ConversationDeleting {
+                            conversation_id: fixtures::cid(BENCH_CONV),
+                        }
+                        .into(),
+                    ],
+                ),
+            };
             let t = Instant::now();
-            store.commit(request(i as u128 + 1, 1)).await.unwrap();
+            store.commit(req).await.unwrap();
             us.push(t.elapsed().as_secs_f64() * 1e6);
         }
         median(us)
@@ -333,20 +395,34 @@ fn commits(rt: &tokio::runtime::Runtime, own: &SelfIdentity, observer: bool, n: 
 }
 
 fn write_commit_observer(rt: &tokio::runtime::Runtime, own: &SelfIdentity) {
-    let mut with = Vec::new();
-    let mut without = Vec::new();
-    for _ in 0..3 {
-        without.push(commits(rt, own, false, 2000));
-        with.push(commits(rt, own, true, 2000));
+    const ROUNDS: usize = 5;
+    let cells = [
+        (false, Load::Settings),
+        (true, Load::Settings),
+        (false, Load::Wakes),
+        (true, Load::Wakes),
+    ];
+    let mut out: [Vec<f64>; 4] = Default::default();
+    for round in 0..ROUNDS {
+        // 每轮换先后，负载随时间的漂移不偏向一组
+        for k in 0..cells.len() {
+            let i = (k + round) % cells.len();
+            let (observer, load) = cells[i];
+            out[i].push(commits(rt, own, observer, load, 2000));
+        }
     }
     emit(
         "write_commit_observer",
         serde_json::json!({
-            "rounds": 3,
-            "without_observer_median_us": median(without.clone()),
-            "with_observer_median_us": median(with.clone()),
-            "without_rounds_us": without,
-            "with_rounds_us": with,
+            "rounds": ROUNDS,
+            "without_observer_median_us": median(out[0].clone()),
+            "with_observer_median_us": median(out[1].clone()),
+            "wakes_without_observer_median_us": median(out[2].clone()),
+            "wakes_with_observer_median_us": median(out[3].clone()),
+            "without_rounds_us": out[0],
+            "with_rounds_us": out[1],
+            "wakes_without_rounds_us": out[2],
+            "wakes_with_rounds_us": out[3],
         }),
     );
 }
