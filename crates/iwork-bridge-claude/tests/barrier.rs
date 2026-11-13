@@ -715,3 +715,17 @@ fn supervisor_pid_env_names_match() {
         iwork_agent_acp::process::SUPERVISOR_PID_ENV
     );
 }
+
+/// 夹具自己收拾模拟后台的 shell（审查 S6-5b 3/F-2）：`Orphanable` 被丢掉（测试成功结束，或者断言失败中途 panic）
+/// 时，shell 被结束并回收，不留一个每 10 毫秒起一次 `sleep` 的进程。
+#[tokio::test(flavor = "multi_thread")]
+async fn orphanable_drop_ends_its_shell() {
+    let rig = Rig::new(Value::Array(opening()));
+    let b = Orphanable::start(&rig).await;
+    let shell = b.shell.id() as i32;
+    let _cleanup = Leftover(vec![b.bridge]);
+    drop(b);
+    // SAFETY: 信号 0 只检查进程号还在不在（回收之后就不在了）
+    let gone = || unsafe { libc::kill(shell, 0) } != 0;
+    wait_until("shell 没了（结束并回收）", Duration::from_secs(2), gone).await;
+}

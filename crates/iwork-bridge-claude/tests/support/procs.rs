@@ -267,6 +267,17 @@ pub struct Orphanable {
     pub err_read: Option<std::fs::File>,
 }
 
+/// 模拟后台的 shell 归夹具收拾：不论测试成功结束还是断言失败中途 panic，丢掉夹具时都结束并回收它（审查 S6-5b
+/// 3/F-2）。桥接这时看到父进程换了，自己收尾。
+impl Drop for Orphanable {
+    fn drop(&mut self) {
+        if matches!(self.shell.try_wait(), Ok(None)) {
+            let _ = self.shell.kill();
+        }
+        let _ = self.shell.wait();
+    }
+}
+
 /// [`Orphanable`] 怎么起桥接。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Launch {

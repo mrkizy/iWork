@@ -26,11 +26,18 @@ pub const ENV_SUPERVISOR_PID: &str = "IWORK_SUPERVISOR_PID";
 
 /// 后台的进程号；0 表示收尾线程还没起（进程内测试里就是这样），这时一律当后台还在。
 static SUPERVISOR: AtomicI32 = AtomicI32::new(0);
-/// CLI 的进程号；0 表示还没起 CLI。
+/// CLI 的身份，也是「谁能动它」的交接点（审查 S6-5b 3/F-1）：
+/// - `pid`（正数）：已登记，收尾线程可以对它发信号，tokio 那边还没回收它；
+/// - `-pid`：收尾线程正在「检查它还在、发信号」，这期间 tokio 那边不能回收它（回收了号就可能被别人复用）；
+/// - 0：没有 CLI，或者已经交还给 tokio 回收，之后不再对这个号发任何信号。
 static CLI: AtomicI32 = AtomicI32::new(0);
 /// 桥接是不是自己进程组的组长：是才对整组发 SIGKILL。
 static LEADER: AtomicBool = AtomicBool::new(false);
 static EVENTS: OnceLock<Sender<Event>> = OnceLock::new();
+
+/// 交还 CLI 时最多等几次收尾线程把信号发完（每次 [`RELEASE_STEP`]）。对面只差两个系统调用，正常一次都不用等。
+const RELEASE_TRIES: u32 = 100;
+const RELEASE_STEP: Duration = Duration::from_millis(1);
 
 /// 看 CLI 退了没有的间隔。
 const CLI_POLL: Duration = Duration::from_millis(50);
@@ -100,7 +107,8 @@ fn watch(events: &Receiver<Event>) -> ! {
                 self_clean();
             }
             Ok(Event::Parked) => {
-                due.get_or_insert(now + TEARDOWN_WAIT);
+                // 从收到的这一刻算，不用等之前取的 now（审查 S6-5b 3/F-3）
+                due.get_or_insert_with(|| Instant::now() + TEARDOWN_WAIT);
             }
             Err(RecvTimeoutError::Timeout) => {}
             // 发送端放在 static 里，不会断；万一断了，照样按时限轮询父进程
@@ -113,9 +121,7 @@ fn watch(events: &Receiver<Event>) -> ! {
 /// 只用系统调用和原子量，可以从任何线程、同时从几处调用（重复的 SIGTERM、SIGKILL 没有害处）。不返回。
 pub fn self_clean() -> ! {
     let cli = CLI.load(Ordering::SeqCst);
-    if cli > 0 && running(cli) {
-        // SAFETY: kill 只读两个整数参数；CLI 是桥接的子进程，还没被回收（running 刚看过），号不会是别人的
-        unsafe { libc::kill(cli, libc::SIGTERM) };
+    if signal_cli(libc::SIGTERM) {
         let deadline = Instant::now() + BRIDGE_TERM_WAIT;
         while Instant::now() < deadline && running(cli) {
             std::thread::sleep(CLI_POLL);
@@ -126,13 +132,50 @@ pub fn self_clean() -> ! {
         if LEADER.load(Ordering::SeqCst) {
             libc::killpg(libc::getpid(), libc::SIGKILL);
         }
-        if cli > 0 && running(cli) {
-            libc::kill(cli, libc::SIGKILL);
-        }
+        signal_cli(libc::SIGKILL);
         libc::kill(libc::getpid(), libc::SIGKILL);
     }
     // SIGKILL 自己之后走不到这里
     std::process::abort()
+}
+
+/// 给 CLI 发一个信号：先占住它的身份（`pid` → `-pid`），再看它还在跑才发，做完放回。占不住（已经交还给 tokio，或者
+/// 别处正在发）就不发。返回发了没有。
+fn signal_cli(sig: libc::c_int) -> bool {
+    let pid = CLI.load(Ordering::SeqCst);
+    if pid <= 0
+        || CLI
+            .compare_exchange(pid, -pid, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+    {
+        return false;
+    }
+    let sent = running(pid) && {
+        #[cfg(test)]
+        seam::pause();
+        // SAFETY: kill 只读两个整数参数；占住期间 tokio 那边不回收它，号不会换人
+        unsafe { libc::kill(pid, sig) == 0 }
+    };
+    let _ = CLI.compare_exchange(-pid, pid, Ordering::SeqCst, Ordering::SeqCst);
+    sent
+}
+
+/// tokio 那边回收 CLI 之前必须先调（`CliProcess` 的 `kill`、`wait` 与 `Drop`，CLI 只有这几条回收路径）：把身份交还
+/// （`pid` → 0），之后收尾线程不再对这个号发信号。收尾线程正在发（`-pid`）就等它发完，最多 [`RELEASE_TRIES`] 次、
+/// 每次 [`RELEASE_STEP`]；等不到返回 `false`，调用方就不回收（宁可留一个僵尸到桥接退出，也不让号被复用）。
+/// 不是登记过的那个 CLI、或者已经交还过，返回 `true`。
+pub fn release_cli(pid: Option<u32>) -> bool {
+    let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) else {
+        return true;
+    };
+    for _ in 0..RELEASE_TRIES {
+        match CLI.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(now) if now == -pid => std::thread::sleep(RELEASE_STEP),
+            Err(_) => return true,
+        }
+    }
+    false
 }
 
 /// CLI 还在跑（没退出）：只看不回收（`WNOWAIT`），回收照旧归 tokio 的 `Child`，或者桥接死后归 init。已经被回收了
@@ -151,4 +194,126 @@ fn running(pid: i32) -> bool {
     };
     // SAFETY: waitid 成功时 si_pid 有效；还没退出时为 0
     rc == 0 && unsafe { info.si_pid() } == 0
+}
+
+/// 测试用的接缝：让「检查之后、发信号之前」停住，好在中间插进别的事。只在 cfg(test) 下存在。
+#[cfg(test)]
+mod seam {
+    use std::sync::Mutex;
+    use std::sync::mpsc::{Receiver, Sender};
+
+    type Hold = (Sender<()>, Receiver<()>);
+    static HOLD: Mutex<Option<Hold>> = Mutex::new(None);
+
+    /// 装上：下一次发信号走到检查之后，先往 `at` 报到，再等 `go`。
+    pub fn set(at: Sender<()>, go: Receiver<()>) {
+        *HOLD.lock().unwrap() = Some((at, go));
+    }
+
+    pub fn pause() {
+        let hold = HOLD.lock().unwrap().take();
+        if let Some((at, go)) = hold {
+            let _ = at.send(());
+            let _ = go.recv();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::mpsc;
+
+    /// 这几条测试都改进程级的 CLI 状态，一条一条来。
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 收尾线程停在「检查过 CLI 还在」和「发信号」之间，另一个线程启动并停在那里，返回 (CLI, 放行的发送端, 发信号的线程)。
+    fn signal_paused_after_check() -> (
+        std::process::Child,
+        mpsc::Sender<()>,
+        std::thread::JoinHandle<bool>,
+    ) {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        register_cli(Some(child.id()));
+        let (at_tx, at_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
+        seam::set(at_tx, go_rx);
+        let signaler = std::thread::spawn(|| signal_cli(libc::SIGTERM));
+        at_rx.recv().unwrap();
+        (child, go_tx, signaler)
+    }
+
+    /// 检查过 CLI 还在、还没发信号的时候，tokio 那边要回收它（审查 S6-5b 3/F-1）：交还要等信号发完才成功，回收排在
+    /// 发信号之后。不然回收之后这个号可能被别的进程复用，接下来的信号就打到了别人身上。
+    #[test]
+    fn release_waits_for_an_in_flight_signal() {
+        let _one = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut child, go, signaler) = signal_paused_after_check();
+        let pid = child.id();
+        let released = Arc::new(AtomicBool::new(false));
+        let r = Arc::clone(&released);
+        let releasing = std::thread::spawn(move || {
+            let ok = release_cli(Some(pid));
+            r.store(true, Ordering::SeqCst);
+            ok
+        });
+        std::thread::sleep(Duration::from_millis(40));
+        let released_early = released.load(Ordering::SeqCst);
+        go.send(()).unwrap();
+        let sent = signaler.join().unwrap();
+        let ok = releasing.join().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        CLI.store(0, Ordering::SeqCst);
+        assert!(
+            !released_early,
+            "信号还没发，交还就成功了：回收可能排到发信号前面"
+        );
+        assert!(ok, "信号发完之后交还成功");
+        assert!(sent, "信号发给了还没被回收的 CLI");
+    }
+
+    /// 收尾线程一直占着（比交还的上限久）：交还有界地放弃、返回 `false`，调用方不回收，不会无限等。
+    #[test]
+    fn release_gives_up_after_its_bound() {
+        let _one = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut child, go, signaler) = signal_paused_after_check();
+        let started = Instant::now();
+        let ok = release_cli(Some(child.id()));
+        let took = started.elapsed();
+        go.send(()).unwrap();
+        signaler.join().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        CLI.store(0, Ordering::SeqCst);
+        assert!(!ok, "占着的时候交还不成功");
+        assert!(took < Duration::from_secs(2), "有界：{took:?}");
+    }
+
+    /// 已经交还给 tokio 回收的 CLI，收尾时不再对这个号发任何信号。
+    #[test]
+    fn released_cli_is_never_signalled() {
+        let _one = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        register_cli(Some(child.id()));
+        assert!(release_cli(Some(child.id())));
+        let sent = signal_cli(libc::SIGTERM);
+        let _ = child.kill();
+        let _ = child.wait();
+        CLI.store(0, Ordering::SeqCst);
+        assert!(!sent, "交还之后不发信号");
+    }
 }
