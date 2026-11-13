@@ -358,13 +358,51 @@ enum Staged {
     World(Op),
     /// 第 k 遍扫描往前走一步
     Advance(usize),
+    /// 同上；走到复核这一步时，读每个见证都拆成「读出生时间 → 读会话号 → 再读出生时间」三次调用（生产代码的
+    /// `read_consistent`），第一次读出生时间和读会话号之间插入这些事（审查 S6-5 5/F-1）
+    Torn(usize, Vec<Op>),
 }
 
 fn staged() -> impl Strategy<Value = Staged> {
     prop_oneof![
         2 => op().prop_map(Staged::World),
         3 => (0..2usize).prop_map(Staged::Advance),
+        2 => ((0..2usize), prop::collection::vec(op(), 1..4)).prop_map(|(k, ops)| Staged::Torn(k, ops)),
     ]
+}
+
+/// 读一个进程的系统调用，照模型世界答；第一次读会话号之前先让插进来的事发生。
+struct TornSys<'a> {
+    world: std::cell::RefCell<&'a mut World>,
+    pending: std::cell::RefCell<Vec<Op>>,
+}
+
+impl crate::process::scan::ProcSys for TornSys<'_> {
+    fn bsd(&self, pid: Pid) -> std::io::Result<Option<crate::process::scan::Bsd>> {
+        let w = self.world.borrow();
+        Ok(w.procs
+            .get(&pid)
+            .filter(|p| !p.unreadable)
+            .map(|p| crate::process::scan::Bsd {
+                ppid: p.ppid,
+                pgid: p.pgid,
+                birth: Birth(p.birth),
+                run: Run::Running,
+            }))
+    }
+    fn sid(&self, pid: Pid) -> Option<Pid> {
+        let ops = std::mem::take(&mut *self.pending.borrow_mut());
+        if !ops.is_empty() {
+            // 回收桥接要动范围，不在读一个进程的这一瞬间里；别的照常发生
+            let mut dummy = Scope::new(BRIDGE, None, DAEMON);
+            let mut w = self.world.borrow_mut();
+            for op in ops.iter().filter(|o| !matches!(o, Op::Reap)) {
+                w.apply(op, &mut dummy);
+            }
+        }
+        let w = self.world.borrow();
+        w.procs.get(&pid).filter(|p| !p.unreadable).map(|p| p.sid)
+    }
 }
 
 /// 一遍扫描走到哪一步了。
@@ -384,7 +422,11 @@ fn run_staged(steps: &[Staged]) -> Result<(), String> {
     for (n, s) in steps.iter().enumerate() {
         match s {
             Staged::World(op) => w.apply(op, &mut scope),
-            Staged::Advance(k) => {
+            Staged::Advance(k) | Staged::Torn(k, _) => {
+                let torn = match s {
+                    Staged::Torn(_, ops) => Some(ops.clone()),
+                    _ => None,
+                };
                 let scan = &mut scans[*k];
                 if scan.snapshot.is_none() {
                     scan.snapshot = Some(scope.begin_scan());
@@ -396,7 +438,25 @@ fn run_staged(steps: &[Staged]) -> Result<(), String> {
                 }
                 if scan.recheck.is_none() {
                     let pids = scan.snapshot.as_ref().unwrap().witness_pids();
-                    scan.recheck = Some(w.recheck(&pids));
+                    scan.recheck = Some(match torn {
+                        None => w.recheck(&pids),
+                        Some(ops) => {
+                            let sys = TornSys {
+                                world: std::cell::RefCell::new(&mut w),
+                                pending: std::cell::RefCell::new(ops),
+                            };
+                            let mut r = Recheck::new();
+                            for pid in pids {
+                                // 一直在换人：真实代码里这一遍扫描算没做成；模型里当这个见证读不到
+                                let now = crate::process::scan::read_consistent(&sys, pid)
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|p| Some((p.birth?, p.sid?)));
+                                r.insert(pid, now);
+                            }
+                            r
+                        }
+                    });
                     continue;
                 }
                 let Scan {
@@ -1089,5 +1149,67 @@ fn scope_holds_only_evidence() {
     assert_eq!(
         fields,
         ["root", "root_sid", "recorded", "generation", "in_flight"]
+    );
+}
+
+// ---------- 读一个进程的两次系统调用之间换人（审查 S6-5 5/F-1） ----------
+
+/// reviewer 的场景：我们的 21（出生时间 21）原在会话 20，后来另立会话 21；会话 20 原来的成员死光，外人重用了号 20 建了
+/// 会话 20，外人的孩子 30 在里面。复核见证 21 时：先读到 21 的出生时间，随后 21 退出、被回收，外人会话 20 的新孩子拿到
+/// 号 21，getsid(21) 读到 20。只按「先 bsd 后 getsid」读会拼出（出生时间 21，会话 20），把 21 当成会话 20 的旧见证，
+/// 认下外人 30。照 getsid 前后各读一次出生时间的读法，拼不出这一条，30 不被认领。
+#[test]
+fn torn_read_cannot_forge_a_witness() {
+    use crate::process::scan::tests::{Scripted, bsd};
+    use crate::process::scan::{ProcSys, read_consistent};
+    // 范围：21 记着会话 20（另立会话之前记下的）
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
+    let mut t0: Vec<Proc> = base_table().into_iter().filter(|p| p.pid != 21).collect();
+    t0.push(proc(21, 20, 20, 20, 21));
+    observe(&mut s, t0);
+    // 这一遍读到的表：20 是外人（重用了号，出生时间 900），30 是它的孩子；我们的 21 已另立会话 21
+    let table = Table::from_procs(vec![
+        proc(1, 1, 1, 1, 1),
+        proc(2, 1, 2, 2, 2),
+        proc(10, 2, 10, 2, 10),
+        proc(20, 1, 20, 20, 900),
+        proc(30, 20, 20, 20, 300),
+        proc(21, 1, 21, 21, 21),
+    ]);
+    // 复核 21：第一次 bsd 读到 21 自己，getsid 时号码已经换给外人（会话 20、出生时间 999）
+    let torn = || {
+        Scripted::new(
+            vec![bsd(21), bsd(999), bsd(999), bsd(999)],
+            vec![Some(20), Some(20)],
+        )
+    };
+    let recheck_with = |read: &dyn Fn(&Scripted) -> Option<(Birth, Pid)>| -> Recheck {
+        let sys = torn();
+        s.witness_pids()
+            .into_iter()
+            .filter(|p| *p == 21)
+            .map(|p| (p, read(&sys)))
+            .collect()
+    };
+    // 旧读法（先 bsd 后 getsid，不核第二次）：拼出假见证，认下外人 30
+    let old = recheck_with(&|sys| {
+        let b = sys.bsd(21).ok()??;
+        Some((b.birth, sys.sid(21)?))
+    });
+    assert_eq!(old[&21], Some((Birth(21), 20)), "对照：旧读法拼出了假见证");
+    let mut old_scope = s.clone();
+    assert!(
+        old_scope.observe(&table, &old).pids().contains(&30),
+        "对照：旧读法认下了外人"
+    );
+    // 新读法：拼不出，30 不被认领
+    let new = recheck_with(&|sys| {
+        let p = read_consistent(sys, 21).ok()??;
+        Some((p.birth?, p.sid?))
+    });
+    assert_eq!(new[&21], Some((Birth(999), 20)));
+    assert!(
+        !s.observe(&table, &new).pids().contains(&30),
+        "外人 30 不被认领"
     );
 }

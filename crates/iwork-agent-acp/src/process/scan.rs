@@ -82,51 +82,115 @@ fn list_pids() -> io::Result<Vec<Pid>> {
     }
 }
 
-/// 读一个进程：读到了为 `Some`；没了、僵尸、没权限为 `None`；别的错误报出去。
-#[cfg(target_os = "macos")]
-fn read_one(pid: Pid) -> io::Result<Option<Proc>> {
+/// 一次 `proc_pidinfo(PROC_PIDTBSDINFO)` 读到的东西（不含会话号）。
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bsd {
+    pub ppid: Pid,
+    pub pgid: Pid,
+    pub birth: Birth,
+    pub run: Run,
+}
+
+/// 读一个进程要用到的两样系统调用，测试换成替身（审查 S6-5 5/F-1）。
+#[cfg(any(target_os = "macos", test))]
+pub trait ProcSys {
+    /// 进程信息；没了、僵尸、没权限为 `None`；别的错误报出去
+    fn bsd(&self, pid: Pid) -> io::Result<Option<Bsd>>;
+    /// 会话号；读不到为 `None`
+    fn sid(&self, pid: Pid) -> Option<Pid>;
+}
+
+/// 读一次进程最多重来几遍：两次出生时间对不上（号码在读的当中换了人）就重读。
+#[cfg(any(target_os = "macos", test))]
+const CONSISTENT_TRIES: usize = 3;
+
+/// 读一个进程，保证会话号和出生时间属于同一个身份（审查 S6-5 5/F-1）。macOS 上出生时间和会话号来自两次系统调用，
+/// 两次之间号码可以换人：先读到旧进程的出生时间、再读到新进程的会话号，拼成一个假见证。所以 `getsid` 前后各读一次
+/// 出生时间，两次相同才用；不同就重读，重读几遍还对不上，这一整遍扫描算没做成（报错）：不只是跳过这一行，因为换上来
+/// 的那个进程也可能是我们的，只跳过它，这一遍可能被拿去判「清空了」。
+#[cfg(any(target_os = "macos", test))]
+pub fn read_consistent(sys: &impl ProcSys, pid: Pid) -> io::Result<Option<Proc>> {
     if pid <= 0 {
         return Ok(None);
     }
-    let size = std::mem::size_of::<libc::proc_bsdinfo>();
-    // SAFETY: 全零是这个纯数据结构体的合法初值
-    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    // SAFETY: 传入的指针与长度描述同一个活着的结构体
-    let n = unsafe {
-        libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            (&raw mut info).cast(),
-            size as libc::c_int,
-        )
-    };
-    if n as usize != size {
-        let e = io::Error::last_os_error();
-        // macOS 对僵尸报 ESRCH
-        return if n <= 0 && skippable(&e) {
-            Ok(None)
-        } else {
-            Err(io::Error::new(e.kind(), format!("读不了进程 {pid}：{e}")))
+    for _ in 0..CONSISTENT_TRIES {
+        let Some(before) = sys.bsd(pid)? else {
+            return Ok(None);
         };
+        let sid = sys.sid(pid);
+        let Some(after) = sys.bsd(pid)? else {
+            return Ok(None);
+        };
+        if before.birth == after.birth {
+            return Ok(Some(Proc {
+                pid,
+                ppid: after.ppid,
+                pgid: after.pgid,
+                sid,
+                birth: Some(after.birth),
+                run: after.run,
+            }));
+        }
     }
-    let run = match info.pbi_status {
-        libc::SZOMB => return Ok(None),
-        libc::SSTOP => Run::Stopped,
-        _ => Run::Running,
-    };
-    // SAFETY: getsid 只读一个整数参数
-    let sid = unsafe { libc::getsid(pid) };
-    Ok(Some(Proc {
-        pid,
-        ppid: info.pbi_ppid as Pid,
-        pgid: info.pbi_pgid as Pid,
-        sid: (sid > 0).then_some(sid),
-        birth: Some(Birth(
-            info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
-        )),
-        run,
-    }))
+    Err(io::Error::other(format!(
+        "进程 {pid} 在读的当中一直换人，这一遍扫描不算"
+    )))
+}
+
+/// 真的系统（macOS）。
+#[cfg(target_os = "macos")]
+struct MacSys;
+
+#[cfg(target_os = "macos")]
+impl ProcSys for MacSys {
+    fn bsd(&self, pid: Pid) -> io::Result<Option<Bsd>> {
+        let size = std::mem::size_of::<libc::proc_bsdinfo>();
+        // SAFETY: 全零是这个纯数据结构体的合法初值
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        // SAFETY: 传入的指针与长度描述同一个活着的结构体
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&raw mut info).cast(),
+                size as libc::c_int,
+            )
+        };
+        if n as usize != size {
+            let e = io::Error::last_os_error();
+            // macOS 对僵尸报 ESRCH
+            return if n <= 0 && skippable(&e) {
+                Ok(None)
+            } else {
+                Err(io::Error::new(e.kind(), format!("读不了进程 {pid}：{e}")))
+            };
+        }
+        let run = match info.pbi_status {
+            libc::SZOMB => return Ok(None),
+            libc::SSTOP => Run::Stopped,
+            _ => Run::Running,
+        };
+        Ok(Some(Bsd {
+            ppid: info.pbi_ppid as Pid,
+            pgid: info.pbi_pgid as Pid,
+            birth: Birth(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec),
+            run,
+        }))
+    }
+
+    fn sid(&self, pid: Pid) -> Option<Pid> {
+        // SAFETY: getsid 只读一个整数参数
+        let sid = unsafe { libc::getsid(pid) };
+        (sid > 0).then_some(sid)
+    }
+}
+
+/// 读一个进程：读到了为 `Some`；没了、僵尸、没权限为 `None`；别的错误报出去。
+#[cfg(target_os = "macos")]
+fn read_one(pid: Pid) -> io::Result<Option<Proc>> {
+    read_consistent(&MacSys, pid)
 }
 
 #[cfg(target_os = "linux")]
@@ -144,6 +208,8 @@ fn list_pids() -> io::Result<Vec<Pid>> {
     Ok(pids)
 }
 
+/// Linux：出生时间（starttime）和会话号在同一个文件里，一次 `read` 读出来；内核生成这份内容时拿的是同一个进程的
+/// 结构，所以两者天然属于同一个身份，不会像 macOS 那样两次系统调用之间换人（审查 S6-5 5/F-1）。
 #[cfg(target_os = "linux")]
 fn read_one(pid: Pid) -> io::Result<Option<Proc>> {
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
@@ -186,8 +252,71 @@ fn parse_stat(pid: Pid, stat: &str) -> io::Result<Option<Proc>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+
+    /// 替身：按次序吐出预先排好的回答。
+    pub struct Scripted {
+        pub bsd: std::cell::RefCell<std::collections::VecDeque<Option<Bsd>>>,
+        pub sid: std::cell::RefCell<std::collections::VecDeque<Option<Pid>>>,
+    }
+
+    impl Scripted {
+        pub fn new(bsd: Vec<Option<Bsd>>, sid: Vec<Option<Pid>>) -> Self {
+            Self {
+                bsd: std::cell::RefCell::new(bsd.into()),
+                sid: std::cell::RefCell::new(sid.into()),
+            }
+        }
+    }
+
+    impl ProcSys for Scripted {
+        fn bsd(&self, _pid: Pid) -> io::Result<Option<Bsd>> {
+            Ok(self.bsd.borrow_mut().pop_front().expect("脚本里还有 bsd"))
+        }
+        fn sid(&self, _pid: Pid) -> Option<Pid> {
+            self.sid.borrow_mut().pop_front().expect("脚本里还有 sid")
+        }
+    }
+
+    pub fn bsd(birth: u64) -> Option<Bsd> {
+        Some(Bsd {
+            ppid: 1,
+            pgid: 21,
+            birth: Birth(birth),
+            run: Run::Running,
+        })
+    }
+
+    /// 5/F-1：getsid 前后出生时间相同才用。
+    #[test]
+    fn sid_and_birth_come_from_one_identity() {
+        // 没换人：直接用
+        let got = read_consistent(&Scripted::new(vec![bsd(21), bsd(21)], vec![Some(21)]), 21);
+        assert_eq!(
+            got.unwrap().map(|p| (p.birth, p.sid)),
+            Some((Some(Birth(21)), Some(21)))
+        );
+        // 读到旧进程的出生时间之后号码换了人，getsid 读到新进程的会话号：这一次不用，重读拿到新进程自己的一致结果，
+        // 拼不出「旧出生时间 + 新会话号」
+        let sys = Scripted::new(
+            vec![bsd(21), bsd(999), bsd(999), bsd(999)],
+            vec![Some(20), Some(20)],
+        );
+        let got = read_consistent(&sys, 21).unwrap().unwrap();
+        assert_eq!((got.birth, got.sid), (Some(Birth(999)), Some(20)));
+        // 一直在换：这一遍扫描算没做成
+        let sys = Scripted::new(
+            (0..CONSISTENT_TRIES * 2)
+                .map(|i| bsd(100 + i as u64))
+                .collect(),
+            vec![Some(20); CONSISTENT_TRIES],
+        );
+        assert!(read_consistent(&sys, 21).is_err());
+        // 读到一半没了：当它没了
+        let sys = Scripted::new(vec![bsd(21), None], vec![Some(21)]);
+        assert_eq!(read_consistent(&sys, 21).unwrap(), None);
+    }
 
     #[test]
     fn stat_line_with_parens_in_the_name() {
