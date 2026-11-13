@@ -34,6 +34,8 @@ pub enum Field {
         group: i32,
         enabled: bool,
     },
+    /// 头像配色：设计令牌名（`derive::avatar::AVATAR_COLORS` 之一，意图入口已校验）。
+    AvatarColor(String),
 }
 
 /// 一项的身份：同一项后改的覆盖先改的。
@@ -43,6 +45,7 @@ pub enum FieldKey {
     Prompt,
     Model,
     Tool(i32),
+    AvatarColor,
 }
 
 impl Field {
@@ -52,6 +55,7 @@ impl Field {
             Field::Prompt(_) => FieldKey::Prompt,
             Field::Model(_) => FieldKey::Model,
             Field::Tool { group, .. } => FieldKey::Tool(*group),
+            Field::AvatarColor(_) => FieldKey::AvatarColor,
         }
     }
 
@@ -68,6 +72,7 @@ impl Field {
                     c.disabled_groups.sort_unstable();
                 }
             }
+            Field::AvatarColor(v) => c.avatar.get_or_insert_default().color.clone_from(v),
         }
     }
 }

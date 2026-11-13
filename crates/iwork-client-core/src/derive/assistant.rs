@@ -2,7 +2,7 @@
 
 use iwork_proto::pb;
 
-use super::avatar::{AvatarState, avatar};
+use super::avatar::{AvatarState, avatar, avatar_color_options};
 use super::model_menu::{MenuInput, model_menu};
 use super::text;
 use crate::store::Store;
@@ -62,5 +62,6 @@ pub fn assistant(store: &Store, id: &str) -> Option<pb::AssistantProfileView> {
             },
         )),
         save_error: store.assistant_edits.error(id).map(str::to_owned),
+        avatar_colors: avatar_color_options(c.avatar.as_ref().map_or("", |a| a.color.as_str())),
     })
 }

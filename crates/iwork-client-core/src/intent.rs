@@ -363,6 +363,16 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
                     group: c.group,
                     enabled: c.enabled,
                 },
+                // 只收配置页给出的 8 个令牌名：存进配置的值要能在浅色、深色下都解析成色
+                Some(F::AvatarColor(token)) => {
+                    if !crate::derive::avatar::AVATAR_COLORS
+                        .iter()
+                        .any(|(t, _)| *t == token)
+                    {
+                        return reject("invalid_intent", &format!("不认识的头像配色：{token}"));
+                    }
+                    Field::AvatarColor(token)
+                }
                 None => return reject("invalid_intent", "没说改哪一项"),
             };
             if store.summary.assistant(&x.assistant_id).is_none() {

@@ -106,7 +106,7 @@ enum Op {
 
 fn op(with_other: bool) -> BoxedStrategy<Op> {
     let base = prop_oneof![
-        4 => (0usize..6, 0usize..3).prop_map(|(f, v)| Op::User(f, v)),
+        4 => (0usize..KEYS.len(), 0usize..3).prop_map(|(f, v)| Op::User(f, v)),
         1 => Just(Op::BadName),
         4 => Just(Op::Process),
         4 => Just(Op::Reply),
@@ -114,14 +114,14 @@ fn op(with_other: bool) -> BoxedStrategy<Op> {
         1 => Just(Op::Resend),
     ];
     if with_other {
-        prop_oneof![5 => base, 1 => (0usize..6, 0usize..3).prop_map(|(f, v)| Op::Other(f, v))]
+        prop_oneof![5 => base, 1 => (0usize..KEYS.len(), 0usize..3).prop_map(|(f, v)| Op::Other(f, v))]
             .boxed()
     } else {
         base.boxed()
     }
 }
 
-/// 第 `f` 项取第 `v` 个值。六项：名字、提示词、模型、两个工具分组。
+/// 第 `f` 项取第 `v` 个值。七项：名字、提示词、模型、三个工具分组、头像配色。
 fn field(f: usize, v: usize) -> Field {
     let names = ["阿森", "林岚", "老周"];
     let models = ["opus", "sonnet", "haiku"];
@@ -140,20 +140,22 @@ fn field(f: usize, v: usize) -> Field {
             group: pb::ToolGroup::RunCommands as i32,
             enabled: v.is_multiple_of(2),
         },
-        _ => Field::Tool {
+        5 => Field::Tool {
             group: pb::ToolGroup::Web as i32,
             enabled: !v.is_multiple_of(2),
         },
+        _ => Field::AvatarColor(["ch1", "ch6", "ch9"][v].into()),
     }
 }
 
-const KEYS: [FieldKey; 6] = [
+const KEYS: [FieldKey; 7] = [
     FieldKey::Name,
     FieldKey::Prompt,
     FieldKey::Model,
     FieldKey::Tool(pb::ToolGroup::EditFiles as i32),
     FieldKey::Tool(pb::ToolGroup::RunCommands as i32),
     FieldKey::Tool(pb::ToolGroup::Web as i32),
+    FieldKey::AvatarColor,
 ];
 
 /// 一份配置里某一项的值（拿 Field 表示，好比较）。
@@ -166,6 +168,9 @@ fn read(c: &pb::AssistantConfig, k: FieldKey) -> Field {
             group: g,
             enabled: !c.disabled_groups.contains(&g),
         },
+        FieldKey::AvatarColor => {
+            Field::AvatarColor(c.avatar.clone().unwrap_or_default().color)
+        }
     }
 }
 

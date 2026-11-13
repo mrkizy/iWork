@@ -66,7 +66,8 @@ message AvatarView {
   // 原来的字母头像首字：M1 不再画字母头像（F-10）。
   reserved 1;
   reserved "initial";
-  // 形象主色（助手配置里选的），经 --ch4 传给素材；空表示用素材自带的颜色。
+  // 形象主色：设计令牌名（ch1、ch4 等，ui-m1 2a 第 18 条 a），网页解析成 var(--<名>) 经 --ch4 交给素材；
+  // 配置里不认识的值 Rust 已换成默认 ch4。空表示用素材自带的颜色（换过形象的）。
   string color = 2;
   // 形象 id。
   string character = 3;
@@ -717,6 +718,16 @@ message AssistantProfileView {
   ModelMenuView model_menu = 17;
   // 自动保存没成功的说明（字段非法、后台校验拒）；下一次改动清掉。
   optional string save_error = 18;
+  // 配置页「头像配色」的 8 个色块（ui-m1 2a 第 18 条 a），按显示顺序；选中即保存。
+  repeated AvatarColorOption avatar_colors = 19;
+}
+
+message AvatarColorOption {
+  // 设计令牌名，原样回传（UpdateAssistantFieldIntent.avatar_color）；网页画成 var(--<名>)。
+  string token = 1;
+  // 读屏名称，如「头像配色 赭红」。
+  string label = 2;
+  bool selected = 3;
 }
 
 message ToolToggle {
@@ -1195,6 +1206,8 @@ message UpdateAssistantFieldIntent {
     string prompt = 3;
     ModelChoice model = 4;
     ToolChoice tool = 5;
+    // 头像配色：AvatarColorOption.token。
+    string avatar_color = 6;
   }
 }
 

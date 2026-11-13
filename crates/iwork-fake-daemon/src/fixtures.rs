@@ -59,7 +59,7 @@ pub fn assistant(id: &str, name: &str, builtin: bool) -> pb::DomainEvent {
                 name: name.into(),
                 avatar: Some(pb::Avatar {
                     initial,
-                    color: "#4F7DF3".into(),
+                    color: "ch4".into(),
                 }),
                 prompt: format!("你是{name}。"),
                 runtime_id: RUNTIME.into(),

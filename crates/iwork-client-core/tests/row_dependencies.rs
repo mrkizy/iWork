@@ -90,16 +90,16 @@ fn assistants(round: u64, color: &str) -> Item {
 #[test]
 fn assistant_table_change_marks_message_rows_only_when_changed() {
     let mut s = live_with_card_and_message();
-    s.apply(assistants(1, "#111111"));
+    s.apply(assistants(1, "ch1"));
     assert_eq!(
         dirty_rows(&mut s),
         ["m1"],
         "头像进了消息行；审批卡片不读助手表"
     );
     // 对照：重查回来的表没变，不标
-    s.apply(assistants(2, "#111111"));
+    s.apply(assistants(2, "ch1"));
     assert!(dirty_rows(&mut s).is_empty());
-    s.apply(assistants(3, "#222222"));
+    s.apply(assistants(3, "ch2"));
     assert_eq!(dirty_rows(&mut s), ["m1"]);
 }
 
