@@ -13,7 +13,7 @@ use iwork_domain::conversation::Conversation;
 use iwork_domain::id::{
     AssistantId, ConversationId, JobId, MessageId, ProjectId, RuntimeId, Seq, TurnId,
 };
-use iwork_domain::message::Message;
+use iwork_domain::message::{Message, MessageBody};
 use iwork_domain::project::Project;
 use iwork_domain::rule::RuleEntry;
 use iwork_domain::runtime::{QuotaWindow, Runtime};
@@ -342,32 +342,34 @@ pub struct UserActionRow {
     pub created_seq: Seq,
 }
 
-/// 对话标题从哪来（技术设计 9.0a）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TitleSource {
-    /// 项目对话：首条用户消息定的自动标题
-    Auto,
-    /// 助手私聊：助手名
-    Fixed,
-}
-
-/// 对话连同只在查询里算出来的值（T09 方案 G1、G4、G8）。
+/// 对话连同算查询视图要的原始事实（T09 方案 G1、G4、G8）。标题、首行这类要截字的值由应用服务从这里算，
+/// 读模型不做文字处理。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConversationListing {
+pub struct ConversationFacts {
     pub conversation: Conversation,
     pub unread: u32,
-    pub title: String,
-    pub title_source: TitleSource,
+    /// 私聊：助手现在的名字（固定标题）；项目对话为 `None`
+    pub dm_assistant_name: Option<String>,
+    /// 第一条用户消息（项目对话的自动标题由它定）
+    pub first_user_message: Option<FirstUserMessage>,
     /// 最近一个回合（`created_seq` 最大）的状态；没有回合为 `None`
     pub last_turn_state: Option<TurnState>,
-    /// 最近一条消息正文的首个非空行；没有消息、正文存成了制品时为空串
-    pub last_message_first_line: String,
+    /// 最近一条消息的正文（流式中的用检查点填）；没有消息为 `None`
+    pub last_message_body: Option<MessageBody>,
+}
+
+/// 第一条用户消息里定自动标题要的两样。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstUserMessage {
+    pub body: MessageBody,
+    /// 第一个附件的文件名（正文为空时标题取它）
+    pub first_attachment_name: Option<String>,
 }
 
 /// `GetConversation` 的一页。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConversationPage {
-    pub conversation: ConversationListing,
+    pub conversation: ConversationFacts,
     /// 按排序字段从旧到新
     pub messages: Vec<MessageRow>,
     /// 本页涉及的回合，按 `created_seq` 升序
@@ -385,24 +387,12 @@ pub struct ConversationPage {
     pub has_newer: bool,
 }
 
-/// `ListConversations` 的过滤与分页（T09 方案 G8）。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ConversationFilter {
-    pub project: Option<ProjectId>,
-    /// 标题包含它（不区分大小写）
-    pub title_contains: Option<String>,
-    /// 上一批最后一条
-    pub before: Option<ConversationId>,
-    /// 0 = 不分页
-    pub limit: u32,
-}
-
-/// `ListConversations` 的一批。
+/// 视图查询因为请求本身不成立被拒（不是存储故障）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConversationBatch {
-    /// 按最近活动倒序
-    pub conversations: Vec<ConversationListing>,
-    pub has_more: bool,
+pub enum ViewRefused {
+    ConversationNotFound(ConversationId),
+    /// 消息游标不在这个对话里
+    CursorNotInConversation { field: &'static str, id: String },
 }
 
 /// 「待你处理」的一项与它在时间线上的位置。
@@ -416,8 +406,8 @@ pub struct PendingEntry {
 /// 消息锚点的种类（T09 方案 2.9、G10）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnchorKind {
-    /// `excerpt`：正文开头，已截到 200 个字素簇
-    UserMessage { message_id: MessageId, excerpt: String },
+    /// `text`：内联正文全文（存成制品的为空串）；截成摘录由应用服务做
+    UserMessage { message_id: MessageId, text: String },
     /// 审批 id、卡片 id 或回合 id
     Waiting { pending_item_id: String },
     FailedTurn { turn_id: TurnId, reason: String, had_output: bool },

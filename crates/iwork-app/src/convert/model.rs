@@ -984,23 +984,19 @@ pub fn action_from_proto(kind: &'static str, a: Option<&pb::ActionSummary>) -> R
     })
 }
 
-/// `Approval.decided_at`：domain 的审批不存决定时间（投影从 `ApprovalDecided` 事件的时间取），
-/// 转 proto 不设，转 domain 忽略。主状态里的决定者与作废原因在 proto `Approval` 上没有字段，
-/// 由 `ApprovalDecided` / `ApprovalVoided` 事件携带；所以经 `Approval` 消息只能无损往返
-/// `Pending` 的审批（`ApprovalRequested` 只会带待审批）。终态审批转 proto 时报错，防止静默丢信息。
+/// 审批 ↔ proto（T09 方案 G3 的终态契约）。四种状态都无损往返：
+///
+/// | `state` | `decider` | `void_reason` |
+/// | --- | --- | --- |
+/// | `PENDING` | 无 | 无 |
+/// | `APPROVED` | 必有 | 无 |
+/// | `DENIED` | 无 | 无 |
+/// | `VOIDED` | 无 | 必有 |
+///
+/// `decided_at` 和 `created_seq` 是投影字段：domain 的审批不存，转 proto 不设，由查询受理从投影填；转 domain 忽略。
+/// `ApprovalRequested` 事件里只会是待审批，那一侧另有校验（`convert::event`）。
 pub fn approval_to_proto(a: &Approval) -> R<pb::Approval> {
-    const K: &str = "Approval";
     let (state, decider, void_reason) = approval_state_to_proto(a.state);
-    if decider.is_some() || void_reason.is_some() {
-        return Err(ConvertError::InvalidValue {
-            kind: K,
-            field: "state",
-            reason: format!(
-                "Approval 消息装不下 {:?} 的载荷，只能带待审批或已拒绝",
-                a.state
-            ),
-        });
-    }
     let (review, review_id, review_reason) = review_state_to_proto(&a.review);
     Ok(pb::Approval {
         id: a.id.to_string(),
@@ -1021,29 +1017,18 @@ pub fn approval_to_proto(a: &Approval) -> R<pb::Approval> {
             .collect(),
         remember_label: a.remember_label.clone(),
         requested_at: Some(timestamp_to_proto(a.requested_at)),
+        // 投影字段，查询受理填（`iwork_app::views`）
         decided_at: None,
         review_id,
-        // T10 填真值（T09 方案 G2、G3）：created_seq 由查询受理从投影填；终态的 decider / void_reason 随
-        // convert 改动（四种状态无损转出）一起填。
         created_seq: 0,
-        decider: None,
-        void_reason: None,
+        decider,
+        void_reason,
     })
 }
 
 pub fn approval_from_proto(a: &pb::Approval) -> R<Approval> {
     const K: &str = "Approval";
-    let state = match pb::ApprovalState::try_from(a.state) {
-        Ok(pb::ApprovalState::Pending) => ApprovalState::Pending,
-        Ok(pb::ApprovalState::Denied) => ApprovalState::Denied,
-        _ => {
-            return Err(ConvertError::UnsupportedEnum {
-                kind: K,
-                field: "state",
-                value: a.state,
-            });
-        }
-    };
+    let state = approval_state_from_proto(a)?;
     Ok(Approval {
         id: parse_id(K, "id", &a.id)?,
         turn_id: parse_id(K, "turn_id", &a.turn_id)?,
@@ -1072,6 +1057,64 @@ pub fn approval_from_proto(a: &pb::Approval) -> R<Approval> {
         remember_label: a.remember_label.clone(),
         requested_at: required_timestamp(K, "requested_at", a.requested_at.as_ref())?,
     })
+}
+
+/// `state`、`decider`、`void_reason` 三个字段 → 主状态，按 [`approval_to_proto`] 的契约表；不合表的点名多出或缺的字段。
+fn approval_state_from_proto(a: &pb::Approval) -> R<ApprovalState> {
+    const K: &str = "Approval";
+    let extra = |field: &'static str, state: &str| ConvertError::InvalidValue {
+        kind: K,
+        field,
+        reason: format!("{state} 的审批不该带这个字段"),
+    };
+    let state = pb::ApprovalState::try_from(a.state).map_err(|_| ConvertError::UnsupportedEnum {
+        kind: K,
+        field: "state",
+        value: a.state,
+    })?;
+    match state {
+        pb::ApprovalState::Approved => {
+            if a.void_reason.is_some() {
+                return Err(extra("void_reason", "已批准"));
+            }
+            let decider = required(K, "decider", a.decider)?;
+            Ok(ApprovalState::Approved {
+                decider: decider_from_proto(K, "decider", decider)?,
+            })
+        }
+        pb::ApprovalState::Voided => {
+            if a.decider.is_some() {
+                return Err(extra("decider", "已作废"));
+            }
+            let reason = required(K, "void_reason", a.void_reason)?;
+            Ok(ApprovalState::Voided {
+                reason: void_reason_from_proto(K, "void_reason", reason)?,
+            })
+        }
+        pb::ApprovalState::Pending | pb::ApprovalState::Denied => {
+            let name = if state == pb::ApprovalState::Pending {
+                "待审批"
+            } else {
+                "已拒绝"
+            };
+            if a.decider.is_some() {
+                return Err(extra("decider", name));
+            }
+            if a.void_reason.is_some() {
+                return Err(extra("void_reason", name));
+            }
+            Ok(if state == pb::ApprovalState::Pending {
+                ApprovalState::Pending
+            } else {
+                ApprovalState::Denied
+            })
+        }
+        pb::ApprovalState::Unspecified => Err(ConvertError::UnsupportedEnum {
+            kind: K,
+            field: "state",
+            value: a.state,
+        }),
+    }
 }
 
 pub fn call_record_to_proto(c: &ApprovalCallRecord) -> R<pb::ApprovalCallRecord> {
