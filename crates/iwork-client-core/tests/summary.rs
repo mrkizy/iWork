@@ -676,7 +676,6 @@ fn pending_in_a_dm_names_its_assistant() {
         id: "c-proj".into(),
         kind: Some(pb::conversation::Kind::Project(pb::ProjectConversation {
             project_id: "p1".into(),
-            ..Default::default()
         })),
         ..Default::default()
     };
