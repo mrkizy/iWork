@@ -20,6 +20,7 @@ use tokio::time::timeout;
 /// 这么久没有新块就算安静。要盖住一轮摘要重查（节流 250ms 加查询往返），CI 上 400ms 不够（run 42992011638）。
 pub const QUIET: Duration = Duration::from_millis(1200);
 
+#[derive(Clone)]
 pub struct Recording {
     /// 第一代收齐的每一帧（编码后的 ViewPatch）。
     pub frames: Vec<Vec<u8>>,

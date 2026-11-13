@@ -317,6 +317,15 @@ pub const REGISTRY: &[Scenario] = &[
         timeline_cap: None,
     },
     Scenario {
+        name: "full-access-note",
+        about: "对话里切到全开：那一行说明用赭红（ui-m1 第 2 节第 9 条）；前面一行切到自动作对照",
+        build: full_access_note,
+        focus: Some("c-full"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
         name: "sidebar-dots",
         about: "侧栏圆点四种状态与未读",
         build: sidebar_dots,
@@ -1190,6 +1199,17 @@ fn add_project_disk(path: &'static str, dir: FakeDir) -> Vec<Step> {
     s.push(Step::OpenHere);
     s.push(a(f::project_conversation("c-add", PROJECT)));
     s.extend(exchange("c-add", "add", "看看这个仓库", "好的。"));
+    s
+}
+
+fn full_access_note() -> Vec<Step> {
+    let c = "c-full";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    // 打开之后实时到：当次说明只随实时事件出现
+    s.extend(exchange(c, "full", "帮我整理一下依赖", "好的，先看一眼。"));
+    s.push(a(f::approval_mode_changed(c, pb::ApprovalMode::Auto)));
+    s.push(a(f::approval_mode_changed(c, pb::ApprovalMode::FullAccess)));
     s
 }
 
