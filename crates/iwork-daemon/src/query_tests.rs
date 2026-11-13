@@ -110,10 +110,8 @@ impl World {
     /// 执行一个操作；当前状态下做不了的就跳过。`a`、`b` 选对象。
     fn step(&mut self, op: u8, a: u8, b: u8) {
         let conv = CONVS[usize::from(a) % CONVS.len()];
-        let pick = |w: &Self, want: fn(TurnState) -> bool| -> Option<usize> {
-            let found: Vec<usize> = (0..w.turns.len())
-                .filter(|i| want(w.turns[*i].state))
-                .collect();
+        let pick = |w: &Self, want: fn(&SimTurn) -> bool| -> Option<usize> {
+            let found: Vec<usize> = (0..w.turns.len()).filter(|i| want(&w.turns[*i])).collect();
             (!found.is_empty()).then(|| found[usize::from(b) % found.len()])
         };
         match op % OPS {
@@ -144,14 +142,14 @@ impl World {
                 });
             }
             2 => {
-                if let Some(i) = pick(self, |s| s == TurnState::Queued) {
+                if let Some(i) = pick(self, |t| t.state == TurnState::Queued) {
                     let e = Self::change(&self.turns[i], TurnState::Running, None);
                     self.commit(vec![e]);
                     self.turns[i].state = TurnState::Running;
                 }
             }
             3 => {
-                if let Some(i) = pick(self, |s| s == TurnState::Running) {
+                if let Some(i) = pick(self, |t| t.state == TurnState::Running) {
                     let call = format!("call-{}", self.fresh());
                     let t = &self.turns[i];
                     let e = ToolCallStarted {
@@ -165,10 +163,9 @@ impl World {
                     self.turns[i].open_tools.push(call);
                 }
             }
+            // 只从还有开着的工具调用的回合里挑：随便挑一个再看有没有，多数时候落空，S2 就几乎碰不到结束事件
             4 => {
-                if let Some(i) =
-                    pick(self, |_| true).filter(|i| !self.turns[*i].open_tools.is_empty())
-                {
+                if let Some(i) = pick(self, |t| !t.open_tools.is_empty()) {
                     let call = self.turns[i].open_tools.remove(0);
                     let t = &self.turns[i];
                     let e = ToolCallFinished {
@@ -182,7 +179,7 @@ impl World {
                 }
             }
             5 => {
-                if let Some(i) = pick(self, |s| s == TurnState::Running) {
+                if let Some(i) = pick(self, |t| t.state == TurnState::Running) {
                     let n = self.fresh();
                     let t = &self.turns[i];
                     let mut m = assistant_message(n, t.conv, t.id);
@@ -200,7 +197,7 @@ impl World {
                 }
             }
             6 => {
-                if let Some(i) = pick(self, |s| s == TurnState::Running) {
+                if let Some(i) = pick(self, |t| t.state == TurnState::Running) {
                     let n = self.fresh();
                     let t = &self.turns[i];
                     let e = vec![
@@ -216,7 +213,7 @@ impl World {
                 }
             }
             7 => {
-                if let Some(i) = pick(self, |s| s == TurnState::WaitingApproval) {
+                if let Some(i) = pick(self, |t| t.state == TurnState::WaitingApproval) {
                     let t = &self.turns[i];
                     let state = if b % 2 == 0 {
                         ApprovalState::Approved {
@@ -241,7 +238,7 @@ impl World {
                 }
             }
             8 => {
-                if let Some(i) = pick(self, |s| s == TurnState::Running) {
+                if let Some(i) = pick(self, |t| t.state == TurnState::Running) {
                     let t = &self.turns[i];
                     let (to, reason) = if b % 3 == 0 {
                         (TurnState::Failed, Some(format!("失败 {}", t.id)))
@@ -270,7 +267,7 @@ impl World {
             }
             // 跑着的回合中断（进程丢失）：时间线上出继续卡片，没有结束行
             9 => {
-                if let Some(i) = pick(self, |s| s == TurnState::Running) {
+                if let Some(i) = pick(self, |t| t.state == TurnState::Running) {
                     let to = TurnState::Interrupted {
                         reason: iwork_domain::turn::InterruptReason::Crash,
                     };
@@ -281,7 +278,7 @@ impl World {
             }
             // 中断的回合续接，或者放弃（收成已取消，有结束事件）
             _ => {
-                if let Some(i) = pick(self, |s| matches!(s, TurnState::Interrupted { .. })) {
+                if let Some(i) = pick(self, |t| matches!(t.state, TurnState::Interrupted { .. })) {
                     let t = &self.turns[i];
                     if b % 2 == 0 {
                         let e = Self::change(t, TurnState::Running, None);
