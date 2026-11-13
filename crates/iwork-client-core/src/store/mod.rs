@@ -592,6 +592,61 @@ impl Store {
             tracing::debug!(target: "iwork_client", key, "跳转的锚点不在当前窗口里，忽略");
             return;
         };
+        self.jump_to(a);
+    }
+
+    /// 从「待你处理」进来，定位到卡片那一行（ui-m1 2a 第 18 条 b）。卡片在待处理表里：拿它的 created_seq 当一处
+    /// 「等你处理」锚点，走和点锚点同一套定位（在时间线里就挪窗口、滚过去；不在就以它为中心取那一段，用户自己
+    /// 滚动就作废）。卡片已经不在待处理表里（刚处理掉）但行还在时间线里：照样挪过去；都不在就不动。
+    pub fn jump_to_row(&mut self, conversation_id: &str, row_key: &str) {
+        if self
+            .open
+            .as_ref()
+            .is_none_or(|t| t.conversation_id != conversation_id)
+        {
+            return;
+        }
+        let card = self.summary.pending.iter().find(|p| {
+            crate::derive::pending_conversation(p) == Some(conversation_id)
+                && crate::derive::pending::row_key(p).as_deref() == Some(row_key)
+        });
+        let anchor = match card {
+            Some(p) => pb::Anchor {
+                created_seq: pending_created_seq(p),
+                at: None,
+                kind: Some(pb::anchor::Kind::Waiting(pb::WaitingAnchor {
+                    pending_item_id: crate::derive::pending::item_id(p)
+                        .unwrap_or_default()
+                        .to_owned(),
+                })),
+            },
+            None => {
+                let in_timeline = self
+                    .open
+                    .as_ref()
+                    .is_some_and(|t| t.key_of(row_key).is_some());
+                if !in_timeline {
+                    tracing::debug!(target: "iwork_client", row_key, "待处理卡片已不在，时间线里也没有这一行，不定位");
+                    return;
+                }
+                // 行就在时间线里：以等待锚点的形状交给同一套定位，候选行就是它自己
+                pb::Anchor {
+                    created_seq: 0,
+                    at: None,
+                    kind: Some(pb::anchor::Kind::Waiting(pb::WaitingAnchor {
+                        pending_item_id: row_key.to_owned(),
+                    })),
+                }
+            }
+        };
+        self.jump_to(anchor);
+    }
+
+    /// 定位到一处：行在时间线里就把网页窗口挪过去并发滚动指令；不在就记下等以它为中心的那一段（会话层据此发查询）。
+    fn jump_to(&mut self, a: pb::Anchor) {
+        let Some(t) = self.open.as_mut() else {
+            return;
+        };
         let row = t.anchor_row(&a);
         // 行在时间线里但可能不在发给网页的那一段里：窗口先放到它上面，帧才带上它（网页滚到以后会报新的窗口）
         if let Some(k) = row.as_deref().and_then(|r| t.key_of(r)) {
@@ -1457,5 +1512,15 @@ fn summary_table_of(kind: &pb::query_result::Kind) -> Option<SummaryTable> {
         K::ListAssistants(_) => Some(SummaryTable::Assistants),
         K::ListPendingItems(_) => Some(SummaryTable::Pending),
         _ => None,
+    }
+}
+
+/// 待处理卡片在时间线上的位置：产生它的那条事件的 seq（T09 方案 G2）。草稿卡片不在任何对话里，没有位置。
+fn pending_created_seq(p: &pb::PendingItem) -> u64 {
+    match p.item.as_ref() {
+        Some(pb::pending_item::Item::Approval(a)) => a.created_seq,
+        Some(pb::pending_item::Item::UserAction(c)) => c.created_seq,
+        Some(pb::pending_item::Item::Resume(r)) => r.created_seq,
+        Some(pb::pending_item::Item::AgentsMdDraft(_)) | None => 0,
     }
 }

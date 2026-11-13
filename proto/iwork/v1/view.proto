@@ -994,6 +994,8 @@ message UiIntent {
     ToggleIntent set_profile_panel_collapsed = 97;
     // 锚点列表里按 Home / End：以整个对话最早 / 最新的一处为中心重取（不跳转）。
     AnchorBrowseEdge anchor_browse_edge = 98;
+    // 从「待你处理」进对话：定位到那张卡片（ui-m1 2a 第 18 条 b）。紧跟在 SetVisible 后面发。
+    JumpToRow jump_to_row = 99;
   }
 }
 
@@ -1049,6 +1051,13 @@ message JumpToLatest {
 message AnchorBrowse {
   string conversation_id = 1;
   string key = 2;
+}
+
+// 跳到待处理卡片所在的行（PendingEntry.row_key）。卡片不在时间线里时由 Rust 以它为中心取那一段，
+// 与点锚点跳转同一套加载、移窗与作废时序（方案 2.9）。
+message JumpToRow {
+  string conversation_id = 1;
+  string row_key = 2;
 }
 
 // Home / End：网页不知道窗口外最早、最新那一处的 key，只说要哪一头。

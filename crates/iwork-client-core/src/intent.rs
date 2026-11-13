@@ -55,6 +55,11 @@ pub enum Local {
         conversation_id: String,
         key: String,
     },
+    /// 从「待你处理」进来：定位到卡片那一行。
+    JumpToRow {
+        conversation_id: String,
+        row_key: String,
+    },
     /// Home / End：以最早（`latest` 为假）或最新的一头为中心重取。
     AnchorBrowseEdge {
         conversation_id: String,
@@ -185,6 +190,10 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
         I::AnchorBrowse(x) => Action::Local(Local::AnchorBrowse {
             conversation_id: x.conversation_id,
             key: x.key,
+        }),
+        I::JumpToRow(x) => Action::Local(Local::JumpToRow {
+            conversation_id: x.conversation_id,
+            row_key: x.row_key,
         }),
         I::AnchorBrowseEdge(x) => Action::Local(Local::AnchorBrowseEdge {
             conversation_id: x.conversation_id,

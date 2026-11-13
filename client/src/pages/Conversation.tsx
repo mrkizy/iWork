@@ -3,7 +3,7 @@
 // 拖文件进窗口时整块对话区盖一层虚线框（文字由 Rust 给，没在拖时不设）。
 // 消息锚点（2a 第 11 条）：内容超出一屏才显示。宽形态（主区域 ≥ 600px）是左边距里的导轨，窄形态是标题栏最右端的按钮
 // 加弹出面板（形态按主区域宽度判断、有回差，见 anchor/layout.ts）；⌥↑ / ⌥↓ 两种形态都不经滚轮直接逐处跳。
-import { createEffect, createSignal, on, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { AnchorButton } from "../anchor/AnchorButton";
 import { AnchorRail } from "../anchor/AnchorRail";
 import { nextNarrow } from "../anchor/layout";
@@ -16,12 +16,8 @@ import { VirtualRows } from "../ui/VirtualRows";
 import { ProjectSelector } from "./ProjectSelector";
 import "./pages.css";
 
-/** 从「待你处理」点进来，滚到那一行后高亮多久（同锚点跳转的 1 秒）。 */
-const ENTRY_HIGHLIGHT_MS = 1000;
-
 export function ConversationPage(props: {
   id: string;
-  rowKey?: string;
   openRuntimeDetails: () => void;
   /** 标题栏右端、锚点按钮左边的按钮（助手私聊页的「助手资料」，ui-m1 2a 第 18 条 d）。 */
   headerEnd?: JSX.Element;
@@ -50,20 +46,10 @@ export function ConversationPage(props: {
   const browseAt = (key: string) => void host.act({ case: "anchorBrowse", value: { conversationId: props.id, key } });
   const browseEdge = (latest: boolean) =>
     void host.act({ case: "anchorBrowseEdge", value: { conversationId: props.id, latest } });
-  // 路由带来的「进来时滚到这一行」（从「待你处理」点进来）：和 Rust 的跳转指令走同一条滚动路径，行到了才滚、
-  // 高亮一下。本地指令的 token 取负数，不和 Rust 的（从 1 递增）撞；Rust 之后发的跳转照常盖过它。
-  const [entryScroll, setEntryScroll] = createSignal<{ rowKey: string; token: bigint; highlightMs: number }>();
-  let entryToken = 0n;
-  createEffect(
-    on(
-      () => [props.id, props.rowKey] as const,
-      ([, rowKey]) => setEntryScroll(rowKey ? { rowKey, token: --entryToken, highlightMs: ENTRY_HIGHLIGHT_MS } : undefined),
-    ),
-  );
-  createEffect(on(() => conv()?.scrollTo?.token, () => setEntryScroll(undefined), { defer: true }));
+  // 滚动指令只有 Rust 一个来源：锚点跳转、⌥↑ / ⌥↓、从「待你处理」进来（App 发 JumpToRow）都由它定位后发回
   const scrollTo = () => {
     const s = conv()?.scrollTo;
-    return entryScroll() ?? (s && { rowKey: s.rowKey, token: s.token, highlightMs: s.highlightMs });
+    return s && { rowKey: s.rowKey, token: s.token, highlightMs: s.highlightMs };
   };
   // ⌥↑ / ⌥↓：焦点在输入框里时是系统的光标移动，不抢
   const onKey = (e: KeyboardEvent) => {

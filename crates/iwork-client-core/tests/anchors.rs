@@ -1030,3 +1030,89 @@ async fn browse_edge_fetches_either_end() {
     )
     .await;
 }
+
+// ---------- 从「待你处理」进来定位到卡片（ui-m1 2a 第 18 条 b；g3b 1/F-5）----------
+
+/// 一张还在等的审批，后面跟 300 条消息：打开对话时它不在最新那一页里。
+async fn old_pending_card() -> (FakeDaemon, App, Web, tempfile::TempDir) {
+    let (d, app, web, dir) = start(&["conversation-basic"], 5000).await;
+    d.append(f::approval(
+        "ap-old",
+        "c-basic",
+        "t-basic",
+        f::command_action("rm -rf build"),
+        pb::ApprovalKind::Ask,
+        &[],
+    ));
+    for i in 0..300 {
+        d.append(f::user_message(&format!("pad-{i}"), "c-basic", "填充"));
+    }
+    (d, app, web, dir)
+}
+
+fn jump_to_row(row: &str) -> I {
+    I::JumpToRow(pb::JumpToRow {
+        conversation_id: "c-basic".into(),
+        row_key: row.into(),
+    })
+}
+
+/// 卡片在 Rust 还没加载的旧历史段里：交给 Rust 定位，以卡片为中心取那一段，落地后滚过去并高亮。
+#[tokio::test(flavor = "multi_thread")]
+async fn jump_to_row_loads_an_old_card() {
+    let (_d, app, mut web, _dir) = old_pending_card().await;
+    open(&app, "c-basic", true).await;
+    until(&app, &mut web, "最新一页到了", |s| {
+        s.rows.contains_key("pad-299")
+    })
+    .await;
+    assert!(
+        !web.state.rows.contains_key("ap-old"),
+        "对照：卡片不在最新那一页"
+    );
+    assert_eq!(intent(&app, jump_to_row("ap-old")).await.error, None);
+    until(&app, &mut web, "取到那一段并滚到卡片", |s| {
+        s.rows.contains_key("ap-old") && s.scroll_to.as_ref().is_some_and(|x| x.row_key == "ap-old")
+    })
+    .await;
+}
+
+/// 卡片已经在 Rust 的时间线里、但不在发给网页的那一段里：窗口挪过去，帧带上它，再滚过去。
+#[tokio::test(flavor = "multi_thread")]
+async fn jump_to_row_moves_the_web_window_to_a_loaded_card() {
+    let (_d, app, mut web, _dir) = old_pending_card().await;
+    open(&app, "c-basic", true).await;
+    until(&app, &mut web, "最新一页到了", |s| {
+        s.rows.contains_key("pad-299")
+    })
+    .await;
+    // 网页窗口顶到最旧，一路往前翻，直到 Rust 把整条时间线都加载了
+    loop {
+        window(&app, "c-basic", i64::MIN, i64::MIN + 1).await;
+        let done = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(c) = app.next_frame(web.request()).await {
+                    web.accept(&c);
+                }
+                if web.state.rows.contains_key("m-basic-u") {
+                    return;
+                }
+            }
+        })
+        .await;
+        if done.is_ok() {
+            break;
+        }
+    }
+    // 网页回到最新一段：卡片还在 Rust 里，但不在发给网页的窗口里
+    window(&app, "c-basic", i64::MAX - 1, i64::MAX).await;
+    until(&app, &mut web, "网页窗口回到最新", |s| {
+        !s.rows.contains_key("ap-old")
+    })
+    .await;
+    assert_eq!(intent(&app, jump_to_row("ap-old")).await.error, None);
+    until(&app, &mut web, "窗口挪到卡片并滚过去", |s| {
+        s.rows.contains_key("ap-old") && s.scroll_to.as_ref().is_some_and(|x| x.row_key == "ap-old")
+    })
+    .await;
+}

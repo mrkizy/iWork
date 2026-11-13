@@ -40,6 +40,10 @@ export function App(props: { host: Host; toasts: Component; initialRoute?: Route
           home: v.home,
         },
       });
+      // 从「待你处理」进来带着卡片那一行：交给 Rust 定位（不在时间线里就取那一段），滚动指令照常随帧回来。
+      // 紧跟在 SetVisible 后面发，Rust 先打开对话再定位。
+      const target = rowTarget(r);
+      if (target) void host.act({ case: "jumpToRow", value: target });
     }),
   );
 
@@ -117,7 +121,7 @@ export function App(props: { host: Host; toasts: Component; initialRoute?: Route
                 <HomePage openRuntimeDetails={() => p.router.go({ page: "settings", section: "runtimes" })} />
               </Match>
               <Match when={conversation(p.router.route())}>{(r) => (
-                  <ConversationPage id={r().id} rowKey={r().rowKey} openRuntimeDetails={() => p.router.go({ page: "settings", section: "runtimes" })} />
+                  <ConversationPage id={r().id} openRuntimeDetails={() => p.router.go({ page: "settings", section: "runtimes" })} />
                 )}</Match>
               <Match when={assistant(p.router.route())}>
                 {(r) => (
@@ -163,3 +167,10 @@ const conversation = (r: Route) => (r.page === "conversation" ? r : undefined);
 const assistant = (r: Route) => (r.page === "assistant" ? r : undefined);
 const allConversations = (r: Route) => (r.page === "allConversations" ? r : undefined);
 const settings = (r: Route) => (r.page === "settings" ? r : undefined);
+
+/** 路由里要定位的那一行（对话页、助手主页的私聊）。 */
+function rowTarget(r: Route): { conversationId: string; rowKey: string } | undefined {
+  if (r.page === "conversation" && r.rowKey) return { conversationId: r.id, rowKey: r.rowKey };
+  if (r.page === "assistant" && r.rowKey) return { conversationId: r.conversationId, rowKey: r.rowKey };
+  return undefined;
+}

@@ -110,7 +110,6 @@ export function AssistantPage(props: {
     <div ref={page} class="iw-assistant-page">
       <ConversationPage
         id={props.route.conversationId}
-        rowKey={props.route.rowKey}
         openRuntimeDetails={props.openRuntimeDetails}
         headerEnd={profileButton}
       />

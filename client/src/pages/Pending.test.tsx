@@ -61,15 +61,24 @@ describe.skipIf(noFixtures)("待你处理", () => {
     expect(visible?.value).toMatchObject({ conversationId: approval.conversationId, pending: false });
   });
 
-  it("进对话时带着行：那一行到了就滚过去并高亮（同锚点跳转的滚动路径）", () => {
-    // approval-states：对话里正好有一张待定的审批卡片，待处理表里也有它
-    const st = loadScenario("approval-states").state;
-    const approval = st.pending!.entries.find((e) => e.conversationId === st.conversation?.id && e.rowKey !== undefined)!;
-    expect(approval, "对照：录像里有这样一项").toBeDefined();
-    renderScenario("approval-states", { page: "conversation", id: approval.conversationId!, rowKey: approval.rowKey });
-    const row = document.querySelector(`[data-vrow][data-key="${approval.rowKey}"]`);
-    expect(row, "对照：那一行在已载入的窗口里").not.toBeNull();
-    expect(row).toHaveClass("iw-vrow--highlight");
+  it("点一项：先声明对话可见，紧跟着请 Rust 定位到那张卡片（不在时间线里由 Rust 取那一段，g3b 1/F-5）", () => {
+    const { acts } = renderScenario("pending-kinds", { page: "pending" });
+    const approval = loadScenario("pending-kinds").state.pending!.entries.find((e) => e.kind === PendingKind.APPROVAL)!;
+    acts.length = 0;
+    fireEvent.click(screen.getByRole("button", { name: new RegExp(approval.title) }));
+    const at = acts.findIndex((a) => a.case === "setVisible");
+    expect(acts[at]?.value).toMatchObject({ conversationId: approval.conversationId });
+    expect(acts[at + 1]).toEqual({
+      case: "jumpToRow",
+      value: { conversationId: approval.conversationId, rowKey: approval.rowKey },
+    });
+  });
+
+  it("对照：直接打开对话（路由不带行）不发定位", () => {
+    const conv = loadScenario("pending-kinds").state.pending!.entries.find((e) => e.conversationId)!.conversationId!;
+    const { acts } = renderScenario("pending-kinds", { page: "conversation", id: conv });
+    expect(acts.some((a) => a.case === "setVisible")).toBe(true);
+    expect(acts.some((a) => a.case === "jumpToRow")).toBe(false);
   });
 
   it("没有待处理项：显示 Rust 给的空态文字", () => {

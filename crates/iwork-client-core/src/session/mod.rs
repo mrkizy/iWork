@@ -749,6 +749,12 @@ impl<D: Dialer> Session<D> {
             } => {
                 self.store.anchor_browse(&conversation_id, &key);
             }
+            Local::JumpToRow {
+                conversation_id,
+                row_key,
+            } => {
+                self.store.jump_to_row(&conversation_id, &row_key);
+            }
             Local::AnchorBrowseEdge {
                 conversation_id,
                 latest,
