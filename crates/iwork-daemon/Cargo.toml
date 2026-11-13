@@ -58,12 +58,12 @@ name = "process"
 path = "tests/process/main.rs"
 required-features = ["dev"]
 
-# 生命周期基准（方案第 6 节）：起真的后台，要 dev（后台带 --dev-trust）
 # 审查 2026-11-13-m1-t10a-d7 1/F-4：流式消息的发布链路（真实观察者、增量出口、ipc 服务端与客户端）
 [[bench]]
 name = "publish_live"
 harness = false
 
+# 生命周期基准（方案第 6 节）：起真的后台，要 dev（后台带 --dev-trust）
 [[bench]]
 name = "lifecycle"
 harness = false
