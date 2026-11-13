@@ -34,7 +34,13 @@
 #   远端命令：env -i，只带 rh_command_env 列出的变量。
 #   任务名：只许字母数字 . _ -、不许 ..，本机与远端共用 rh_is_task_name；动路径前再核真实路径落在 tasks/ 之下。
 #
-# 测试替身：REMOTE_HEAVY_SSH（替换 ssh 程序）、REMOTE_HEAVY_ORIGIN（远端抓取的地址），只给 --selftest 用。
+#   远端锚点：任何写操作（mkdir、开锁、抓取、建 worktree）之前，先核 ~/work/iwork-remote 是真目录、物理路径
+#     与 ~/work/iWork（T11 检出）互不包含，根下的固定条目都不是符号链接；repo.git 必须是真目录、是裸仓库、
+#     带本脚本建库时写的 iwork.remoteHeavy=1 标记。
+#
+# 可信覆盖项：REMOTE_HEAVY_SSH（替换 ssh 程序）、REMOTE_HEAVY_ORIGIN（远端抓取的地址）是给 --selftest 用的，
+# 由调用者自己设、脚本不核。上面的隔离保证以它们都没设为前提：设了 REMOTE_HEAVY_SSH 就不经 ssh 那一层；
+# REMOTE_HEAVY_ORIGIN 换成 ssh 地址时 git 会走自己的 ssh 传输，不受 rh_git 关掉的那几项约束。
 set -euo pipefail
 
 HOST="mac120"
@@ -81,7 +87,8 @@ rh_main() {
   SESSION_PID=$PPID
   LOG=""
   rh_validate_inputs
-  mkdir -p "$TASKS" || rh_refuse "建不了 $TASKS"
+  rh_check_root
+  if [ ! -d "$TASKS" ]; then mkdir "$TASKS" || rh_refuse "建不了 $TASKS"; fi
   case "$R_MODE" in
     run) rh_run ;;
     clean) rh_clean ;;
@@ -126,6 +133,66 @@ rh_validate_inputs() {
     [ -n "$R_ORIGIN" ] || rh_refuse "origin 地址为空"
     [ "${#R_CMD[@]}" -gt 0 ] || rh_refuse "没有命令"
   fi
+}
+
+# a 与 b 是同一路径，或一个在另一个之下（都是物理路径）
+rh_path_overlaps() {
+  [ "$1" = "$2" ] && return 0
+  case "$1/" in "$2"/*) return 0 ;; esac
+  case "$2/" in "$1"/*) return 0 ;; esac
+  return 1
+}
+
+# 根目录这个锚点：在任何写操作之前核。ROOT 不存在时只在 ~/work 下建这一层，不建 ~/work。
+# 核过之后 ROOT 和派生路径都换成物理路径。
+rh_check_root() {
+  local parent="$HOME/work" t11="$HOME/work/iWork" t11_real root_real e
+  if [ -e "$t11" ]; then t11_real=$(cd -P "$t11" && pwd) || rh_refuse "解析不了 $t11"; else t11_real=$t11; fi
+  if [ ! -e "$ROOT" ] && [ ! -L "$ROOT" ]; then
+    [ -d "$parent" ] || rh_refuse "$parent 不存在"
+    # 建之前先算它将来的物理路径（~/work 本身可能是链接）
+    root_real="$(cd -P "$parent" && pwd)/iwork-remote"
+    if rh_path_overlaps "$root_real" "$t11_real"; then rh_refuse "$ROOT 会建到 $root_real，和 T11 检出重叠"; fi
+    mkdir "$ROOT" || rh_refuse "建不了 $ROOT"
+  fi
+  [ ! -L "$ROOT" ] || rh_refuse "$ROOT 是符号链接"
+  [ -d "$ROOT" ] || rh_refuse "$ROOT 不是目录"
+  root_real=$(cd -P "$ROOT" && pwd) || rh_refuse "解析不了 $ROOT"
+  if rh_path_overlaps "$root_real" "$t11_real"; then
+    rh_refuse "$ROOT 解析到 $root_real，和 T11 检出 $t11_real 重叠"
+  fi
+  for e in tasks repo.git heavy.lock heavy.holder repo.lock PERF_WINDOW; do
+    [ ! -L "$root_real/$e" ] || rh_refuse "$root_real/$e 是符号链接"
+  done
+  ROOT=$root_real
+  REPO="$ROOT/repo.git"
+  TASKS="$ROOT/tasks"
+  HEAVY_LOCK="$ROOT/heavy.lock"
+  HOLDER="$ROOT/heavy.holder"
+  REPO_LOCK="$ROOT/repo.lock"
+  PERF_MARK="$ROOT/PERF_WINDOW"
+}
+
+# repo.git 这个锚点：真目录、裸仓库、git 认的 git-dir 就是它自己、带本脚本写的身份标记。
+# 所有对它的 git 调用都用 --git-dir，不让 git 往上层目录找仓库。
+rh_check_repo() {
+  [ ! -L "$REPO" ] || rh_refuse "$REPO 是符号链接"
+  [ -d "$REPO" ] || rh_refuse "$REPO 不是目录"
+  [ "$(rh_git --git-dir="$REPO" rev-parse --is-bare-repository 2>/dev/null)" = true ] ||
+    rh_refuse "$REPO 不是裸仓库"
+  local gd
+  gd=$(rh_git --git-dir="$REPO" rev-parse --absolute-git-dir 2>/dev/null) || rh_refuse "$REPO 读不出 git-dir"
+  [ "$(cd -P "$gd" && pwd)" = "$(cd -P "$REPO" && pwd)" ] || rh_refuse "$REPO 的 git-dir 指到了 $gd"
+  [ "$(rh_git --git-dir="$REPO" config --get iwork.remoteHeavy 2>/dev/null)" = 1 ] ||
+    rh_refuse "$REPO 没有 iwork.remoteHeavy=1 标记，不是本脚本建的；确认是本脚本早先建的就补上标记（git --git-dir=$REPO config iwork.remoteHeavy 1），否则挪走它"
+}
+
+rh_ensure_repo() {
+  if [ ! -e "$REPO" ] && [ ! -L "$REPO" ]; then
+    rh_git init -q --bare "$REPO" && rh_git --git-dir="$REPO" config iwork.remoteHeavy 1 ||
+      rh_refuse "建不了裸仓库 $REPO"
+  fi
+  rh_check_repo
 }
 
 # 任务目录：入口核过名字之后，动路径前再核一次（纵深防御）：名字本身、tasks/ 不是符号链接、
@@ -215,15 +282,13 @@ rh_unlock_heavy() {
 }
 
 rh_fetch_and_verify() {
-  if [ ! -d "$REPO" ]; then
-    rh_git init -q --bare "$REPO" || rh_refuse "建不了裸仓库 $REPO"
-  fi
-  rh_git -C "$REPO" config remote.origin.url "$R_ORIGIN"
+  rh_ensure_repo
+  rh_git --git-dir="$REPO" config remote.origin.url "$R_ORIGIN"
   # 公开仓库不需要凭据；rh_git 让需要鉴权的抓取直接失败，绝不去读钥匙串或问 askpass。
-  rh_git -C "$REPO" fetch --quiet --prune origin \
+  rh_git --git-dir="$REPO" fetch --quiet --prune origin \
     '+refs/heads/*:refs/remotes/origin/*' || rh_refuse "从 $R_ORIGIN 抓取失败"
-  if ! rh_git -C "$REPO" cat-file -e "$R_SHA^{commit}" 2>/dev/null ||
-    [ -z "$(rh_git -C "$REPO" for-each-ref --count=1 --contains "$R_SHA" refs/remotes/origin)" ]; then
+  if ! rh_git --git-dir="$REPO" cat-file -e "$R_SHA^{commit}" 2>/dev/null ||
+    [ -z "$(rh_git --git-dir="$REPO" for-each-ref --count=1 --contains "$R_SHA" refs/remotes/origin)" ]; then
     rh_refuse "提交 $R_SHA 不在 origin 的任何分支上：先 git push 再跑（本机未提交、未推送的改动不会带过去）"
   fi
 }
@@ -236,8 +301,8 @@ rh_checkout() { # src
     rh_git -C "$src" checkout -q --detach --force "$R_SHA" &&
       rh_git -C "$src" clean -q -ffdx || rh_refuse "检出 $R_SHA 到 $src 失败"
   else
-    rh_git -C "$REPO" worktree prune
-    rh_git -C "$REPO" worktree add -q --detach "$src" "$R_SHA" || rh_refuse "建 worktree $src 失败"
+    rh_git --git-dir="$REPO" worktree prune
+    rh_git --git-dir="$REPO" worktree add -q --detach "$src" "$R_SHA" || rh_refuse "建 worktree $src 失败"
   fi
   [ "$(rh_git -C "$src" rev-parse HEAD)" = "$R_SHA" ] || rh_refuse "$src 检出后 HEAD 不是 $R_SHA"
   [ -z "$(rh_git -C "$src" status --porcelain --ignored)" ] || rh_refuse "$src 检出后不干净"
@@ -356,10 +421,11 @@ rh_clean() {
   local td=$TD size
   size=$(du -sh "$td" 2>/dev/null | awk '{print $1}')
   rh_lock_repo
-  if rh_is_our_worktree "$td/src"; then rh_git -C "$REPO" worktree remove --force "$td/src" || true; fi
+  if [ -e "$REPO" ] || [ -L "$REPO" ]; then rh_check_repo; fi
+  if rh_is_our_worktree "$td/src"; then rh_git --git-dir="$REPO" worktree remove --force "$td/src" || true; fi
   # rm -rf 不跟随符号链接；td 已核过是 tasks/ 下的真实目录。
   rm -rf "$td" || rh_refuse "删不掉 $td"
-  if [ -d "$REPO" ]; then rh_git -C "$REPO" worktree prune; fi
+  if [ -d "$REPO" ]; then rh_git --git-dir="$REPO" worktree prune; fi
   rh_unlock_repo
   rh_unlock_heavy
   rh_say "已删任务 ${R_TASK}（约 ${size}）"
@@ -393,6 +459,34 @@ parse_seconds() { # 90 | 30m | 2h
   esac
 }
 
+# ssh -G 打印值时去掉了引号，拼回 -o 后 ssh 会按配置语法再解析一遍：带空白、引号、反斜杠的值会被拆开或报错。
+# 不去还原引号，而是只接受不含这些字符的值，含了就点名拒绝。
+ssh_plain_value() { # 键 值
+  case "$2" in
+    *[[:space:]\"\'\\]*)
+      echo "remote-heavy: ssh 配置里的 $1 含空白、引号或反斜杠，本脚本不接受：$(printf '%q' "$2")（改用不含这些字符的路径）" >&2
+      return 1 ;;
+  esac
+}
+
+# UserKnownHostsFile 本来就是空格分隔的多个路径，ssh -G 输出里分不出「一个带空格的路径」和「两个路径」。
+# ssh -G 会把路径展开成绝对路径，所以要求每一段都以 / 或 ~ 开头：带空格的单个路径拆开后后一段不满足，会被拒绝。
+known_hosts_value() { # 值
+  local f
+  set -f
+  for f in $1; do
+    if ! ssh_plain_value userknownhostsfile "$f"; then set +f; return 1; fi
+    case "$f" in
+      /* | '~'*) ;;
+      *)
+        set +f
+        echo "remote-heavy: ssh 配置里的 userknownhostsfile 解析出一段不是绝对路径：$(printf '%q' "$f")（known_hosts 路径不能含空白）" >&2
+        return 1 ;;
+    esac
+  done
+  set +f
+}
+
 # 由 `ssh -G <别名>` 解析出的有效配置里只挑连接要的几项，拼成 SSH_ARGS；之后 ssh 用 -F /dev/null 运行，
 # 不再读用户或系统的 ssh 配置，配置里的 SendEnv、SetEnv、LocalForward、ProxyCommand 等都进不来。
 # 第二个参数只给自测用：指定解析时读的配置文件。
@@ -411,11 +505,11 @@ ssh_args_for() { # 主机别名 [配置文件]
       hostname) hostname=$val ;;
       user) user=$val ;;
       port) port=$val ;;
-      identityfile) SSH_ARGS+=(-o "IdentityFile=$val") ;;
-      certificatefile) SSH_ARGS+=(-o "CertificateFile=$val") ;;
+      identityfile) ssh_plain_value "$key" "$val" || return 2; SSH_ARGS+=(-o "IdentityFile=$val") ;;
+      certificatefile) ssh_plain_value "$key" "$val" || return 2; SSH_ARGS+=(-o "CertificateFile=$val") ;;
       identitiesonly) SSH_ARGS+=(-o "IdentitiesOnly=$val") ;;
-      hostkeyalias) SSH_ARGS+=(-o "HostKeyAlias=$val") ;;
-      userknownhostsfile) SSH_ARGS+=(-o "UserKnownHostsFile=$val") ;;
+      hostkeyalias) ssh_plain_value "$key" "$val" || return 2; SSH_ARGS+=(-o "HostKeyAlias=$val") ;;
+      userknownhostsfile) known_hosts_value "$val" || return 2; SSH_ARGS+=(-o "UserKnownHostsFile=$val") ;;
       proxycommand | proxyjump)
         [ "$val" = none ] || { echo "remote-heavy: $alias 配了 ${key}，本脚本不经代理连接" >&2; return 2; } ;;
     esac
@@ -534,8 +628,10 @@ selftest() {
   export HOME="$tmp/localhome" GIT_CONFIG_NOSYSTEM=1
   local home="$tmp/home" root="$tmp/home/work/iwork-remote" out="$tmp/out"
   mkdir -p "$HOME" "$home" "$out" "$tmp/fakedf"
-  # 远端 ~/work/iWork 的替身：T11 的检出。任何用例都不许动它。
+  # 远端 ~/work/iWork 的替身：T11 的检出（一个带 origin 的 git 仓库）。任何用例都不许动它。
   mkdir -p "$home/work/iWork"
+  git init -q "$home/work/iWork"
+  git -C "$home/work/iWork" config remote.origin.url keep-url
   echo keep >"$home/work/iWork/sentinel"
 
   # 假 ssh：只记本机 canary 有没有漏到它这里（不落盘任何别的环境）；远端会话里放一个 REMOTE_SESSION_CANARY，
@@ -612,7 +708,8 @@ FAKE
   }
   sentinel_intact() {
     [ "$(cat "$home/work/iWork/sentinel" 2>/dev/null)" = keep ] &&
-      [ "$(ls -A "$home/work/iWork")" = sentinel ]
+      [ "$(ls -A "$home/work/iWork")" = "$(printf '.git\nsentinel')" ] &&
+      [ "$(git -C "$home/work/iWork" config --get remote.origin.url)" = keep-url ]
   }
 
   echo "remote-heavy selftest（临时目录 ${tmp}）"
@@ -761,6 +858,45 @@ FAKE
   rr after-timeout --task t-a "$pushed" -- /bin/sh -c 'exit 0'
   check "超时后锁已释放（下一次不用等锁）" sh -c "[ $rc -eq 0 ] && ! grep -q 等锁 '$out/after-timeout'"
 
+  # --- 远端锚点：根目录与 repo.git ---
+  check "repo.git 带本脚本的身份标记" [ "$(git --git-dir="$root/repo.git" config --get iwork.remoteHeavy)" = 1 ]
+  # 根目录链到 T11：run、clean、list 都在动任何东西之前拒绝
+  mv "$root" "$root.aside"
+  ln -s "$home/work/iWork" "$root"
+  rr root-run --task t-a "$pushed" -- /bin/sh -c "touch '$out/ran-anchor'"
+  check "根目录链到 T11：run 拒绝" test "$rc" -eq 2 -a ! -e "$out/ran-anchor"
+  rh root-clean clean t-a
+  check "根目录链到 T11：clean 拒绝" [ "$rc" -eq 2 ]
+  rh root-list list
+  check "根目录链到 T11：list 拒绝" [ "$rc" -eq 2 ]
+  check "根目录链到 T11：T11 里没建出 repo.git、tasks、锁" sentinel_intact
+  rm "$root"
+  mv "$root.aside" "$root"
+  # repo.git 链到外部仓库（T11 的 .git）：run 不许改它的 origin，clean 不许拿它删 worktree
+  mv "$root/repo.git" "$root/repo.git.aside"
+  ln -s "$home/work/iWork/.git" "$root/repo.git"
+  rr repo-link-run --task t-a "$pushed" -- /bin/sh -c "touch '$out/ran-anchor'"
+  check "repo.git 链到外部仓库：run 拒绝" test "$rc" -eq 2 -a ! -e "$out/ran-anchor"
+  rh repo-link-clean clean t-a
+  check "repo.git 链到外部仓库：clean 拒绝" [ "$rc" -eq 2 ]
+  check "repo.git 链到外部仓库：T11 的 origin 没被改" sentinel_intact
+  rm "$root/repo.git"
+  # repo.git 是真的裸仓库但不是本脚本建的（没有标记）
+  git init -q --bare "$root/repo.git"
+  rr repo-nomark --task t-nomark "$pushed" -- /bin/sh -c "touch '$out/ran-anchor'"
+  check "repo.git 没有身份标记：run 拒绝并说明" test "$rc" -eq 2 -a ! -e "$out/ran-anchor"
+  check "repo.git 没有身份标记：提示里点名标记" grep -q 'iwork.remoteHeavy' "$out/repo-nomark"
+  rm -rf "$root/repo.git"
+  mv "$root/repo.git.aside" "$root/repo.git"
+  # 根下的固定文件链到外面：holder 会被截断写，不许
+  ln -s "$home/work/iWork/sentinel" "$root/heavy.holder"
+  rr holder-link --task t-a "$pushed" -- /bin/sh -c "touch '$out/ran-anchor'"
+  check "heavy.holder 是符号链接：run 拒绝" test "$rc" -eq 2 -a ! -e "$out/ran-anchor"
+  check "heavy.holder 链接用例后 T11 哨兵没被截断" sentinel_intact
+  rm "$root/heavy.holder"
+  rr anchors-ok --task t-a "$pushed" -- /bin/sh -c 'exit 0'
+  check "对照：锚点恢复后能跑" [ "$rc" -eq 0 ]
+
   # --- clean ---
   rh clean clean t-a
   check "clean 成功" [ "$rc" -eq 0 ]
@@ -783,7 +919,7 @@ Host rhtest
   ForwardAgent yes
 CFG
   need "对照：直接读这份配置时 SendEnv、SetEnv 都生效" sh -c \
-    "ssh -G -F '$tmp/ssh_config' rhtest | grep -q '^sendenv RH_SECRET_TOKEN' && ssh -G -F '$tmp/ssh_config' rhtest | grep -q '^setenv RH_SET=1'"
+    "ssh -G -F '$tmp/ssh_config' rhtest 2>/dev/null | grep -q '^sendenv RH_SECRET_TOKEN' && ssh -G -F '$tmp/ssh_config' rhtest 2>/dev/null | grep -q '^setenv RH_SET=1'"
   need "ssh_args_for 解析成功" ssh_args_for rhtest "$tmp/ssh_config"
   local eff
   eff=$(ssh -G "${SSH_ARGS[@]}" rhtest 2>/dev/null)
@@ -793,6 +929,22 @@ CFG
   check "ForwardAgent 关着" grep -q '^forwardagent no$' <<<"$eff"
   check "连接参数保留：hostname/user/port" sh -c 'printf "%s\n" "$1" | grep -q "^hostname 192.0.2.10$" && printf "%s\n" "$1" | grep -q "^user someone$" && printf "%s\n" "$1" | grep -q "^port 2222$"' _ "$eff"
   check "连接参数保留：identityfile" grep -q '^identityfile ~/.ssh/id_rhtest$' <<<"$eff"
+  # 带空白、引号的路径：ssh -G 打印时丢了引号，拼回去会被拆开，要点名拒绝
+  printf 'Host rhq\n  HostName 192.0.2.10\n  User u\n  IdentityFile "/tmp/my key"\n' >"$tmp/ssh_config_space"
+  need "对照：带空格的 IdentityFile 在原配置里合法" sh -c "ssh -G -F '$tmp/ssh_config_space' rhq 2>/dev/null | grep -q '^identityfile /tmp/my key\$'"
+  check "IdentityFile 含空格：拒绝" not ssh_args_for rhq "$tmp/ssh_config_space" 2>/dev/null
+  printf 'Host rhq\n  HostName 192.0.2.10\n  User u\n  CertificateFile "/tmp/a\x27b"\n' >"$tmp/ssh_config_quote"
+  check "CertificateFile 含引号：拒绝" not ssh_args_for rhq "$tmp/ssh_config_quote" 2>/dev/null
+  printf 'Host rhq\n  HostName 192.0.2.10\n  User u\n  UserKnownHostsFile "/tmp/kh dir/known_hosts"\n' >"$tmp/ssh_config_kh1"
+  check "UserKnownHostsFile 单个路径含空格：拒绝（不拆成两个）" not ssh_args_for rhq "$tmp/ssh_config_kh1" 2>/dev/null
+  printf 'Host rhq\n  HostName 192.0.2.10\n  User u\n  UserKnownHostsFile /tmp/kh1 ~/.ssh/kh2\n' >"$tmp/ssh_config_kh2"
+  need "多个 known_hosts：解析成功" ssh_args_for rhq "$tmp/ssh_config_kh2"
+  eff=$(ssh -G "${SSH_ARGS[@]}" rhq 2>/dev/null)
+  local kh_orig kh_ours
+  kh_orig=$(ssh -G -F "$tmp/ssh_config_kh2" rhq 2>/dev/null | grep '^userknownhostsfile ')
+  kh_ours=$(grep '^userknownhostsfile ' <<<"$eff")
+  check "多个 known_hosts 往返后与原配置的有效值相同（两个路径）" \
+    sh -c '[ "$1" = "$2" ] && [ "$(printf "%s" "$1" | wc -w)" -eq 3 ]' _ "$kh_orig" "$kh_ours"
   printf 'Host rhproxy\n  HostName 192.0.2.11\n  ProxyCommand nc %%h %%p\n' >"$tmp/ssh_config_proxy"
   check "配了 ProxyCommand 时拒绝" not ssh_args_for rhproxy "$tmp/ssh_config_proxy" 2>/dev/null
 
