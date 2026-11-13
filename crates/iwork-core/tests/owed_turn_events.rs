@@ -129,6 +129,7 @@ fn owed_events_follow_the_table_for_every_state() {
                             }
                             .into(),
                             TurnFinished {
+                                conversation_id: Some(turn.conversation_id),
                                 turn_id: turn.id,
                                 state: end,
                                 usage: Default::default(),

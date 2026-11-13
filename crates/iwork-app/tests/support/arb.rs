@@ -798,7 +798,35 @@ fn local_item() -> impl Strategy<Value = LocalConfigItem> + Clone {
 fn boxed<S: Strategy<Value = T> + 'static, T: Into<DomainEvent> + std::fmt::Debug + 'static>(
     s: S,
 ) -> BoxedStrategy<DomainEvent> {
-    s.prop_map(Into::into).boxed()
+    // 带所属对话的十二种事件（G5）：各变体的策略里填 None，这里统一随机成有或没有（没有 = 加字段之前的旧事件）
+    (
+        s.prop_map(Into::into),
+        proptest::option::of(conversation_id()),
+    )
+        .prop_map(|(e, c)| with_conversation(e, c))
+        .boxed()
+}
+
+/// 给带所属对话的十二种事件（G5）换上 `c`；别的事件原样返回。
+pub fn with_conversation(mut e: DomainEvent, c: Option<ConversationId>) -> DomainEvent {
+    use DomainEvent as E;
+    let slot = match &mut e {
+        E::TurnStateChanged(x) => &mut x.conversation_id,
+        E::TurnFinished(x) => &mut x.conversation_id,
+        E::TurnModelReported(x) => &mut x.conversation_id,
+        E::TurnSessionBound(x) => &mut x.conversation_id,
+        E::TurnIntentRecorded(x) => &mut x.conversation_id,
+        E::ToolCallStarted(x) => &mut x.conversation_id,
+        E::ToolCallFinished(x) => &mut x.conversation_id,
+        E::ApprovalDelivered(x) => &mut x.conversation_id,
+        E::ApprovalReviewUpdated(x) => &mut x.conversation_id,
+        E::ApprovalDecided(x) => &mut x.conversation_id,
+        E::ApprovalVoided(x) => &mut x.conversation_id,
+        E::UserActionStateChanged(x) => &mut x.conversation_id,
+        _ => return e,
+    };
+    *slot = c;
+    e
 }
 
 /// 每个事件变体一个策略，配上种类名。测试据此逐个变体跑、并核对覆盖了全部 KINDS。
@@ -1091,6 +1119,7 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                     proptest::option::of(text()),
                 )
                     .prop_map(|(turn_id, from, to, reason)| TurnStateChanged {
+                        conversation_id: None,
                         turn_id,
                         from,
                         to,
@@ -1129,6 +1158,7 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                 )
                     .prop_map(
                         |(turn_id, state, usage, celebrate, change_summary)| TurnFinished {
+                            conversation_id: None,
                             turn_id,
                             state,
                             usage,
@@ -1141,14 +1171,18 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
         (
             "turn_model_reported",
             boxed(
-                (turn_id(), model())
-                    .prop_map(|(turn_id, model)| TurnModelReported { turn_id, model }),
+                (turn_id(), model()).prop_map(|(turn_id, model)| TurnModelReported {
+                    conversation_id: None,
+                    turn_id,
+                    model,
+                }),
             ),
         ),
         (
             "tool_call_started",
             boxed((turn_id(), text(), text(), action()).prop_map(
                 |(turn_id, id, tool_name, action)| ToolCallStarted {
+                    conversation_id: None,
                     turn_id,
                     tool_call_id: ToolCallId(id),
                     tool_name,
@@ -1167,6 +1201,7 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                 )
                     .prop_map(|(turn_id, id, ok, output_artifact)| {
                         ToolCallFinished {
+                            conversation_id: None,
                             turn_id,
                             tool_call_id: ToolCallId(id),
                             ok,
@@ -1180,6 +1215,7 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
             boxed(
                 (turn_id(), text(), prop::option::of(session_replaced())).prop_map(
                     |(turn_id, runtime_session_id, replaced)| TurnSessionBound {
+                        conversation_id: None,
                         turn_id,
                         runtime_session_id,
                         replaced,
@@ -1191,6 +1227,7 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
             "approval_delivered",
             boxed(
                 (approval_id(), turn_id()).prop_map(|(approval_id, turn_id)| ApprovalDelivered {
+                    conversation_id: None,
                     approval_id,
                     turn_id,
                 }),
@@ -1203,7 +1240,11 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                     turn_id(),
                     prop_oneof![Just(TurnIntentKind::Cancel), Just(TurnIntentKind::Resume)],
                 )
-                    .prop_map(|(turn_id, intent)| TurnIntentRecorded { turn_id, intent }),
+                    .prop_map(|(turn_id, intent)| TurnIntentRecorded {
+                        conversation_id: None,
+                        turn_id,
+                        intent,
+                    }),
             ),
         ),
         (
@@ -1215,6 +1256,7 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
             boxed(
                 (approval_id(), started_review_state()).prop_map(|(approval_id, review)| {
                     ApprovalReviewUpdated {
+                        conversation_id: None,
                         approval_id,
                         review,
                     }
@@ -1234,6 +1276,7 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                     proptest::option::of(pick(RememberScope::all())),
                 )
                     .prop_map(|(approval_id, state, remember)| ApprovalDecided {
+                        conversation_id: None,
                         approval_id,
                         state,
                         remember,
@@ -1245,6 +1288,7 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
             boxed(
                 (approval_id(), pick(VoidReason::all())).prop_map(|(approval_id, reason)| {
                     ApprovalVoided {
+                        conversation_id: None,
                         approval_id,
                         reason,
                     }
@@ -1375,6 +1419,7 @@ pub fn event_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> {
                 )
                     .prop_map(|(card_id, state, output_artifact)| {
                         UserActionStateChanged {
+                            conversation_id: None,
                             card_id,
                             state,
                             output_artifact,
@@ -1563,6 +1608,7 @@ pub fn boundary_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> 
             "turn_finished",
             boxed((turn_id(), turn_state(), usage(), any::<bool>()).prop_map(
                 |(turn_id, state, usage, celebrate)| TurnFinished {
+                    conversation_id: None,
                     turn_id,
                     state,
                     usage,
@@ -1600,6 +1646,7 @@ pub fn boundary_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> 
             boxed(
                 (approval_id(), review_state()).prop_map(|(approval_id, review)| {
                     ApprovalReviewUpdated {
+                        conversation_id: None,
                         approval_id,
                         review,
                     }
@@ -1611,6 +1658,7 @@ pub fn boundary_strategies() -> Vec<(&'static str, BoxedStrategy<DomainEvent>)> 
             boxed(
                 (approval_id(), pick(ApprovalState::all())).prop_map(|(approval_id, state)| {
                     ApprovalDecided {
+                        conversation_id: None,
                         approval_id,
                         state,
                         remember: None,

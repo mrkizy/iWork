@@ -73,6 +73,7 @@ pub fn plan(unsettled: &Unsettled) -> Result<RecoveryPlan, RecoveryError> {
         events.push(
             TurnStateChanged {
                 turn_id: t.id,
+                conversation_id: Some(t.conversation_id),
                 from: t.state,
                 to,
                 reason: None,
@@ -86,6 +87,7 @@ pub fn plan(unsettled: &Unsettled) -> Result<RecoveryPlan, RecoveryError> {
             events.push(
                 TurnFinished {
                     turn_id: t.id,
+                    conversation_id: Some(t.conversation_id),
                     state: to,
                     usage: Usage::default(),
                     celebrate: false,
@@ -112,6 +114,7 @@ pub fn plan(unsettled: &Unsettled) -> Result<RecoveryPlan, RecoveryError> {
         events.push(
             UserActionStateChanged {
                 card_id: c.id,
+                conversation_id: Some(c.conversation_id),
                 state,
                 output_artifact: c.output_artifact,
             }

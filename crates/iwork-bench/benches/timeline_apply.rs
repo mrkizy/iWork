@@ -94,6 +94,7 @@ fn turn_queued(id: &str, model: &str) -> E {
 
 fn tool_started(turn: &str, call: &str) -> E {
     E::ToolCallStarted(pb::ToolCallStarted {
+        conversation_id: CONV.into(),
         turn_id: turn.into(),
         tool_call_id: call.into(),
         tool_name: "Bash".into(),
@@ -103,6 +104,7 @@ fn tool_started(turn: &str, call: &str) -> E {
 
 fn tool_finished(turn: &str, call: &str) -> E {
     E::ToolCallFinished(pb::ToolCallFinished {
+        conversation_id: CONV.into(),
         turn_id: turn.into(),
         tool_call_id: call.into(),
         ok: true,
@@ -112,6 +114,7 @@ fn tool_finished(turn: &str, call: &str) -> E {
 
 fn turn_finished(turn: &str) -> E {
     E::TurnFinished(pb::TurnFinished {
+        conversation_id: CONV.into(),
         turn_id: turn.into(),
         state: pb::TurnState::Completed as i32,
         usage: None,

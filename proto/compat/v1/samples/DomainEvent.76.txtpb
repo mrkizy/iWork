@@ -1,0 +1,5 @@
+approval_voided {
+  approval_id: "01JC0V0000000000000000APR1"
+  reason: VOID_REASON_TURN_ABANDONED_AFTER_INTERRUPT
+  conversation_id: "01JC0C0000000000000000CNV1"
+}

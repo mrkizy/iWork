@@ -18,8 +18,9 @@ use iwork_proto::pb::domain_event::Event as P;
 
 use super::model::*;
 use super::{
-    ConvertError, ids_to_strings, opt_timestamp, parse_id, parse_ids, parse_opt_id,
-    path_from_proto, path_to_proto, required, required_timestamp, timestamp_to_proto,
+    ConvertError, conversation_id_from_proto, conversation_id_to_proto, ids_to_strings,
+    opt_timestamp, parse_id, parse_ids, parse_opt_id, path_from_proto, path_to_proto, required,
+    required_timestamp, timestamp_to_proto,
 };
 
 type R<T> = Result<T, ConvertError>;
@@ -145,6 +146,7 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
             let (from, from_interrupt_reason) = turn_state_to_proto(e.from);
             let (to, interrupt_reason) = turn_state_to_proto(e.to);
             P::TurnStateChanged(pb::TurnStateChanged {
+                conversation_id: conversation_id_to_proto(e.conversation_id),
                 turn_id: e.turn_id.to_string(),
                 from,
                 to,
@@ -154,6 +156,7 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
             })
         }
         DomainEvent::TurnFinished(e) => P::TurnFinished(pb::TurnFinished {
+            conversation_id: conversation_id_to_proto(e.conversation_id),
             turn_id: e.turn_id.to_string(),
             state: finished_state_to_proto(e.state)?,
             usage: Some(usage_to_proto(&e.usage)),
@@ -165,30 +168,36 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
                 .transpose()?,
         }),
         DomainEvent::TurnModelReported(e) => P::TurnModelReported(pb::TurnModelReported {
+            conversation_id: conversation_id_to_proto(e.conversation_id),
             turn_id: e.turn_id.to_string(),
             model: Some(model_selection_to_proto(&e.model)),
         }),
         DomainEvent::ApprovalDelivered(e) => P::ApprovalDelivered(pb::ApprovalDelivered {
+            conversation_id: conversation_id_to_proto(e.conversation_id),
             approval_id: e.approval_id.to_string(),
             turn_id: e.turn_id.to_string(),
         }),
         DomainEvent::TurnIntentRecorded(e) => P::TurnIntentRecorded(pb::TurnIntentRecorded {
+            conversation_id: conversation_id_to_proto(e.conversation_id),
             turn_id: e.turn_id.to_string(),
             intent: turn_intent_to_proto(e.intent),
         }),
         DomainEvent::ToolCallStarted(e) => P::ToolCallStarted(pb::ToolCallStarted {
+            conversation_id: conversation_id_to_proto(e.conversation_id),
             turn_id: e.turn_id.to_string(),
             tool_call_id: e.tool_call_id.0.clone(),
             tool_name: e.tool_name.clone(),
             action: Some(action_to_proto(&e.action)?),
         }),
         DomainEvent::ToolCallFinished(e) => P::ToolCallFinished(pb::ToolCallFinished {
+            conversation_id: conversation_id_to_proto(e.conversation_id),
             turn_id: e.turn_id.to_string(),
             tool_call_id: e.tool_call_id.0.clone(),
             ok: e.ok,
             output_artifact: e.output_artifact.as_ref().map(artifact_ref_to_proto),
         }),
         DomainEvent::TurnSessionBound(e) => P::TurnSessionBound(pb::TurnSessionBound {
+            conversation_id: conversation_id_to_proto(e.conversation_id),
             turn_id: e.turn_id.to_string(),
             runtime_session_id: e.runtime_session_id.clone(),
             replaced: e.replaced.as_ref().map(|r| pb::SessionReplaced {
@@ -202,6 +211,7 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
         DomainEvent::ApprovalReviewUpdated(e) => {
             let (review, review_id, reason) = review_state_to_proto(&e.review);
             P::ApprovalReviewUpdated(pb::ApprovalReviewUpdated {
+                conversation_id: conversation_id_to_proto(e.conversation_id),
                 approval_id: e.approval_id.to_string(),
                 review_id: review_id.ok_or(ConvertError::InvalidValue {
                     kind: "ApprovalReviewUpdated",
@@ -214,6 +224,7 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
         }
         DomainEvent::ApprovalDecided(e) => P::ApprovalDecided(approval_decided_to_proto(e)?),
         DomainEvent::ApprovalVoided(e) => P::ApprovalVoided(pb::ApprovalVoided {
+            conversation_id: conversation_id_to_proto(e.conversation_id),
             approval_id: e.approval_id.to_string(),
             reason: void_reason_to_proto(e.reason),
         }),
@@ -265,6 +276,7 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
         DomainEvent::UserActionStateChanged(e) => {
             let f = user_action_state_to_proto(&e.state);
             P::UserActionStateChanged(pb::UserActionStateChanged {
+                conversation_id: conversation_id_to_proto(e.conversation_id),
                 card_id: e.card_id.to_string(),
                 state: f.state,
                 exit: f.exit,
@@ -476,6 +488,7 @@ fn approval_decided_to_proto(e: &ev::ApprovalDecided) -> R<pb::ApprovalDecided> 
         }
     };
     Ok(pb::ApprovalDecided {
+        conversation_id: conversation_id_to_proto(e.conversation_id),
         approval_id: e.approval_id.to_string(),
         state: state as i32,
         decider: decider_to_proto(decider),
@@ -505,6 +518,7 @@ fn approval_decided_from_proto(e: &pb::ApprovalDecided) -> R<ev::ApprovalDecided
         }
     };
     Ok(ev::ApprovalDecided {
+        conversation_id: conversation_id_from_proto("ApprovalDecided", &e.conversation_id)?,
         approval_id: parse_id(K, "approval_id", &e.approval_id)?,
         state,
         remember: e
@@ -692,6 +706,10 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
         P::TurnStateChanged(e) => {
             const K: &str = "TurnStateChanged";
             ev::TurnStateChanged {
+                conversation_id: conversation_id_from_proto(
+                    "TurnStateChanged",
+                    &e.conversation_id,
+                )?,
                 turn_id: parse_id(K, "turn_id", &e.turn_id)?,
                 from: turn_state_from_proto(
                     K,
@@ -708,6 +726,7 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
         P::TurnFinished(e) => {
             const K: &str = "TurnFinished";
             ev::TurnFinished {
+                conversation_id: conversation_id_from_proto("TurnFinished", &e.conversation_id)?,
                 turn_id: parse_id(K, "turn_id", &e.turn_id)?,
                 state: finished_state_from_proto(e.state)?,
                 usage: usage_from_proto(required(K, "usage", e.usage.as_ref())?),
@@ -717,21 +736,25 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
             .into()
         }
         P::TurnModelReported(e) => ev::TurnModelReported {
+            conversation_id: conversation_id_from_proto("TurnModelReported", &e.conversation_id)?,
             turn_id: parse_id("TurnModelReported", "turn_id", &e.turn_id)?,
             model: required_model("TurnModelReported", "model", e.model.as_ref())?,
         }
         .into(),
         P::ApprovalDelivered(e) => ev::ApprovalDelivered {
+            conversation_id: conversation_id_from_proto("ApprovalDelivered", &e.conversation_id)?,
             approval_id: parse_id("ApprovalDelivered", "approval_id", &e.approval_id)?,
             turn_id: parse_id("ApprovalDelivered", "turn_id", &e.turn_id)?,
         }
         .into(),
         P::TurnIntentRecorded(e) => ev::TurnIntentRecorded {
+            conversation_id: conversation_id_from_proto("TurnIntentRecorded", &e.conversation_id)?,
             turn_id: parse_id("TurnIntentRecorded", "turn_id", &e.turn_id)?,
             intent: turn_intent_from_proto("TurnIntentRecorded", "intent", e.intent)?,
         }
         .into(),
         P::ToolCallStarted(e) => ev::ToolCallStarted {
+            conversation_id: conversation_id_from_proto("ToolCallStarted", &e.conversation_id)?,
             turn_id: parse_id("ToolCallStarted", "turn_id", &e.turn_id)?,
             tool_call_id: ToolCallId(e.tool_call_id),
             tool_name: e.tool_name,
@@ -739,6 +762,7 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
         }
         .into(),
         P::ToolCallFinished(e) => ev::ToolCallFinished {
+            conversation_id: conversation_id_from_proto("ToolCallFinished", &e.conversation_id)?,
             turn_id: parse_id("ToolCallFinished", "turn_id", &e.turn_id)?,
             tool_call_id: ToolCallId(e.tool_call_id),
             ok: e.ok,
@@ -746,6 +770,7 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
         }
         .into(),
         P::TurnSessionBound(e) => ev::TurnSessionBound {
+            conversation_id: conversation_id_from_proto("TurnSessionBound", &e.conversation_id)?,
             turn_id: parse_id("TurnSessionBound", "turn_id", &e.turn_id)?,
             runtime_session_id: e.runtime_session_id,
             replaced: e
@@ -783,6 +808,10 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
                 });
             }
             ev::ApprovalReviewUpdated {
+                conversation_id: conversation_id_from_proto(
+                    "ApprovalReviewUpdated",
+                    &e.conversation_id,
+                )?,
                 approval_id: parse_id(K, "approval_id", &e.approval_id)?,
                 review,
             }
@@ -790,6 +819,7 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
         }
         P::ApprovalDecided(e) => approval_decided_from_proto(&e)?.into(),
         P::ApprovalVoided(e) => ev::ApprovalVoided {
+            conversation_id: conversation_id_from_proto("ApprovalVoided", &e.conversation_id)?,
             approval_id: parse_id("ApprovalVoided", "approval_id", &e.approval_id)?,
             reason: void_reason_from_proto("ApprovalVoided", "reason", e.reason)?,
         }
@@ -862,6 +892,10 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
         P::UserActionStateChanged(e) => {
             const K: &str = "UserActionStateChanged";
             ev::UserActionStateChanged {
+                conversation_id: conversation_id_from_proto(
+                    "UserActionStateChanged",
+                    &e.conversation_id,
+                )?,
                 card_id: parse_id(K, "card_id", &e.card_id)?,
                 state: user_action_state_from_proto(
                     K,

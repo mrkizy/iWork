@@ -104,6 +104,7 @@ pub fn owed_turn_events(
         events.push(
             TurnStateChanged {
                 turn_id: turn.id,
+                conversation_id: Some(turn.conversation_id),
                 from: state,
                 to,
                 reason,
@@ -141,6 +142,7 @@ pub fn owed_turn_events(
     events.push(
         TurnFinished {
             turn_id: turn.id,
+            conversation_id: Some(turn.conversation_id),
             state,
             usage: Usage::default(),
             celebrate: false,

@@ -1,0 +1,13 @@
+{
+  "toolCallFinished": {
+    "turnId": "01JC0T0000000000000000TRN1",
+    "toolCallId": "tool-1",
+    "ok": true,
+    "outputArtifact": {
+      "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "area": "ARTIFACT_AREA_ARTIFACTS",
+      "size": "4096"
+    },
+    "conversationId": "01JC0C0000000000000000CNV1"
+  }
+}

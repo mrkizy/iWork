@@ -315,6 +315,8 @@ pub fn turn_state(
 ) -> pb::DomainEvent {
     let interrupt = (to == pb::TurnState::Interrupted).then_some(pb::InterruptReason::Crash.into());
     ev(E::TurnStateChanged(pb::TurnStateChanged {
+        // 所属对话由假后台追加时按折叠表填（`routes::stamp_conversation`）
+        conversation_id: String::new(),
         turn_id: id.into(),
         from: from.into(),
         to: to.into(),
@@ -341,6 +343,8 @@ pub fn turn_finished(
     changes: Option<pb::ChangeSummary>,
 ) -> pb::DomainEvent {
     ev(E::TurnFinished(pb::TurnFinished {
+        // 所属对话由假后台追加时按折叠表填（`routes::stamp_conversation`）
+        conversation_id: String::new(),
         turn_id: id.into(),
         state: state.into(),
         usage: Some(usage(1200, 340)),
@@ -360,6 +364,8 @@ pub fn changes(paths: &[&str], insertions: u32, deletions: u32) -> pb::ChangeSum
 
 pub fn tool_started(turn_id: &str, call_id: &str, tool: &str, summary: &str) -> pb::DomainEvent {
     ev(E::ToolCallStarted(pb::ToolCallStarted {
+        // 所属对话由假后台追加时按折叠表填（`routes::stamp_conversation`）
+        conversation_id: String::new(),
         turn_id: turn_id.into(),
         tool_call_id: call_id.into(),
         tool_name: tool.into(),
@@ -369,6 +375,8 @@ pub fn tool_started(turn_id: &str, call_id: &str, tool: &str, summary: &str) -> 
 
 pub fn tool_finished(turn_id: &str, call_id: &str, ok: bool) -> pb::DomainEvent {
     ev(E::ToolCallFinished(pb::ToolCallFinished {
+        // 所属对话由假后台追加时按折叠表填（`routes::stamp_conversation`）
+        conversation_id: String::new(),
         turn_id: turn_id.into(),
         tool_call_id: call_id.into(),
         ok,
@@ -435,6 +443,8 @@ pub fn approval_decided(
     decider: pb::ApprovalDecider,
 ) -> pb::DomainEvent {
     ev(E::ApprovalDecided(pb::ApprovalDecided {
+        // 所属对话由假后台追加时按折叠表填（`routes::stamp_conversation`）
+        conversation_id: String::new(),
         approval_id: id.into(),
         state: state.into(),
         decider: decider.into(),
@@ -444,6 +454,8 @@ pub fn approval_decided(
 
 pub fn approval_voided(id: &str, reason: pb::VoidReason) -> pb::DomainEvent {
     ev(E::ApprovalVoided(pb::ApprovalVoided {
+        // 所属对话由假后台追加时按折叠表填（`routes::stamp_conversation`）
+        conversation_id: String::new(),
         approval_id: id.into(),
         reason: reason.into(),
     }))
@@ -487,6 +499,8 @@ pub fn user_action_state(
     void: Option<pb::VoidReason>,
 ) -> pb::DomainEvent {
     ev(E::UserActionStateChanged(pb::UserActionStateChanged {
+        // 所属对话由假后台追加时按折叠表填（`routes::stamp_conversation`）
+        conversation_id: String::new(),
         card_id: id.into(),
         state: state.into(),
         exit: exit_code.map(|c| pb::ExitStatus {

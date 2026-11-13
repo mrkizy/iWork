@@ -84,6 +84,7 @@ fn approvals(n: u128, _flip: bool) -> Vec<DomainEvent> {
         }
         .into(),
         ApprovalDecided {
+            conversation_id: Some(cid(10)),
             approval_id: apid(n),
             state: ApprovalState::Approved {
                 decider: Decider::User,
@@ -99,6 +100,7 @@ fn approvals(n: u128, _flip: bool) -> Vec<DomainEvent> {
 fn typical(n: u128, _flip: bool) -> Vec<DomainEvent> {
     let change = |from, to| -> DomainEvent {
         TurnStateChanged {
+            conversation_id: Some(cid(10)),
             turn_id: tid(20),
             from,
             to,
@@ -147,6 +149,7 @@ fn run(scenario: &Scenario, fullfsync: Option<bool>, label: &str) {
             ConversationCreated { conversation: project_conversation(10, 1) }.into(),
             TurnQueued { turn: turn(20, 10) }.into(),
             TurnStateChanged {
+                conversation_id: Some(cid(10)),
                 turn_id: tid(20),
                 from: TurnState::Queued,
                 to: TurnState::Running,

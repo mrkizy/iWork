@@ -295,6 +295,8 @@ pub fn e_turn(n: u128, conv: u128, assistant: u128) -> DomainEvent {
 }
 pub fn e_turn_state(n: u128, from: TurnState, to: TurnState) -> DomainEvent {
     TurnStateChanged {
+        // 引擎按自己折叠的表认对话，不读事件上的所属对话（G5 的路由不在这组用例里）
+        conversation_id: None,
         turn_id: tid(n),
         from,
         to,
@@ -328,6 +330,7 @@ pub fn e_resumed(n: u128) -> DomainEvent {
 }
 pub fn e_turn_finished(n: u128, state: TurnState) -> DomainEvent {
     TurnFinished {
+        conversation_id: None,
         turn_id: tid(n),
         state,
         usage: Default::default(),
@@ -341,6 +344,7 @@ pub fn e_requested(a: Approval) -> DomainEvent {
 }
 pub fn e_review(n: u128, review: ReviewState) -> DomainEvent {
     ApprovalReviewUpdated {
+        conversation_id: None,
         approval_id: apid(n),
         review,
     }
@@ -348,6 +352,7 @@ pub fn e_review(n: u128, review: ReviewState) -> DomainEvent {
 }
 pub fn e_decided(n: u128, state: ApprovalState) -> DomainEvent {
     ApprovalDecided {
+        conversation_id: None,
         approval_id: apid(n),
         state,
         remember: None,
@@ -367,6 +372,7 @@ pub fn e_denied(n: u128) -> DomainEvent {
 }
 pub fn e_voided(n: u128, reason: VoidReason) -> DomainEvent {
     ApprovalVoided {
+        conversation_id: None,
         approval_id: apid(n),
         reason,
     }
@@ -374,6 +380,7 @@ pub fn e_voided(n: u128, reason: VoidReason) -> DomainEvent {
 }
 pub fn e_delivered(n: u128, turn: u128) -> DomainEvent {
     ApprovalDelivered {
+        conversation_id: None,
         approval_id: apid(n),
         turn_id: tid(turn),
     }
@@ -403,6 +410,7 @@ pub fn e_card(c: UserActionCard) -> DomainEvent {
 }
 pub fn e_card_state(n: u128, state: UserActionState) -> DomainEvent {
     UserActionStateChanged {
+        conversation_id: None,
         card_id: uaid(n),
         state,
         output_artifact: None,
@@ -460,6 +468,7 @@ pub fn waiting_turn(
     vec![
         TurnQueued { turn: x }.into(),
         TurnStateChanged {
+            conversation_id: Some(conversation_id),
             turn_id: t,
             from: TurnState::Queued,
             to: TurnState::Running,
@@ -467,6 +476,7 @@ pub fn waiting_turn(
         }
         .into(),
         TurnStateChanged {
+            conversation_id: Some(conversation_id),
             turn_id: t,
             from: TurnState::Running,
             to: TurnState::WaitingApproval,

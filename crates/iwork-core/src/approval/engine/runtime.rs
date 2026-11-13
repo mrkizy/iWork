@@ -73,6 +73,7 @@ where
             vec![
                 TurnStateChanged {
                     turn_id: turn.id,
+                    conversation_id: Some(turn.conversation_id),
                     from: turn.state,
                     to: next.state,
                     reason: None,
@@ -158,6 +159,7 @@ where
                                 vec![
                                     TurnModelReported {
                                         turn_id: turn.id,
+                                        conversation_id: Some(turn.conversation_id),
                                         model,
                                     }
                                     .into(),
@@ -254,6 +256,7 @@ where
             events.push(
                 TurnStateChanged {
                     turn_id: turn.id,
+                    conversation_id: Some(turn.conversation_id),
                     from,
                     to: turn.state,
                     reason: None,
@@ -274,6 +277,7 @@ where
         events.push(
             TurnFinished {
                 turn_id: turn.id,
+                conversation_id: Some(turn.conversation_id),
                 state: turn.state,
                 usage,
                 celebrate: false,

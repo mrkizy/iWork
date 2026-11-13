@@ -294,6 +294,7 @@ fn waiting_turn(n: u32, c: u32) -> Vec<DomainEvent> {
     vec![
         TurnQueued { turn: turn(n, c) }.into(),
         TurnStateChanged {
+            conversation_id: Some(cid(c)),
             turn_id: tid(n),
             from: TurnState::Queued,
             to: TurnState::WaitingApproval,
@@ -444,6 +445,7 @@ fn tool_call(turn: TurnId, id: String) -> [DomainEvent; 2] {
     use iwork_domain::action::{Action, ActionFlags, ActionKind, ActionTarget};
     [
         ToolCallStarted {
+            conversation_id: Some(cid(0)),
             turn_id: turn,
             tool_call_id: ToolCallId(id.clone()),
             tool_name: "Bash".into(),
@@ -457,6 +459,7 @@ fn tool_call(turn: TurnId, id: String) -> [DomainEvent; 2] {
         }
         .into(),
         ToolCallFinished {
+            conversation_id: Some(cid(0)),
             turn_id: turn,
             tool_call_id: ToolCallId(id),
             ok: true,
@@ -582,6 +585,7 @@ async fn fold_startup(e: &Env, total: usize) {
             batch.push(MessageAppended { message: m }.into());
             batch.push(
                 TurnFinished {
+                    conversation_id: Some(cid(0)),
                     turn_id: tid(t),
                     state: TurnState::Completed,
                     usage: Default::default(),

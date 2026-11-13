@@ -305,6 +305,7 @@ fn migration_0002_backfills_from_events() {
     };
     let change = |turn: u128, from: TurnState, to: TurnState| -> DomainEvent {
         TurnStateChanged {
+            conversation_id: Some(cid(if turn == 22 { 11 } else { 10 })),
             turn_id: tid(turn),
             from,
             to,
@@ -342,6 +343,7 @@ fn migration_0002_backfills_from_events() {
         6,
         vec![
             ToolCallStarted {
+                conversation_id: Some(cid(10)),
                 turn_id: tid(20),
                 tool_call_id: ToolCallId("tc".into()),
                 tool_name: "Bash".into(),
@@ -355,6 +357,7 @@ fn migration_0002_backfills_from_events() {
         vec![
             change(20, TurnState::Running, TurnState::Completed),
             TurnFinished {
+                conversation_id: Some(cid(10)),
                 turn_id: tid(20),
                 state: TurnState::Completed,
                 usage: Default::default(),

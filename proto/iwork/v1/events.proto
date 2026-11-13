@@ -281,6 +281,8 @@ message TurnStateChanged {
   optional InterruptReason interrupt_reason = 5;
   // from = INTERRUPTED 时必有：续接或放弃时，领域状态 Interrupted{reason} 往返不能丢原因。
   optional InterruptReason from_interrupt_reason = 6;
+  // 所属对话（T09 方案 G5、T10a 方案 2.7）：会话范围按它路由。加这个字段之前落盘的旧事件为空。
+  string conversation_id = 15;
 }
 
 // 流：turn（turn_id）。celebrate：正常结束且有改动时盖「搞定」章（设计 9.7 第 2 条）。
@@ -290,12 +292,16 @@ message TurnFinished {
   Usage usage = 3;
   bool celebrate = 4;
   ChangeSummary change_summary = 5;
+  // 所属对话（T09 方案 G5、T10a 方案 2.7）：会话范围按它路由。加这个字段之前落盘的旧事件为空。
+  string conversation_id = 15;
 }
 
 // 流：turn（turn_id）。CLI 实际报告的模型，与请求的不一致时以它为准（设计 9.6 第 4 条）。
 message TurnModelReported {
   string turn_id = 1;
   ModelSelection model = 2;
+  // 所属对话（T09 方案 G5、T10a 方案 2.7）：会话范围按它路由。加这个字段之前落盘的旧事件为空。
+  string conversation_id = 15;
 }
 
 // 流：turn（turn_id）。回合跑在哪条运行时会话上：发 prompt 之前、与回合进 Running 同一次提交，
@@ -308,6 +314,8 @@ message TurnSessionBound {
   // 续接失败、用摘要新开了会话时记下被换掉的那条（需求第 12 章 v1.78 的审计；T06 方案 5.2a）。
   // 新编号就是 runtime_session_id。不设 = 不是换会话。
   SessionReplaced replaced = 3;
+  // 所属对话（T09 方案 G5、T10a 方案 2.7）：会话范围按它路由。加这个字段之前落盘的旧事件为空。
+  string conversation_id = 15;
 }
 
 // 被换掉的运行时会话：旧编号与原因。
@@ -321,6 +329,8 @@ message SessionReplaced {
 message ApprovalDelivered {
   string approval_id = 1;
   string turn_id = 2;
+  // 所属对话（T09 方案 G5、T10a 方案 2.7）：会话范围按它路由。加这个字段之前落盘的旧事件为空。
+  string conversation_id = 15;
 }
 
 // 流：turn（turn_id）。用户要取消在跑的回合、或要继续已中断的回合（T10a 方案 0a.3 A5）。只管它落盘时
@@ -328,6 +338,8 @@ message ApprovalDelivered {
 message TurnIntentRecorded {
   string turn_id = 1;
   TurnIntentKind intent = 2;
+  // 所属对话（T09 方案 G5、T10a 方案 2.7）：会话范围按它路由。加这个字段之前落盘的旧事件为空。
+  string conversation_id = 15;
 }
 
 // 名字带 Kind：view.proto 已有界面意图 TurnIntent。
@@ -343,6 +355,8 @@ message ToolCallStarted {
   string tool_call_id = 2;
   string tool_name = 3;
   ActionSummary action = 4;
+  // 所属对话（T09 方案 G5、T10a 方案 2.7）：会话范围按它路由。加这个字段之前落盘的旧事件为空。
+  string conversation_id = 15;
 }
 
 // 流：turn（turn_id）。大段输出只带制品引用（设计 3.7）。
@@ -351,6 +365,8 @@ message ToolCallFinished {
   string tool_call_id = 2;
   bool ok = 3;
   ArtifactRef output_artifact = 4;
+  // 所属对话（T09 方案 G5、T10a 方案 2.7）：会话范围按它路由。加这个字段之前落盘的旧事件为空。
+  string conversation_id = 15;
 }
 
 // ---------- 审批（流：approval；求值与过期结果为 audit 流；规则为 rule 流） ----------
@@ -367,6 +383,8 @@ message ApprovalReviewUpdated {
   // IN_PROGRESS / PASSED / FAILED / TIMED_OUT / ERRORED / ABANDONED 之一。
   ReviewState review = 3;
   optional string reason = 4;
+  // 所属对话（T09 方案 G5、T10a 方案 2.7）：会话范围按它路由。加这个字段之前落盘的旧事件为空。
+  string conversation_id = 15;
 }
 
 // 流：approval（approval_id）。
@@ -377,12 +395,16 @@ message ApprovalDecided {
   ApprovalDecider decider = 3;
   // 只有用户允许时才有。
   optional RememberScope remember = 4;
+  // 所属对话（T09 方案 G5、T10a 方案 2.7）：会话范围按它路由。加这个字段之前落盘的旧事件为空。
+  string conversation_id = 15;
 }
 
 // 流：approval（approval_id）。
 message ApprovalVoided {
   string approval_id = 1;
   VoidReason reason = 2;
+  // 所属对话（T09 方案 G5、T10a 方案 2.7）：会话范围按它路由。加这个字段之前落盘的旧事件为空。
+  string conversation_id = 15;
 }
 
 // 流：audit（turn_id）。每次求值写一条，放行也记（设计 7.4）。
@@ -476,6 +498,8 @@ message UserActionStateChanged {
   ArtifactRef output_artifact = 5;
   // VOIDED 时必有。
   optional VoidReason void_reason = 6;
+  // 所属对话（T09 方案 G5、T10a 方案 2.7）：会话范围按它路由。加这个字段之前落盘的旧事件为空。
+  string conversation_id = 15;
 }
 
 // ---------- 安全清单（流：rule） ----------

@@ -56,7 +56,10 @@ impl Shared {
 
     /// 追加一条持久事件：分配 seq、算路由（在折叠之前：删除事件折叠后就查不到归属）、折叠、入日志、发布。
     /// 全程持有状态锁，所以发布顺序就是 seq 顺序（Publisher 要求递增）。
-    fn append_locked(&self, st: &mut State, event: pb::DomainEvent, actor: &str) -> u64 {
+    fn append_locked(&self, st: &mut State, mut event: pb::DomainEvent, actor: &str) -> u64 {
+        if let Some(inner) = event.event.as_mut() {
+            routes::stamp_conversation(&st.tables, inner);
+        }
         let seq = st.head() + 1;
         let at = envelope_time(seq);
         let inner = event

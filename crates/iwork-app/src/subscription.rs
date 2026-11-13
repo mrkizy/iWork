@@ -133,8 +133,24 @@ pub fn snapshot_queries(scope: &pb::SubscriptionScope) -> Vec<pb::Query> {
         .unwrap_or_default()
 }
 
+/// 旧事件没带所属对话时只 warn 一次（补发会把整段历史再算一遍路由，逐条 warn 会刷屏）。
+static LEGACY_WARNED: std::sync::Once = std::sync::Once::new();
+
+fn carried<'a>(event: &DomainEvent, id: Option<&'a ConversationId>) -> Option<&'a ConversationId> {
+    if id.is_none() {
+        LEGACY_WARNED.call_once(|| {
+            tracing::warn!(
+                kind = event.kind(),
+                "事件没有所属对话（加 conversation_id 之前落盘的旧事件），只走主流"
+            );
+        });
+    }
+    id
+}
+
 /// 事件 → 路由键。第一个键永远是 [`DomainEvent::stream`] 那条流；回合、审批、亲手执行卡片事件
-/// 再加一个 `conversation:<id>`，让会话范围也收到它们（方案 Q3）。
+/// 再加一个 `conversation:<id>`，让会话范围也收到它们（方案 Q3）；回合、工具调用、审批后续、卡片状态事件的对话
+/// 取自事件自己带的 `conversation_id`（G5）。
 pub fn routes_for(event: &DomainEvent) -> Vec<StreamKey> {
     let (kind, id) = event.stream();
     let kind = stream_kind_name(kind);
@@ -160,21 +176,20 @@ fn owning_conversation(event: &DomainEvent) -> Option<&ConversationId> {
         E::ApprovalRequested(e) => Some(&e.approval.conversation_id),
         E::UserActionProposed(e) => Some(&e.card.conversation_id),
 
-        // 载荷里还没有 conversation_id，暂时只走主流，会话范围靠快照对齐。
-        // T10 给这些事件加字段后在这里返回它；字段为空（加字段前的旧载荷）时只返回主键并 warn 一次，
-        // 不回填（方案 Q3）。
-        E::TurnStateChanged(_)
-        | E::TurnFinished(_)
-        | E::TurnModelReported(_)
-        | E::TurnSessionBound(_)
-        | E::TurnIntentRecorded(_)
-        | E::ToolCallStarted(_)
-        | E::ToolCallFinished(_)
-        | E::ApprovalDelivered(_)
-        | E::ApprovalReviewUpdated(_)
-        | E::ApprovalDecided(_)
-        | E::ApprovalVoided(_)
-        | E::UserActionStateChanged(_) => None,
+        // 事件自己带着所属对话（G5，T10a 方案 2.7）。`None` 只出现在加这个字段之前落盘的旧事件上：
+        // 只走主流，warn 一次，不回填（T03 方案 Q3）；那时这些事件本来就只走主流，会话范围靠快照对齐。
+        E::TurnStateChanged(e) => carried(event, e.conversation_id.as_ref()),
+        E::TurnFinished(e) => carried(event, e.conversation_id.as_ref()),
+        E::TurnModelReported(e) => carried(event, e.conversation_id.as_ref()),
+        E::TurnSessionBound(e) => carried(event, e.conversation_id.as_ref()),
+        E::TurnIntentRecorded(e) => carried(event, e.conversation_id.as_ref()),
+        E::ToolCallStarted(e) => carried(event, e.conversation_id.as_ref()),
+        E::ToolCallFinished(e) => carried(event, e.conversation_id.as_ref()),
+        E::ApprovalDelivered(e) => carried(event, e.conversation_id.as_ref()),
+        E::ApprovalReviewUpdated(e) => carried(event, e.conversation_id.as_ref()),
+        E::ApprovalDecided(e) => carried(event, e.conversation_id.as_ref()),
+        E::ApprovalVoided(e) => carried(event, e.conversation_id.as_ref()),
+        E::UserActionStateChanged(e) => carried(event, e.conversation_id.as_ref()),
 
         // 主流已经是 conversation，或者不属于单个对话（审计流不进任何范围）。
         E::ProjectAdded(_)

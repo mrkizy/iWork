@@ -26,6 +26,8 @@ const DIRECT_ATTEMPTS: usize = 3;
 /// 一条状态变化的简写。
 fn changed(turn: TurnId, from: TurnState, to: TurnState) -> DomainEvent {
     TurnStateChanged {
+        // 存储的提交时校验不读所属对话
+        conversation_id: None,
         turn_id: turn,
         from,
         to,
@@ -36,6 +38,7 @@ fn changed(turn: TurnId, from: TurnState, to: TurnState) -> DomainEvent {
 
 fn finished(turn: TurnId, state: TurnState) -> DomainEvent {
     TurnFinished {
+        conversation_id: None,
         turn_id: turn,
         state,
         usage: Default::default(),

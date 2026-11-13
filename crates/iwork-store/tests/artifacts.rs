@@ -519,6 +519,7 @@ fn gc_after_conversation_deleted_frees_attachment_copy() {
         vec![
             // 级联删除要求名下回合先到终态（T10a X5）
             TurnStateChanged {
+                conversation_id: Some(cid(10)),
                 turn_id: tid(20),
                 from: TurnState::Queued,
                 to: TurnState::Cancelled,

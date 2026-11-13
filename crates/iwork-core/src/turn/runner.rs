@@ -75,7 +75,7 @@ use iwork_domain::event::{
     QuotaObserved, SessionReplaced, ToolCallFinished, ToolCallStarted, TurnFinished,
     TurnModelReported, TurnSessionBound, TurnStateChanged, UsageReported,
 };
-use iwork_domain::id::{CommandId, MessageId, ProjectId, TurnId};
+use iwork_domain::id::{CommandId, ConversationId, MessageId, ProjectId, TurnId};
 use iwork_domain::message::{Author, Message, MessageBody, MessageStatus};
 use iwork_domain::session::SessionLostReason;
 use iwork_domain::turn::{Turn, TurnIllegal, TurnState, TurnTrigger};
@@ -384,9 +384,10 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             let _ = self.retire().await;
             self.resume = Some(old.clone());
         }
-        if let Some(turn_id) = bound {
+        if let Some((turn_id, conversation_id)) = bound {
             let event = TurnSessionBound {
                 turn_id,
+                conversation_id: Some(conversation_id),
                 runtime_session_id: old,
                 replaced: None,
             };
@@ -474,7 +475,7 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             return Ok(run.turn.state);
         }
         if replaced.is_some() {
-            self.mark_bound(run.turn.id);
+            self.mark_bound(run.turn.id, run.turn.conversation_id);
         }
         run.started(first, self.resume.clone(), replaced, assistant_name)
             .await?;
@@ -555,11 +556,11 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
 
     /// 用摘要新开的会话的编号要提交到回合上了（新会话报得出编号时才有那条绑定）。在提交**之前**记：提交在途时
     /// future 被丢掉，那笔照样可能落盘；提交失败时多补记一条旧编号，没有害处。
-    fn mark_bound(&mut self, turn_id: TurnId) {
+    fn mark_bound(&mut self, turn_id: TurnId, conversation_id: ConversationId) {
         if self.resume.is_some()
             && let Some(pending) = self.unconfirmed.as_mut()
         {
-            pending.bound = Some(turn_id);
+            pending.bound = Some((turn_id, conversation_id));
         }
     }
 
@@ -710,7 +711,7 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             },
         };
         if replaced.is_some() {
-            self.mark_bound(run.turn.id);
+            self.mark_bound(run.turn.id, run.turn.conversation_id);
         }
         run.bind_session(self.resume.clone(), replaced).await?;
         let session = self.session.as_ref().expect("刚开好会话");
@@ -725,8 +726,8 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
 struct Unconfirmed {
     /// 被换掉的旧编号
     old: String,
-    /// 新编号已经落盘到这个回合上（`TurnSessionBound`）
-    bound: Option<TurnId>,
+    /// 新编号已经落盘到这个回合上（`TurnSessionBound`）；对话编号随补记的那条事件带上（G5）
+    bound: Option<(TurnId, ConversationId)>,
 }
 
 /// `ensure_session` 的结果。
@@ -932,6 +933,7 @@ where
         let to = self.turn.apply(trigger, self.ports.clock.now())?;
         Ok(TurnStateChanged {
             turn_id: self.turn.id,
+            conversation_id: Some(self.turn.conversation_id),
             from,
             to,
             reason,
@@ -983,6 +985,7 @@ where
         Some(
             TurnSessionBound {
                 turn_id: self.turn.id,
+                conversation_id: Some(self.turn.conversation_id),
                 runtime_session_id: id,
                 replaced,
             }
@@ -1075,6 +1078,7 @@ where
     /// 处理一条更新；回合到此结束时返回结局。
     async fn on_update(&mut self, update: AgentUpdate) -> Result<Option<End>, TurnRunError> {
         let turn_id = self.turn.id;
+        let conversation_id = Some(self.turn.conversation_id);
         let event: DomainEvent = match update {
             AgentUpdate::Text { offset, text } => {
                 self.on_text(offset, text).await?;
@@ -1086,6 +1090,7 @@ where
                 raw_input,
             } => ToolCallStarted {
                 turn_id,
+                conversation_id,
                 tool_call_id,
                 tool_name: tool.0.clone(),
                 // 动作归一属于审批引擎（技术设计 7.1，T07）；在那之前只记工具名
@@ -1104,13 +1109,19 @@ where
                 output: _,
             } => ToolCallFinished {
                 turn_id,
+                conversation_id,
                 tool_call_id,
                 ok,
                 // 大段输出进制品存储（技术设计 3.7）随附件与制品功能接入
                 output_artifact: None,
             }
             .into(),
-            AgentUpdate::ModelReported(model) => TurnModelReported { turn_id, model }.into(),
+            AgentUpdate::ModelReported(model) => TurnModelReported {
+                turn_id,
+                conversation_id,
+                model,
+            }
+            .into(),
             AgentUpdate::Usage(usage) => {
                 self.usage = usage;
                 return Ok(None);
@@ -1245,6 +1256,7 @@ where
                 ApprovalDelivered {
                     approval_id,
                     turn_id: self.turn.id,
+                    conversation_id: Some(self.turn.conversation_id),
                 }
                 .into(),
             );
@@ -1405,6 +1417,7 @@ where
     fn finished_event(&self, summary: Option<ChangeSummary>) -> DomainEvent {
         TurnFinished {
             turn_id: self.turn.id,
+            conversation_id: Some(self.turn.conversation_id),
             state: self.turn.state,
             usage: self.usage,
             celebrate: summary.as_ref().is_some_and(|s| s.files_changed > 0),

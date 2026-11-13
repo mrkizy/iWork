@@ -918,6 +918,8 @@ async fn trailing_text_is_checkpointed_without_further_updates() {
 
 fn void_event() -> DomainEvent {
     iwork_domain::event::ApprovalVoided {
+        // 编排不读事件上的所属对话；这里只扮演外部写入
+        conversation_id: None,
         approval_id: iwork_domain::id::ApprovalId::from_raw(RawUlid::from_u128(77)),
         reason: VoidReason::TurnCancelled,
     }
@@ -1301,6 +1303,7 @@ mod delivery_gate {
 
     fn interrupted(t: TurnId, from: TurnState) -> DomainEvent {
         TurnStateChanged {
+            conversation_id: None,
             turn_id: t,
             from,
             to: TurnState::Interrupted {
@@ -1342,6 +1345,7 @@ mod delivery_gate {
         // 所以先扮演又一次权限请求让回合进等审批
         w.store.seed(vec![
             TurnStateChanged {
+                conversation_id: None,
                 turn_id: t,
                 from: TurnState::Running,
                 to: TurnState::WaitingApproval,
