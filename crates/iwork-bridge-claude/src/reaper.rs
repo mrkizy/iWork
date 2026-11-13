@@ -35,9 +35,17 @@ static CLI: AtomicI32 = AtomicI32::new(0);
 static LEADER: AtomicBool = AtomicBool::new(false);
 static EVENTS: OnceLock<Sender<Event>> = OnceLock::new();
 
-/// 交还 CLI 时最多等几次收尾线程把信号发完（每次 [`RELEASE_STEP`]）。对面只差两个系统调用，正常一次都不用等。
-const RELEASE_TRIES: u32 = 100;
+/// 交还 CLI 时最多等多久让收尾线程把信号发完（绝对期限；每次看完睡 [`RELEASE_STEP`]，墙钟最多再多出一次睡眠的
+/// 超出）。对面只差两个系统调用，正常一次都不用等。
+const RELEASE_LIMIT: Duration = Duration::from_millis(100);
 const RELEASE_STEP: Duration = Duration::from_millis(1);
+
+/// 收尾权（审查 S6-5b 4/F-1）：第一个进入收尾的拿到它，由它发 SIGTERM、等宽限期、最后杀整组。之后进来的（比如后台
+/// 没了时收尾线程和 panic 处理同时进来）不发信号、不杀组，只等先来的那一处把进程结束；等满 [`OWNER_WAIT`] 进程还
+/// 在（先来的那一处所在的线程被卡住了），才自己杀。这样谁也不会抢在已经开始的 SIGTERM 宽限期之前杀整组。
+static CLEANING: AtomicBool = AtomicBool::new(false);
+/// 后来的收尾者最多等先来的那一处多久：它的宽限期 [`BRIDGE_TERM_WAIT`] 再加一点余量。
+const OWNER_WAIT: Duration = Duration::from_secs(3);
 
 /// 看 CLI 退了没有的间隔。
 const CLI_POLL: Duration = Duration::from_millis(50);
@@ -120,6 +128,31 @@ fn watch(events: &Receiver<Event>) -> ! {
 /// 桥接自己收尾（5.4a 第 5 条第二种）：SIGTERM CLI，最多等 [`BRIDGE_TERM_WAIT`]，再对自己的进程组发 SIGKILL。
 /// 只用系统调用和原子量，可以从任何线程、同时从几处调用（重复的 SIGTERM、SIGKILL 没有害处）。不返回。
 pub fn self_clean() -> ! {
+    run_cleanup(&|| {
+        // SAFETY: 这几个调用只读两个整数参数；组号是自己的进程号（只在确认是组长时用）
+        unsafe {
+            if LEADER.load(Ordering::SeqCst) {
+                libc::killpg(libc::getpid(), libc::SIGKILL);
+            }
+            signal_cli(libc::SIGKILL);
+            libc::kill(libc::getpid(), libc::SIGKILL);
+        }
+    });
+    // SIGKILL 自己之后走不到这里
+    std::process::abort()
+}
+
+/// 收尾的前半段（SIGTERM CLI，等它最多 [`BRIDGE_TERM_WAIT`]），然后调 `finish`（产品里是杀掉整组，不返回；测试里
+/// 只记一笔）。拿不到收尾权的只等，见 [`CLEANING`]。
+fn run_cleanup(finish: &dyn Fn()) {
+    if CLEANING.swap(true, Ordering::SeqCst) {
+        let deadline = Instant::now() + OWNER_WAIT;
+        while Instant::now() < deadline {
+            std::thread::sleep(CLI_POLL);
+        }
+        finish();
+        return;
+    }
     let cli = CLI.load(Ordering::SeqCst);
     if signal_cli(libc::SIGTERM) {
         let deadline = Instant::now() + BRIDGE_TERM_WAIT;
@@ -127,20 +160,12 @@ pub fn self_clean() -> ! {
             std::thread::sleep(CLI_POLL);
         }
     }
-    // SAFETY: 这几个调用只读两个整数参数；组号是自己的进程号（只在确认是组长时用）
-    unsafe {
-        if LEADER.load(Ordering::SeqCst) {
-            libc::killpg(libc::getpid(), libc::SIGKILL);
-        }
-        signal_cli(libc::SIGKILL);
-        libc::kill(libc::getpid(), libc::SIGKILL);
-    }
-    // SIGKILL 自己之后走不到这里
-    std::process::abort()
+    finish();
 }
 
 /// 给 CLI 发一个信号：先占住它的身份（`pid` → `-pid`），再看它还在跑才发，做完放回。占不住（已经交还给 tokio，或者
-/// 别处正在发）就不发。返回发了没有。
+/// 别处正在发）就不发。返回发了没有。「别处正在发」只可能是另一处收尾，而收尾权只给一处（[`CLEANING`]），所以拿着
+/// 收尾权的那一处看到 `false` 只会是没有 CLI、或者 CLI 已经交还。
 fn signal_cli(sig: libc::c_int) -> bool {
     let pid = CLI.load(Ordering::SeqCst);
     if pid <= 0
@@ -161,21 +186,26 @@ fn signal_cli(sig: libc::c_int) -> bool {
 }
 
 /// tokio 那边回收 CLI 之前必须先调（`CliProcess` 的 `kill`、`wait` 与 `Drop`，CLI 只有这几条回收路径）：把身份交还
-/// （`pid` → 0），之后收尾线程不再对这个号发信号。收尾线程正在发（`-pid`）就等它发完，最多 [`RELEASE_TRIES`] 次、
-/// 每次 [`RELEASE_STEP`]；等不到返回 `false`，调用方就不回收（宁可留一个僵尸到桥接退出，也不让号被复用）。
+/// （`pid` → 0），之后收尾线程不再对这个号发信号。收尾线程正在发（`-pid`）就等它发完，最多到 [`RELEASE_LIMIT`]
+/// 这个绝对期限；等不到返回 `false`，调用方就不回收（宁可留一个僵尸到桥接退出，也不让号被复用）。
 /// 不是登记过的那个 CLI、或者已经交还过，返回 `true`。
 pub fn release_cli(pid: Option<u32>) -> bool {
     let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) else {
         return true;
     };
-    for _ in 0..RELEASE_TRIES {
+    let deadline = Instant::now() + RELEASE_LIMIT;
+    loop {
         match CLI.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst) {
             Ok(_) => return true,
-            Err(now) if now == -pid => std::thread::sleep(RELEASE_STEP),
+            Err(now) if now == -pid => {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(RELEASE_STEP);
+            }
             Err(_) => return true,
         }
     }
-    false
 }
 
 /// CLI 还在跑（没退出）：只看不回收（`WNOWAIT`），回收照旧归 tokio 的 `Child`，或者桥接死后归 init。已经被回收了
@@ -295,7 +325,85 @@ mod tests {
         let _ = child.wait();
         CLI.store(0, Ordering::SeqCst);
         assert!(!ok, "占着的时候交还不成功");
-        assert!(took < Duration::from_secs(2), "有界：{took:?}");
+        // 绝对期限 100 毫秒，加一次睡眠的超出；负载高时调度会再拖一点，这里留余量
+        assert!(took < Duration::from_millis(500), "有界：{took:?}");
+    }
+
+    /// 两处同时收尾（后台没了时收尾线程和 panic 处理一起进来，审查 S6-5b 4/F-1）：先进来的停在检查之后、SIGTERM
+    /// 之前；后进来的绝不能抢在它的 SIGTERM 和宽限期之前杀掉整组。CLI 照样先收到 SIGTERM。
+    #[test]
+    fn concurrent_cleanup_keeps_the_term_grace() {
+        let _one = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_cleanup();
+        let (mut child, go, first) = cleanup_paused_after_check();
+        let finished = Arc::new(AtomicBool::new(false));
+        let f = Arc::clone(&finished);
+        let second = std::thread::spawn(move || {
+            run_cleanup(&|| f.store(true, Ordering::SeqCst));
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        let killed_early = finished.load(Ordering::SeqCst);
+        go.send(()).unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+        let status = child.wait().unwrap();
+        CLI.store(0, Ordering::SeqCst);
+        assert!(!killed_early, "第一处还没发 SIGTERM，第二处就去杀整组了");
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(libc::SIGTERM),
+            "CLI 先收到了 SIGTERM：{status:?}"
+        );
+    }
+
+    /// 对照：只有一处收尾时，CLI 收到 SIGTERM，宽限期里退出，然后才杀整组。
+    #[test]
+    fn single_cleanup_terms_the_cli_first() {
+        let _one = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_cleanup();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        register_cli(Some(child.id()));
+        let finished = AtomicBool::new(false);
+        run_cleanup(&|| finished.store(true, Ordering::SeqCst));
+        let status = child.wait().unwrap();
+        CLI.store(0, Ordering::SeqCst);
+        assert!(finished.load(Ordering::SeqCst));
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(libc::SIGTERM),
+            "{status:?}"
+        );
+    }
+
+    /// 起一条收尾，停在「检查过 CLI 还在」与 SIGTERM 之间。返回 (CLI, 放行的发送端, 那条收尾的线程)。
+    fn cleanup_paused_after_check() -> (
+        std::process::Child,
+        mpsc::Sender<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        register_cli(Some(child.id()));
+        let (at_tx, at_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
+        seam::set(at_tx, go_rx);
+        let first = std::thread::spawn(|| run_cleanup(&|| {}));
+        at_rx.recv().unwrap();
+        (child, go_tx, first)
+    }
+
+    /// 收尾的进程级状态复位（测试一条一条来，每条从头开始）。
+    fn reset_cleanup() {
+        CLEANING.store(false, Ordering::SeqCst);
     }
 
     /// 已经交还给 tokio 回收的 CLI，收尾时不再对这个号发任何信号。
