@@ -67,7 +67,7 @@ use iwork_domain::rule::{RuleLayer, RuleScope};
 use iwork_domain::turn::{InterruptReason, TurnIntentKind};
 use iwork_ports::store::StoragePort;
 use support::fixtures::*;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 
 /// 用户消息与排它的回合（同一笔，SendMessage 的形状），回合的助手是 `assistant`。
 fn queued_with_request(msg: u128, turn_n: u128, assistant_id: AssistantId) -> Vec<DomainEvent> {
@@ -103,26 +103,6 @@ fn interrupted(turn_n: u128) -> Vec<DomainEvent> {
     events.push(changed(turn_n, TurnState::Queued, TurnState::Running));
     events.push(changed(turn_n, TurnState::Running, CRASH));
     events
-}
-
-/// 屏障：到了发一声，等放行。
-fn barrier() -> (
-    iwork_daemon::host::HostHook,
-    mpsc::UnboundedReceiver<()>,
-    Arc<Notify>,
-) {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let release = Arc::new(Notify::new());
-    let r = release.clone();
-    let hook: iwork_daemon::host::HostHook = Arc::new(move || {
-        let (tx, r) = (tx.clone(), r.clone());
-        Box::pin(async move {
-            let go = r.notified();
-            let _ = tx.send(());
-            go.await;
-        })
-    });
-    (hook, rx, release)
 }
 
 /// K5（D3、G8）：会话线任务压在准备的读上，宿主被叫醒两次：这条线上只有一份活——交活次数 1、准备里的读只发了一次。
@@ -382,33 +362,6 @@ async fn resume_with_lost_session_uses_summary() {
     h.stop().await;
 }
 
-const WAIT_LIMIT: TurnState = TurnState::Interrupted {
-    reason: InterruptReason::ApprovalWaitLimit,
-};
-
-/// 让回合在等审批上到期中断：运行时发一个要问用户的请求，会话声明的等待上限很短。
-async fn interrupted_by_wait_limit(h: &H, n: u128) -> iwork_domain::id::TurnId {
-    h.agent.ask.store(true, Ordering::SeqCst);
-    *h.agent.wait_limit.lock().unwrap() = Some(std::time::Duration::from_millis(50));
-    let finished = h.host.counters().finished.load(Ordering::SeqCst);
-    let t = h.send(n, "推一下").await;
-    h.wait_state(t, |s| s == WAIT_LIMIT).await;
-    // 状态落盘之后，这一趟还要在宿主的锁里记下结束
-    within("第一趟记完结束", async {
-        while h.host.counters().finished.load(Ordering::SeqCst) <= finished {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
-    t
-}
-
-fn resume(t: iwork_domain::id::TurnId) -> iwork_proto::pb::command::Kind {
-    iwork_proto::pb::command::Kind::ResumeTurn(iwork_proto::pb::ResumeTurn {
-        turn_id: t.to_string(),
-    })
-}
-
 /// R6、D7 ①：等审批到期中断后用户批准，引擎折叠里它在 `turns_to_resume()`：宿主自动续接，续接说明点名批准的那次调用。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn resume_from_grant() {
@@ -539,12 +492,6 @@ async fn stale_read_does_not_hand_over() {
     h.stop().await;
 }
 
-fn cancel(t: iwork_domain::id::TurnId) -> iwork_proto::pb::command::Kind {
-    iwork_proto::pb::command::Kind::CancelTurn(iwork_proto::pb::CancelTurn {
-        turn_id: t.to_string(),
-    })
-}
-
 /// D6：在跑的回合落一条取消意图，宿主给这一趟发取消，回合经「取消中」到「已取消」；排着的回合直接撤回、
 /// 不派发、没有 prompt。之后的消息照常跑。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -575,12 +522,6 @@ async fn cancel_running_and_withdraw_queued() {
     let c = h.send(5, "之后").await;
     h.wait_state(c, |s| s == TurnState::Completed).await;
     h.stop().await;
-}
-
-fn finishes(req: &iwork_ports::store::CommitRequest, to: TurnState) -> bool {
-    req.events
-        .iter()
-        .any(|e| matches!(e, DomainEvent::TurnStateChanged(s) if s.to == to))
 }
 
 /// D5：编排在「已进 Running、提交 Completed 时存储报错」处以错误收场：宿主把回合记成 Failed，流式消息收尾。
@@ -671,13 +612,6 @@ async fn hung_change_reads_stay_bounded() {
     h.wait_state(t, |s| s == TurnState::Completed).await;
     assert_eq!(summaries(&support::turns::events(&h.raw).await), 1);
     h.stop().await;
-}
-
-fn accepted(r: &iwork_proto::pb::Response) -> iwork_proto::pb::CommandAccepted {
-    match &r.body {
-        Some(iwork_proto::pb::response::Body::Accepted(a)) => *a,
-        other => panic!("没受理：{other:?}"),
-    }
 }
 
 fn intents(evs: &[(u64, DomainEvent)], t: iwork_domain::id::TurnId) -> usize {
@@ -1071,26 +1005,6 @@ async fn stale_read_after_run_end_is_not_judged() {
     let b = h.send(2, "之后").await;
     h.wait_state(b, |s| s == TurnState::Completed).await;
     h.stop().await;
-}
-
-fn approval_of(
-    evs: &[(u64, DomainEvent)],
-    t: iwork_domain::id::TurnId,
-) -> Vec<iwork_domain::id::ApprovalId> {
-    evs.iter()
-        .filter_map(|(_, e)| match e {
-            DomainEvent::ApprovalRequested(a) if a.approval.turn_id == t => Some(a.approval.id),
-            _ => None,
-        })
-        .collect()
-}
-
-fn allow(a: iwork_domain::id::ApprovalId) -> iwork_proto::pb::command::Kind {
-    iwork_proto::pb::command::Kind::DecideApproval(iwork_proto::pb::DecideApproval {
-        approval_id: a.to_string(),
-        decision: iwork_proto::pb::ApprovalDecision::Allow.into(),
-        remember: 0,
-    })
 }
 
 /// K17（R6、D7 ①，产品负责人 2026-11-13 定）：回合中断着 → 用户批准 → 续接之前后台没了（崩溃一格、完全退出一格）→

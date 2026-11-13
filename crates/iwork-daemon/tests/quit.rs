@@ -2,7 +2,6 @@
 
 mod support;
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -10,26 +9,6 @@ use iwork_daemon::work::{QuitCounts, RunningWork, ShutdownDecision};
 use iwork_domain::event::DomainEvent;
 use iwork_domain::turn::TurnState;
 use support::turns::*;
-use tokio::sync::{Notify, mpsc};
-
-fn barrier() -> (
-    iwork_daemon::host::HostHook,
-    mpsc::UnboundedReceiver<()>,
-    Arc<Notify>,
-) {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let release = Arc::new(Notify::new());
-    let r = release.clone();
-    let hook: iwork_daemon::host::HostHook = Arc::new(move || {
-        let (tx, r) = (tx.clone(), r.clone());
-        Box::pin(async move {
-            let go = r.notified();
-            let _ = tx.send(());
-            go.await;
-        })
-    });
-    (hook, rx, release)
-}
 
 fn turn_events(evs: &[(u64, DomainEvent)]) -> usize {
     evs.iter()
@@ -225,12 +204,6 @@ async fn seal_does_not_wait_for_stuck_prepare_read() {
         .expect("不等准备里那次读");
     assert_eq!(h.agent.prompt_count(), 0);
     h.stop().await;
-}
-
-fn resume(t: iwork_domain::id::TurnId) -> iwork_proto::pb::command::Kind {
-    iwork_proto::pb::command::Kind::ResumeTurn(iwork_proto::pb::ResumeTurn {
-        turn_id: t.to_string(),
-    })
 }
 
 /// K10（D7、R7）：中断 → 继续意图落盘 → 续接过了 `begin_run`、停在开会话里、第一笔还没提交 → 带确认退出 → 放开：

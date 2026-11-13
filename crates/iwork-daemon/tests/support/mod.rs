@@ -3,4 +3,5 @@
 
 #[path = "../../../iwork-store/tests/support/fixtures.rs"]
 pub mod fixtures;
+pub mod hooked;
 pub mod turns;

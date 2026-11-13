@@ -20,6 +20,7 @@ use iwork_daemon::publish::{PublishObserver, PublishSink, PublishState};
 use iwork_daemon::time::{MonotonicIds, SystemClock, TokioTimer};
 use iwork_domain::event::{AssistantCreated, ConversationCreated, DomainEvent, ProjectAdded};
 use iwork_domain::id::{AssistantId, CommandId, ConversationId, RawUlid, TurnId};
+use iwork_domain::turn::InterruptReason;
 use iwork_domain::turn::TurnState;
 use iwork_host::fs::OsPathResolver;
 use iwork_ipc::peer::UserId;
@@ -32,9 +33,10 @@ use iwork_ports::live::{LivePublisher, MessageDelta};
 use iwork_ports::store::{EventFilter, StoragePort};
 use iwork_proto::pb;
 use iwork_store::SqliteReadModel;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 
 use super::fixtures::*;
+pub use super::hooked::{HookedRead, HookedStore, Knobs};
 
 // ---------- 假运行时 ----------
 
@@ -365,17 +367,20 @@ impl iwork_ports::vcs::VcsProvider for CountingVcs {
 
 pub type Gated = GatedStore<Store>;
 pub type Read = SqliteReadModel<ProtoEventCodec>;
+/// 宿主与引擎用的存储、宿主用的读模型：外面套一层能停住、能计数的外壳（`H::knobs`）
+pub type HStore = HookedStore<Gated>;
+pub type HRead = HookedRead<Read>;
 pub type Engine = ApprovalEngine<
     SystemClock,
     MonotonicIds<SystemClock>,
-    Gated,
+    HStore,
     FakeAgent,
     TokioTimer,
     OsPathResolver,
 >;
 pub type Ports = Wired<
-    Gated,
-    Read,
+    HStore,
+    HRead,
     FakeAgent,
     Arc<Engine>,
     NoLive,
@@ -400,6 +405,7 @@ pub struct H {
     pub agent: Arc<Ctl>,
     pub vcs: Arc<CountingVcs>,
     pub budget: Arc<ReadBudget>,
+    pub knobs: Arc<Knobs>,
     pub publishing: PublishState,
     pub host_task: Option<tokio::task::JoinHandle<HostError>>,
     pub sync_task: Option<tokio::task::JoinHandle<()>>,
@@ -412,6 +418,8 @@ pub struct Opts {
     pub probe_enabled: bool,
     /// 起宿主之前额外提交的事件
     pub extra: Vec<DomainEvent>,
+    /// 宿主拿一个没人叫的唤醒（提交观察者叫不到它）：D1–D4 的保底一格
+    pub detached_wake: bool,
 }
 
 /// 夹具里的对话：项目 PROJECT 的项目对话 CONV。内置助手由组装处的第 1a 步登记。
@@ -440,6 +448,11 @@ pub async fn assemble(env: Env, opts: Opts, agent: Arc<Ctl>) -> H {
     .unwrap();
     let gate = Arc::new(SealGate::default());
     let gated = GatedStore::new(raw.clone(), gate.clone());
+    let knobs = Arc::new(Knobs::default());
+    let hooked = HookedStore {
+        inner: gated.clone(),
+        knobs: knobs.clone(),
+    };
     let read = read_model(&raw);
     let ids = MonotonicIds::new(SystemClock::new());
     assembly::register_builtin_assistant(&gated, &read, &SystemClock::new())
@@ -470,7 +483,7 @@ pub async fn assemble(env: Env, opts: Opts, agent: Arc<Ctl>) -> H {
         EnginePorts {
             clock: SystemClock::new(),
             ids: MonotonicIds::new(SystemClock::new()),
-            store: gated.clone(),
+            store: hooked.clone(),
             reviewer: FakeAgent(agent.clone()),
             timer: TokioTimer,
             fs: fs.clone(),
@@ -485,8 +498,11 @@ pub async fn assemble(env: Env, opts: Opts, agent: Arc<Ctl>) -> H {
     let budget = Arc::new(ReadBudget::default());
     let host = TurnHost::start(
         Arc::new(Wired {
-            store: gated.clone(),
-            read: read_model(&raw),
+            store: hooked.clone(),
+            read: HookedRead {
+                inner: read_model(&raw),
+                knobs: knobs.clone(),
+            },
             agent: FakeAgent(agent.clone()),
             engine: engine.clone(),
             live: NoLive,
@@ -499,7 +515,11 @@ pub async fn assemble(env: Env, opts: Opts, agent: Arc<Ctl>) -> H {
                 .with_capture_limit(Duration::from_millis(100)),
             gate: gate.clone(),
         }),
-        publishing.host.clone(),
+        if opts.detached_wake {
+            Arc::new(Notify::new())
+        } else {
+            publishing.host.clone()
+        },
     )
     .await
     .unwrap();
@@ -521,6 +541,7 @@ pub async fn assemble(env: Env, opts: Opts, agent: Arc<Ctl>) -> H {
         agent,
         vcs,
         budget,
+        knobs,
         publishing,
         host_task: None,
         sync_task: None,
@@ -554,6 +575,12 @@ impl H {
             wake,
             move || host.wake(),
         )));
+    }
+
+    /// 只起宿主的常驻任务，不起 `engine-sync`（它追平后会叫醒宿主）。配合 `Opts::detached_wake` 把唤醒全部压住。
+    pub fn start_host_only(&mut self) {
+        let host = self.host.clone();
+        self.host_task = Some(tokio::spawn(async move { host.run().await }));
     }
 
     /// 停掉宿主（不封口：测试结束或重启前用），放手存储。
@@ -760,4 +787,92 @@ pub async fn restart(env: Env, opts: Opts) -> H {
         Arc::default(),
     )
     .await
+}
+
+// ---------- 各测试文件共用的小工具 ----------
+
+/// 屏障：到了发一声，等放行。
+pub fn barrier() -> (
+    iwork_daemon::host::HostHook,
+    mpsc::UnboundedReceiver<()>,
+    Arc<Notify>,
+) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let release = Arc::new(Notify::new());
+    let r = release.clone();
+    let hook: iwork_daemon::host::HostHook = Arc::new(move || {
+        let (tx, r) = (tx.clone(), r.clone());
+        Box::pin(async move {
+            let go = r.notified();
+            let _ = tx.send(());
+            go.await;
+        })
+    });
+    (hook, rx, release)
+}
+
+pub const WAIT_LIMIT: TurnState = TurnState::Interrupted {
+    reason: InterruptReason::ApprovalWaitLimit,
+};
+
+/// 让回合在等审批上到期中断：运行时发一个要问用户的请求，会话声明的等待上限很短。
+pub async fn interrupted_by_wait_limit(h: &H, n: u128) -> iwork_domain::id::TurnId {
+    h.agent.ask.store(true, Ordering::SeqCst);
+    *h.agent.wait_limit.lock().unwrap() = Some(std::time::Duration::from_millis(50));
+    let finished = h.host.counters().finished.load(Ordering::SeqCst);
+    let t = h.send(n, "推一下").await;
+    h.wait_state(t, |s| s == WAIT_LIMIT).await;
+    // 状态落盘之后，这一趟还要在宿主的锁里记下结束
+    within("第一趟记完结束", async {
+        while h.host.counters().finished.load(Ordering::SeqCst) <= finished {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    t
+}
+
+pub fn resume(t: iwork_domain::id::TurnId) -> iwork_proto::pb::command::Kind {
+    iwork_proto::pb::command::Kind::ResumeTurn(iwork_proto::pb::ResumeTurn {
+        turn_id: t.to_string(),
+    })
+}
+
+pub fn cancel(t: iwork_domain::id::TurnId) -> iwork_proto::pb::command::Kind {
+    iwork_proto::pb::command::Kind::CancelTurn(iwork_proto::pb::CancelTurn {
+        turn_id: t.to_string(),
+    })
+}
+
+pub fn finishes(req: &iwork_ports::store::CommitRequest, to: TurnState) -> bool {
+    req.events
+        .iter()
+        .any(|e| matches!(e, DomainEvent::TurnStateChanged(s) if s.to == to))
+}
+
+pub fn accepted(r: &iwork_proto::pb::Response) -> iwork_proto::pb::CommandAccepted {
+    match &r.body {
+        Some(iwork_proto::pb::response::Body::Accepted(a)) => *a,
+        other => panic!("没受理：{other:?}"),
+    }
+}
+
+pub fn approval_of(
+    evs: &[(u64, DomainEvent)],
+    t: iwork_domain::id::TurnId,
+) -> Vec<iwork_domain::id::ApprovalId> {
+    evs.iter()
+        .filter_map(|(_, e)| match e {
+            DomainEvent::ApprovalRequested(a) if a.approval.turn_id == t => Some(a.approval.id),
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn allow(a: iwork_domain::id::ApprovalId) -> iwork_proto::pb::command::Kind {
+    iwork_proto::pb::command::Kind::DecideApproval(iwork_proto::pb::DecideApproval {
+        approval_id: a.to_string(),
+        decision: iwork_proto::pb::ApprovalDecision::Allow.into(),
+        remember: 0,
+    })
 }
