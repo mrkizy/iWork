@@ -15,7 +15,6 @@
 //! `IWORK_BENCH_LIVE_DELTAS`（默认 50）调规模。
 
 #[path = "../../iwork-store/tests/support/fixtures.rs"]
-#[allow(dead_code)]
 mod fixtures;
 
 use std::path::PathBuf;
