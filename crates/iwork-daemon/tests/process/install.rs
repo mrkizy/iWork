@@ -285,12 +285,14 @@ fn startup_manifest_audit_is_in_daemon_log() {
     let inst = installed(&sb, "A");
     let at_start: serde_json::Value =
         serde_json::from_slice(&std::fs::read(inst.dir.join(MANIFEST_FILE)).unwrap()).unwrap();
-    let ids_at_start: usize = at_start["binaries"]
+    // 清单按身份去重计数：Linux 上同一版的后台与客户端副本内容相同，是同一个身份
+    let ids_at_start = at_start["binaries"]
         .as_object()
         .unwrap()
         .values()
-        .map(|ids| ids.as_array().unwrap().len())
-        .sum();
+        .flat_map(|ids| ids.as_array().unwrap().iter().map(|i| i.to_string()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     let resume = sb.home.join("resume");
     let d = sb.spawn_exe(
         &inst.daemon(),
