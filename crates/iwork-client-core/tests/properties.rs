@@ -432,6 +432,37 @@ mod live {
         case(vec![0, 2, 10, 1, 0]).await.unwrap();
     }
 
+    /// 重连后的锚点窗口比新连上的多一截（步 7 的 developer 发现，main 上就有；macOS CI 偶发红的就是它）。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconnect_equals_fresh_anchor_window() {
+        case(vec![
+            1, 12, 2, 6, 2, 11, 6, 11, 10, 11, 7, 12, 9, 10, 2, 7, 8, 8, 4, 12, 0, 12, 0, 6, 10,
+            10, 11, 11, 6, 0, 12, 0, 12,
+        ])
+        .await
+        .unwrap();
+    }
+
+    /// 后台此刻的全量锚点（按 created_seq 升序的 key），作期望值：直接问假后台，不经客户端。
+    fn all_anchor_keys(d: &FakeDaemon) -> Vec<String> {
+        let r = d.query(&pb::Query {
+            kind: Some(pb::query::Kind::ListAnchors(pb::ListAnchors {
+                conversation_id: "c-basic".into(),
+                around_seq: 0,
+                before: u32::MAX,
+                after: 0,
+            })),
+        });
+        match r.kind {
+            Some(pb::query_result::Kind::ListAnchors(l)) => l
+                .anchors
+                .iter()
+                .map(|a| a.created_seq.to_string())
+                .collect(),
+            other => panic!("ListAnchors 回了 {other:?}"),
+        }
+    }
+
     async fn scroll_top(app: &App) {
         app.intent(pb::UiIntent {
             kind: Some(I::SetVisibleRows(pb::SetVisibleRows {
@@ -581,9 +612,45 @@ mod live {
         settle(&fresh_app, &mut fresh).await;
         prop_assert_eq!(&web.state.sidebar, &fresh.state.sidebar);
         prop_assert_eq!(&web.state.rows, &fresh.state.rows);
-        // 锚点窗口（列表、前后还有没有）与两个计数（等你处理、失败回合的状态点）、当前位置都对得上（方案 2.9）
+        // 锚点（方案 2.9）：窗口取多大一段是翻看状态，跟以哪处为中心取过有关（重连的沿用断线前的中心，新连的从最新
+        // 一段起步、盖不住阅读位置才重取），两边的窗口可以一长一短，都对。所以不逐字比窗口，比和历史无关的：
+        // 各自是后台全量锚点里连续的一段、前后还有没有说得对、都盖住了当前位置；当前位置与两个计数相同。
         prop_assert!(fresh.state.anchors.is_some(), "对照：新客户端取到了锚点");
-        prop_assert_eq!(&web.state.anchors, &fresh.state.anchors);
+        let all = all_anchor_keys(&d);
+        let current = &fresh.state.anchor_cursor.as_ref().unwrap().current_key;
+        for (who, w) in [("重连", &web), ("新连", &fresh)] {
+            let a = w.state.anchors.as_ref().unwrap();
+            let keys: Vec<&str> = a.items.iter().map(|i| i.key.as_str()).collect();
+            let start = all.iter().position(|k| Some(&k.as_str()) == keys.first());
+            prop_assert!(
+                start.is_some_and(|s| all[s..]
+                    .iter()
+                    .map(String::as_str)
+                    .take(keys.len())
+                    .eq(keys.iter().copied())),
+                "{who}的锚点窗口不是全量里连续的一段：{keys:?}"
+            );
+            let s = start.unwrap();
+            prop_assert_eq!(a.has_before, s > 0, "{}：前面还有没有", who);
+            prop_assert_eq!(
+                a.has_after,
+                s + keys.len() < all.len(),
+                "{}：后面还有没有",
+                who
+            );
+            prop_assert!(
+                keys.contains(&current.as_str()),
+                "{who}的窗口没盖住当前位置 {current}"
+            );
+            prop_assert_eq!(
+                a.has_waiting,
+                fresh.state.anchors.as_ref().unwrap().has_waiting
+            );
+            prop_assert_eq!(
+                a.has_failed,
+                fresh.state.anchors.as_ref().unwrap().has_failed
+            );
+        }
         prop_assert_eq!(&web.state.anchor_cursor, &fresh.state.anchor_cursor);
         // 两个计数的期望值由操作序列独立算出，不读后台：整个对话里有没有还在等的审批、有没有失败回合
         let anchors = web.state.anchors.clone().unwrap_or_default();
