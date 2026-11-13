@@ -267,7 +267,7 @@ impl UpdateStream for FakeUpdates {
             }),
             2 => {
                 if !self.usage_sent
-                    && let Some(u) = self.ctl.usage_per_prompt.lock().unwrap().clone()
+                    && let Some(u) = *self.ctl.usage_per_prompt.lock().unwrap()
                 {
                     self.usage_sent = true;
                     self.step -= 1;
@@ -542,6 +542,8 @@ pub struct Opts {
     pub detached_wake: bool,
     /// 会话的临时目录；没给就是系统临时目录（夹具的数据都在它下面，所以默认情况下夹具里哪儿都算可写）
     pub tmp_dirs: Option<Vec<PathBuf>>,
+    /// 宿主的时限；没给就是正式的那一套。「到时放手」的格子给毫秒级的、用真时间跑
+    pub limits: Option<iwork_daemon::host::HostLimits>,
 }
 
 /// 夹具里的对话：项目 PROJECT 的项目对话 CONV。内置助手由组装处的第 1a 步登记。
@@ -622,35 +624,36 @@ pub async fn assemble(env: Env, opts: Opts, agent: Arc<Ctl>) -> H {
     let vcs = Arc::new(CountingVcs::default());
     let budget = Arc::new(ReadBudget::default());
     let frozen_resume = Arc::new(Mutex::new(None));
-    let host = TurnHost::start(
-        Arc::new(Wired {
-            store: hooked.clone(),
-            read: HookedRead {
-                inner: read_model(&raw),
-                knobs: knobs.clone(),
-            },
-            agent: FakeAgent(agent.clone()),
-            engine: FoldShim {
-                inner: engine.clone(),
-                frozen: frozen_resume.clone(),
-            },
-            live: NoLive,
-            clock: SystemClock::new(),
-            ids: MonotonicIds::new(SystemClock::new()),
-            timer: TokioTimer,
-            fs,
-            env: host_env,
-            changes: VcsChanges::new(vcs.clone(), opts.probe_enabled, budget.clone())
-                .with_capture_limit(Duration::from_millis(100)),
-            gate: gate.clone(),
-        }),
-        if opts.detached_wake {
-            Arc::new(Notify::new())
-        } else {
-            publishing.host.clone()
+    let wired = Arc::new(Wired {
+        store: hooked.clone(),
+        read: HookedRead {
+            inner: read_model(&raw),
+            knobs: knobs.clone(),
         },
-    )
-    .await
+        agent: FakeAgent(agent.clone()),
+        engine: FoldShim {
+            inner: engine.clone(),
+            frozen: frozen_resume.clone(),
+        },
+        live: NoLive,
+        clock: SystemClock::new(),
+        ids: MonotonicIds::new(SystemClock::new()),
+        timer: TokioTimer,
+        fs,
+        env: host_env,
+        changes: VcsChanges::new(vcs.clone(), opts.probe_enabled, budget.clone())
+            .with_capture_limit(Duration::from_millis(100)),
+        gate: gate.clone(),
+    });
+    let wake = if opts.detached_wake {
+        Arc::new(Notify::new())
+    } else {
+        publishing.host.clone()
+    };
+    let host = match opts.limits {
+        Some(limits) => TurnHost::start_with_limits(wired, wake, limits).await,
+        None => TurnHost::start(wired, wake).await,
+    }
     .unwrap();
     let d = Dispatcher::new(CommandPorts {
         store: Arc::new(gated),

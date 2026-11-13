@@ -19,7 +19,7 @@ use iwork_ports::store::{CommitRequest, StoragePort};
 
 use super::plan::{Closing, JobKind};
 use super::ports::HostPorts;
-use super::{Bounded, HOST_ACTOR, HOST_IO_LIMIT, TurnHost, bounded, with_permit};
+use super::{Bounded, HOST_ACTOR, TurnHost, bounded, with_permit};
 use crate::work::{AbortReport, QUIT_COUNT_LIMIT, QuitCounts, RunningWork, ShutdownDecision};
 
 /// 封口后等各条线清完树、报回来，最多这么久（停机第 3 步的上限里）。
@@ -53,9 +53,11 @@ impl<P: HostPorts> TurnHost<P> {
     /// 读或提交没做成：那些回合留在排着，下次启动会被派发（KA1，照实）。
     async fn withdraw_all_queued(&self) {
         let ports = self.ports.clone();
-        let read = bounded(&self.shared.withdraw_read_busy, HOST_IO_LIMIT, async move {
-            ports.read().turn_work().await
-        })
+        let read = bounded(
+            &self.shared.withdraw_read_busy,
+            self.shared.limits.io,
+            async move { ports.read().turn_work().await },
+        )
         .await;
         let work = match read {
             Bounded::Done(Ok(w)) => w,
@@ -99,7 +101,7 @@ impl<P: HostPorts> TurnHost<P> {
             // 和补账等宿主自己的提交共用一份在途额度（B3，方案 0a.8）：一笔正常的补账在途时等它，不立刻落进 KA1；
             // 等多久由停机第 2 步的期限管，这里只给一个上限
             let permit = match tokio::time::timeout(
-                HOST_IO_LIMIT,
+                self.shared.limits.io,
                 self.shared.host_commit.clone().acquire_owned(),
             )
             .await
@@ -111,7 +113,7 @@ impl<P: HostPorts> TurnHost<P> {
                 }
             };
             let ports = self.ports.clone();
-            let committed = with_permit(permit, HOST_IO_LIMIT, async move {
+            let committed = with_permit(permit, self.shared.limits.io, async move {
                 ports.store().commit(req).await
             })
             .await;
@@ -224,7 +226,10 @@ impl<P: HostPorts> RunningWork for TurnHost<P> {
                 out.await;
             }
         };
-        if tokio::time::timeout(ABORT_LIMIT, all_out).await.is_err() {
+        if tokio::time::timeout(self.shared.limits.abort, all_out)
+            .await
+            .is_err()
+        {
             tracing::warn!(
                 stuck = self.shared.tally().unreported,
                 "封口后到点还有会话线没清完树"

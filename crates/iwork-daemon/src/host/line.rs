@@ -22,10 +22,7 @@ use super::changes::ChangeReader;
 use super::plan::{Closing, Entry, JobEnd, JobKind, LastRun};
 use super::ports::{HostEngine, HostPorts};
 use super::prepare::{LineKey, prepare};
-use super::{
-    Backoff, Bounded, HOST_IO_LIMIT, JobInFlight, LINE_BACKOFF_MAX, LINE_BACKOFF_START, Shared,
-    bounded,
-};
+use super::{Backoff, Bounded, JobInFlight, Shared, bounded};
 use crate::logging;
 
 type Line<P> =
@@ -84,9 +81,9 @@ impl Shared {
             let sent = job.is_some_and(|j| j.cancel_sent);
             entry.backoff = match &end {
                 JobEnd::Broke(_) | JobEnd::NotStarted(_) => {
-                    let delay = entry
-                        .backoff
-                        .map_or(LINE_BACKOFF_START, |b| (b.delay * 2).min(LINE_BACKOFF_MAX));
+                    let delay = entry.backoff.map_or(self.limits.line_backoff_start, |b| {
+                        (b.delay * 2).min(self.limits.line_backoff_max)
+                    });
                     Some(Backoff {
                         delay,
                         ready_at: tokio::time::Instant::now() + delay,
@@ -243,6 +240,7 @@ struct Facts {
 async fn read_facts<P: HostPorts>(
     ports: &Arc<P>,
     busy: &Arc<AtomicBool>,
+    limit: std::time::Duration,
     conversation: ConversationId,
     turn: TurnId,
 ) -> Result<Facts, String> {
@@ -267,10 +265,10 @@ async fn read_facts<P: HostPorts>(
             recorded_usage,
         })
     };
-    match bounded(busy, HOST_IO_LIMIT, read).await {
+    match bounded(busy, limit, read).await {
         Bounded::Done(r) => r,
         Bounded::Busy => Err("这条线上一次准备的读还没回来".into()),
-        Bounded::TimedOut => Err("准备的读 30 秒没回来".into()),
+        Bounded::TimedOut => Err(format!("准备的读 {limit:?} 没回来")),
     }
 }
 
@@ -357,7 +355,7 @@ async fn run_turn_job<P: HostPorts>(
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         shared.counters.at(|h| h.before_prepare_read.clone()).await;
     }
-    let facts = match read_facts(ports, read_busy, conversation, turn_id).await {
+    let facts = match read_facts(ports, read_busy, shared.limits.io, conversation, turn_id).await {
         Ok(f) => f,
         Err(why) => return JobEnd::NotStarted(why),
     };
@@ -379,7 +377,7 @@ async fn run_turn_job<P: HostPorts>(
         }
         // 在 D8a 补完旧绑定之后再取（换线要用补完之后的那一条）；和准备的读共用这条线的在途标记，先后做
         let p = ports.clone();
-        let read = bounded(read_busy, HOST_IO_LIMIT, async move {
+        let read = bounded(read_busy, shared.limits.io, async move {
             p.read().last_session_binding(conversation).await
         })
         .await;

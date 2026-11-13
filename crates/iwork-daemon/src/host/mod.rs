@@ -60,6 +60,38 @@ pub const LINE_BACKOFF_MAX: Duration = Duration::from_secs(60);
 pub const HOST_BACKOFF_START: Duration = Duration::from_millis(100);
 pub const HOST_BACKOFF_MAX: Duration = Duration::from_secs(5);
 
+/// 宿主的各个时限，一处放齐。正式路径只用 [`HostLimits::default`]，每一项就是上面对应的常量（组装处不传别的）；
+/// 测试构建可以经 [`TurnHost::start_with_limits`] 换成毫秒级，用真时间跑「到时放手」的格子，不去拨暂停的
+/// 时钟——暂停的时钟和真 IO（SQLite 的读写线程）混在一起时，拨钟那一下正好有一次真读在途，它的时限就被拨过去，
+/// 测出来的是调度的巧合，不是行为（b45 第 2 轮 CI 实测）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostLimits {
+    /// 宿主的每次读、每笔提交、会话线准备里的读（[`HOST_IO_LIMIT`]）
+    pub io: Duration,
+    /// 保底对账（[`BACKSTOP`]）
+    pub backstop: Duration,
+    /// 读续接名单之前的追平（[`CATCH_UP_LIMIT`]）
+    pub catch_up: Duration,
+    /// 一条线上一趟没成之后的退避（[`LINE_BACKOFF_START`]、[`LINE_BACKOFF_MAX`]）
+    pub line_backoff_start: Duration,
+    pub line_backoff_max: Duration,
+    /// 封口后等各条线清树（[`quit::ABORT_LIMIT`]）
+    pub abort: Duration,
+}
+
+impl Default for HostLimits {
+    fn default() -> Self {
+        Self {
+            io: HOST_IO_LIMIT,
+            backstop: BACKSTOP,
+            catch_up: CATCH_UP_LIMIT,
+            line_backoff_start: LINE_BACKOFF_START,
+            line_backoff_max: LINE_BACKOFF_MAX,
+            abort: quit::ABORT_LIMIT,
+        }
+    }
+}
+
 /// 宿主宣告致命（T04 2.10 登记 `turn-host`）：整进程退出交崩溃恢复，不在进程内补事实（P3 a）。
 #[derive(Debug, thiserror::Error)]
 pub enum HostError {
@@ -203,6 +235,7 @@ struct Shared {
     wake: Arc<Notify>,
     /// 启动时读到的 head（R7）
     boot_head: Seq,
+    limits: HostLimits,
     /// 封口了没有：会话线任务收到就丢掉手上的一整趟（E3）
     sealed: watch::Sender<bool>,
     /// 一趟结束、一条线的任务退出时叫一声（`cancel_all`、`abort_all` 等它们）
@@ -331,6 +364,24 @@ impl<P: HostPorts> TurnHost<P> {
     /// 启动表第 9 步：读 head 记成 `boot_head`；库里有占着进程的回合就失败并点名（R3）。`wake` 是提交观察者
     /// 叫醒宿主用的那一个（`PublishState::host`）。
     pub async fn start(ports: Arc<P>, wake: Arc<Notify>) -> Result<Self, HostStartError> {
+        Self::start_inner(ports, wake, HostLimits::default()).await
+    }
+
+    /// 测试构建：换一套时限起（见 [`HostLimits`]）。
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub async fn start_with_limits(
+        ports: Arc<P>,
+        wake: Arc<Notify>,
+        limits: HostLimits,
+    ) -> Result<Self, HostStartError> {
+        Self::start_inner(ports, wake, limits).await
+    }
+
+    async fn start_inner(
+        ports: Arc<P>,
+        wake: Arc<Notify>,
+        limits: HostLimits,
+    ) -> Result<Self, HostStartError> {
         let work = ports.read().turn_work().await?;
         let held: Vec<TurnId> = work
             .conversations
@@ -351,6 +402,7 @@ impl<P: HostPorts> TurnHost<P> {
                 }),
                 wake,
                 boot_head: work.head,
+                limits,
                 sealed: watch::Sender::new(false),
                 idle: Notify::new(),
                 tally: Mutex::default(),
@@ -437,7 +489,7 @@ impl<P: HostPorts> TurnHost<P> {
         let runs_before: BTreeMap<ConversationId, u64> = {
             let lines = self.shared.lock();
             if lines.closing == Closing::Sealed {
-                return Ok(Next::After(BACKSTOP));
+                return Ok(Next::After(self.shared.limits.backstop));
             }
             lines
                 .by_conversation
@@ -447,21 +499,22 @@ impl<P: HostPorts> TurnHost<P> {
         };
         // 2. 读库，至多一个在途
         let ports = self.ports.clone();
-        let work: TurnWork = match bounded(&self.shared.read_busy, HOST_IO_LIMIT, async move {
-            ports.read().turn_work().await
-        })
-        .await
-        {
-            Bounded::Done(Ok(w)) => w,
-            Bounded::Done(Err(e)) => {
-                tracing::warn!(error = %e, "宿主对账读库失败，退避后再来");
-                return Ok(Next::After(next_backoff(host_backoff)));
-            }
-            Bounded::Busy | Bounded::TimedOut => {
-                tracing::error!("宿主对账的上一次读还没回来，这一轮不发新的读");
-                return Ok(Next::After(BACKSTOP));
-            }
-        };
+        let work: TurnWork =
+            match bounded(&self.shared.read_busy, self.shared.limits.io, async move {
+                ports.read().turn_work().await
+            })
+            .await
+            {
+                Bounded::Done(Ok(w)) => w,
+                Bounded::Done(Err(e)) => {
+                    tracing::warn!(error = %e, "宿主对账读库失败，退避后再来");
+                    return Ok(Next::After(next_backoff(host_backoff)));
+                }
+                Bounded::Busy | Bounded::TimedOut => {
+                    tracing::error!("宿主对账的上一次读还没回来，这一轮不发新的读");
+                    return Ok(Next::After(self.shared.limits.backstop));
+                }
+            };
         #[cfg(any(test, feature = "test-hooks"))]
         self.shared
             .counters
@@ -469,9 +522,11 @@ impl<P: HostPorts> TurnHost<P> {
             .await;
         // 3. 引擎追平了才用它的续接名单
         let ports = self.ports.clone();
-        let caught_up = bounded(&self.shared.catch_up_busy, CATCH_UP_LIMIT, async move {
-            ports.engine().catch_up().await
-        })
+        let caught_up = bounded(
+            &self.shared.catch_up_busy,
+            self.shared.limits.catch_up,
+            async move { ports.engine().catch_up().await },
+        )
         .await;
         let resume: BTreeMap<TurnId, Seq> = match caught_up {
             Bounded::Done(Ok(())) => self.ports.engine().turns_to_resume(),
@@ -573,7 +628,8 @@ impl<P: HostPorts> TurnHost<P> {
         if committed || again {
             return Ok(Next::Now);
         }
-        let wait = soonest.map_or(BACKSTOP, |t| t.saturating_duration_since(now).min(BACKSTOP));
+        let backstop = self.shared.limits.backstop;
+        let wait = soonest.map_or(backstop, |t| t.saturating_duration_since(now).min(backstop));
         Ok(Next::After(wait))
     }
 
@@ -632,7 +688,7 @@ impl<P: HostPorts> TurnHost<P> {
             return Err(());
         };
         let ports = self.ports.clone();
-        match with_permit(permit, HOST_IO_LIMIT, job.run(ports, c)).await {
+        match with_permit(permit, self.shared.limits.io, job.run(ports, c)).await {
             Bounded::Done(Ok(committed)) => Ok(committed),
             Bounded::Done(Err(e)) => {
                 tracing::warn!(error = %e, %turn, "宿主的提交没成，重读重算");
@@ -743,5 +799,35 @@ fn next_backoff(cur: &mut Duration) -> Duration {
 impl<P: HostPorts> crate::handler::dispatch::HostState for TurnHost<P> {
     fn is_closed(&self) -> bool {
         TurnHost::is_closed(self)
+    }
+}
+
+#[cfg(test)]
+mod limits_tests {
+    use super::*;
+
+    /// 正式路径的时限就是这几个常量：`Default` 的每一项都钉住（换成别的值只允许出现在测试构建里）。
+    #[test]
+    fn default_limits_are_the_constants() {
+        let HostLimits {
+            io,
+            backstop,
+            catch_up,
+            line_backoff_start,
+            line_backoff_max,
+            abort,
+        } = HostLimits::default();
+        assert_eq!(io, HOST_IO_LIMIT);
+        assert_eq!(io, Duration::from_secs(30));
+        assert_eq!(backstop, BACKSTOP);
+        assert_eq!(backstop, Duration::from_secs(30));
+        assert_eq!(catch_up, CATCH_UP_LIMIT);
+        assert_eq!(catch_up, Duration::from_secs(5));
+        assert_eq!(line_backoff_start, LINE_BACKOFF_START);
+        assert_eq!(line_backoff_start, Duration::from_secs(1));
+        assert_eq!(line_backoff_max, LINE_BACKOFF_MAX);
+        assert_eq!(line_backoff_max, Duration::from_secs(60));
+        assert_eq!(abort, quit::ABORT_LIMIT);
+        assert_eq!(abort, Duration::from_secs(3));
     }
 }
