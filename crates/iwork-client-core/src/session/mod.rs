@@ -16,6 +16,8 @@ mod presence;
 pub mod reconnect;
 mod reminders;
 mod start;
+#[cfg(test)]
+mod test_support;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;

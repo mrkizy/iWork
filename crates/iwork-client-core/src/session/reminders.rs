@@ -120,9 +120,12 @@ impl<D: Dialer> Session<D> {
     }
 
     pub(super) fn on_open_target(&mut self, epoch: u64, result: Option<pb::GetOpenTargetResult>) {
-        if epoch == self.conn_epoch {
-            self.open_target_in_flight = false;
+        if epoch != self.conn_epoch {
+            // 旧连接上的回包：那条连接关闭时在飞标记已清（`drop_connection`），新连接会重新问；它答的可能是换掉
+            // 之前的那个后台，拿来比较会把导航和看过的记录改回去（审查 2/F-1）。和别的异步回包入口一样先丢掉
+            return;
         }
+        self.open_target_in_flight = false;
         let Some(t) = result else {
             return;
         };
@@ -171,6 +174,8 @@ pub(super) fn is_new_open_target(
 #[cfg(test)]
 mod open_target_tests {
     use super::*;
+    use crate::session::test_support::session;
+    use std::time::UNIX_EPOCH;
 
     fn target(boot: &str, token: u64) -> pb::GetOpenTargetResult {
         pb::GetOpenTargetResult {
@@ -200,5 +205,52 @@ mod open_target_tests {
         for (seen, t, want, name) in cases {
             assert_eq!(is_new_open_target(seen, &t), want, "{name}");
         }
+    }
+
+    fn clicked(boot: &str, token: u64, conversation: &str) -> pb::GetOpenTargetResult {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        pb::GetOpenTargetResult {
+            token,
+            boot_id: boot.into(),
+            pending_item_id: format!("item-{conversation}"),
+            conversation_id: Some(conversation.into()),
+            at: Some(prost_types::Timestamp {
+                seconds: i64::try_from(now.as_secs()).unwrap(),
+                nanos: 0,
+            }),
+        }
+    }
+
+    fn navigated(s: &Session<crate::session::test_support::NoDial>) -> Option<String> {
+        s.store.navigate.as_ref().map(|n| n.conversation_id.clone())
+    }
+
+    /// 审查 2/F-1：旧连接（旧后台 A）的回包晚于新连接（新后台 B）的回包到，不能把导航和看过的记录改回 A。
+    /// 回包经 `on_internal` 注入，和主循环收到它时走同一条路。
+    #[tokio::test]
+    async fn old_connection_reply_arriving_late_is_dropped() {
+        let mut s = session();
+        s.conn_epoch = 2;
+        s.open_target_in_flight = true;
+        s.on_internal(Internal::OpenTarget {
+            epoch: 2,
+            result: Some(clicked("B", 1, "c-b")),
+        });
+        assert_eq!(
+            navigated(&s).as_deref(),
+            Some("c-b"),
+            "对照：新连接的回包照跳"
+        );
+        assert!(!s.open_target_in_flight);
+        s.on_internal(Internal::OpenTarget {
+            epoch: 1,
+            result: Some(clicked("A", 1, "c-a")),
+        });
+        assert_eq!(navigated(&s).as_deref(), Some("c-b"), "旧连接的回包不跳");
+        assert_eq!(
+            s.open_target_seen,
+            Some(("B".to_owned(), 1)),
+            "看过的记录不变"
+        );
     }
 }
