@@ -29,6 +29,8 @@ const GITFILE_OUTSIDE_MODULES: &str = "子模块的 .git 指到上层仓库的 m
 const METADATA_SYMLINK: &str = "git 目录里有符号链接";
 const ALTERNATES_UNSUPPORTED: &str = "借用别处的对象库（objects/info/alternates），不支持";
 const WORKTREE_NOT_ROOT: &str = "仓库的工作区不是登记的仓库根";
+const POINTER_AMBIGUOUS: &str =
+    ".git 文件或 commondir 的路径里链接后面跟着 ..，按字面和按实际解析不是同一个目录";
 
 /// 仓库外那个东西的两种摆法，见文件头。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -754,24 +756,164 @@ async fn info_exclude_symlink_is_refused() {
     }
 }
 
-/// 对照：gix 的读操作不碰的 `hooks/`、`logs/` 是链接（常见：钩子目录链到共享的地方）→ 不拒绝，照常读。
+/// 第 2 轮 F-1：走树时不往下走的 `hooks`、`logs`、`lfs` 本身是链接 → 拒绝，不管指向文件还是目录。
+/// 指向文件时，大小写不敏感的文件系统上 `ref: LFS` 这种全大写伪引用会被 gix 开到 `.git/lfs`、顺着链接读出去
+/// （gix-ref name.rs 的伪引用规则，find.rs 落在 git 目录下）；指向目录（常见：钩子目录链到共享的地方）也拒，
+/// 代价记在 KA2。
 #[tokio::test]
-async fn hooks_and_logs_symlinks_are_not_refused() {
+async fn skipped_entry_symlink_is_refused() {
+    for entry in ["lfs", "hooks", "logs"] {
+        for outside_kind in BOTH {
+            let f = Fixture::new();
+            let (repo, second) = repo_with_unreferenced_commit(&f, "proj");
+            let mark = marker(entry);
+            let outside = f.root().join(format!("outside-{mark}"));
+            write(&outside, &format!("{second}\n"));
+            let link = repo.join(".git").join(entry);
+            let _ = std::fs::remove_dir_all(&link);
+            symlink(&outside, &link).unwrap();
+            std::fs::write(
+                repo.join(".git/HEAD"),
+                format!("ref: {}\n", entry.to_uppercase()),
+            )
+            .unwrap();
+            let _hidden = hide_if(outside_kind, &outside);
+
+            let err = f.vcs().baseline(&RepoRoot(repo)).await.unwrap_err();
+            assert_refused(&err, METADATA_SYMLINK, &second);
+            assert_refused(&err, METADATA_SYMLINK, &mark);
+        }
+    }
+
+    // 只用 git 命令也摆得出来：模板里的 lfs 是链接，`git init --template` 把它抄进 .git，分支指到 LFS
+    let f = Fixture::new();
+    let (repo, second) = repo_with_unreferenced_commit(&f, "proj");
+    let outside = f.root().join("outside-template");
+    write(&outside, &format!("{second}\n"));
+    let tpl = repo.join("tpl");
+    std::fs::create_dir_all(&tpl).unwrap();
+    symlink(&outside, tpl.join("lfs")).unwrap();
+    f.git(
+        &repo,
+        &["init", "--quiet", &format!("--template={}", tpl.display())],
+    );
+    assert!(
+        repo.join(".git/lfs").is_symlink(),
+        "git init --template 把链接抄进了 .git"
+    );
+    f.git(&repo, &["symbolic-ref", "refs/heads/foo", "LFS"]);
+    f.git(&repo, &["symbolic-ref", "HEAD", "refs/heads/foo"]);
+    let err = f.vcs().baseline(&RepoRoot(repo)).await.unwrap_err();
+    assert_refused(&err, METADATA_SYMLINK, &second);
+
+    // 链到目录的也拒
     let f = Fixture::new();
     let repo = f.repo_with_commit("proj", &[("a", "1\n")]);
-    let shared = f.root().join("shared");
-    std::fs::create_dir_all(shared.join("hooks")).unwrap();
-    std::fs::create_dir_all(shared.join("logs")).unwrap();
-    replace_with_symlink(&repo.join(".git/hooks"), &shared.join("hooks"));
-    replace_with_symlink(&repo.join(".git/logs"), &shared.join("logs"));
-    write(&repo.join("a"), "2\n");
+    let shared = f.root().join("shared-hooks");
+    std::fs::create_dir_all(&shared).unwrap();
+    replace_with_symlink(&repo.join(".git/hooks"), &shared);
+    let err = f.vcs().status(&RepoRoot(repo)).await.unwrap_err();
+    assert_refused(&err, METADATA_SYMLINK, "shared-hooks");
+}
 
-    let status = f.vcs().status(&RepoRoot(repo)).await.unwrap();
+/// 第 2 轮 F-2：gitfile 写 `<基>/link/../lib`，`link` 是链接。取真实路径是顺着 link 走再 `..`，gix 对没有
+/// commondir 的 gitfile 目标按字面消掉 `link/..`，两边指的不是同一个目录 → 拒绝，不交给 gix。
+/// 字面那一头是工作区里摆的假 git 目录，它的 `config` 链到仓库外；仓库外的内容写成读了就会改变结果的配置
+/// （`repositoryformatversion = 7` 让打开失败），读没读一看报错就知道。
+#[tokio::test]
+async fn gitfile_dotdot_after_symlink_is_refused() {
+    for outside_kind in BOTH {
+        for at in ["submodule", "root"] {
+            let f = Fixture::new();
+            let mark = marker("dotdot");
+            let outside = f.root().join(format!("outside-{mark}"));
+            write(
+                &outside,
+                &format!("# {mark}\n[core]\n\trepositoryformatversion = 7\n"),
+            );
+            // 摆一个没查过的 git 目录：HEAD、objects/、refs/ 是真的，config 链到仓库外
+            let fake = |dir: &Path| {
+                std::fs::create_dir_all(dir.join("objects")).unwrap();
+                std::fs::create_dir_all(dir.join("refs")).unwrap();
+                write(&dir.join("HEAD"), "ref: refs/heads/main\n");
+                symlink(&outside, dir.join("config")).unwrap();
+            };
+            let (root, op_is_diff) = match at {
+                "submodule" => {
+                    let sup = super_with_submodule(&f);
+                    let base = sup.join("evilbase");
+                    std::fs::create_dir_all(&base).unwrap();
+                    symlink(sup.join(".git/modules/deps/lib"), base.join("link")).unwrap();
+                    fake(&base.join("lib"));
+                    std::fs::write(
+                        sup.join("deps/lib/.git"),
+                        "gitdir: ../../evilbase/link/../lib\n",
+                    )
+                    .unwrap();
+                    (sup, true)
+                }
+                _ => {
+                    let repo = f.repo_with_commit("proj", &[("a", "1\n")]);
+                    // 真 git 目录挪到 <夹具>/actual/.git；base/link 链到 actual/x，取真实路径走 link/.. 回到 actual
+                    let actual = f.root().join("actual");
+                    std::fs::create_dir_all(actual.join("x")).unwrap();
+                    std::fs::rename(repo.join(".git"), actual.join(".git")).unwrap();
+                    let base = repo.join("base");
+                    std::fs::create_dir_all(&base).unwrap();
+                    symlink(actual.join("x"), base.join("link")).unwrap();
+                    fake(&base.join(".git"));
+                    write(&repo.join(".git"), "gitdir: base/link/../.git\n");
+                    (repo, false)
+                }
+            };
+            let root = RepoRoot(root);
+            let base = if op_is_diff {
+                Some(f.vcs().baseline(&root).await.unwrap())
+            } else {
+                None
+            };
+            let _hidden = hide_if(outside_kind, &outside);
+
+            let err = match base {
+                Some(base) => f
+                    .vcs()
+                    .diff(&root, DiffRange::WorkspaceSince(base))
+                    .await
+                    .unwrap_err(),
+                None => f.vcs().baseline(&root).await.unwrap_err(),
+            };
+            assert_refused(&err, POINTER_AMBIGUOUS, &mark);
+        }
+    }
+}
+
+/// 第 2 轮 F-4：子模块里 `git worktree add` 出的链接工作树。共享 config 里有 git 给子模块写的
+/// `core.worktree`，git 与 gix 对链接工作树都不认它；只比配置文件在这个 git 目录之下的那一份，不误拒。
+#[tokio::test]
+async fn linked_worktree_of_submodule_works() {
+    let f = Fixture::new();
+    let sup = super_with_submodule(&f);
+    let sub = sup.join("deps/lib");
+    let wt = f.root().join("sub-linked");
+    f.git(
+        &sub,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "side",
+            wt.to_str().unwrap(),
+        ],
+    );
+    write(&wt.join("l"), "2\n");
+
+    let status = f.vcs().status(&RepoRoot(wt)).await.unwrap();
     assert!(
         status
             .changed
             .iter()
-            .any(|c| c.path == Path::new("a") && c.change == ChangeKind::Modified),
+            .any(|c| c.path == Path::new("l") && c.change == ChangeKind::Modified),
         "{status:?}"
     );
 }

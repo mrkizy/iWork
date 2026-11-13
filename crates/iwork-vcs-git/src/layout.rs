@@ -4,11 +4,12 @@
 //! 数据目录，后台在沙箱外读到就违反了底线。gix 找到要读的文件只有三种途径，各用一条规则管住：
 //!
 //! 1. **打开的目标**：`.git` 是目录或 gitfile，gitfile 与 `commondir` 再指到别的目录。预检用 gix 自己的解析函数
-//!    算出 git 目录与共享目录（[`check_before_open`]），交给 gix 的路径是 `<根>/.git` 本身（不给 gix 退回去开根目录
-//!    的机会），开完再核 gix 用的就是预检的那两个目录（[`check_after_open`]）。
-//! 2. **磁盘布局**：git 目录、共享目录整棵树走一遍，不跟随，有链接就拒绝；只排除当前读操作根本不读的几处
-//!    （[`Skip`]）。gix 按引用名、文件名在这两棵树里找到的东西（`refs/`、`worktrees/<名>/`、`packed-refs`、包、
-//!    索引……）都在里面，不用逐个列。
+//!    算出 git 目录与共享目录，字面与实际解析不一致就拒绝（[`check_before_open`]、[`pointer_target`]）；交给 gix 的
+//!    路径是 `<根>/.git` 本身（不给 gix 退回去开根目录的机会），开完再核 gix 用的就是预检的那两个目录
+//!    （[`check_after_open`]）。
+//! 2. **磁盘布局**：git 目录、共享目录整棵树走一遍，不跟随，任何一项是链接就拒绝；只有几处目录本身查过、
+//!    不往里走（[`Skip`]，那里面的文件当前的读操作碰不到）。gix 按引用名、文件名在这两棵树里找到的东西（`refs/`、
+//!    `worktrees/<名>/`、`packed-refs`、包、索引……）都在里面，不用逐个列。
 //! 3. **配置里写的路径**：gix 把「会让它去读别处或运行程序」的配置值（`core.excludesFile`、`core.attributesFile`、
 //!    `gitoxide.core.indexFile`、过滤与差异驱动、`core.worktree`……）都经同一道信任闸读；打开时让这道闸对仓库
 //!    来源的配置一律回 false（[`open_options`]）。闸外的设置（`core.fileMode`、`core.autocrlf` 等）照常生效。
@@ -38,6 +39,9 @@ pub(crate) enum Refusal {
     SubmoduleDotGitDir,
     /// `.git` 文件或 `commondir` 解析不出路径
     PointerMalformed,
+    /// `.git` 文件或 `commondir` 的路径按字面消掉 `..` 和取真实路径（先走链接再 `..`）得到不同的目录：gix 有的地方
+    /// 按字面算，预检查过的就可能不是 gix 打开的那个
+    PointerAmbiguous,
     /// 子模块的 gitfile 指到上层仓库的 `modules/` 之外
     GitfileOutsideModules,
     /// git 目录或共享目录里的一个东西是符号链接；`entry` 是它在那个目录里的相对路径
@@ -59,6 +63,9 @@ impl Refusal {
                 "子模块的 .git 是目录，只认指到上层仓库 modules/ 之下的 gitfile"
             }
             Self::PointerMalformed => ".git 文件或 commondir 解析不出路径",
+            Self::PointerAmbiguous => {
+                ".git 文件或 commondir 的路径里链接后面跟着 ..，按字面和按实际解析不是同一个目录"
+            }
             Self::GitfileOutsideModules => "子模块的 .git 指到上层仓库的 modules/ 之外",
             Self::MetadataSymlink { .. } => "git 目录里有符号链接",
             Self::AlternatesUnsupported => "借用别处的对象库（objects/info/alternates），不支持",
@@ -117,7 +124,7 @@ pub(crate) fn dot_git(worktree: &Path) -> PathBuf {
 /// 打开之前查：`.git` 是什么、它指到的 git 目录与共享目录里有没有链接、有没有借用别处的对象库。
 ///
 /// gitfile 与 `commondir` 用 gix 自己的函数解析（`gix::discover::path`，gix 打开时用的就是这两个，末尾空白的
-/// 处理一样），所以这里查的目录就是 gix 将要读的目录。
+/// 处理一样），再经 [`pointer_target`] 确认字面与实际解析一致，所以这里查的目录就是 gix 将要读的目录。
 pub(crate) fn check_before_open(
     worktree: &Path,
     opening: &Opening<'_>,
@@ -134,7 +141,7 @@ pub(crate) fn check_before_open(
             // 上面已确认 `.git` 是普通文件、不是链接
             let target = gix::discover::path::from_gitdir_file(&dot_git)
                 .map_err(|_| Refusal::PointerMalformed)?;
-            let target = real_path(&target)?;
+            let target = pointer_target(&target)?;
             if let Opening::Submodule { modules } = opening
                 && !modules.iter().any(|m| target.starts_with(m))
             {
@@ -149,7 +156,7 @@ pub(crate) fn check_before_open(
     // `commondir` 在上面走树时已确认不是链接
     let common_dir = match gix::discover::path::from_plain_file(&git_dir.join("commondir")) {
         None => git_dir.clone(),
-        Some(Ok(rel)) => real_path(&git_dir.join(rel))?,
+        Some(Ok(rel)) => pointer_target(&git_dir.join(rel))?,
         Some(Err(_)) => return Err(Refusal::PointerMalformed.into()),
     };
     if common_dir != git_dir {
@@ -189,6 +196,8 @@ pub(crate) fn open_options() -> gix::open::Options {
 ///
 /// `core.worktree` 不过信任闸，gix 打开时不用它；但它指到别处时，按登记的根读工作区和 git 自己看到的不是同一个
 /// 地方，所以照旧拒绝（和 T09 添加项目时的口径一致）。这里只把它的值解析成真实路径来比，不读它指的东西。
+/// 只看配置文件落在这个 git 目录之下的那一份：链接的工作树不认共享 config 里的这一项（git 与 gix 都如此，
+/// gix 0.90 `open/repository.rs` 的 `is_eligible_worktree_config_section`），例如子模块里开的链接工作树。
 pub(crate) fn check_after_open(
     repo: &Repository,
     worktree: &Path,
@@ -208,7 +217,14 @@ pub(crate) fn check_after_open(
     let configured = repo
         .config_snapshot()
         .plumbing()
-        .raw_value_filter("core.worktree", |meta| !trusted_section(meta))
+        .raw_value_filter("core.worktree", |meta| {
+            !trusted_section(meta)
+                && meta
+                    .path
+                    .as_deref()
+                    .and_then(|p| dunce::canonicalize(p).ok())
+                    .is_some_and(|p| p.starts_with(&checked.git_dir))
+        })
         .ok();
     if let Some(value) = configured {
         let path = gix::path::from_bstring(value).map_err(|_| Refusal::WorktreeNotRoot)?;
@@ -226,34 +242,47 @@ fn real_path(path: &Path) -> Result<PathBuf, LayoutError> {
         .map_err(|e| LayoutError::Io(format!("取 git 目录的真实路径失败：{e}")))
 }
 
-/// 走树时怎么对待 git 目录顶层的某些条目。只排除当前读操作（`baseline`、`status`、`diff`、`worktree_versions`、
-/// 读子模块 `HEAD`）根本不读的地方。**以后加了会读它们的操作（例如读 reflog 要读 `logs/`），要回来重核这张表。**
+/// gitfile 或 `commondir` 指到的目录的真实路径。gix 有的地方先按字面消掉 `..` 再用（gix-discover 0.57
+/// `repository.rs` 对没有 commondir 的 gitfile 目标做 `gix_path::normalize`），取真实路径则是先走链接再 `..`；
+/// `<基>/link/../x` 里 `link` 是链接时两者不是同一个目录。两种都算，不一样就拒绝，正常的相对路径两种结果相同。
+fn pointer_target(path: &Path) -> Result<PathBuf, LayoutError> {
+    let real = real_path(path)?;
+    let cwd =
+        std::env::current_dir().map_err(|e| LayoutError::Io(format!("取当前目录失败：{e}")))?;
+    let literal = gix::path::normalize(path.into(), &cwd).ok_or(Refusal::PointerAmbiguous)?;
+    match dunce::canonicalize(&literal) {
+        Ok(literal) if literal == real => Ok(real),
+        _ => Err(Refusal::PointerAmbiguous.into()),
+    }
+}
+
+/// 走树时要不要进某个目录。每一项本身都要查（是链接就拒），这张表只决定进不进去。
+///
+/// 不进去的目录，里面的文件只可能被这样读到：引用名。gix 找引用时，不以 `refs/`、`worktrees/`、`main-worktree/`
+/// 开头的多段名字会先补上 `refs/`（gix-ref 0.69 `name.rs` 的 `construct_full_name_ref`），落不到这几个目录里；
+/// 落在 git 目录顶层的只有全大写单段的伪引用，而顶层每一项本身都查过（大小写不敏感的文件系统上 `ref: LFS`
+/// 会开到 `.git/lfs`，所以本身也必须查，第 2 轮 F-1）。除此之外当前的读操作（`baseline`、`status`、`diff`、
+/// `worktree_versions`、读子模块 `HEAD`）不碰它们。**以后加了会读它们的操作（例如读 reflog 要读 `logs/`），
+/// 要回来重核这张表。**
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Skip {
-    /// 照常查，往下走
+    /// 往下走
     No,
-    /// 本身不能是链接，但不往下走：
-    /// - `objects/<两位十六进制>/`：松散对象，数量可以很大，单个文件是链接不逐个查（KA2 第 3 点）；目录本身是链接
-    ///   就等于整个扇区都在别处，照样拒绝。
-    /// - `modules/`：子模块的 git 目录，打开子模块时查它自己那一份；它本身是链接的话，子模块 gitfile 的「落在
-    ///   `modules/` 之下」就会被带到别处，所以本身要查。
-    Descend,
-    /// 整个不看（本身是链接也行）：gix 的读操作不碰它们。
-    /// - `hooks/`：只有写操作运行钩子；常见做法是把它整个链到共享的钩子目录。
-    /// - `logs/`：reflog，读状态与差异不用。
-    /// - `lfs/`：git-lfs 自己的缓存，gix 不读。
-    Entirely,
+    /// 不往下走：
+    /// - `objects/<两位十六进制>/`：松散对象，数量可以很大，单个文件是链接不逐个查（KA2 第 3 点）。
+    /// - `modules/`：子模块的 git 目录，打开子模块时查它自己那一份。
+    /// - `hooks/`、`logs/`、`lfs/`：钩子（只有写操作运行）、reflog、git-lfs 的缓存，可以很大。
+    NotDescended,
 }
 
 fn skip(rel: &Path) -> Skip {
     let mut parts = rel.iter().map(|p| p.to_str());
     match (parts.next(), parts.next(), parts.next()) {
-        (Some(Some("hooks" | "logs" | "lfs")), None, _) => Skip::Entirely,
-        (Some(Some("modules")), None, _) => Skip::Descend,
+        (Some(Some("hooks" | "logs" | "lfs" | "modules")), None, _) => Skip::NotDescended,
         (Some(Some("objects")), Some(Some(fan)), None)
             if fan.len() == 2 && fan.bytes().all(|b| b.is_ascii_hexdigit()) =>
         {
-            Skip::Descend
+            Skip::NotDescended
         }
         _ => Skip::No,
     }
@@ -268,14 +297,18 @@ fn check_tree(dir: &Path) -> Result<(), LayoutError> {
         Ok(meta) if meta.len() > 0 => Err(Refusal::AlternatesUnsupported.into()),
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(LayoutError::Io(format!("{}：{e}", alternates.display()))),
+        Err(e) => Err(LayoutError::Io(format!(
+            "读 objects/info/alternates 失败：{e}"
+        ))),
     }
 }
 
 /// `dir/sub` 下面的每一项：先看它本身是不是链接，是目录再往下走。往下走之前它已确认不是链接，所以 `read_dir`
-/// 不会被带到别处。
+/// 不会被带到别处。错误里只写相对 git 目录的位置（git 目录本身可能是 gitfile 写的路径）。
 fn refuse_links_in_tree(dir: &Path, sub: &Path) -> Result<(), LayoutError> {
-    let io = |e: std::io::Error| LayoutError::Io(format!("{}：{e}", dir.join(sub).display()));
+    let io = |e: std::io::Error| {
+        LayoutError::Io(format!("读 git 目录里的「{}」失败：{e}", sub.display()))
+    };
     let entries = match std::fs::read_dir(dir.join(sub)) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -285,9 +318,6 @@ fn refuse_links_in_tree(dir: &Path, sub: &Path) -> Result<(), LayoutError> {
         let entry = entry.map_err(io)?;
         let rel = sub.join(entry.file_name());
         let rule = skip(&rel);
-        if rule == Skip::Entirely {
-            continue;
-        }
         // DirEntry::file_type 不跟随链接
         let file_type = entry.file_type().map_err(io)?;
         if file_type.is_symlink() {
@@ -306,11 +336,11 @@ mod tests {
 
     #[test]
     fn skip_table() {
-        assert_eq!(skip(Path::new("hooks")), Skip::Entirely);
-        assert_eq!(skip(Path::new("logs")), Skip::Entirely);
-        assert_eq!(skip(Path::new("lfs")), Skip::Entirely);
-        assert_eq!(skip(Path::new("modules")), Skip::Descend);
-        assert_eq!(skip(Path::new("objects/ab")), Skip::Descend);
+        assert_eq!(skip(Path::new("hooks")), Skip::NotDescended);
+        assert_eq!(skip(Path::new("logs")), Skip::NotDescended);
+        assert_eq!(skip(Path::new("lfs")), Skip::NotDescended);
+        assert_eq!(skip(Path::new("modules")), Skip::NotDescended);
+        assert_eq!(skip(Path::new("objects/ab")), Skip::NotDescended);
         // 只排除顶层与对象扇区本身，同名的深处条目照常查
         assert_eq!(skip(Path::new("refs/heads/hooks")), Skip::No);
         assert_eq!(skip(Path::new("worktrees/w/logs")), Skip::No);
@@ -319,6 +349,25 @@ mod tests {
         assert_eq!(skip(Path::new("objects/abc")), Skip::No);
         assert_eq!(skip(Path::new("objects/zz")), Skip::No);
         assert_eq!(skip(Path::new("refs")), Skip::No);
+    }
+
+    /// 走树时读失败，错误里只有相对 git 目录的位置，不带 git 目录本身（它可能是 gitfile 写的仓库外路径）。
+    #[cfg(unix)]
+    #[test]
+    fn walk_error_names_relative_entry_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let git = tmp.path().join("git-dir-secret-name");
+        let refs = git.join("refs");
+        std::fs::create_dir_all(&refs).unwrap();
+        std::fs::set_permissions(&refs, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let got = check_tree(&git);
+        std::fs::set_permissions(&refs, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Err(LayoutError::Io(text)) = got else {
+            panic!("refs/ 读不了应报读失败：{got:?}");
+        };
+        assert!(text.contains("refs"), "{text}");
+        assert!(!text.contains("git-dir-secret-name"), "{text}");
     }
 
     #[test]
