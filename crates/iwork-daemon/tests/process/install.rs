@@ -249,7 +249,7 @@ fn staged_install_any_order() {
 
 /// S7（第 1 轮 F-5）：无清单启动 → 之后放入清单（文件没变）→ 重启一次，把清单读进来，之后不再重启。
 /// 「读进来了」看行为：没读进来的话，内存里没有清单、磁盘上有，每个周期都会判「信任材料换了」而循环重启。
-/// （`manifest_loaded` 审计记在第 1 步，那时文件日志还没装，不在 daemon.log 里。）
+/// 日志里也看得到：两次启动各记一条清单审计，第一次是读不到，第二次读到且登记了自己。
 #[test]
 fn manifest_arrives_after_start() {
     let _slot = Slot::take();
@@ -262,6 +262,87 @@ fn manifest_arrives_after_start() {
     assert_eq!(r[0], r[1], "同一个程序文件");
     sb.wait_ready(d.pid(), START);
     assert_no_restart(&sb, &mut d, Duration::from_secs(10), 2);
+    let audits = manifest_audits(&sb);
+    let events: Vec<&str> = audits
+        .iter()
+        .map(|a| a["event"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        events,
+        ["manifest_unavailable", "manifest_loaded"],
+        "每次启动一条清单审计：{audits:?}"
+    );
+    assert_eq!(audits[1]["self_listed"], true, "{audits:?}");
+}
+
+/// T03 方案 2.12「启动时一次」（F-2）：清单审计在日志装好之前就产生了，日志就绪后照启动那一刻的快照记进 daemon.log。
+/// 第 1 步之后、日志装好之前（停在第 2 步）把磁盘上的清单换成不登记自己的另一份：记下来的必须还是启动时读到的那份，
+/// 证明补记用的是快照、没有重读清单。
+#[test]
+fn startup_manifest_audit_is_in_daemon_log() {
+    let _slot = Slot::take();
+    let sb = Sandbox::new();
+    let inst = installed(&sb, "A");
+    let at_start: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(inst.dir.join(MANIFEST_FILE)).unwrap()).unwrap();
+    // 清单按身份去重计数：Linux 上同一版的后台与客户端副本内容相同，是同一个身份
+    let ids_at_start = at_start["binaries"]
+        .as_object()
+        .unwrap()
+        .values()
+        .flat_map(|ids| ids.as_array().unwrap().iter().map(|i| i.to_string()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let resume = sb.home.join("resume");
+    let d = sb.spawn_exe(
+        &inst.daemon(),
+        &[],
+        &[
+            FAST,
+            ("IWORK_DEV_PAUSE_AT", "endpoint"),
+            ("IWORK_DEV_RESUME_FILE", resume.to_str().unwrap()),
+        ],
+    );
+    d.wait_stderr("IWORK-PAUSED endpoint", START);
+    let other = inst
+        .manifest_text(&[("iwork-daemon", "B")])
+        .replace(r#""app_version":"t""#, r#""app_version":"t-later""#);
+    assert!(other.contains("t-later"), "对照：换上去的清单确实不同");
+    let tmp = inst.dir.join(".manifest.incoming");
+    std::fs::write(&tmp, other).unwrap();
+    std::fs::rename(&tmp, inst.dir.join(MANIFEST_FILE)).unwrap();
+    std::fs::write(&resume, b"").unwrap();
+    wait_ready_logged(&sb, d.pid(), 0, START);
+
+    let audits = manifest_audits(&sb);
+    let first = audits
+        .first()
+        .unwrap_or_else(|| panic!("daemon.log 里没有清单审计：\n{}", log_text(&sb)));
+    assert_eq!(first["event"], "manifest_loaded", "{audits:?}");
+    assert_eq!(first["app_version"], "t", "启动时那份清单：{audits:?}");
+    assert_eq!(
+        first["entries"], ids_at_start,
+        "启动时那份清单的条目数：{audits:?}"
+    );
+    assert_eq!(first["self_listed"], true, "{audits:?}");
+    let path = first["path"].as_str().unwrap();
+    assert!(path.ends_with(MANIFEST_FILE), "{path}");
+}
+
+/// daemon.log 里的清单审计（`manifest_loaded` / `manifest_unavailable`）的字段，按先后。
+fn manifest_audits(sb: &Sandbox) -> Vec<serde_json::Value> {
+    log_text(sb)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["target"] == "iwork.ipc.audit")
+        .map(|v| v["fields"].clone())
+        .filter(|f| {
+            matches!(
+                f["event"].as_str(),
+                Some("manifest_loaded" | "manifest_unavailable")
+            )
+        })
+        .collect()
 }
 
 /// S7：装齐的新后台没有执行权限 → `exec` 失败，以 21 退出（托管实例同样报非零）。

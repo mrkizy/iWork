@@ -2919,12 +2919,14 @@ dependencies = [
  "bytes",
  "iwork-fake-daemon",
  "iwork-ipc",
+ "iwork-log",
  "iwork-proto",
  "jiff",
  "libc",
  "proptest",
  "prost",
  "prost-types",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
@@ -2964,6 +2966,7 @@ dependencies = [
  "iwork-domain",
  "iwork-host",
  "iwork-ipc",
+ "iwork-log",
  "iwork-ports",
  "iwork-proto",
  "iwork-store",
@@ -3067,6 +3070,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "iwork-log"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "iwork-ports"
 version = "0.1.0"
 dependencies = [
@@ -3110,6 +3124,7 @@ version = "0.1.0"
 dependencies = [
  "iwork-app",
  "iwork-domain",
+ "iwork-log",
  "iwork-ports",
  "iwork-proto",
  "pollster",

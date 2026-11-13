@@ -551,7 +551,10 @@ impl<C: Connect, S: Spawn> Dialer for Launcher<C, S> {
     async fn dial(&mut self) -> Result<(Client, Incoming), DialError> {
         self.connect_or_launch().await.map_err(|e| match e {
             LaunchError::Connect(c) => DialError::Connect(c),
-            LaunchError::NotReady(d) => DialError::NotReady(d.to_view()),
+            LaunchError::NotReady(d) => DialError::NotReady {
+                stage: d.stage,
+                view: d.to_view(),
+            },
             LaunchError::Environment(m) => DialError::Environment(m),
         })
     }
