@@ -75,6 +75,19 @@ _disown() {
 }
 own() { is_owned "$1" || OWNED+=("$1"); }
 
+# 目录读得出内容、并且是空的。读不了（没有读权限等）不算空：调用方当成「有东西」处理（审查 3/F-4）
+is_empty_dir() {
+  local entries
+  real_dir "$1" || return 1
+  entries=$(ls -A "$1" 2>/dev/null) || return 1
+  [ -z "$entries" ]
+}
+
+# 硬链接数（同一个文件有几个名字）
+_nlink() {
+  if [ "$(uname -s)" = Darwin ]; then stat -f %l "$1"; else stat -c %h "$1"; fi
+}
+
 # 目标位置空着，可以往那里新建：自己不存在，所在目录是真目录（不是链接）
 dest_free() {
   _exists "$1" && _owned_fail "${1} 已经有东西（不是这一次建的），不碰它"
@@ -117,9 +130,12 @@ no_links_in() {
 }
 
 # ---------------------------------------------------------------- 跨次运行的记录
-# 记录文件 <根>/.iwork-journal，一行「add|del<TAB><相对根的名字><TAB><身份>」，只追加。
-# 认领受管根：不存在 → 独占新建目录与记录；是空的真目录 → 独占新建记录；是带记录（普通文件、不是链接）的真目录
-# → 认；别的（链接、文件、没有记录的非空目录）一律拒绝。认了的根登记进 OWNED。
+# 记录文件 <根>/.iwork-journal：第一行是表头「iwork-journal 1<TAB><根的身份>」，之后一行
+# 「add|del<TAB><相对根的名字><TAB><身份>」，只追加。
+# 认领受管根：不存在 → 独占新建目录与记录；是读得出内容的空真目录 → 独占新建记录；已有记录 → 只有它证明得了是这个
+# 根自己的才认（普通文件、不是符号链接、硬链接数为 1、表头里的根身份就是这个根、每行格式对；审查 3/F-1：外面的文件
+# 硬链接进来、同名的普通文本、从别的根拷来的记录都不认，也不往里写）；别的（链接、文件、没有记录的非空目录、读不了
+# 内容的目录）一律拒绝。认了的根登记进 OWNED。
 journal_root() {
   local root=$1
   if ! _exists "$root"; then
@@ -128,12 +144,17 @@ journal_root() {
     real_dir "$root" || _owned_fail "${root} 不是真目录（是链接或文件），不碰它"
     own "$root"
   fi
-  local j="$root/$JOURNAL_NAME"
+  local j="$root/$JOURNAL_NAME" header
+  header=$(printf 'iwork-journal 1\t%s' "$(_ident "$root")")
   if _exists "$j"; then
     [ -f "$j" ] && [ ! -L "$j" ] || _owned_fail "${j} 不是普通文件，不认"
+    [ "$(_nlink "$j")" = 1 ] || _owned_fail "${j} 有不止一个名字（硬链接），不认、不往里写"
+    [ "$(head -n 1 "$j")" = "$header" ] || _owned_fail "${j} 不是这个目录自己的记录（表头不对），不认"
+    awk -F '\t' 'NR > 1 && !(NF == 3 && ($1 == "add" || $1 == "del") && $2 != "" && $3 != "") { bad = 1 } END { exit bad }' "$j" \
+      || _owned_fail "${j} 里有格式不对的行，不认"
   else
-    [ -z "$(ls -A "$root")" ] || _owned_fail "${root} 不是空的、也没有本工具的记录（不是这个脚本建的），不碰它"
-    ( set -C; : > "$j" ) 2>/dev/null || _owned_fail "建不了记录 ${j}"
+    is_empty_dir "$root" || _owned_fail "${root} 不是空的（或读不了内容）、也没有本工具的记录（不是这个脚本建的），不碰它"
+    ( set -C; printf '%s\n' "$header" > "$j" ) 2>/dev/null || _owned_fail "建不了记录 ${j}"
   fi
   JOURNAL_ROOT=$root
 }

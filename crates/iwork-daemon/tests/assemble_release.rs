@@ -762,3 +762,72 @@ fn concurrent_assembly_is_refused_and_active_staging_kept() {
     assert_eq!(first.wait().unwrap().code(), Some(1));
     ok(&i.assemble());
 }
+
+/// 审查 3/F-2：只杀装配的主进程（不是整个进程组），它起的核对还活着、还在用暂存：锁要跟着还活着的进程走，第二次装配
+/// 拿不到锁，不收拾、不删那份暂存。核对也结束之后，再装配就照记录收拾掉它、照常发布。
+#[test]
+fn killing_only_the_main_process_keeps_the_lock_while_children_live() {
+    let i = Inputs::new("a");
+    let hang = i.root.join("check-hangs");
+    let marker = i.root.join("check-started");
+    let release = i.root.join("release");
+    write_executable(
+        &hang,
+        &format!(
+            "#!/bin/sh\necho $PPID > '{}.tmp' && mv '{}.tmp' '{}'\nwhile [ ! -e '{}' ]; do sleep 0.05; done\nexit 1\n",
+            marker.display(),
+            marker.display(),
+            marker.display(),
+            release.display()
+        ),
+    );
+    let mut first = i.command().arg("--check").arg(&hang).spawn().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !marker.exists() {
+        assert!(std::time::Instant::now() < deadline, "核对没开始");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // 核对记下的父进程就是跑装配主体的那个 bash：只杀它（不杀进程组、不杀核对）
+    let body: i32 = std::fs::read_to_string(&marker)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY：只对这个测试起的装配主体发信号
+    unsafe { libc::kill(body, libc::SIGKILL) };
+    let _ = first.wait();
+    let staging: Vec<String> = dist_entries(&i.dist)
+        .into_iter()
+        .filter(|n| n.starts_with(".staging-"))
+        .collect();
+    assert_eq!(staging.len(), 1, "{staging:?}");
+    let out = i.assemble();
+    // 先放掉核对，免得断言失败时它一直挂着
+    std::fs::write(&release, "").unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("另一个装配正在用"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(i.dist.join(&staging[0]).exists(), "还在用的暂存没被删");
+    // 核对结束（锁随最后一个持有者释放）之后：照记录收拾、照常发布
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let out = i.assemble();
+        if out.status.success() {
+            break;
+        }
+        assert!(
+            stderr(&out).contains("另一个装配正在用"),
+            "{}",
+            stderr(&out)
+        );
+        assert!(std::time::Instant::now() < deadline, "锁一直没放");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        !i.dist.join(&staging[0]).exists(),
+        "残留的暂存按记录收拾掉了"
+    );
+}

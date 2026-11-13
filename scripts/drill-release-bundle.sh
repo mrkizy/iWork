@@ -117,7 +117,7 @@ note "launchd 用户环境里的 IWORK_DATA_DIR：$DATA_DIR_STATE"
 # 演练要放东西、事后要删或改名的每个位置，开始时都必须空着（或是空的真目录）：不是这一次建的，脚本一概不碰
 if _exists "$D"; then
   real_dir "$D" || stop_before "数据根 D 不是真目录（是链接或文件）"
-  [ -z "$(ls -A "$D" 2>/dev/null)" ] || stop_before "数据根 D 不是空的"
+  is_empty_dir "$D" || stop_before "数据根 D 不是空的（或读不了内容）"
 fi
 if _exists "$APPS"; then real_dir "$APPS" || stop_before "${APPS} 不是真目录（是链接或文件）"; fi
 for p in "$DEST" "${DEST%.app}.prev.app" "${DEST%.app}.incoming.app" "${DEST%.app}.failed.app"; do

@@ -31,7 +31,6 @@ DAEMON_SIGN_ID=dev.iwork.daemon
 die() { echo "assemble-release: $2" >&2; exit "$1"; }
 usage() { die 2 "用法：$0 [--app <Tauri 的 .app>] --client <程序> --daemon <程序> --check <check-install> --dist <成品目录>（--app 只在 macOS 上要）"; }
 
-ARGS=("$@")
 APP="" CLIENT="" DAEMON="" CHECK="" DIST=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -74,20 +73,18 @@ DIST="$(canonical "$DIST")"
 JOURNAL_ROOT=$DIST
 OWNED=("$DIST")
 
-# 同一个 <dist> 一次只许一个装配：在锁里重新跑自己（锁拿不到就停，不等）。收拾残留在锁里，不会删到正在跑的暂存
+# 同一个 <dist> 一次只许一个装配，锁由跑这个脚本的进程自己拿着：fd 9 开着锁文件，perl 在这个 fd 的打开文件上加
+# flock（不阻塞）。flock 跟着打开文件走，不跟着进程走：perl 退出后锁还在，直到这个脚本和它起的子进程（核对、签名…）
+# 全都关掉 fd 9 才放。所以只杀这个脚本、核对还活着、还在用暂存时，第二个装配拿不到锁，不会去收拾它（审查 3/F-2）。
+# 两个平台同一个办法；perl 两边都自带，不另加依赖（macOS 没有 flock 命令）。收拾残留也在锁里做
 LOCK="$DIST/.iwork-assemble.lock"
-if [ "${IWORK_ASSEMBLE_LOCK_HELD:-}" != "$LOCK" ]; then
-  if _exists "$LOCK"; then [ -f "$LOCK" ] && [ ! -L "$LOCK" ] || die 1 "${LOCK} 不是普通文件，不用它"; fi
-  export IWORK_ASSEMBLE_LOCK_HELD="$LOCK"
-  rc=0
-  if command -v flock >/dev/null 2>&1; then
-    flock -n -E 75 "$LOCK" "$BASH" "$0" ${ARGS[@]+"${ARGS[@]}"} || rc=$?
-  else
-    lockf -t 0 "$LOCK" "$BASH" "$0" ${ARGS[@]+"${ARGS[@]}"} || rc=$?
-  fi
+if _exists "$LOCK"; then [ -f "$LOCK" ] && [ ! -L "$LOCK" ] || die 1 "${LOCK} 不是普通文件，不用它"; fi
+exec 9>>"$LOCK"
+perl -MFcntl=:flock -e 'open(my $fh, ">&=", 9) or exit 2; flock($fh, LOCK_EX | LOCK_NB) or exit 75; exit 0' || {
+  rc=$?
   [ "$rc" = 75 ] && die 1 "另一个装配正在用 ${DIST}，这一次不做"
-  exit "$rc"
-fi
+  die 1 "拿不了锁 ${LOCK}（perl 退出 ${rc}）"
+}
 
 # 上一次断在半路留下的：只动记录里有、身份也对得上的。没验完的暂存删掉；断在两次改名之间的，把旧成品改回去；
 # 新成品已到位的，删留底。同名却不在记录里的（别人放的备份、别的东西）一律不动，停下报错

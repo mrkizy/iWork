@@ -79,12 +79,14 @@ jobs:
           # 删钥匙串。仓库里的脚本与 Rust 测试一概不改搜索列表（审查 2/F-2）；证书由 test-signing-identity.sh 导入它。
           kc="$RUNNER_TEMP/iwork-test-signing.keychain-db"
           security create-keychain -p t "$kc"
+          # 建好就装收尾：之后哪一步失败都删掉这个临时钥匙串；存好原列表之后才把「恢复原列表」加进收尾
+          trap 'security delete-keychain "$kc"' EXIT
           security unlock-keychain -p t "$kc"
           security set-keychain-settings "$kc"
           saved=$(security list-keychains -d user)
           orig=()
           while IFS= read -r k; do k=${k#*\"}; k=${k%\"*}; [ -n "$k" ] && orig+=("$k"); done <<< "$saved"
-          [ ${#orig[@]} -gt 0 ] || { echo "读出的钥匙串搜索列表是空的，不改" >&2; security delete-keychain "$kc"; exit 1; }
+          [ ${#orig[@]} -gt 0 ] || { echo "读出的钥匙串搜索列表是空的，不改" >&2; exit 1; }
           trap 'security list-keychains -d user -s "${orig[@]}"; security delete-keychain "$kc"' EXIT
           security list-keychains -d user -s "$kc" "${orig[@]}"
           export IWORK_TEST_SIGNING_KEYCHAIN="$kc"
@@ -220,12 +222,14 @@ jobs:
           # 删钥匙串。仓库里的脚本与 Rust 测试一概不改搜索列表（审查 2/F-2）；证书由 test-signing-identity.sh 导入它。
           kc="$RUNNER_TEMP/iwork-test-signing.keychain-db"
           security create-keychain -p t "$kc"
+          # 建好就装收尾：之后哪一步失败都删掉这个临时钥匙串；存好原列表之后才把「恢复原列表」加进收尾
+          trap 'security delete-keychain "$kc"' EXIT
           security unlock-keychain -p t "$kc"
           security set-keychain-settings "$kc"
           saved=$(security list-keychains -d user)
           orig=()
           while IFS= read -r k; do k=${k#*\"}; k=${k%\"*}; [ -n "$k" ] && orig+=("$k"); done <<< "$saved"
-          [ ${#orig[@]} -gt 0 ] || { echo "读出的钥匙串搜索列表是空的，不改" >&2; security delete-keychain "$kc"; exit 1; }
+          [ ${#orig[@]} -gt 0 ] || { echo "读出的钥匙串搜索列表是空的，不改" >&2; exit 1; }
           trap 'security list-keychains -d user -s "${orig[@]}"; security delete-keychain "$kc"' EXIT
           security list-keychains -d user -s "$kc" "${orig[@]}"
           export IWORK_TEST_SIGNING_KEYCHAIN="$kc"

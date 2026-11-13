@@ -61,8 +61,8 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 2 -config "$dir/cert.cnf" \
   || { echo "$0：openssl 建证书失败：" >&2; cat "$dir/openssl.err" >&2; exit 1; }
 openssl pkcs12 -export -legacy -inkey "$dir/cert.key" -in "$dir/cert.pem" \
   -out "$dir/cert.p12" -passout pass:t
-# 共用的钥匙串：并发的测试一个一个导入（锁文件在钥匙串旁边）
-lockf -k "$kc.import-lock" /bin/sh -c '
+# 共用的钥匙串：并发的测试一个一个导入（锁文件在钥匙串旁边）。-e：导入失败就停，后一步成功也不能盖掉它（审查 3/F-3）
+lockf -k "$kc.import-lock" /bin/sh -ec '
   security import "$1" -k "$2" -P t -T /usr/bin/codesign >/dev/null
   security set-key-partition-list -S apple-tool:,apple: -s -k t "$2" >/dev/null' sh "$dir/cert.p12" "$kc"
 # 私钥已经进了钥匙串，目录里的明文私钥与 p12 不留

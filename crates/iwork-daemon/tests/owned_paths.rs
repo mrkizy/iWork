@@ -210,3 +210,74 @@ fn no_links_in_refuses_links() {
     std::os::unix::fs::symlink(d.join("elsewhere"), d.join("pkg/Contents/MacOS")).unwrap();
     assert!(!sh(&d, r#"no_links_in "$1/pkg""#).status.success());
 }
+
+/// 审查 3/F-1：已有的记录文件要证明是这个根自己的：不是硬链接（nlink 为 1）、第一行是带这个根身份的表头、每行格式
+/// 对。外面的文件硬链接成记录、同名的普通文本、从别的根拷来的记录，都不认；外面文件的字节一个不变。
+#[test]
+fn journal_root_refuses_forged_or_linked_journals() {
+    let (_t, d) = tmp();
+    // 硬链接：外面的文件链进一个空根
+    std::fs::create_dir_all(d.join("hard")).unwrap();
+    std::fs::write(d.join("outside.txt"), "precious\n").unwrap();
+    std::fs::hard_link(d.join("outside.txt"), d.join("hard/.iwork-journal")).unwrap();
+    let out = sh(&d, r#"journal_root "$1/hard"; journal_add "$1/hard" "x""#);
+    assert!(!out.status.success(), "硬链接的记录被认了");
+    assert_eq!(
+        std::fs::read_to_string(d.join("outside.txt")).unwrap(),
+        "precious\n",
+        "外面文件的字节没变"
+    );
+    // 硬链接，并且外面那个文件的内容恰好是这个根合格的记录（表头、格式都对）：只有「硬链接数为 1」这一条挡得住
+    std::fs::create_dir_all(d.join("hard2")).unwrap();
+    let header = ok(&sh(
+        &d,
+        r#"printf 'iwork-journal 1\t%s\n' "$(_ident "$1/hard2")""#,
+    ));
+    std::fs::write(d.join("outside2.txt"), &header).unwrap();
+    std::fs::hard_link(d.join("outside2.txt"), d.join("hard2/.iwork-journal")).unwrap();
+    let out = sh(
+        &d,
+        r#"journal_root "$1/hard2"; mkdir "$1/hard2/x"; journal_add "$1/hard2/x""#,
+    );
+    assert!(!out.status.success(), "内容合格的硬链接记录被认了");
+    assert_eq!(
+        std::fs::read_to_string(d.join("outside2.txt")).unwrap(),
+        header,
+        "外面文件的字节没变"
+    );
+    // 同名的普通文本
+    std::fs::create_dir_all(d.join("plain")).unwrap();
+    std::fs::write(d.join("plain/.iwork-journal"), "just notes\n").unwrap();
+    assert!(!sh(&d, r#"journal_root "$1/plain""#).status.success());
+    assert_eq!(
+        std::fs::read_to_string(d.join("plain/.iwork-journal")).unwrap(),
+        "just notes\n"
+    );
+    // 从别的根拷来的记录（表头里的根身份对不上）
+    ok(&sh(&d, r#"journal_root "$1/orig""#));
+    std::fs::create_dir_all(d.join("copy")).unwrap();
+    std::fs::copy(d.join("orig/.iwork-journal"), d.join("copy/.iwork-journal")).unwrap();
+    assert!(!sh(&d, r#"journal_root "$1/copy""#).status.success());
+    // 对照：自己建的记录，下一次照认
+    ok(&sh(&d, r#"journal_root "$1/orig""#));
+}
+
+/// 审查 3/F-4：读不了目录内容（权限 0300）时不能当成空目录认领：拒绝，里面不建记录。
+#[test]
+fn unreadable_dir_is_not_treated_as_empty() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_t, d) = tmp();
+    std::fs::create_dir_all(d.join("locked")).unwrap();
+    std::fs::write(d.join("locked/keep"), "keep").unwrap();
+    std::fs::set_permissions(d.join("locked"), std::fs::Permissions::from_mode(0o300)).unwrap();
+    let out = sh(&d, r#"journal_root "$1/locked""#);
+    let empty = sh(&d, r#"is_empty_dir "$1/locked""#);
+    std::fs::set_permissions(d.join("locked"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!out.status.success(), "读不了内容的目录被认领了");
+    assert!(!d.join("locked/.iwork-journal").exists());
+    assert!(!empty.status.success(), "读不了内容的目录被当成空的");
+    // 对照：真空目录是空的；有东西的不是
+    std::fs::create_dir_all(d.join("empty")).unwrap();
+    ok(&sh(&d, r#"is_empty_dir "$1/empty""#));
+    assert!(!sh(&d, r#"is_empty_dir "$1/locked""#).status.success());
+}
