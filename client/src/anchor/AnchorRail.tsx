@@ -20,6 +20,8 @@ export interface AnchorRailProps {
   onBrowse: (key: string) => void;
   /** Home / End：请 Rust 以最早（假）/ 最新（真）的一头为中心重取。 */
   onBrowseEdge: (latest: boolean) => void;
+  /** Rust 还在等 Home / End 时用户在列表里滚动或按键：请它作废。 */
+  onListInput: () => void;
 }
 
 export function AnchorRail(props: AnchorRailProps) {

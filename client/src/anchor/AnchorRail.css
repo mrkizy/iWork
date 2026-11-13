@@ -13,10 +13,11 @@
 .iw-anchor:focus-visible {
   outline: none;
 }
+/* 静止态的环往里收（offset 为负）：外扩会越过主区域左缘被裁掉（UI g3b 2/F-2） */
 .iw-anchor:focus-visible .iw-anchor__rest {
   outline: 2px solid var(--brand);
-  outline-offset: 4px;
-  border-radius: var(--r-xs);
+  outline-offset: -2px;
+  border-radius: var(--r-sm);
 }
 .iw-anchor:focus-visible .iw-anchor__frame {
   outline: 2px solid var(--brand);
@@ -30,7 +31,9 @@
   justify-content: center;
   gap: 4px;
   min-height: 36px;
-  padding-left: 14px;
+  margin-left: 4px;
+  padding: 0 8px 0 10px;
+  width: fit-content;
 }
 .iw-anchor__rest span {
   display: block;

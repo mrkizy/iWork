@@ -14,6 +14,7 @@ export interface AnchorButtonProps {
   onJump: (key: string) => void;
   onBrowse: (key: string) => void;
   onBrowseEdge: (latest: boolean) => void;
+  onListInput: () => void;
 }
 
 export function AnchorButton(props: AnchorButtonProps) {

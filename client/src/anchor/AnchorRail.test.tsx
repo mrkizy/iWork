@@ -19,6 +19,7 @@ function mount(anchors: AnchorsView, current?: string) {
   const jumps: string[] = [];
   const browses: string[] = [];
   const edges: boolean[] = [];
+  let inputs = 0;
   const [view, setView] = createSignal(anchors);
   render(() => (
     <div class="iw-timeline">
@@ -29,6 +30,7 @@ function mount(anchors: AnchorsView, current?: string) {
         onJump={(k) => jumps.push(k)}
         onBrowse={(k) => browses.push(k)}
         onBrowseEdge={(latest) => edges.push(latest)}
+        onListInput={() => inputs++}
       />
     </div>
   ));
@@ -37,7 +39,20 @@ function mount(anchors: AnchorsView, current?: string) {
   const ticks = () => [...rail.querySelectorAll<HTMLButtonElement>(".iw-tick")];
   const previewed = () => rail.querySelector<HTMLButtonElement>(".iw-tick[aria-current]");
   const card = () => rail.querySelector<HTMLButtonElement>(".iw-anchor__card");
-  return { rail, list, ticks, previewed, card, jumps, browses, edges, setView };
+  return {
+    rail,
+    list,
+    ticks,
+    previewed,
+    card,
+    jumps,
+    browses,
+    edges,
+    setView,
+    get inputs() {
+      return inputs;
+    },
+  };
 }
 
 /** 给列表一个可视高度与内容高度（jsdom 不排版）。 */
@@ -143,27 +158,48 @@ describe.skipIf(noFixtures)("锚点导轨（宽形态，列表式）", () => {
     expect(a.jumps).toEqual([anchors.items[at - 1].key]);
   });
 
-  it("Home：最早一处不在已载入的窗口里就请 Rust 取最早一头，新列表到了预览移到第一条；End 到头时直接移到最后一条", () => {
+  it("Home / End：那一头不在已载入的窗口里就请 Rust 取；Rust 给落点（token）才移过去，同一个 token 只用一次；到头时直接移", () => {
     const { anchors, current } = fromScenario("anchors-unloaded");
     expect(anchors.hasBefore && !anchors.hasAfter, "对照：前面还有、后面没有").toBe(true);
     const a = mount(anchors, current);
     fireEvent.mouseEnter(a.rail);
     fireEvent.keyDown(document, { key: "Home" });
     expect(a.edges).toEqual([false]);
-    expect(a.previewed()?.getAttribute("aria-label"), "新列表到之前预览不动").toBe(
-      label(anchors.items.find((i) => i.key === current)!),
-    );
     const earliest = anchors.items.slice(0, 5).map((i, n) => ({ ...i, key: `first-${n}` }));
-    a.setView(create(AnchorsViewSchema, { ...anchors, items: [...earliest, ...anchors.items.slice(0, 20)], hasBefore: false, hasAfter: true }));
+    const first = create(AnchorsViewSchema, { ...anchors, items: [...earliest, ...anchors.items.slice(0, 20)], hasBefore: false, hasAfter: true });
+    a.setView(first);
+    expect(a.previewed()?.getAttribute("aria-label"), "窗口到了但没有落点：不落到最早一处").not.toBe(label(earliest[0]));
+    a.setView(create(AnchorsViewSchema, { ...first, edgeLanding: { token: 41n, latest: false } }));
     expect(a.previewed()?.getAttribute("aria-label")).toBe(label(earliest[0]));
-    // End：这份窗口后面还有，请最新一头；那一头到了（后面没有了）移到最后一条
-    fireEvent.keyDown(document, { key: "End" });
-    expect(a.edges).toEqual([false, true]);
+    fireEvent.mouseEnter(a.ticks()[3]);
+    a.setView(create(AnchorsViewSchema, { ...first, edgeLanding: { token: 41n, latest: false } }));
+    expect(a.previewed()?.getAttribute("aria-label"), "同一个 token 不再用").toBe(label(first.items[3]));
+    // 已经到了最新一头：End 不请 Rust，直接移到最后一条
     a.setView(create(AnchorsViewSchema, { ...anchors }));
-    expect(a.previewed()?.getAttribute("aria-label")).toBe(label(anchors.items.at(-1)!));
-    fireEvent.keyDown(document, { key: "Home" });
     fireEvent.keyDown(document, { key: "End" });
-    expect(a.edges, "已经在最新一头：End 不再请").toEqual([false, true, false]);
+    expect(a.edges).toEqual([false]);
+    expect(a.previewed()?.getAttribute("aria-label")).toBe(label(anchors.items.at(-1)!));
+  });
+
+  it("在等 Home / End 的那一头时用户滚列表或按方向键：请 Rust 作废；迟到的窗口按 key 还原，不把用户拉回顶（g3b 2/F-1）", async () => {
+    const { anchors, current } = fromScenario("anchors-unloaded");
+    const a = mount(create(AnchorsViewSchema, { ...anchors, edgePending: true }), current);
+    fireEvent.mouseEnter(a.rail);
+    await settle();
+    const list = a.list()!;
+    sizeList(list, 10 * PITCH, anchors.items.length);
+    expect(a.inputs, "对照：还没动").toBe(0);
+    fireEvent.wheel(list, { deltaY: 40 });
+    list.scrollTop = LIST_PAD + 30 * PITCH;
+    fireEvent.scroll(list);
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+    expect(a.inputs).toBe(2);
+    // Rust 作废了：迟到的窗口没有落点，前面多了 10 条；用户看着的那一段原样留着（往下挪 10 条的距离），不回顶
+    const before = list.scrollTop;
+    expect(before, "对照：不在顶上").toBeGreaterThan(0);
+    const extra = anchors.items.slice(0, 10).map((i, n) => ({ ...i, key: `late-${n}` }));
+    a.setView(create(AnchorsViewSchema, { ...anchors, items: [...extra, ...anchors.items], edgePending: false }));
+    expect(list.scrollTop).toBe(before + 10 * PITCH);
   });
 
   it("滚到离已载入的一端不到 8 条、那一侧还有：请 Rust 以那一条为中心重取；约 300ms 没到出加载点；新列表到了按 key 对回原位", async () => {

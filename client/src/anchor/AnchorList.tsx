@@ -33,19 +33,23 @@ export interface AnchorSource {
   currentKey?: string;
   /** 列表滚到离已载入的一端不到 8 条、那一侧还有：请 Rust 以这一条为中心重取。 */
   onBrowse: (key: string) => void;
-  /** Home / End 要的那一头不在已载入的窗口里：请 Rust 以整个对话最早（假）/ 最新（真）的一头为中心重取。 */
+  /** Home / End 要的那一头不在已载入的窗口里：请 Rust 以整个对话最早（假）/ 最新（真）的一头为中心重取。
+   *  这个意图由 Rust 持有：那一头到了，AnchorsView 带 edgeLanding（token）回来，网页只执行一次。 */
   onBrowseEdge: (latest: boolean) => void;
+  /** Rust 还在等 Home / End 的那一头（edgePending）时，用户在列表里滚动或按方向键：请 Rust 作废它。 */
+  onListInput: () => void;
 }
 
 /** 翻看状态：展开时 `reset` 回到当前位置；`preview` 换预览处（悬停）；按键换预览处并滚进视野。
  *
- * 列表滚动位置由谁定（优先级从高到低，见 AnchorList）：用户滚动列表 > 用户按键（↑ / ↓、Home / End，含 Home / End
- * 等的那一头到了）把预览滚进视野 > 窗口替换按 key 还原 > 展开时居中当前位置。「滚进视野」只由按键触发，
- * 不挂在「预览处变了」上：窗口替换也会让预览处变（旧的被裁掉），那不是用户换了预览。 */
+ * 列表滚动位置由谁定（优先级从高到低，见 AnchorList）：用户滚动列表 > 用户按键（↑ / ↓、Home / End）把预览滚进视野、
+ * Rust 给的头尾落点（edgeLanding，一次性，token 只用一次） > 窗口替换按 key 还原 > 展开时居中当前位置。「滚进视野」
+ * 只由按键与落点触发，不挂在「预览处变了」上：窗口替换也会让预览处变（旧的被裁掉），那不是用户换了预览。
+ * 等数据的头尾意图只在 Rust（锚点模块头的表）：迟到、作废都由它管，网页不记「在等哪一头」。 */
 export function createAnchorBrowse(props: AnchorSource) {
   const [previewKey, setPreviewKey] = createSignal<string>();
-  // Home / End 请了重取、在等新列表的那一头（普通变量：只在按键与新窗口到达时读写，不驱动渲染）
-  let pendingEdge: "start" | "end" | undefined;
+  // 已经执行过的头尾落点：建这份状态时已有的落点算用过（收起再展开不重放）
+  let seenLanding = props.anchors.edgeLanding?.token;
   // 列表挂上来时给：把第 i 条滚进视野
   let reveal: ((i: number) => void) | undefined;
 
@@ -70,12 +74,14 @@ export function createAnchorBrowse(props: AnchorSource) {
   const edge = (which: "start" | "end") => {
     const more = which === "start" ? props.anchors.hasBefore : props.anchors.hasAfter;
     if (!more) {
-      pendingEdge = undefined;
       moveTo(which === "start" ? 0 : items().length - 1);
       return;
     }
-    pendingEdge = which;
     props.onBrowseEdge(which === "end");
+  };
+  /** 用户在列表里滚动或按方向键：Rust 还在等头尾就请它作废。 */
+  const userMoved = () => {
+    if (props.anchors.edgePending) props.onListInput();
   };
 
   return {
@@ -86,19 +92,17 @@ export function createAnchorBrowse(props: AnchorSource) {
     /** 悬停换预览处（鼠标就在那一条上，不用滚）。 */
     preview: (key: string) => setPreviewKey(key),
     setReveal: (f: ((i: number) => void) | undefined) => (reveal = f),
-    /** 新窗口到了：Home / End 等的那一头到了（那一侧没有更多了）就把预览移到那一头并滚进视野，返回真；
-     *  这是用户按键的结果，优先于按 key 还原。 */
+    userMoved,
+    /** Rust 给的头尾落点：没执行过就把预览移到那一头并滚进视野，返回真（优先于按 key 还原）。 */
     landEdge(): boolean {
-      const a = props.anchors;
-      if (pendingEdge === "start" && !a.hasBefore) moveTo(0);
-      else if (pendingEdge === "end" && !a.hasAfter) moveTo(a.items.length - 1);
-      else return false;
-      pendingEdge = undefined;
+      const l = props.anchors.edgeLanding;
+      if (l === undefined || l.token === seenLanding) return false;
+      seenLanding = l.token;
+      moveTo(l.latest ? items().length - 1 : 0);
       return true;
     },
     reset() {
       setPreviewKey(props.currentKey);
-      pendingEdge = undefined;
     },
     /** 展开时的按键：↑ / ↓ 换一处，Home / End 到整个对话的头尾，Enter 跳到预览那一处。处理了返回真。 */
     onKey(e: KeyboardEvent, jump: (key: string) => void): boolean {
@@ -107,6 +111,7 @@ export function createAnchorBrowse(props: AnchorSource) {
         case "ArrowDown":
           if (e.altKey) return false;
           e.preventDefault();
+          userMoved();
           moveTo(index() + (e.key === "ArrowUp" ? -1 : 1));
           return true;
         case "Home":
@@ -176,14 +181,18 @@ export function AnchorList(props: {
   // 旧的预览处被新窗口裁掉时，预览改到还原后顶上那一条（不回落到末项，也不因此居中）。加载点收掉。
   createEffect(
     on(
-      () => props.anchors.items,
-      (next) => {
-        clearTimeout(loadingTimer);
-        setLoadingSide(undefined);
+      () => props.anchors,
+      (view, prev) => {
         if (props.browse.landEdge()) {
+          clearTimeout(loadingTimer);
+          setLoadingSide(undefined);
           measure();
           return;
         }
+        const next = view.items;
+        if (prev !== undefined && next === prev.items) return;
+        clearTimeout(loadingTimer);
+        setLoadingSide(undefined);
         const keys = next.map((a) => a.key);
         const keptTop = topKey;
         const top = restoredScrollTop(keys, keptTop, topOffset);
@@ -237,6 +246,8 @@ export function AnchorList(props: {
           }}
           style={{ height: `${LIST_PAD * 2 + items().length * PITCH}px` }}
           onScroll={measure}
+          onWheel={() => props.browse.userMoved()}
+          onTouchMove={() => props.browse.userMoved()}
         >
           <For each={items()}>
             {(a, i) => (

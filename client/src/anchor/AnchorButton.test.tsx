@@ -24,6 +24,7 @@ function mount(anchors: AnchorsView, current?: string) {
         onJump={(k) => jumps.push(k)}
         onBrowse={(k) => browses.push(k)}
         onBrowseEdge={() => {}}
+        onListInput={() => {}}
       />
       <p data-testid="outside">别处</p>
     </div>

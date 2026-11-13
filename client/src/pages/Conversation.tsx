@@ -46,6 +46,7 @@ export function ConversationPage(props: {
   const browseAt = (key: string) => void host.act({ case: "anchorBrowse", value: { conversationId: props.id, key } });
   const browseEdge = (latest: boolean) =>
     void host.act({ case: "anchorBrowseEdge", value: { conversationId: props.id, latest } });
+  const listInput = () => void host.act({ case: "anchorListInput", value: { conversationId: props.id } });
   // 滚动指令只有 Rust 一个来源：锚点跳转、⌥↑ / ⌥↓、从「待你处理」进来（App 发 JumpToRow）都由它定位后发回
   const scrollTo = () => {
     const s = conv()?.scrollTo;
@@ -82,6 +83,7 @@ export function ConversationPage(props: {
               onJump={jumpTo}
               onBrowse={browseAt}
               onBrowseEdge={browseEdge}
+              onListInput={listInput}
             />
           )}
         </Show>
@@ -135,6 +137,7 @@ export function ConversationPage(props: {
                   onJump={jumpTo}
                   onBrowse={browseAt}
                   onBrowseEdge={browseEdge}
+              onListInput={listInput}
                 />
               )}
             </Show>
