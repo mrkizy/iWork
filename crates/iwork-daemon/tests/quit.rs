@@ -291,6 +291,12 @@ async fn resume_cancelled_before_start_does_not_rerun_after_restart() {
         h.wait_rounds(r + 1).await;
     }
     assert!(interrupted(h.turn_state(t).await), "重启后不自己续接（R7）");
+    // 交活是对账那一轮里同步做的；prompt 要等会话线准备、开会话之后才发，两轮之后不一定已经发出，单看它证伪不了
+    assert_eq!(
+        h.host.counters().handed.load(Ordering::SeqCst),
+        0,
+        "重启后没有交活"
+    );
     assert_eq!(h.agent.prompt_count(), 0);
     h.stop().await;
 }

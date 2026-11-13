@@ -1121,6 +1121,12 @@ async fn grant_from_previous_run_does_not_auto_resume() {
             h.host.wake();
             h.wait_rounds(r + 1).await;
         }
+        // 交活在对账那一轮里同步做；prompt 要等会话线准备、开会话之后才发，单看它证伪不了
+        assert_eq!(
+            h.host.counters().handed.load(Ordering::SeqCst),
+            0,
+            "重启后没有交活（quit={quit}）"
+        );
         assert_eq!(h.agent.prompt_count(), 0, "重启后不自己续接（quit={quit}）");
         assert_eq!(h.turn_state(t).await, WAIT_LIMIT);
         accepted(&h.ask(fresh_id(3), resume(t)).await);
