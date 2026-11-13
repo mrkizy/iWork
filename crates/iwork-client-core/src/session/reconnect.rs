@@ -85,7 +85,7 @@ pub fn on_dial_error(e: &DialError) -> (Connection, Retry) {
             ),
             None => (Connection::Diagnostics(diagnostics_for(c)), Retry::Backoff),
         },
-        DialError::NotReady(d) => (Connection::Diagnostics(d.clone()), Retry::Backoff),
+        DialError::NotReady { view, .. } => (Connection::Diagnostics(view.clone()), Retry::Backoff),
         DialError::Environment(msg) => (Connection::Environment(msg.clone()), Retry::Manual),
     }
 }

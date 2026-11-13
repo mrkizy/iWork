@@ -1260,7 +1260,7 @@ impl<D: Dialer> Session<D> {
             Ok((client, incoming)) => self.on_connected(client, incoming),
             Err(e) => {
                 let (view, retry) = reconnect::on_dial_error(&e);
-                tracing::info!(target: "iwork_client", error = ?e, "连不上后台服务");
+                tracing::info!(target: "iwork_client", error = %log_fields::dial_error(&e), "连不上后台服务");
                 self.store.set_connection(view);
                 self.retry_at = match retry {
                     Retry::Backoff => Some(self.now() + self.backoff.next_delay()),
@@ -1362,7 +1362,7 @@ impl<D: Dialer> Session<D> {
                 return;
             }
             IncomingItem::Closed(reason) => {
-                self.on_closed(&format!("{reason:?}"));
+                self.on_closed(log_fields::close_reason(&reason));
                 return;
             }
         };

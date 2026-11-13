@@ -20,6 +20,11 @@ use iwork_ipc::transport::Endpoint;
 
 const CHILD_ENV: &str = "IWORK_CLIENT_LOG_CHILD";
 const PRIVACY_CHILD_ENV: &str = "IWORK_CLIENT_LOG_PRIVACY_CHILD";
+const HANDSHAKE_CHILD_ENV: &str = "IWORK_CLIENT_LOG_HANDSHAKE_CHILD";
+/// 后台在握手时回的错误说明里带的虚构私有路径（审查 2/F-1）。
+const PATH_CANARY: &str = "/Users/review/私有项目-CANARY-握手-5e2a/notes";
+/// 拨号失败的那一行（对照）。
+const DIAL_FAILED_LINE: &str = "连不上后台服务";
 /// 虚构的搜索词：只会出现在对话列表的筛选里。
 const SEARCH_CANARY: &str = "CANARY-搜索-7c1d93";
 /// 假后台拒绝命令、查询时给的说明文字的开头（`iwork-fake-daemon` 里写死的）：后台的说明文字可能带路径，不许落盘。
@@ -241,6 +246,109 @@ fn client_log_keeps_user_text_out() {
     assert!(
         leaks.is_empty(),
         "client.log 里有用户输入或后台说明文字：\n{}",
+        leaks.join("\n")
+    );
+}
+
+/// 子进程：起一个只会回握手错误的端点（错误说明里带虚构的私有路径），用真会话拨号（`dev` 构建 + `IWORK_DEV_ENDPOINT`：
+/// 只连这个端点、走开发信任，所以能过身份判定、走到握手），等「连不上后台服务」进了日志再退出。
+#[test]
+fn handshake_child() {
+    if std::env::var_os(HANDSHAKE_CHILD_ENV).is_none() {
+        return;
+    }
+    use iwork_client_core::{App, AppDialer, DesktopParts, Options};
+    use iwork_ipc::frame::{Frame, HEADER_LEN, encode_frame};
+    use iwork_proto::pb;
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+
+    let _log = iwork_client_core::logging::init();
+    let log_file = std::path::PathBuf::from(std::env::var_os("IWORK_DATA_DIR").unwrap())
+        .join("logs/client.log");
+    let sock = std::path::PathBuf::from(std::env::var_os("IWORK_DEV_ENDPOINT").unwrap());
+    let listener = UnixListener::bind(&sock).unwrap();
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut conn) = conn else { continue };
+            // 等客户端的 Hello 到了（读到帧头就够），回一个握手错误
+            let mut head = [0u8; HEADER_LEN];
+            if conn.read_exact(&mut head).is_err() {
+                continue;
+            }
+            let mut buf = bytes::BytesMut::new();
+            encode_frame(
+                &Frame::Response(pb::Response {
+                    request_id: 0,
+                    body: Some(pb::response::Body::Error(pb::Error {
+                        code: pb::ErrorCode::Internal as i32,
+                        message: format!("打不开 {PATH_CANARY}"),
+                        retryable: true,
+                        details: Default::default(),
+                    })),
+                }),
+                &mut buf,
+            );
+            let _ = conn.write_all(&buf);
+        }
+    });
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (_app, effects) = App::start(
+            AppDialer::new(DesktopParts::new("test")),
+            Options::default(),
+        );
+        std::mem::forget(effects);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            iwork_client_core::logging::flush_global();
+            let log = std::fs::read_to_string(&log_file).unwrap_or_default();
+            if log.contains(DIAL_FAILED_LINE) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "拨号失败没进日志：\n{log}");
+        }
+    });
+}
+
+/// 审查 2/F-1：后台在握手时回的错误说明（可能带路径）不落盘；拨号失败本身照样记（对照）。
+#[test]
+fn client_log_keeps_handshake_error_text_out() {
+    let tmp = tempfile::Builder::new()
+        .prefix("iwh-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let data = tmp.path().join("data");
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args(["handshake_child", "--exact", "--nocapture"])
+        .env(HANDSHAKE_CHILD_ENV, "1")
+        .env("IWORK_DATA_DIR", &data)
+        .env("IWORK_DEV_ENDPOINT", tmp.path().join("d.sock"))
+        .env("IWORK_LOG", "debug")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = std::fs::read_to_string(data.join("logs/client.log")).unwrap();
+    assert!(
+        log.contains(DIAL_FAILED_LINE),
+        "对照：拨号失败记了：\n{log}"
+    );
+    let leaks: Vec<&str> = log.lines().filter(|l| l.contains("CANARY-握手")).collect();
+    assert!(
+        leaks.is_empty(),
+        "client.log 里有握手错误的说明文字：\n{}",
         leaks.join("\n")
     );
 }

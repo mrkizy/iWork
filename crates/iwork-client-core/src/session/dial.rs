@@ -15,7 +15,11 @@ use crate::store::Diagnostics;
 #[derive(Debug)]
 pub enum DialError {
     Connect(ConnectError),
-    NotReady(Diagnostics),
+    /// `stage` 是停在哪一步（日志用，不带内容）；`view` 给诊断页。
+    NotReady {
+        stage: &'static str,
+        view: Diagnostics,
+    },
     Environment(String),
 }
 
