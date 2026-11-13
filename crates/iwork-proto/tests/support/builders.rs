@@ -1188,6 +1188,7 @@ pub fn ev_turn_queued() -> DomainEvent {
 
 pub fn ev_turn_state_changed() -> DomainEvent {
     ev(E::TurnStateChanged(TurnStateChanged {
+        conversation_id: String::new(),
         turn_id: s(TURN),
         from: TurnState::WaitingApproval.into(),
         to: TurnState::Interrupted.into(),
@@ -1199,6 +1200,7 @@ pub fn ev_turn_state_changed() -> DomainEvent {
 
 pub fn ev_turn_finished() -> DomainEvent {
     ev(E::TurnFinished(TurnFinished {
+        conversation_id: String::new(),
         turn_id: s(TURN),
         state: TurnState::Completed.into(),
         usage: usage(),
@@ -1214,6 +1216,7 @@ pub fn ev_turn_finished() -> DomainEvent {
 
 pub fn ev_turn_model_reported() -> DomainEvent {
     ev(E::TurnModelReported(TurnModelReported {
+        conversation_id: String::new(),
         turn_id: s(TURN),
         model: model_sel(),
     }))
@@ -1221,6 +1224,7 @@ pub fn ev_turn_model_reported() -> DomainEvent {
 
 pub fn ev_tool_call_started() -> DomainEvent {
     ev(E::ToolCallStarted(ToolCallStarted {
+        conversation_id: String::new(),
         turn_id: s(TURN),
         tool_call_id: s("tool-1"),
         tool_name: s("Edit"),
@@ -1230,6 +1234,7 @@ pub fn ev_tool_call_started() -> DomainEvent {
 
 pub fn ev_tool_call_finished() -> DomainEvent {
     ev(E::ToolCallFinished(ToolCallFinished {
+        conversation_id: String::new(),
         turn_id: s(TURN),
         tool_call_id: s("tool-1"),
         ok: true,
@@ -1245,6 +1250,7 @@ pub fn ev_approval_requested() -> DomainEvent {
 
 pub fn ev_approval_review_updated() -> DomainEvent {
     ev(E::ApprovalReviewUpdated(ApprovalReviewUpdated {
+        conversation_id: String::new(),
         approval_id: s(APPROVAL),
         review_id: s(REVIEW),
         review: ReviewState::Abandoned.into(),
@@ -1254,6 +1260,7 @@ pub fn ev_approval_review_updated() -> DomainEvent {
 
 pub fn ev_approval_decided() -> DomainEvent {
     ev(E::ApprovalDecided(ApprovalDecided {
+        conversation_id: String::new(),
         approval_id: s(APPROVAL),
         state: ApprovalState::Approved.into(),
         decider: ApprovalDecider::User.into(),
@@ -1263,6 +1270,7 @@ pub fn ev_approval_decided() -> DomainEvent {
 
 pub fn ev_approval_voided() -> DomainEvent {
     ev(E::ApprovalVoided(ApprovalVoided {
+        conversation_id: String::new(),
         approval_id: s(APPROVAL),
         reason: VoidReason::TurnAbandonedAfterInterrupt.into(),
     }))
@@ -1270,6 +1278,7 @@ pub fn ev_approval_voided() -> DomainEvent {
 
 pub fn ev_approval_voided_turn_failed() -> DomainEvent {
     ev(E::ApprovalVoided(ApprovalVoided {
+        conversation_id: String::new(),
         approval_id: s(APPROVAL),
         reason: VoidReason::TurnFailed.into(),
     }))
@@ -1315,6 +1324,7 @@ pub fn ev_approval_evaluated_with_call() -> DomainEvent {
 /// T07 Q9：后台服务重启，进行中的审查失去执行者。
 pub fn ev_approval_review_abandoned_executor_lost() -> DomainEvent {
     ev(E::ApprovalReviewUpdated(ApprovalReviewUpdated {
+        conversation_id: String::new(),
         approval_id: s(APPROVAL),
         review_id: s(REVIEW),
         review: ReviewState::Abandoned.into(),
@@ -1360,6 +1370,7 @@ pub fn ev_user_action_proposed() -> DomainEvent {
 
 pub fn ev_user_action_state_changed() -> DomainEvent {
     ev(E::UserActionStateChanged(UserActionStateChanged {
+        conversation_id: String::new(),
         card_id: s(CARD),
         state: UserActionState::Done.into(),
         exit: Some(ExitStatus {
@@ -1627,6 +1638,7 @@ pub fn query_result_pending_resume_seq() -> QueryResult {
 }
 pub fn ev_turn_session_bound() -> DomainEvent {
     ev(E::TurnSessionBound(TurnSessionBound {
+        conversation_id: String::new(),
         turn_id: s(TURN),
         runtime_session_id: s("sess-1"),
         replaced: None,
@@ -1635,6 +1647,7 @@ pub fn ev_turn_session_bound() -> DomainEvent {
 /// 续接失败、用摘要新开了会话（T06 方案 5.2a）：带被换掉的旧会话。
 pub fn ev_turn_session_bound_replaced() -> DomainEvent {
     ev(E::TurnSessionBound(TurnSessionBound {
+        conversation_id: String::new(),
         turn_id: s(TURN),
         runtime_session_id: s("sess-2"),
         replaced: Some(SessionReplaced {
@@ -1731,6 +1744,7 @@ pub fn ev_approval_evaluated_grant() -> DomainEvent {
 /// T07 E2（T06 方案 2.6 第 2 条）：编排采纳了一条审批结果。
 pub fn ev_approval_delivered() -> DomainEvent {
     ev(E::ApprovalDelivered(ApprovalDelivered {
+        conversation_id: String::new(),
         approval_id: s(APPROVAL),
         turn_id: s(TURN),
     }))
@@ -1739,6 +1753,7 @@ pub fn ev_approval_delivered() -> DomainEvent {
 /// T10a A5：用户要取消在跑的回合。
 pub fn ev_turn_intent_recorded_cancel() -> DomainEvent {
     ev(E::TurnIntentRecorded(TurnIntentRecorded {
+        conversation_id: String::new(),
         turn_id: s(TURN),
         intent: TurnIntentKind::Cancel as i32,
     }))
@@ -1746,6 +1761,7 @@ pub fn ev_turn_intent_recorded_cancel() -> DomainEvent {
 /// T10a A5：用户要继续已中断的回合。
 pub fn ev_turn_intent_recorded_resume() -> DomainEvent {
     ev(E::TurnIntentRecorded(TurnIntentRecorded {
+        conversation_id: String::new(),
         turn_id: s(TURN),
         intent: TurnIntentKind::Resume as i32,
     }))
@@ -1773,4 +1789,66 @@ pub fn ev_runtime_session_forget_failed() -> DomainEvent {
             },
         )),
     }))
+}
+
+// ---------- G5：十二种事件带上所属对话（T10a 方案 2.7） ----------
+// 旧样本的 conversation_id 为空（加字段之前的载荷），这里各加一条带对话编号的，保护新字段的取值。
+
+/// 给十二种带所属对话的事件填上 `CONVERSATION`；别的事件原样返回（不会走到）。
+fn with_conversation(mut e: DomainEvent) -> DomainEvent {
+    use domain_event::Event as E;
+    let c = match e.event.as_mut().expect("样本都有事件") {
+        E::TurnStateChanged(x) => &mut x.conversation_id,
+        E::TurnFinished(x) => &mut x.conversation_id,
+        E::TurnModelReported(x) => &mut x.conversation_id,
+        E::TurnSessionBound(x) => &mut x.conversation_id,
+        E::TurnIntentRecorded(x) => &mut x.conversation_id,
+        E::ToolCallStarted(x) => &mut x.conversation_id,
+        E::ToolCallFinished(x) => &mut x.conversation_id,
+        E::ApprovalDelivered(x) => &mut x.conversation_id,
+        E::ApprovalReviewUpdated(x) => &mut x.conversation_id,
+        E::ApprovalDecided(x) => &mut x.conversation_id,
+        E::ApprovalVoided(x) => &mut x.conversation_id,
+        E::UserActionStateChanged(x) => &mut x.conversation_id,
+        other => panic!("{other:?} 不带所属对话"),
+    };
+    *c = s(CONVERSATION);
+    e
+}
+
+pub fn ev_turn_state_changed_in_conversation() -> DomainEvent {
+    with_conversation(ev_turn_state_changed())
+}
+pub fn ev_turn_finished_in_conversation() -> DomainEvent {
+    with_conversation(ev_turn_finished())
+}
+pub fn ev_turn_model_reported_in_conversation() -> DomainEvent {
+    with_conversation(ev_turn_model_reported())
+}
+pub fn ev_turn_session_bound_in_conversation() -> DomainEvent {
+    with_conversation(ev_turn_session_bound())
+}
+pub fn ev_turn_intent_recorded_in_conversation() -> DomainEvent {
+    with_conversation(ev_turn_intent_recorded_cancel())
+}
+pub fn ev_tool_call_started_in_conversation() -> DomainEvent {
+    with_conversation(ev_tool_call_started())
+}
+pub fn ev_tool_call_finished_in_conversation() -> DomainEvent {
+    with_conversation(ev_tool_call_finished())
+}
+pub fn ev_approval_delivered_in_conversation() -> DomainEvent {
+    with_conversation(ev_approval_delivered())
+}
+pub fn ev_approval_review_updated_in_conversation() -> DomainEvent {
+    with_conversation(ev_approval_review_updated())
+}
+pub fn ev_approval_decided_in_conversation() -> DomainEvent {
+    with_conversation(ev_approval_decided())
+}
+pub fn ev_approval_voided_in_conversation() -> DomainEvent {
+    with_conversation(ev_approval_voided())
+}
+pub fn ev_user_action_state_changed_in_conversation() -> DomainEvent {
+    with_conversation(ev_user_action_state_changed())
 }

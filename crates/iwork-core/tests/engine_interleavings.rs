@@ -174,6 +174,8 @@ fn walk(t: u8, from: TurnState, to: TurnState) -> Vec<DomainEvent> {
 
 fn state(t: u8, from: TurnState, to: TurnState) -> DomainEvent {
     TurnStateChanged {
+        // 引擎按自己折叠的表认对话，不读事件上的所属对话（G5 的路由不在这组用例里）
+        conversation_id: None,
         turn_id: tid(t),
         from,
         to,
@@ -583,6 +585,7 @@ impl Run {
                     self.delivered.insert(a);
                     self.commit_task(vec![
                         ApprovalDelivered {
+                            conversation_id: None,
                             approval_id: a,
                             turn_id: tid(turn),
                         }
@@ -642,6 +645,7 @@ impl Run {
                     let mut events = walk(turn, from, TurnState::Cancelled);
                     events.push(
                         TurnFinished {
+                            conversation_id: None,
                             turn_id: tid(turn),
                             state: TurnState::Cancelled,
                             usage: Default::default(),
@@ -727,6 +731,7 @@ impl Run {
                 let (card, conv) = cards[usize::from(nth) % cards.len()];
                 let change = |s| -> DomainEvent {
                     UserActionStateChanged {
+                        conversation_id: Some(conv),
                         card_id: card,
                         state: s,
                         output_artifact: None,

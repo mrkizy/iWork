@@ -9,7 +9,7 @@ use iwork_app::codec::ProtoEventCodec;
 use iwork_app::convert::{ConvertError, event_from_proto, event_to_proto};
 use iwork_domain::common::{Timestamp, Usage};
 use iwork_domain::event::{DomainEvent, QuotaObserved, TurnFinished};
-use iwork_domain::id::{RawUlid, RuntimeId, TurnId};
+use iwork_domain::id::{ConversationId, RawUlid, RuntimeId, TurnId};
 use iwork_domain::runtime::QuotaWindow;
 use iwork_domain::turn::{InterruptReason, TurnState};
 use iwork_ports::store::EventCodec;
@@ -18,6 +18,7 @@ use support::arb::boundary_strategies;
 
 fn finished(state: TurnState) -> DomainEvent {
     TurnFinished {
+        conversation_id: Some(ConversationId::from_raw(RawUlid::from_u128(2))),
         turn_id: TurnId::from_raw(RawUlid::from_u128(1)),
         state,
         usage: Usage::default(),

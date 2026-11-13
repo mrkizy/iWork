@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use iwork_domain::common::{Sha256, Timestamp};
-use iwork_domain::id::IdParseError;
+use iwork_domain::id::{ConversationId, IdParseError};
 use iwork_proto::pb;
 
 pub use event::{event_from_proto, event_to_proto, persisted_event_to_proto};
@@ -107,6 +107,21 @@ pub(crate) fn parse_opt_id<T: FromStr<Err = IdParseError>>(
     text: Option<&str>,
 ) -> Result<Option<T>, ConvertError> {
     text.map(|t| parse_id(kind, field, t)).transpose()
+}
+
+/// 事件上的所属对话（G5）：`None` ↔ 空串。空串只出现在加这个字段之前落盘的旧事件上。
+pub(crate) fn conversation_id_to_proto(id: Option<ConversationId>) -> String {
+    id.map(|c| c.to_string()).unwrap_or_default()
+}
+
+pub(crate) fn conversation_id_from_proto(
+    kind: &'static str,
+    text: &str,
+) -> Result<Option<ConversationId>, ConvertError> {
+    if text.is_empty() {
+        return Ok(None);
+    }
+    parse_id(kind, "conversation_id", text).map(Some)
 }
 
 pub(crate) fn parse_ids<T: FromStr<Err = IdParseError>>(

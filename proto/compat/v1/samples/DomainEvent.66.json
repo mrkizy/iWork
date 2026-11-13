@@ -1,0 +1,11 @@
+{
+  "turnStateChanged": {
+    "turnId": "01JC0T0000000000000000TRN1",
+    "from": "TURN_STATE_WAITING_APPROVAL",
+    "to": "TURN_STATE_INTERRUPTED",
+    "reason": "审批等待到上限",
+    "interruptReason": "INTERRUPT_REASON_APPROVAL_WAIT_LIMIT",
+    "fromInterruptReason": "INTERRUPT_REASON_CRASH",
+    "conversationId": "01JC0C0000000000000000CNV1"
+  }
+}

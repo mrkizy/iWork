@@ -252,6 +252,7 @@ fn approval_review_identity_survives_rebuild() {
         }
         .into(),
         ApprovalReviewUpdated {
+            conversation_id: Some(pending_approval().conversation_id),
             approval_id: id,
             review: online.review.clone(),
         }

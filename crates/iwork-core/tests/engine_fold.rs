@@ -991,6 +991,8 @@ mod props {
     impl From<ApprovalDeliveredFor> for DomainEvent {
         fn from(d: ApprovalDeliveredFor) -> Self {
             iwork_domain::event::ApprovalDelivered {
+                // 引擎按自己折叠的表认对话，不读事件上的所属对话（G5 的路由不在这组用例里）
+                conversation_id: None,
                 approval_id: apid(d.1),
                 turn_id: d.0,
             }

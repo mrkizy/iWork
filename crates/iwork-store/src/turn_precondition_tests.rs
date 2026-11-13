@@ -52,6 +52,8 @@ const INT_CRASH: TurnState = TurnState::Interrupted {
 
 fn change(turn: u128, from: TurnState, to: TurnState) -> DomainEvent {
     TurnStateChanged {
+        // 存储的提交时校验不读所属对话；这里的回合散在几个对话里，不逐个对应
+        conversation_id: None,
         turn_id: tid(turn),
         from,
         to,
@@ -62,6 +64,8 @@ fn change(turn: u128, from: TurnState, to: TurnState) -> DomainEvent {
 
 fn intent(turn: u128, intent: TurnIntentKind) -> DomainEvent {
     TurnIntentRecorded {
+        // 存储的提交时校验不读所属对话；这里的回合散在几个对话里，不逐个对应
+        conversation_id: None,
         turn_id: tid(turn),
         intent,
     }

@@ -154,6 +154,7 @@ fn pending_items_read_one_snapshot() {
             4,
             vec![
                 ApprovalDecided {
+                    conversation_id: Some(cid(10)),
                     approval_id: apid(40),
                     state: iwork_domain::approval::ApprovalState::Denied,
                     remember: None,

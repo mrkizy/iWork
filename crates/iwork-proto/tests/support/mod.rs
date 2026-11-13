@@ -163,6 +163,19 @@ sample_types! {
         b::ev_turn_intent_recorded_resume,
         b::ev_runtime_session_forget_refused,
         b::ev_runtime_session_forget_failed,
+        // G5：带所属对话的十二条（T10a 方案 2.7）
+        b::ev_turn_state_changed_in_conversation,
+        b::ev_turn_finished_in_conversation,
+        b::ev_turn_model_reported_in_conversation,
+        b::ev_turn_session_bound_in_conversation,
+        b::ev_turn_intent_recorded_in_conversation,
+        b::ev_tool_call_started_in_conversation,
+        b::ev_tool_call_finished_in_conversation,
+        b::ev_approval_delivered_in_conversation,
+        b::ev_approval_review_updated_in_conversation,
+        b::ev_approval_decided_in_conversation,
+        b::ev_approval_voided_in_conversation,
+        b::ev_user_action_state_changed_in_conversation,
     ],
 }
 

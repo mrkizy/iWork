@@ -90,6 +90,7 @@ fn approval_terminal_states() {
     let cases: Vec<(E, &str, bool, bool)> = vec![
         (
             E::ApprovalDecided(pb::ApprovalDecided {
+                conversation_id: CID.into(),
                 approval_id: "ap".into(),
                 state: pb::ApprovalState::Approved as i32,
                 decider: pb::ApprovalDecider::User as i32,
@@ -101,6 +102,7 @@ fn approval_terminal_states() {
         ),
         (
             E::ApprovalDecided(pb::ApprovalDecided {
+                conversation_id: CID.into(),
                 approval_id: "ap".into(),
                 state: pb::ApprovalState::Approved as i32,
                 decider: pb::ApprovalDecider::ModeSwitch as i32,
@@ -112,6 +114,7 @@ fn approval_terminal_states() {
         ),
         (
             E::ApprovalDecided(pb::ApprovalDecided {
+                conversation_id: CID.into(),
                 approval_id: "ap".into(),
                 state: pb::ApprovalState::Denied as i32,
                 decider: pb::ApprovalDecider::User as i32,
@@ -123,6 +126,7 @@ fn approval_terminal_states() {
         ),
         (
             E::ApprovalVoided(pb::ApprovalVoided {
+                conversation_id: CID.into(),
                 approval_id: "ap".into(),
                 reason: pb::VoidReason::TurnCancelled as i32,
             }),
@@ -338,6 +342,7 @@ fn turn_end_celebrate_failed_cancelled() {
             20,
             &[CONV],
             E::TurnFinished(pb::TurnFinished {
+                conversation_id: CID.into(),
                 turn_id: "t1".into(),
                 state: state as i32,
                 usage: Some(pb::Usage {

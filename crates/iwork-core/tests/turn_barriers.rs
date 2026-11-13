@@ -994,6 +994,7 @@ async fn resume_entry_starts_from_interrupted() {
     let w = W::<Reference>::new(&turn).await;
     w.store.seed(vec![
         iwork_domain::event::TurnStateChanged {
+            conversation_id: Some(support::conversation()),
             turn_id: t,
             from: TurnState::Queued,
             to: TurnState::Running,
@@ -1001,6 +1002,7 @@ async fn resume_entry_starts_from_interrupted() {
         }
         .into(),
         iwork_domain::event::TurnStateChanged {
+            conversation_id: Some(support::conversation()),
             turn_id: t,
             from: TurnState::Running,
             to: TurnState::Interrupted {
@@ -1047,6 +1049,7 @@ async fn resume_failure_fails_interrupted_turn() {
     let w = W::<Reference>::new(&turn).await;
     w.store.seed(vec![
         iwork_domain::event::TurnStateChanged {
+            conversation_id: Some(support::conversation()),
             turn_id: t,
             from: TurnState::Queued,
             to: TurnState::Running,
@@ -1054,6 +1057,7 @@ async fn resume_failure_fails_interrupted_turn() {
         }
         .into(),
         iwork_domain::event::TurnStateChanged {
+            conversation_id: Some(support::conversation()),
             turn_id: t,
             from: TurnState::Running,
             to: TurnState::WaitingApproval,
@@ -1061,6 +1065,7 @@ async fn resume_failure_fails_interrupted_turn() {
         }
         .into(),
         iwork_domain::event::TurnStateChanged {
+            conversation_id: Some(support::conversation()),
             turn_id: t,
             from: TurnState::WaitingApproval,
             to: wait_limit(),
@@ -1161,6 +1166,7 @@ fn bindings(store: &MemStore, turn: TurnId) -> Vec<TurnSessionBound> {
 fn interrupted_turn<J: Judge>(w: &W<J>, mut turn: Turn) -> Turn {
     w.store.seed(vec![
         iwork_domain::event::TurnStateChanged {
+            conversation_id: Some(support::conversation()),
             turn_id: turn.id,
             from: TurnState::Queued,
             to: TurnState::Running,
@@ -1168,6 +1174,7 @@ fn interrupted_turn<J: Judge>(w: &W<J>, mut turn: Turn) -> Turn {
         }
         .into(),
         iwork_domain::event::TurnStateChanged {
+            conversation_id: Some(support::conversation()),
             turn_id: turn.id,
             from: TurnState::Running,
             to: TurnState::Interrupted {
@@ -1212,6 +1219,7 @@ async fn resume_of_missing_session_recovers_with_summary() {
         assert_eq!(
             bindings(&w.store, t),
             [TurnSessionBound {
+                conversation_id: Some(support::conversation()),
                 turn_id: t,
                 runtime_session_id: NEW_ID.into(),
                 replaced: Some(SessionReplaced {
@@ -1410,11 +1418,13 @@ async fn lost_session_after_process_exit_recovers() {
         bindings(&w.store, t),
         [
             TurnSessionBound {
+                conversation_id: Some(support::conversation()),
                 turn_id: t,
                 runtime_session_id: "fake".into(),
                 replaced: None,
             },
             TurnSessionBound {
+                conversation_id: Some(support::conversation()),
                 turn_id: t,
                 runtime_session_id: NEW_ID.into(),
                 replaced: Some(SessionReplaced {
@@ -1487,6 +1497,7 @@ async fn rerun_after_broken_recovery(
     assert_eq!(
         bindings(&w.store, t).last().unwrap(),
         &TurnSessionBound {
+            conversation_id: Some(support::conversation()),
             turn_id: t,
             runtime_session_id: "new-2".into(),
             replaced: Some(SessionReplaced {
@@ -1597,6 +1608,7 @@ fn turn_id(n: u128) -> TurnId {
 /// 退回旧编号时补的那条绑定。
 fn rebound(turn: TurnId) -> TurnSessionBound {
     TurnSessionBound {
+        conversation_id: Some(support::conversation()),
         turn_id: turn,
         runtime_session_id: OLD_ID.into(),
         replaced: None,
@@ -1620,6 +1632,7 @@ async fn next_turn_recovers(w: &Arc<W<Reference>>, line: Line<Reference>) {
     assert_eq!(
         bindings(&w.store, next.id),
         [TurnSessionBound {
+            conversation_id: Some(support::conversation()),
             turn_id: next.id,
             runtime_session_id: "new-2".into(),
             replaced: Some(SessionReplaced {

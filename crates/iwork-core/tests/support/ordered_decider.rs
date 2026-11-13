@@ -138,6 +138,8 @@ impl OrderedDecider {
         };
         self.commit(vec![
             ApprovalDecided {
+                // 引擎按自己折叠的表认对话，不读事件上的所属对话（G5 的路由不在这组用例里）
+                conversation_id: None,
                 approval_id: id,
                 state,
                 remember: None,
@@ -199,6 +201,7 @@ impl PermissionDecider for OrderedDecider {
             .filter(|a| f.turn_of[*a] == turn_id)
             .map(|a| {
                 ApprovalVoided {
+                    conversation_id: None,
                     approval_id: *a,
                     reason,
                 }

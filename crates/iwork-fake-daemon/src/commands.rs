@@ -100,6 +100,7 @@ pub fn decide(
             }
             let allow = a.decision == i32::from(pb::ApprovalDecision::Allow);
             d.events.push(ev(E::ApprovalDecided(pb::ApprovalDecided {
+                conversation_id: approval.conversation_id.clone(),
                 approval_id: a.approval_id.clone(),
                 state: if allow {
                     pb::ApprovalState::Approved

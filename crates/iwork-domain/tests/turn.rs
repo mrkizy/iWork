@@ -322,6 +322,7 @@ fn legal_edges() -> Vec<(TurnState, TurnState)> {
 
 fn changed(from: TurnState, to: TurnState) -> TurnStateChanged {
     TurnStateChanged {
+        conversation_id: Some(ConversationId::from_raw(RawUlid::from_u128(2))),
         turn_id: TurnId::from_raw(RawUlid::from_u128(1)),
         from,
         to,

@@ -85,6 +85,7 @@ fn requested(n: u128) -> DomainEvent {
 
 fn decided(n: u128, state: ApprovalState) -> DomainEvent {
     ApprovalDecided {
+        conversation_id: Some(cid(10)),
         approval_id: apid(n),
         state,
         remember: None,
@@ -94,6 +95,7 @@ fn decided(n: u128, state: ApprovalState) -> DomainEvent {
 
 fn voided(n: u128) -> DomainEvent {
     ApprovalVoided {
+        conversation_id: Some(cid(10)),
         approval_id: apid(n),
         reason: VoidReason::TurnCancelled,
     }
@@ -109,6 +111,7 @@ fn proposed(n: u128) -> DomainEvent {
 
 fn card_to(n: u128, state: UserActionState) -> DomainEvent {
     UserActionStateChanged {
+        conversation_id: Some(cid(10)),
         card_id: uaid(n),
         state,
         output_artifact: None,
@@ -166,6 +169,7 @@ fn precondition_matches_domain_table() {
     let rid = ReviewId(tid(900));
     let review = |r: ReviewState| -> DomainEvent {
         ApprovalReviewUpdated {
+            conversation_id: Some(cid(10)),
             approval_id: apid(n),
             review: r,
         }
@@ -265,6 +269,7 @@ fn precondition_failure_rolls_back_whole_command() {
     let before = rules(&env);
     let r = feed.commit(vec![
         ApprovalDecided {
+            conversation_id: Some(cid(10)),
             approval_id: apid(1),
             state: APPROVED,
             remember: Some(RememberScope::Project),
@@ -420,6 +425,7 @@ fn owner_facts_sqlite_matches_reference() {
         // 回合结束：行还在
         vec![
             TurnFinished {
+                conversation_id: Some(cid(10)),
                 turn_id: tid(20),
                 state: TurnState::Completed,
                 usage: Default::default(),
@@ -438,6 +444,7 @@ fn owner_facts_sqlite_matches_reference() {
         // 级联删除要求名下回合先到终态（T10a X5）
         vec![
             TurnStateChanged {
+                conversation_id: Some(cid(12)),
                 turn_id: tid(22),
                 from: TurnState::Queued,
                 to: TurnState::Cancelled,
@@ -445,6 +452,7 @@ fn owner_facts_sqlite_matches_reference() {
             }
             .into(),
             TurnStateChanged {
+                conversation_id: Some(cid(11)),
                 turn_id: tid(21),
                 from: TurnState::Queued,
                 to: TurnState::Cancelled,
@@ -517,6 +525,7 @@ fn owner_alive_precondition() {
     // 回合结束了：照样能建、能批
     feed.ok(vec![
         TurnFinished {
+            conversation_id: Some(cid(10)),
             turn_id: tid(20),
             state: TurnState::Completed,
             usage: Default::default(),
@@ -636,6 +645,7 @@ fn owner_alive_precondition() {
     // 孤儿能被作废
     feed.ok(vec![
         ApprovalVoided {
+            conversation_id: Some(cid(12)),
             approval_id: apid(6),
             reason: VoidReason::AssistantDeleted,
         }
@@ -645,6 +655,7 @@ fn owner_alive_precondition() {
     // 对话整条没了：回合行随之级联，再建就是回合没有记录（级联前回合先到终态，T10a X5）
     feed.ok(vec![
         TurnStateChanged {
+            conversation_id: Some(cid(11)),
             turn_id: tid(21),
             from: TurnState::Queued,
             to: TurnState::Cancelled,

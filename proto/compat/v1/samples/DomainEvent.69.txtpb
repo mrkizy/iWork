@@ -1,0 +1,5 @@
+turn_session_bound {
+  turn_id: "01JC0T0000000000000000TRN1"
+  runtime_session_id: "sess-1"
+  conversation_id: "01JC0C0000000000000000CNV1"
+}
