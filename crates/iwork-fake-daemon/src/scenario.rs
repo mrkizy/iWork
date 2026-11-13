@@ -264,6 +264,15 @@ pub const REGISTRY: &[Scenario] = &[
         timeline_cap: None,
     },
     Scenario {
+        name: "all-conversations-today",
+        about: "全部对话：今天聊过的写时刻、更早的写日期（ui-m1 2a 第 5 条；时刻按录像那一刻算）",
+        build: all_conversations_today,
+        focus: None,
+        characters: &[],
+        client: &[ClientAct::ShowAllConversations(PROJECT)],
+        timeline_cap: None,
+    },
+    Scenario {
         name: "settings-rules",
         about: "设置：记住的规则三组（永久、本项目、本对话）各一条，运行时就绪",
         build: settings_rules,
@@ -1154,6 +1163,34 @@ fn all_conversations() -> Vec<Step> {
             &format!("第 {i} 个对话的第一句\n第二行不显示"),
         )));
     }
+    s
+}
+
+fn all_conversations_today() -> Vec<Step> {
+    let mut s = base();
+    // 假后台按最近活动的 seq 倒序列：先建旧的，列表顺序才和时间对得上
+    for (c, first) in [
+        ("c-old", "上个月聊的"),
+        ("c-today-2", "早些时候聊的"),
+        ("c-today-1", "刚才聊的"),
+    ] {
+        s.push(a(f::project_conversation(c, PROJECT)));
+        s.push(a(f::user_message(&format!("m-{c}"), c, first)));
+    }
+    // 信封时间是按 seq 排的固定时刻；把前两个的最近活动改成录像这一刻往前几分钟（只给预览看「今天」）
+    s.push(Step::Mutate(Box::new(|t: &mut Tables| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+        for (id, ago) in [("c-today-1", 5 * 60), ("c-today-2", 40 * 60)] {
+            if let Some(row) = t.conversations.get_mut(id) {
+                row.conversation.updated_at = Some(prost_types::Timestamp {
+                    seconds: now - ago,
+                    nanos: 0,
+                });
+            }
+        }
+    })));
     s
 }
 

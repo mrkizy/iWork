@@ -3,7 +3,8 @@
 // 只在开发服务器上（preview.html 不是发布入口）。地址：/preview.html 列出全部场景；
 // #/<场景>?theme=light|dark 打开一个场景；&play=1 按 16ms 一帧回放第一代的帧，否则直接应用全量；
 // &frame=N 回放到第 N 帧停住（流式中间帧要截图时用）。#/characters 是全部形象 × 表情一览（不是录像）。回放时右上角有控制条：暂停 / 继续、下一帧、帧号。
-// 操作不发给任何后台：只在右下角显示最后一次操作，并回「受理」。
+// 操作不发给任何后台：只在右下角显示最后一次操作，并回「受理」。&reject=<操作>&reason=<原因> 让那一种操作回「被拒」
+// （审被拒时的界面用，如 reject=createAssistant&reason=名字不能为空）；被拒时照正式入口弹提示，调用方说 quiet 的不弹。
 import { create } from "@bufbuild/protobuf";
 import { createSignal, For, Show } from "solid-js";
 import { render } from "solid-js/web";
@@ -117,7 +118,9 @@ function createPlayer(frames: ReturnType<typeof decodeFrames>, apply: (i: number
 }
 
 async function main() {
-  const { name, theme, play, stopAt } = parseHash();
+  const { name, theme, play, stopAt, query } = parseHash();
+  const rejectCase = query.get("reject");
+  const rejectReason = query.get("reason") ?? "后台拒绝了这次操作";
   applyTheme(theme);
   const index = JSON.parse(new TextDecoder().decode(await fetchBytes(`${FIXTURES}index.json`))) as FixtureEntry[];
   if (name === undefined) {
@@ -135,10 +138,14 @@ async function main() {
   const [last, setLast] = createSignal("");
   const host: Host = {
     view: store.state,
-    async act(kind) {
+    async act(kind, opts) {
       // 视图声明（看哪儿、窗口在哪）是自动发的，不当成「最后一次操作」显示
       if (VIEW_DECLARATIONS.has(kind?.case ?? "")) return create(IntentAckSchema, {});
       setLast(`${kind?.case ?? "?"} ${JSON.stringify(kind?.value, (_k, v) => (typeof v === "bigint" ? String(v) : v))}`);
+      if (kind?.case !== undefined && kind.case === rejectCase) {
+        if (!opts?.quiet) toaster.show(rejectReason);
+        return create(IntentAckSchema, { error: { code: "rejected", message: rejectReason } });
+      }
       return create(IntentAckSchema, {});
     },
   };
