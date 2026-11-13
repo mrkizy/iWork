@@ -27,9 +27,10 @@
 #   PERF_WINDOW            存在时拒绝起新的重测试（T11 夜间测量手动建、测完删）
 #
 # 只用 ssh 和 git：不开端口（ClearAllForwardings）、不转发 agent、不改系统设置与钥匙串。
-# 信任边界（每一层都不靠「过滤」，而是只放进白名单）：
-#   本机 → ssh：ssh 在 env -i 下启动，用 -F /dev/null 不读任何 ssh 配置；连接参数只从 `ssh -G mac120`
-#     里挑 hostname、user、port、identityfile 等几项（ssh_args_for），所以配置里的 SendEnv / SetEnv 带不过去。
+# 信任边界：
+#   本机 → ssh：ssh 用用户自己的配置连接 mac120（主机信任、known_hosts、吊销、身份文件都是用户的设置，脚本
+#     不碰不改）。脚本只保证两件事：本机环境变量不随连接发出（ssh 在 env -i 下启动，SendEnv 没有东西可发；
+#     配置里写死的 SetEnv 是用户自己写的值，不是本机进程环境）；不转发 agent、X11、端口（命令行 -o，见 SSH_OPTS）。
 #   远端 git：rh_git 在 env -i 下跑，不读全局与系统 git 配置，关掉凭据助手、askpass 与终端提示；要鉴权就直接失败。
 #   远端命令：env -i，只带 rh_command_env 列出的变量。
 #   任务名：只许字母数字 . _ -、不许 ..，本机与远端共用 rh_is_task_name；动路径前再核真实路径落在 tasks/ 之下。
@@ -44,6 +45,9 @@
 set -euo pipefail
 
 HOST="mac120"
+# 命令行 -o 先于配置文件被读到，ssh 对同一项取先读到的值，所以这些能确定生效，用户配置改不回去。
+SSH_OPTS=(-o BatchMode=yes -o ForwardAgent=no -o ForwardX11=no -o ClearAllForwardings=yes
+  -o PermitLocalCommand=no -o RequestTTY=no -o ServerAliveInterval=30 -o ServerAliveCountMax=4)
 ORIGIN_URL="${REMOTE_HEAVY_ORIGIN:-https://github.com/mrkizy/iWork.git}"
 DEFAULT_TIMEOUT="2h"
 DEFAULT_MIN_FREE_GB=50
@@ -135,17 +139,38 @@ rh_validate_inputs() {
   fi
 }
 
-# a 就是 b，或在 b 之下。按文件系统身份（设备号 + inode，即 test -ef）比，不按路径拼写比：
-# macOS 默认卷不区分大小写，iwork-remote 与 IWORK-REMOTE 拼写不同却是同一目录。
-# 从 a 的物理路径一级级往上走到 /，每一级都和 b 比一次。a、b 都要存在；b 不存在时 -ef 恒为假。
+# 文件系统身份：设备号:inode。按 uname 选 stat 的写法；拿不到就失败。
+rh_file_id() { # 路径
+  case "$(uname)" in
+    Darwin) stat -L -f '%d:%i' "$1" 2>/dev/null ;;
+    *) stat -L -c '%d:%i' "$1" 2>/dev/null ;;
+  esac
+}
+
+# a 就是 b，或在 b 之下吗？三种结果：0 确定是，1 确定不是，2 无法判断。
+# 按文件系统身份比，不按路径拼写比（macOS 默认卷不区分大小写，拼写不同可能是同一目录）：
+# 从 a 的物理路径一级级往上走到 /，每一级的身份都和 b 的比。任何一步出错（cd、pwd、stat 失败，权限不够）
+# 都是「无法判断」，绝不当成「不包含」；调用方把 0 和 2 都当成拒绝。
 rh_is_within() { # a b
-  local p
-  p=$(cd -P "$1" && pwd) || return 1
+  local p b_id p_id
+  b_id=$(rh_file_id "$2") && [ -n "$b_id" ] || return 2
+  p=$(cd -P "$1" 2>/dev/null && pwd -P) && [ -n "$p" ] || return 2
   while :; do
-    if [ "$p" -ef "$2" ]; then return 0; fi
+    p_id=$(rh_file_id "$p") && [ -n "$p_id" ] || return 2
+    [ "$p_id" != "$b_id" ] || return 0
     [ "$p" != / ] || return 1
-    p=$(dirname "$p")
+    p=$(dirname "$p") || return 2
   done
+}
+
+# 两者确定互不包含才返回 0；包含或无法判断都返回 1。
+rh_disjoint() { # a b
+  local r=0
+  rh_is_within "$1" "$2" || r=$?
+  [ "$r" -eq 1 ] || return 1
+  r=0
+  rh_is_within "$2" "$1" || r=$?
+  [ "$r" -eq 1 ]
 }
 
 # 根目录这个锚点：在任何写操作之前核。ROOT 不存在时只在 ~/work 下建这一层，不建 ~/work。
@@ -158,14 +183,18 @@ rh_check_root() {
   if [ ! -e "$ROOT" ] && [ ! -L "$ROOT" ]; then
     [ -d "$parent" ] || rh_refuse "$parent 不存在"
     # 建之前：将建的 ROOT 的父目录不能是 T11 或在 T11 之下（~/work 本身可能是链接）
-    if [ -e "$t11" ] && rh_is_within "$parent" "$t11"; then rh_refuse "$parent 是 T11 检出或在它之内，不在这里建 $ROOT"; fi
+    if [ -e "$t11" ]; then
+      local r=0
+      rh_is_within "$parent" "$t11" || r=$?
+      [ "$r" -eq 1 ] || rh_refuse "判断不了 $parent 是否在 T11 检出之内，或它就在里面（结果 ${r}），不建 $ROOT"
+    fi
     mkdir "$ROOT" || rh_refuse "建不了 $ROOT"
   fi
   [ ! -L "$ROOT" ] || rh_refuse "$ROOT 是符号链接"
   [ -d "$ROOT" ] || rh_refuse "$ROOT 不是目录"
   root_real=$(cd -P "$ROOT" && pwd) || rh_refuse "解析不了 $ROOT"
-  if [ -e "$t11" ] && { rh_is_within "$ROOT" "$t11" || rh_is_within "$t11" "$ROOT"; }; then
-    rh_refuse "$ROOT 和 T11 检出 $t11 是同一目录或互相包含"
+  if [ -e "$t11" ] && ! rh_disjoint "$ROOT" "$t11"; then
+    rh_refuse "$ROOT 和 T11 检出 $t11 是同一目录、互相包含，或判断不了（权限不够等）"
   fi
   for e in tasks repo.git heavy.lock heavy.holder repo.lock PERF_WINDOW; do
     [ ! -L "$root_real/$e" ] || rh_refuse "$root_real/$e 是符号链接"
@@ -465,72 +494,13 @@ parse_seconds() { # 90 | 30m | 2h
   esac
 }
 
-# ssh -G 打印值时去掉了引号，拼回 -o 后 ssh 会按配置语法再解析一遍：带空白、引号、反斜杠的值会被拆开或报错。
-# 不去还原引号，而是只接受不含这些字符的值，含了就点名拒绝。
-ssh_plain_value() { # 键 值
-  case "$2" in
-    *[[:space:]\"\'\\]*)
-      echo "remote-heavy: ssh 配置里的 $1 含空白、引号或反斜杠，本脚本不接受：$(printf '%q' "$2")（改用不含这些字符的路径）" >&2
-      return 1 ;;
-  esac
-}
-
-# 由 `ssh -G <别名>` 解析出的有效配置里只挑连接要的几项，拼成 SSH_ARGS；之后 ssh 用 -F /dev/null 运行，
-# 不再读用户或系统的 ssh 配置，配置里的 SendEnv、SetEnv、LocalForward、ProxyCommand 等都进不来。
-# UserKnownHostsFile 不转写：它是空格分隔的多个路径，ssh -G 打印时丢了引号，「一个带空格的路径」和「两个路径」
-# 打出来一模一样，猜不出边界。ssh 调用不传它，用 ssh 在 -F /dev/null 下的默认值；用户配置对这台主机改过它
-# （有效值和默认值不同）就拒绝，宁可连不上也不猜。
-# 第二个参数只给自测用：指定解析时读的配置文件。
-ssh_args_for() { # 主机别名 [配置文件]
-  local alias=$1 cfg=${2:-} conf line key val hostname="" user="" port="" known_hosts="" default_known_hosts=""
-  if [ -n "$cfg" ]; then
-    conf=$(ssh -G -F "$cfg" "$alias" 2>/dev/null) || { echo "remote-heavy: ssh -G $alias 失败" >&2; return 2; }
-  else
-    conf=$(ssh -G "$alias" 2>/dev/null) || { echo "remote-heavy: ssh -G $alias 失败" >&2; return 2; }
-  fi
-  SSH_ARGS=(-F /dev/null)
-  while IFS= read -r line; do
-    key=${line%% *}
-    val=${line#* }
-    case "$key" in
-      hostname) hostname=$val ;;
-      user) user=$val ;;
-      port) port=$val ;;
-      identityfile) ssh_plain_value "$key" "$val" || return 2; SSH_ARGS+=(-o "IdentityFile=$val") ;;
-      certificatefile) ssh_plain_value "$key" "$val" || return 2; SSH_ARGS+=(-o "CertificateFile=$val") ;;
-      identitiesonly) SSH_ARGS+=(-o "IdentitiesOnly=$val") ;;
-      hostkeyalias) ssh_plain_value "$key" "$val" || return 2; SSH_ARGS+=(-o "HostKeyAlias=$val") ;;
-      userknownhostsfile) known_hosts=$val ;;
-      proxycommand | proxyjump)
-        [ "$val" = none ] || { echo "remote-heavy: $alias 配了 ${key}，本脚本不经代理连接" >&2; return 2; } ;;
-    esac
-  done <<<"$conf"
-  case "$hostname" in '' | *[!A-Za-z0-9.:-]*) echo "remote-heavy: hostname 不合法：$(printf '%q' "$hostname")" >&2; return 2 ;; esac
-  case "$user" in '' | *[!A-Za-z0-9._-]*) echo "remote-heavy: user 不合法：$(printf '%q' "$user")" >&2; return 2 ;; esac
-  rh_is_uint "$port" || { echo "remote-heavy: port 不合法：$(printf '%q' "$port")" >&2; return 2; }
-  default_known_hosts=$(ssh -F /dev/null -G "$hostname" 2>/dev/null | sed -n 's/^userknownhostsfile //p')
-  if [ -z "$default_known_hosts" ] || [ "$known_hosts" != "$default_known_hosts" ]; then
-    echo "remote-heavy: ssh 配置给 $alias 改了 UserKnownHostsFile（$(printf '%q' "$known_hosts")，默认是 $(printf '%q' "$default_known_hosts")）；本脚本只用默认的 known_hosts，请去掉这项配置或把主机密钥放进默认文件" >&2
-    return 2
-  fi
-  SSH_ARGS+=(-o "HostName=$hostname" -o "User=$user" -o "Port=$port"
-    -o BatchMode=yes -o StrictHostKeyChecking=yes -o ForwardAgent=no -o ForwardX11=no
-    -o ClearAllForwardings=yes -o PermitLocalCommand=no -o RequestTTY=no
-    -o ServerAliveInterval=30 -o ServerAliveCountMax=4)
-}
-
 # 把远端程序与参数拼成一段脚本，经 ssh 的 stdin 交给远端 bash -s。
 # 参数用 printf %q 写成赋值语句，不经远端登录 shell（zsh）再解析一遍。
 send_remote() { # mode task sha timeout min_free cmd...
   local mode=$1 task=$2 sha=$3 timeout=$4 min_free=$5
   shift 5
-  local ssh_cmd
-  if [ -n "${REMOTE_HEAVY_SSH:-}" ]; then
-    ssh_cmd=("$REMOTE_HEAVY_SSH")
-  else
-    ssh_args_for "$HOST" || return 2
-    ssh_cmd=(ssh "${SSH_ARGS[@]}")
-  fi
+  # REMOTE_HEAVY_SSH 只替换程序，参数照常传，自测能核到实际传了什么
+  local ssh_cmd=("${REMOTE_HEAVY_SSH:-ssh}" "${SSH_OPTS[@]}")
   local program
   program=$(
     printf 'R_MODE=%q\nR_TASK=%q\nR_SHA=%q\nR_TIMEOUT=%q\nR_MIN_FREE_GB=%q\nR_ORIGIN=%q\n' \
@@ -620,7 +590,8 @@ selftest() {
   # tmp 不用 local：EXIT trap 在函数返回后才跑，要还能读到它。
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/remote-heavy-selftest.XXXXXX")"
   # 自测里起的后台运行（锁、超时用例）在出错退出时也要收掉。
-  trap 'jobs -p | xargs kill 2>/dev/null; rm -rf "$tmp"' EXIT
+  # chmod -R：用例中途失败时可能留下 chmod 000 的目录，rm -rf 删不掉
+  trap 'jobs -p | xargs kill 2>/dev/null; chmod -R u+rwx "$tmp" 2>/dev/null; rm -rf "$tmp"' EXIT
   export HOME="$tmp/localhome" GIT_CONFIG_NOSYSTEM=1
   local home="$tmp/home" root="$tmp/home/work/iwork-remote" out="$tmp/out"
   mkdir -p "$HOME" "$home" "$out" "$tmp/fakedf"
@@ -630,11 +601,12 @@ selftest() {
   git -C "$home/work/iWork" config remote.origin.url keep-url
   echo keep >"$home/work/iWork/sentinel"
 
-  # 假 ssh：只记本机 canary 有没有漏到它这里（不落盘任何别的环境）；远端会话里放一个 REMOTE_SESSION_CANARY，
+  # 假 ssh：只记本机 canary 有没有漏到它这里（不落盘任何别的环境）和自己的命令行参数；远端会话里放一个 REMOTE_SESSION_CANARY，
   # 模拟远端 sshd 接受了某个变量，用来证明远端命令的环境仍只来自白名单。$tmp/lowdisk 存在时换上假 df。
   cat >"$tmp/fake-ssh" <<FAKE
 #!/bin/bash
 if [ -n "\${REMOTE_HEAVY_SELFTEST_CANARY:-}" ]; then echo leaked >"$out/ssh-saw-canary"; fi
+printf '%s\n' "\$@" >"$out/ssh-args"
 prefix=""
 if [ -e "$tmp/lowdisk" ]; then prefix="$tmp/fakedf:"; fi
 exec env -i HOME="$home" PATH="\${prefix}/usr/bin:/bin:/usr/sbin:/sbin" REMOTE_SESSION_CANARY=remote-canary /bin/bash -s
@@ -893,6 +865,38 @@ FAKE
   rr anchors-ok --task t-a "$pushed" -- /bin/sh -c 'exit 0'
   check "对照：锚点恢复后能跑" [ "$rc" -eq 0 ]
 
+  # 无法判断就拒绝：T11 读不进去（chmod 000）时，判断不了它和 ROOT 的关系，任何写操作之前都拒绝。
+  # 以 root 身份跑时 chmod 000 挡不住，造不出这个场景，跳过（不计数）。
+  mkdir "$tmp/permprobe"
+  chmod 000 "$tmp/permprobe"
+  if ! (cd "$tmp/permprobe") 2>/dev/null; then
+    # T11 链进 ROOT 的一个任务目录，那个目录 chmod 000：clean 不许把它删掉
+    mkdir -p "$root/tasks/t-locked"
+    echo keep >"$root/tasks/t-locked/t11-sentinel"
+    mv "$home/work/iWork" "$home/work/iWork.aside"
+    ln -s "$root/tasks/t-locked" "$home/work/iWork"
+    chmod 000 "$root/tasks/t-locked"
+    rh perm-clean clean t-locked
+    check "T11 链进 ROOT 且读不进去：clean 拒绝" [ "$rc" -eq 2 ]
+    check "T11 链进 ROOT 且读不进去：拒绝理由是判断不了" grep -q '判断不了' "$out/perm-clean"
+    chmod 755 "$root/tasks/t-locked"
+    check "T11 链进 ROOT 且读不进去：那个目录和哨兵还在" test -e "$root/tasks/t-locked/t11-sentinel"
+    rm "$home/work/iWork"
+    rm -rf "$root/tasks/t-locked"
+    mv "$home/work/iWork.aside" "$home/work/iWork"
+    # T11 本身读不进去：run 也拒绝（失败关闭），命令没跑
+    chmod 000 "$home/work/iWork"
+    rr perm-run --task t-a "$pushed" -- /bin/sh -c "touch '$out/ran-perm'"
+    check "T11 读不进去：run 拒绝且命令没跑" test "$rc" -eq 2 -a ! -e "$out/ran-perm"
+    chmod 755 "$home/work/iWork"
+    check "读不进去的用例后 T11 哨兵完好" sentinel_intact
+    rr perm-ok --task t-a "$pushed" -- /bin/sh -c 'exit 0'
+    check "对照：权限恢复后能跑" [ "$rc" -eq 0 ]
+  else
+    echo "  skip  T11 读不进去两格（chmod 000 挡不住当前用户）"
+  fi
+  chmod 755 "$tmp/permprobe"
+
   # 大小写别名：macOS 默认卷不区分大小写，T11 链到 .../IWORK-REMOTE 时和 ROOT 是同一目录，拼写却不同。
   # 卷区分大小写时这两格造不出来，跳过（不计数）。
   mkdir "$tmp/caseprobe"
@@ -945,51 +949,41 @@ FAKE
   check "对照：别的任务还在" [ -d "$root/tasks/t-lock-a/src" ]
   check "全部用例跑完哨兵仍在" sentinel_intact
 
-  # --- ssh 边界：配置里的 SendEnv / SetEnv / 转发进不了真正发出去的参数 ---
+  # --- ssh：用用户自己的配置，命令行 -o 只关转发、不动信任设置 ---
+  # 实际调用时 ssh 读用户的 ~/.ssh/config；这里用 -F 指一份替身配置，模拟用户写了这些。
   cat >"$tmp/ssh_config" <<'CFG'
 Host rhtest
   HostName 192.0.2.10
-  User someone
-  Port 2222
-  IdentityFile ~/.ssh/id_rhtest
-  IdentitiesOnly yes
-  SendEnv RH_SECRET_TOKEN LC_*
-  SetEnv RH_SET=1
-  LocalForward 9999 127.0.0.1:9999
   ForwardAgent yes
+  ForwardX11 yes
+  BatchMode no
+  LocalForward 9999 127.0.0.1:9999
+  GlobalKnownHostsFile /tmp/rh_global_known_hosts
+  RevokedHostKeys /tmp/rh_revoked
+  UserKnownHostsFile "/tmp/rh kh/known_hosts"
 CFG
-  need "对照：直接读这份配置时 SendEnv、SetEnv 都生效" sh -c \
-    "ssh -G -F '$tmp/ssh_config' rhtest 2>/dev/null | grep -q '^sendenv RH_SECRET_TOKEN' && ssh -G -F '$tmp/ssh_config' rhtest 2>/dev/null | grep -q '^setenv RH_SET=1'"
-  need "ssh_args_for 解析成功" ssh_args_for rhtest "$tmp/ssh_config"
-  local eff
-  eff=$(ssh -G "${SSH_ARGS[@]}" rhtest 2>/dev/null)
-  check "有效配置里没有 SendEnv" not grep -q '^sendenv ' <<<"$eff"
-  check "有效配置里没有 SetEnv" not grep -q '^setenv ' <<<"$eff"
-  check "有效配置里没有 LocalForward" not grep -q '^localforward ' <<<"$eff"
-  check "ForwardAgent 关着" grep -q '^forwardagent no$' <<<"$eff"
-  check "连接参数保留：hostname/user/port" sh -c 'printf "%s\n" "$1" | grep -q "^hostname 192.0.2.10$" && printf "%s\n" "$1" | grep -q "^user someone$" && printf "%s\n" "$1" | grep -q "^port 2222$"' _ "$eff"
-  check "连接参数保留：identityfile" grep -q '^identityfile ~/.ssh/id_rhtest$' <<<"$eff"
-  # 带空白、引号的路径：ssh -G 打印时丢了引号，拼回去会被拆开，要点名拒绝
-  printf 'Host rhq\n  HostName 192.0.2.10\n  User u\n  IdentityFile "/tmp/my key"\n' >"$tmp/ssh_config_space"
-  need "对照：带空格的 IdentityFile 在原配置里合法" sh -c "ssh -G -F '$tmp/ssh_config_space' rhq 2>/dev/null | grep -q '^identityfile /tmp/my key\$'"
-  check "IdentityFile 含空格：拒绝" not ssh_args_for rhq "$tmp/ssh_config_space" 2>/dev/null
-  printf 'Host rhq\n  HostName 192.0.2.10\n  User u\n  CertificateFile "/tmp/a\x27b"\n' >"$tmp/ssh_config_quote"
-  check "CertificateFile 含引号：拒绝" not ssh_args_for rhq "$tmp/ssh_config_quote" 2>/dev/null
-  # known_hosts：不从配置转写，只用 ssh 的默认值；配置改过它就拒绝（两种写法 ssh -G 打出来一模一样，没法猜）
-  printf 'Host rhq\n  HostName 192.0.2.10\n  User u\n  UserKnownHostsFile "/tmp/kh /x/known_hosts"\n' >"$tmp/ssh_config_kh1"
-  printf 'Host rhq\n  HostName 192.0.2.10\n  User u\n  UserKnownHostsFile /tmp/kh /x/known_hosts\n' >"$tmp/ssh_config_kh2"
-  need "对照：一个带空格的路径和两个路径，ssh -G 打出来一样" sh -c \
-    "[ \"\$(ssh -G -F '$tmp/ssh_config_kh1' rhq 2>/dev/null | grep ^userknownhostsfile)\" = \"\$(ssh -G -F '$tmp/ssh_config_kh2' rhq 2>/dev/null | grep ^userknownhostsfile)\" ]"
-  check "UserKnownHostsFile 一个带空格的路径：拒绝" not ssh_args_for rhq "$tmp/ssh_config_kh1" 2>/dev/null
-  check "UserKnownHostsFile 两个路径：拒绝" not ssh_args_for rhq "$tmp/ssh_config_kh2" 2>/dev/null
-  printf 'Host rhq\n  HostName 192.0.2.10\n  User u\n' >"$tmp/ssh_config_kh0"
-  need "UserKnownHostsFile 用默认值：接受" ssh_args_for rhq "$tmp/ssh_config_kh0"
-  check "发出去的参数里没有 UserKnownHostsFile" not sh -c 'printf "%s\n" "$@" | grep -q UserKnownHostsFile' _ "${SSH_ARGS[@]}"
-  check "有效 known_hosts 就是 -F /dev/null 下的默认值" sh -c '[ "$1" = "$2" ] && [ -n "$1" ]' _ \
-    "$(ssh -G "${SSH_ARGS[@]}" rhq 2>/dev/null | grep ^userknownhostsfile)" \
-    "$(ssh -F /dev/null -G 192.0.2.10 2>/dev/null | grep ^userknownhostsfile)"
-  printf 'Host rhproxy\n  HostName 192.0.2.11\n  ProxyCommand nc %%h %%p\n' >"$tmp/ssh_config_proxy"
-  check "配了 ProxyCommand 时拒绝" not ssh_args_for rhproxy "$tmp/ssh_config_proxy" 2>/dev/null
+  local eff_cfg eff_ours
+  eff_cfg=$(ssh -G -F "$tmp/ssh_config" rhtest 2>/dev/null)
+  eff_ours=$(ssh -G -F "$tmp/ssh_config" "${SSH_OPTS[@]}" rhtest 2>/dev/null)
+  need "对照：替身配置本身打开了 agent 转发" grep -q '^forwardagent yes$' <<<"$eff_cfg"
+  check "加上脚本的 -o 后：ForwardAgent 关" grep -q '^forwardagent no$' <<<"$eff_ours"
+  check "加上脚本的 -o 后：ForwardX11 关" grep -q '^forwardx11 no$' <<<"$eff_ours"
+  check "加上脚本的 -o 后：BatchMode 开" grep -q '^batchmode yes$' <<<"$eff_ours"
+  check "加上脚本的 -o 后：ClearAllForwardings 开、LocalForward 不生效" sh -c \
+    'printf "%s\n" "$1" | grep -q "^clearallforwardings yes$"' _ "$eff_ours"
+  local key
+  for key in globalknownhostsfile revokedhostkeys userknownhostsfile hostname; do
+    check "用户的 $key 保持生效（与只读配置时相同）" sh -c '[ -n "$1" ] && [ "$1" = "$2" ]' _ \
+      "$(grep "^$key " <<<"$eff_cfg")" "$(grep "^$key " <<<"$eff_ours")"
+  done
+  # 实际发出的 ssh 命令行（假 ssh 记下的参数，不含环境）带了这几个 -o，主机是 mac120
+  local o
+  for o in BatchMode=yes ForwardAgent=no ForwardX11=no ClearAllForwardings=yes PermitLocalCommand=no RequestTTY=no; do
+    check "实际 ssh 命令行带 -o $o" grep -qx -- "$o" "$out/ssh-args"
+  done
+  check "实际 ssh 命令行的主机是 mac120、远端跑 /bin/bash -s" sh -c \
+    'tail -3 "$1" | tr "\n" " " | grep -q "^mac120 /bin/bash -s $"' _ "$out/ssh-args"
+  check "实际 ssh 命令行没有 -F（用户配置照常生效）" not grep -qx -- -F "$out/ssh-args"
 
   # --- 远端 git：askpass、凭据助手、全局配置都进不来 ---
   local gh="$tmp/githome" called="$out/askpass-called"
