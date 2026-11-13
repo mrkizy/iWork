@@ -60,6 +60,8 @@ pub enum Local {
         conversation_id: String,
         row_key: String,
     },
+    /// 用户在锚点列表里滚动或按键：等着的头尾作废。
+    AnchorListInput(String),
     /// Home / End：以最早（`latest` 为假）或最新的一头为中心重取。
     AnchorBrowseEdge {
         conversation_id: String,
@@ -195,6 +197,7 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
             conversation_id: x.conversation_id,
             row_key: x.row_key,
         }),
+        I::AnchorListInput(x) => Action::Local(Local::AnchorListInput(x.conversation_id)),
         I::AnchorBrowseEdge(x) => Action::Local(Local::AnchorBrowseEdge {
             conversation_id: x.conversation_id,
             latest: x.latest,

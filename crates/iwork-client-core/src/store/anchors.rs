@@ -3,6 +3,23 @@
 //!
 //! 哪些算锚点只在后台算（`ListAnchors`），这里不从已加载的行里挑（R13）；窗口按「以某处为中心前后各取
 //! [`ANCHOR_SPAN`] 条」取，失效后重查、不推演，与侧栏摘要同一套（并进摘要重查的同一轮）。
+//!
+//! ## 一次性滚动意图（只在这里持有，网页只执行带 token 的指令）
+//!
+//! 两类，各最多一个，新的替换旧的：
+//! - 跳到某一行（[`Anchors::pending_jump`] / [`Anchors::pending_relative`] 在等，[`Anchors::scroll`] 已发出）：点锚点、
+//!   ⌥↑ / ⌥↓、从「待你处理」进来。
+//! - 锚点列表的头尾（[`Anchors::edge`]）：Home / End。
+//!
+//! | 阶段 | 等什么 | 到了做什么 |
+//! | --- | --- | --- |
+//! | 等底 | 对话的首份快照（[`Anchors::base_loaded`] 为假） | 目标行在时间线里就发滚动；不在就转「等数据」 |
+//! | 等数据 | 以目标为中心的那一段（AroundPage）/ 以那一头为中心的锚点窗口 | 对得上才发：滚动指令 / 头尾落点 |
+//! | 已发出 | 网页按 token 用掉（同一个只用一次；全量帧不重发） | — |
+//!
+//! 作废：用户自己滚动时间线（跳行，[`Anchors::cancel_waiting`]）；用户在锚点列表里滚动或按键（头尾，
+//! [`Anchors::cancel_list_input`]）；首份快照之后的快照（重连走快照、Q9，[`Anchors::reset_to_latest`]）；网页
+//! attach 换代（[`Anchors::on_attach`]）；换对话（整份丢）。作废以后迟到的结果照常进时间线、换窗口，但不再执行。
 
 use iwork_proto::pb;
 
@@ -54,6 +71,31 @@ pub struct ScrollTo {
     pub token: u64,
 }
 
+/// 滚动指令与头尾落点的 token：整个进程单调递增，换对话、换代次都不回头，网页按「没见过」去重才可靠。
+fn next_token() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// 以它为中心取的锚点窗口就是那一头。
+fn edge_center(latest: bool) -> u64 {
+    if latest {
+        LATEST_CENTER
+    } else {
+        EARLIEST_CENTER
+    }
+}
+
+/// 锚点列表的 Home / End。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    /// 在等以那一头为中心的锚点窗口。
+    Waiting { latest: bool },
+    /// 那一头到了：网页按 token 把预览移过去（只用一次）。
+    Landed { latest: bool, token: u64 },
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Anchors {
     /// 最近一次取到的窗口；还没取到为 `None`（组件不显示）。
@@ -71,7 +113,10 @@ pub struct Anchors {
     /// 相对跳转等窗口重取后再落（目标越过了窗口而那一侧还有）。
     pub pending_relative: Option<i32>,
     pub scroll: Option<ScrollTo>,
-    next_token: u64,
+    /// 对话的首份快照到了没有。没到之前的跳转只记下（「等底」），到了再定：首份快照是这次打开的底，不作废；
+    /// 之后的快照（重连、Q9）才作废。
+    pub base_loaded: bool,
+    pub edge: Option<Edge>,
 }
 
 /// 一次操作之后要做的事（会话层据此发查询、记脏）。
@@ -100,12 +145,20 @@ impl Anchors {
         self.items().iter().find(|a| key_of(a) == key)
     }
 
-    /// 新窗口到了：整份替换；以前预览的位置由网页按 key 对回去。
+    /// 新窗口到了：整份替换；以前预览的位置由网页按 key 对回去。等着的头尾正是这一头的就落点。
     pub fn replace_window(&mut self, center: u64, w: pb::ListAnchorsResult) -> AnchorEffect {
         self.window = Some(w);
         self.center = center;
         if self.want_center == Some(center) {
             self.want_center = None;
+        }
+        if let Some(Edge::Waiting { latest }) = self.edge
+            && edge_center(latest) == center
+        {
+            self.edge = Some(Edge::Landed {
+                latest,
+                token: next_token(),
+            });
         }
         AnchorEffect {
             anchors_dirty: true,
@@ -177,13 +230,45 @@ impl Anchors {
         e
     }
 
-    /// Home / End：以整个对话最早或最新的一头为中心重取（不跳转）。
-    pub fn browse_edge(&mut self, latest: bool) {
-        self.want_center = Some(if latest {
-            LATEST_CENTER
-        } else {
-            EARLIEST_CENTER
-        });
+    /// Home / End：以整个对话最早或最新的一头为中心重取（不跳转），窗口到了给网页一个头尾落点。
+    pub fn browse_edge(&mut self, latest: bool) -> AnchorEffect {
+        self.want_center = Some(edge_center(latest));
+        self.edge = Some(Edge::Waiting { latest });
+        AnchorEffect {
+            anchors_dirty: true,
+            ..Default::default()
+        }
+    }
+
+    /// 用户在锚点列表里滚动或按键：头尾意图作废（迟到的窗口照常换上，但不再把预览拉到那一头）。
+    pub fn cancel_list_input(&mut self) -> AnchorEffect {
+        AnchorEffect {
+            anchors_dirty: self.edge.take().is_some(),
+            ..Default::default()
+        }
+    }
+
+    /// 对话的底到了（首份快照已进时间线）：等底的跳转现在定。`row` 是它在时间线里对应的行（调用方查好）：
+    /// 在就发滚动；不在就留着等以它为中心的那一段（会话层这时才发 AroundPage）。
+    pub fn base_arrived(&mut self, row: Option<String>) -> AnchorEffect {
+        self.base_loaded = true;
+        match (self.pending_jump.is_some(), row) {
+            (true, Some(row)) => {
+                self.pending_jump = None;
+                let mut e = self.emit_scroll(row);
+                e.anchors_dirty = true;
+                e
+            }
+            _ => AnchorEffect::default(),
+        }
+    }
+
+    /// 网页重新 attach（换代次，如重载）：一次性意图全部作废。没发出的滚动指令不再发，迟到的结果只进时间线。
+    pub fn on_attach(&mut self) {
+        self.pending_jump = None;
+        self.pending_relative = None;
+        self.scroll = None;
+        self.edge = None;
     }
 
     /// 翻看到了离窗口边缘不远的一处：以它为中心重取（不跳转）。
@@ -197,6 +282,17 @@ impl Anchors {
     /// 不在 → 记下等着，返回真表示要取以它为中心的一段。
     pub fn jump(&mut self, a: pb::Anchor, row: Option<String>) -> (AnchorEffect, bool) {
         self.pending_relative = None;
+        if !self.base_loaded {
+            // 等底：首份快照还没到，先记下，到了由 base_arrived 定
+            self.pending_jump = Some(PendingJump { anchor: a });
+            return (
+                AnchorEffect {
+                    anchors_dirty: true,
+                    ..Default::default()
+                },
+                false,
+            );
+        }
         match row {
             Some(row) => {
                 self.pending_jump = None;
@@ -274,22 +370,25 @@ impl Anchors {
         }
     }
 
-    /// 时间线因为快照重建成了最新页（打开对话、重连走了快照、Q9）：不再跳，锚点按最新位置重取。
+    /// 首份快照之后又走了快照（重连、Q9），时间线回到最新页：一次性意图全部作废，锚点按最新位置重取。
+    /// 首份快照不走这里（见 [`Anchors::base_arrived`]）。
     pub fn reset_to_latest(&mut self) -> AnchorEffect {
         let had_jump = self.pending_jump.take().is_some();
+        let had_edge = self.edge.take().is_some();
         self.pending_relative = None;
-        self.want_center = Some(0);
+        self.scroll = None;
+        self.want_center = Some(LATEST_CENTER);
         AnchorEffect {
-            anchors_dirty: had_jump,
+            anchors_dirty: had_jump || had_edge,
             ..Default::default()
         }
     }
 
+    /// 滚动指令的唯一产生处（Rust 侧没有第二处构造 ScrollTo）。
     fn emit_scroll(&mut self, row_key: String) -> AnchorEffect {
-        self.next_token += 1;
         self.scroll = Some(ScrollTo {
             row_key,
-            token: self.next_token,
+            token: next_token(),
         });
         AnchorEffect {
             scroll_dirty: true,
@@ -301,6 +400,14 @@ impl Anchors {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 首份快照已经到了的锚点状态（这里的单元测试都在「有底」之后）。
+    fn based() -> Anchors {
+        Anchors {
+            base_loaded: true,
+            ..Anchors::default()
+        }
+    }
 
     fn a(seq: u64) -> pb::Anchor {
         pb::Anchor {
@@ -331,7 +438,7 @@ mod tests {
 
     #[test]
     fn current_outside_window_refetches() {
-        let mut s = Anchors::default();
+        let mut s = based();
         s.replace_window(0, window(&[100, 200], true, false));
         s.on_visible(150);
         assert_eq!(s.want_center, None, "在窗口里不重取");
@@ -341,7 +448,7 @@ mod tests {
             Some(50),
             "第一行在窗口之前、前面还有：以它为中心重取"
         );
-        let mut t = Anchors::default();
+        let mut t = based();
         t.replace_window(0, window(&[100, 200], false, false));
         t.on_visible(50);
         assert_eq!(t.want_center, None, "对照：前面没有了就不重取");
@@ -351,7 +458,7 @@ mod tests {
     /// 之后换来的窗口（翻看、重取）只重算位置，不把翻看出来的窗口拉回去。
     #[test]
     fn first_window_checks_visible_position() {
-        let mut s = Anchors::default();
+        let mut s = based();
         s.window_arrived(0, window(&[100, 200], true, false), Some(50));
         assert_eq!(
             s.want_center,
@@ -359,7 +466,7 @@ mod tests {
             "第一份窗口：位置在它之前、前面还有，重取"
         );
 
-        let mut t = Anchors::default();
+        let mut t = based();
         t.window_arrived(0, window(&[100, 200], true, false), Some(150));
         assert_eq!(t.want_center, None, "对照：位置在窗口里不重取");
         t.window_arrived(300, window(&[300, 400], true, false), Some(150));
@@ -373,7 +480,7 @@ mod tests {
 
     #[test]
     fn jump_to_loaded_row_emits_scroll_once_per_token() {
-        let mut s = Anchors::default();
+        let mut s = based();
         s.replace_window(0, window(&[10, 20], false, false));
         let (e, fetch) = s.jump(a(20), Some("m20".into()));
         assert!(e.scroll_dirty && !fetch);
@@ -394,14 +501,14 @@ mod tests {
 
     #[test]
     fn relative_at_window_edge_fetches_first() {
-        let mut s = Anchors::default();
+        let mut s = based();
         s.replace_window(0, window(&[10, 20], true, false));
         s.on_visible(10);
         assert_eq!(s.relative_target(1).as_deref(), Some("20"));
         assert_eq!(s.relative_target(-1), None, "越过窗口前端");
         assert_eq!(s.pending_relative, Some(-1));
         assert_eq!(s.want_center, Some(10), "以当前位置为中心重取");
-        let mut t = Anchors::default();
+        let mut t = based();
         t.replace_window(0, window(&[10, 20], false, false));
         t.on_visible(20);
         assert_eq!(t.relative_target(1), None, "到头了");
@@ -410,7 +517,7 @@ mod tests {
 
     #[test]
     fn landed_without_target_shows_segment_only() {
-        let mut s = Anchors::default();
+        let mut s = based();
         s.replace_window(0, window(&[10], false, false));
         s.jump(a(10), None);
         assert_eq!(
@@ -428,7 +535,7 @@ mod tests {
 
     #[test]
     fn snapshot_reset_drops_pending_jump() {
-        let mut s = Anchors::default();
+        let mut s = based();
         s.replace_window(0, window(&[10], false, false));
         s.jump(a(10), None);
         s.reset_to_latest();

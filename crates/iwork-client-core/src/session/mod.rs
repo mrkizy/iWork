@@ -755,6 +755,9 @@ impl<D: Dialer> Session<D> {
             } => {
                 self.store.jump_to_row(&conversation_id, &row_key);
             }
+            Local::AnchorListInput(conversation_id) => {
+                self.store.anchor_list_input(&conversation_id);
+            }
             Local::AnchorBrowseEdge {
                 conversation_id,
                 latest,
@@ -1164,8 +1167,9 @@ impl<D: Dialer> Session<D> {
                     },
                 ));
             }
-            // 跳到没加载的锚点：取以它为中心的一段
+            // 跳到没加载的锚点：取以它为中心的一段（有了底才取：首份快照没到时先等底，见锚点模块头的表）
             if ready
+                && tl.anchors.base_loaded
                 && let Some(j) = &tl.anchors.pending_jump
                 && !self.backed_off("around", now)
                 && !self.in_flight(|p| matches!(p, QueryPurpose::AroundPage { seq, .. } if *seq == j.anchor.created_seq))

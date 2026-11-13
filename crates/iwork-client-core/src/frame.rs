@@ -119,6 +119,8 @@ impl FrameEngine {
         self.epoch = self.epoch.wrapping_add(1);
         self.current = None;
         self.sent = SentRows::default();
+        // 一次性的滚动意图不跨代次：重载后的网页不再被拉去上一代要的位置（锚点模块头的表）
+        store.on_attach();
         store.dirty.mark_all();
         self.epoch
     }

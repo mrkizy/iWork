@@ -6,7 +6,7 @@ use iwork_proto::pb;
 
 use super::{Ctx, pending, text, to_system_time};
 use crate::store::Store;
-use crate::store::anchors::{HIGHLIGHT_MS, key_of};
+use crate::store::anchors::{Edge, HIGHLIGHT_MS, key_of};
 use crate::store::timeline::Timeline;
 
 /// 锚点列表；还没取到时为 `None`（组件不显示）。
@@ -35,6 +35,11 @@ pub fn anchors(store: &Store, tl: &Timeline, ctx: Ctx) -> Option<pb::AnchorsView
             .as_ref()
             .map(|j| key_of(&j.anchor))
             .unwrap_or_default(),
+        edge_landing: match tl.anchors.edge {
+            Some(Edge::Landed { latest, token }) => Some(pb::EdgeLanding { token, latest }),
+            _ => None,
+        },
+        edge_pending: matches!(tl.anchors.edge, Some(Edge::Waiting { .. })),
     })
 }
 

@@ -240,6 +240,16 @@ message AnchorsView {
   optional string jump_loading = 6;
   // 正在跳的那一处（AnchorItem.key）：那条刻度做「流光」，对话区顶端出进度线（ui-m1 2a 第 11 条）。不在加载时为空。
   string jump_loading_key = 7;
+  // Home / End 要的那一头到了：网页把预览移到那一头（同一个 token 只用一次）。
+  optional EdgeLanding edge_landing = 8;
+  // 还在等 Home / End 的那一头：这时用户在列表里滚动或按键，网页发 AnchorListInput 作废它。
+  bool edge_pending = 9;
+}
+
+message EdgeLanding {
+  uint64 token = 1;
+  // 真 = 最新一头（End），假 = 最早一头（Home）。
+  bool latest = 2;
 }
 
 enum AnchorKind {
@@ -996,6 +1006,8 @@ message UiIntent {
     AnchorBrowseEdge anchor_browse_edge = 98;
     // 从「待你处理」进对话：定位到那张卡片（ui-m1 2a 第 18 条 b）。紧跟在 SetVisible 后面发。
     JumpToRow jump_to_row = 99;
+    // 用户在锚点列表里滚动或按键（只在 AnchorsView.edge_pending 时发）：作废等着的 Home / End。
+    AnchorListInput anchor_list_input = 100;
   }
 }
 
@@ -1058,6 +1070,10 @@ message AnchorBrowse {
 message JumpToRow {
   string conversation_id = 1;
   string row_key = 2;
+}
+
+message AnchorListInput {
+  string conversation_id = 1;
 }
 
 // Home / End：网页不知道窗口外最早、最新那一处的 key，只说要哪一头。

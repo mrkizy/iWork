@@ -1116,3 +1116,30 @@ async fn jump_to_row_moves_the_web_window_to_a_loaded_card() {
     })
     .await;
 }
+
+/// App 的真实顺序：SetVisible 之后立刻 JumpToRow，不等最新页（g3b 1/F-5）。首份快照是这次打开的底，不作废等着的
+/// 跳转；卡片不在最新页里，有了底再取以它为中心的那一段，落地后滚过去。
+#[tokio::test(flavor = "multi_thread")]
+async fn jump_to_row_right_after_set_visible() {
+    let (_d, app, mut web, _dir) = old_pending_card().await;
+    // 侧栏摘要（含待处理表）先到：入口是从「待你处理」页点进来的，那时表已经有了
+    intent(
+        &app,
+        I::SetVisible(pb::SetVisible {
+            sidebar: true,
+            pending: true,
+            ..Default::default()
+        }),
+    )
+    .await;
+    until(&app, &mut web, "待处理表到了", |s| {
+        s.pending.as_ref().is_some_and(|p| !p.entries.is_empty())
+    })
+    .await;
+    open(&app, "c-basic", true).await;
+    assert_eq!(intent(&app, jump_to_row("ap-old")).await.error, None);
+    until(&app, &mut web, "取到那一段并滚到卡片", |s| {
+        s.rows.contains_key("ap-old") && s.scroll_to.as_ref().is_some_and(|x| x.row_key == "ap-old")
+    })
+    .await;
+}

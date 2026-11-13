@@ -556,7 +556,8 @@ impl Store {
             .as_mut()
             .filter(|t| t.conversation_id == conversation_id)
         {
-            t.anchors.browse_edge(latest);
+            let e = t.anchors.browse_edge(latest);
+            self.dirty.conversation(TimelineChange::from_anchor(e));
         }
     }
 
@@ -1137,8 +1138,9 @@ impl Store {
             return;
         };
         sub.state = ViewState::Ready;
+        let scope = sub.scope.clone();
         // 设置范围走了快照（连上、重连）：期间可能漏了 rule 流的事件，记住的规则按过期重查
-        if sub.scope == ScopeKind::Settings {
+        if scope == ScopeKind::Settings {
             self.rules_stale = true;
         }
         if let Some(snapshot) = s.snapshot {
@@ -1171,8 +1173,55 @@ impl Store {
                 self.snapshot_tables.clear();
             }
         }
+        if let ScopeKind::Conversation(cid) = &scope {
+            self.conversation_base_arrived(cid);
+        }
         if !self.any_loading() {
             applied.follow_ups.push(FollowUp::AllReady);
+        }
+    }
+
+    /// 打开的对话的订阅就绪（首份快照已进时间线）：有了底，等底的跳转现在定（锚点模块头的表）。重连时也会
+    /// 再就绪一次，那时已经有底，什么都不做（作废由快照分支的 reset_to_latest 管）。
+    fn conversation_base_arrived(&mut self, conversation_id: &str) {
+        let Some(t) = self
+            .open
+            .as_mut()
+            .filter(|t| t.conversation_id == conversation_id && !t.anchors.base_loaded)
+        else {
+            return;
+        };
+        let row = t
+            .anchors
+            .pending_jump
+            .as_ref()
+            .and_then(|j| t.anchor_row(&j.anchor));
+        // 行在时间线里：窗口先放到它上面，帧才带上它（同 jump_to）
+        if let Some(k) = row.as_deref().and_then(|r| t.key_of(r)) {
+            self.window = Some((k.ordinal(), k.ordinal()));
+            self.dirty.mark(ViewKey::Conversation);
+        }
+        let e = t.anchors.base_arrived(row);
+        self.dirty.conversation(TimelineChange::from_anchor(e));
+    }
+
+    /// 网页重新 attach（换代次）：一次性滚动意图全部作废，还没发出的滚动指令不再发（锚点模块头的表）。
+    pub fn on_attach(&mut self) {
+        if let Some(t) = self.open.as_mut() {
+            t.anchors.on_attach();
+        }
+        self.dirty.conversation.scroll = false;
+    }
+
+    /// 用户在锚点列表里滚动或按键：等着的头尾作废。
+    pub fn anchor_list_input(&mut self, conversation_id: &str) {
+        if let Some(t) = self
+            .open
+            .as_mut()
+            .filter(|t| t.conversation_id == conversation_id)
+        {
+            let e = t.anchors.cancel_list_input();
+            self.dirty.conversation(TimelineChange::from_anchor(e));
         }
     }
 
@@ -1358,10 +1407,12 @@ impl Store {
                     let mut c = t.apply_page(&page, mode);
                     c.merge(t.fit(plan, self.summary.resume_cards()));
                     match mode {
-                        // 打开对话、重连走了快照：时间线回到最新，不再跳，锚点按最新位置重取（Q9 一并）
-                        PageMode::Snapshot => {
+                        // 首份快照是这次打开的底：等底的跳转由 apply_subscribed 在订阅就绪时定，不作废。
+                        // 之后的快照（重连走快照、Q9）回到最新：一次性意图全部作废，锚点按最新位置重取
+                        PageMode::Snapshot if t.anchors.base_loaded => {
                             c.merge(TimelineChange::from_anchor(t.anchors.reset_to_latest()));
                         }
+                        PageMode::Snapshot => {}
                         // 只有等着的正是这一次跳转时才落点（审查 4/F-5）：过时的结果（先跳 A 再跳 B 时 A 的、
                         // 用户滚动作废了的）照常进时间线，但不消费当前的等待、不发滚动、不挪窗口
                         PageMode::Around { center } => {
