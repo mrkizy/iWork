@@ -632,6 +632,8 @@ message SettingsView {
   string rules_empty_text = 7;
   repeated ImportGroup import_groups = 8;
   string import_empty_text = 9;
+  // 关于页「版本 x.y.z」里的版本号：客户端自己的构建版本，不依赖后台（ui-m1 2a 第 18 条 g ③）。
+  string app_version = 10;
 }
 
 message RuntimeView {

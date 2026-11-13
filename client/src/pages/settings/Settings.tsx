@@ -64,7 +64,10 @@ export function SettingsPage(props: { section?: SettingsSection; go: (s: Setting
               <Match when={section() === "about"}>
                 <div class="iw-settings__about">
                   <img src={iconUrl} alt="" width="48" height="48" />
-                  <span>iWork</span>
+                  <div class="iw-settings__about-text">
+                    <span>iWork</span>
+                    <span class="iw-settings__version">版本 {v().appVersion}</span>
+                  </div>
                 </div>
               </Match>
             </Choose>

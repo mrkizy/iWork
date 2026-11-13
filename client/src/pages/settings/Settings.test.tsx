@@ -112,4 +112,12 @@ describe.skipIf(noFixtures)("设置页", () => {
     expect(v.ruleGroups.length, "对照：没有规则").toBe(0);
     expect(within(body()).getByText(v.rulesEmptyText)).toBeInTheDocument();
   });
+
+  it("关于：图标、「iWork」、下一行「版本 x.y.z」，版本来自 patch（客户端自己的构建版本，ui-m1 2a 第 18 条 g ③）", () => {
+    renderScenario("settings-rules", { page: "settings", section: "about" });
+    const v = view("settings-rules");
+    expect(v.appVersion, "对照：录像里带着版本").toMatch(/^\d+\.\d+\.\d+/);
+    expect(within(body()).getByText("iWork")).toBeInTheDocument();
+    expect(within(body()).getByText(`版本 ${v.appVersion}`)).toBeInTheDocument();
+  });
 });

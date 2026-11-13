@@ -150,3 +150,16 @@
   font-size: var(--fs-lg);
   font-weight: 600;
 }
+
+.iw-settings__about-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 「版本 x.y.z」：--tx3、12px（ui-m1 2a 第 18 条 g ③） */
+.iw-settings__version {
+  color: var(--tx3);
+  font-size: var(--fs-sm);
+  font-weight: 400;
+}

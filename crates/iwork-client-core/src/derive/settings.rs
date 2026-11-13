@@ -199,6 +199,8 @@ pub fn settings(store: &Store, ctx: Ctx) -> pb::SettingsView {
             String::new()
         },
         import_groups,
+        // 客户端和 client-core 同一个工作区版本（version.workspace），这里取的就是客户端的构建版本
+        app_version: env!("CARGO_PKG_VERSION").into(),
     }
 }
 
