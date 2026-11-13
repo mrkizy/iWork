@@ -82,6 +82,12 @@ pub struct Ctl {
     pub ask_with: Mutex<Option<(String, String)>>,
     /// 每条 prompt 里把那个请求发几次（0 当 1）：第一次被一次性放行用掉、第二次再去等审批
     pub asks_per_prompt: AtomicUsize,
+    /// 清树（`terminate`）停在这里，直到放开（`hang_terminate` 是永不返回，这个能放开）
+    pub terminate_stall: super::hooked::Stall,
+    /// 为真时下一条 prompt 不收（报错），只这一次
+    pub fail_next_prompt: std::sync::atomic::AtomicBool,
+    /// 发权限请求之前停在这里（E4：先封口、再让请求进引擎）
+    pub ask_gate: super::hooked::Stall,
 }
 
 type Asker = Arc<
@@ -198,9 +204,13 @@ impl AgentSession for FakeSession {
         if self.ctl.hang_terminate.load(Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
+        let _returned = self.ctl.terminate_stall.pass().await;
         Ok(())
     }
     async fn prompt(&self, blocks: Vec<ContentBlock>) -> Result<FakeUpdates, AgentError> {
+        if self.ctl.fail_next_prompt.swap(false, Ordering::SeqCst) {
+            return Err(AgentError::RuntimeNotFound);
+        }
         let ticket = {
             let mut prompts = self.ctl.prompts.lock().unwrap();
             prompts.push((self.id.clone(), blocks));
@@ -247,6 +257,7 @@ impl UpdateStream for FakeUpdates {
             2 => {
                 if let Some(ask) = self.asker.take() {
                     for _ in 0..self.ctl.asks_per_prompt.load(Ordering::SeqCst).max(1) {
+                        let _passed = self.ctl.ask_gate.pass().await;
                         let (tool, input) = self
                             .ctl
                             .ask_with

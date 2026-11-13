@@ -57,7 +57,7 @@ impl Stall {
     }
 
     /// 过这一处；返回的守卫在被包的调用返回之后丢弃，那时才记一次「已返回」。
-    async fn pass(&self) -> Returned<'_> {
+    pub async fn pass(&self) -> Returned<'_> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let done = Returned(self);
         if !self.armed.load(Ordering::SeqCst) {
@@ -77,7 +77,7 @@ impl Stall {
     }
 }
 
-struct Returned<'a>(&'a Stall);
+pub struct Returned<'a>(&'a Stall);
 
 impl Drop for Returned<'_> {
     fn drop(&mut self) {
