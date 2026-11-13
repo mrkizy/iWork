@@ -50,11 +50,13 @@ pub enum OwedError {
 }
 
 /// 回合 `turn`（库里此刻的样子）欠下的事件；什么都不欠（已到终态，或这种触发下不归宿主收）时返回空。
-/// `streaming`：它名下还在流式的助手消息，正文已用检查点填好。
+/// `streaming`：它名下还在流式的助手消息，正文已用检查点填好。`recorded_usage`：这个回合已记下的用量累计（读
+/// 模型里的回合用量，没记过就是零），结束事件原样带上——事件里的用量是回合累计。
 pub fn owed_turn_events(
     turn: &Turn,
     streaming: &[Message],
     by: &OwedBy,
+    recorded_usage: Usage,
 ) -> Result<Vec<DomainEvent>, OwedError> {
     if turn.state.is_terminal() {
         return Ok(Vec::new());
@@ -144,7 +146,7 @@ pub fn owed_turn_events(
             turn_id: turn.id,
             conversation_id: Some(turn.conversation_id),
             state,
-            usage: Usage::default(),
+            usage: recorded_usage,
             celebrate: false,
             change_summary: None,
         }

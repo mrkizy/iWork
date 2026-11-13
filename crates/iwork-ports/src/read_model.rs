@@ -88,10 +88,12 @@ pub struct RuntimeQuota {
 }
 
 /// 上次运行没收尾的东西（T04 方案 2.5）。一个读事务里取，交给崩溃恢复的纯函数。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Unsettled {
     /// 持有运行时进程的回合（`TurnState::holds_process`）。`Queued` 的回合一定没发过 prompt，不在这里。
     pub turns: Vec<Turn>,
+    /// 这些回合已记下的用量累计（只列记过的）。收成终态时结束事件带上它（事件里的用量是回合累计）
+    pub recorded_usage: std::collections::BTreeMap<TurnId, Usage>,
     /// 这些回合名下还在流式的助手消息；正文已用检查点填好。
     pub streaming: Vec<Message>,
     /// 执行到一半的亲手执行卡片（转换表里能接 `ProcessLost` 的状态：启动中、执行中、停止中）。

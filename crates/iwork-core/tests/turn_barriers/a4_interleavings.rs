@@ -93,7 +93,7 @@ async fn settle_broken(store: &MemStore, turn: &Turn) {
             cancel_requested: false,
             reason: "编排出错".into(),
         };
-        let events = owed_turn_events(&now, &streaming, &by).unwrap();
+        let events = owed_turn_events(&now, &streaming, &by, Default::default()).unwrap();
         if events.is_empty() {
             return;
         }

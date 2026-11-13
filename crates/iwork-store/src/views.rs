@@ -850,7 +850,10 @@ impl<C: EventCodec + ?Sized> ViewTx<'_, C> {
         })
     }
 
-    /// 整个对话的累计用量；一个回合都没报过为 `None`。
+    /// 整个对话的累计用量；一个结束的回合都没有时为 `None`。
+    /// 本对话用量：已结束的回合各自的用量相加。事件里的用量是回合累计（续接接着加），`turn_usage` 按回合取最后
+    /// 一条；回合结束时结束事件的累计覆盖中断时 `UsageReported` 记下的。没结束的回合不算：客户端只在结束事件上
+    /// 加用量，快照里先算进去，结束时就会再加一次（审查 2026-11-13-m1-t10a-d7 1/F-3）。
     fn usage_total(
         &self,
         conversation: &str,
@@ -859,9 +862,10 @@ impl<C: EventCodec + ?Sized> ViewTx<'_, C> {
         let (n, input, output, read, write, cost): Row = self
             .conn
             .prepare_cached(
-                "SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), \
-                 COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0), \
-                 SUM(cost_usd) FROM turn_usage WHERE conversation_id = ?1",
+                "SELECT COUNT(*), COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), \
+                 COALESCE(SUM(u.cache_read_tokens), 0), COALESCE(SUM(u.cache_write_tokens), 0), \
+                 SUM(u.cost_usd) FROM turn_usage u JOIN turns t ON t.id = u.turn_id \
+                 WHERE u.conversation_id = ?1 AND t.ended_seq != 0",
             )
             .and_then(|mut st| {
                 st.query_row([conversation], |r| {

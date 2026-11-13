@@ -378,6 +378,7 @@ impl<J: Judge> W<J> {
         TurnPlan {
             entry: TurnEntry::Resume {
                 request: ResumeRequest::Ready(request_blocks()),
+                recorded_usage: Default::default(),
             },
             blocks: vec![ContentBlock::Text(resume_note(&ResumeReason::Interrupted))],
             ..self.plan(turn)
@@ -1944,6 +1945,7 @@ async fn unavailable_request_fails_resumed_turn() {
     let plan = TurnPlan {
         entry: TurnEntry::Resume {
             request: ResumeRequest::Unavailable("附件 spec.txt 不在了".into()),
+            recorded_usage: Default::default(),
         },
         ..w.resume_plan(turn)
     };
@@ -1979,6 +1981,7 @@ async fn unavailable_request_fails_resumed_turn() {
     let plan = TurnPlan {
         entry: TurnEntry::Resume {
             request: ResumeRequest::Unavailable("用不到".into()),
+            recorded_usage: Default::default(),
         },
         ..w.resume_plan(other)
     };
@@ -2310,3 +2313,7 @@ mod line_swap;
 /// 回合状态两类写者撞车（T10a 方案 A4、G1；7.2a 的 K3）。
 #[path = "turn_barriers/a4_interleavings.rs"]
 mod a4_interleavings;
+
+/// 回合用量是回合累计，续接接着加（审查 2026-11-13-m1-t10a-d7 1/F-3）。
+#[path = "turn_barriers/usage.rs"]
+mod usage;

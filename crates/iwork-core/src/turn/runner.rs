@@ -208,8 +208,13 @@ pub enum TurnEntry {
     /// 新回合（`Queued`）：请求就在 `blocks` 里
     New,
     /// 中断后续接（`Interrupted`）。`request` 只在会话记录用不了、用摘要新开时才用（T06 方案 5.2a）：
-    /// 新会话里没有这一轮的请求，要原样再给一次
-    Resume { request: ResumeRequest },
+    /// 新会话里没有这一轮的请求，要原样再给一次。`recorded_usage`：这个回合上次记下的用量累计（读模型里的回合
+    /// 用量，没记过就是零）；这一趟的用量在它上面接着加，事件里写的都是回合累计（审查 2026-11-13-m1-t10a-d7
+    /// 1/F-3）。新回合没有这一项：起点只能是零
+    Resume {
+        request: ResumeRequest,
+        recorded_usage: Usage,
+    },
 }
 
 /// 续接回合的请求，由调用方用和新回合同一个「消息 → 输入块」的函数转好。
@@ -430,9 +435,12 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
             run: run_tag,
         } = plan;
         // 和回合状态对不上的在第一步里报表外转换
-        let (first, request) = match entry {
-            TurnEntry::New => (TurnTrigger::Started, None),
-            TurnEntry::Resume { request } => (TurnTrigger::Resume, Some(request)),
+        let (first, request, recorded_usage) = match entry {
+            TurnEntry::New => (TurnTrigger::Started, None, Usage::default()),
+            TurnEntry::Resume {
+                request,
+                recorded_usage,
+            } => (TurnTrigger::Resume, Some(request), recorded_usage),
         };
         let mut cancels = self.slot.open(turn.id, run_tag);
         let slot = self.slot.clone();
@@ -441,6 +449,7 @@ impl<A: AgentPort, D: PermissionDecider> SessionLine<A, D> {
         let timer = ports.timer;
         let mut run = TurnRun::new(turn, ports, &*decider, &slot, context_project_id, request);
         run.changes = changes;
+        run.recorded_usage = recorded_usage;
         let resuming = first == TurnTrigger::Resume;
 
         // 交出 prompt 之前的三次「看一眼」只为少做无用功；保证在 prompt() 里的裁决点（T10a 方案 D1a）
@@ -801,7 +810,10 @@ struct TurnRun<'a, S, C, I, L, T, H, D> {
     slot: &'a TurnSlot,
     message_id: Option<MessageId>,
     body: String,
-    usage: Usage,
+    /// 这个回合在这一趟之前记下的用量累计（续接时来自 `TurnEntry::Resume`，新回合是零）
+    recorded_usage: Usage,
+    /// 这一趟的用量：适配层每次报的是这一趟到目前的用量，后报的替换先报的
+    run_usage: Usage,
     last_checkpoint: Option<MonotonicInstant>,
     checkpointed_len: usize,
     /// 这一趟的改动探针（`TurnPlan.changes`）
@@ -835,7 +847,8 @@ where
             slot,
             message_id: None,
             body: String::new(),
-            usage: Usage::default(),
+            recorded_usage: Usage::default(),
+            run_usage: Usage::default(),
             last_checkpoint: None,
             checkpointed_len: 0,
             changes: None,
@@ -1123,7 +1136,7 @@ where
             }
             .into(),
             AgentUpdate::Usage(usage) => {
-                self.usage = usage;
+                self.run_usage = usage;
                 return Ok(None);
             }
             AgentUpdate::Quota(readings) => {
@@ -1376,12 +1389,13 @@ where
             }
             .into(),
         );
-        if self.usage != Usage::default() {
+        // 这一趟报过用量才写；写的是回合累计
+        if self.run_usage != Usage::default() {
             events.push(
                 UsageReported {
                     runtime_id: self.turn.runtime_id,
                     turn_id: self.turn.id,
-                    usage: self.usage,
+                    usage: self.turn_usage(),
                 }
                 .into(),
             );
@@ -1413,17 +1427,36 @@ where
         None
     }
 
+    /// 这个回合到现在一共的用量：之前记下的加上这一趟的。
+    fn turn_usage(&self) -> Usage {
+        add_usage(self.recorded_usage, self.run_usage)
+    }
+
     /// 回合结束事件。`summary` 只在以 `Completed` 收尾时可能有；有改动的文件才盖「搞定」章（技术设计 9.7）。
     fn finished_event(&self, summary: Option<ChangeSummary>) -> DomainEvent {
         TurnFinished {
             turn_id: self.turn.id,
             conversation_id: Some(self.turn.conversation_id),
             state: self.turn.state,
-            usage: self.usage,
+            usage: self.turn_usage(),
             celebrate: summary.as_ref().is_some_and(|s| s.files_changed > 0),
             change_summary: summary,
         }
         .into()
+    }
+}
+
+/// 两份用量相加。费用只有一边有时取有的那边（和 client-core 累加「本对话用量」同一个规则）。
+fn add_usage(a: Usage, b: Usage) -> Usage {
+    Usage {
+        input_tokens: a.input_tokens + b.input_tokens,
+        output_tokens: a.output_tokens + b.output_tokens,
+        cache_read_tokens: a.cache_read_tokens + b.cache_read_tokens,
+        cache_write_tokens: a.cache_write_tokens + b.cache_write_tokens,
+        cost_usd: match (a.cost_usd, b.cost_usd) {
+            (Some(x), Some(y)) => Some(x + y),
+            (x, y) => x.or(y),
+        },
     }
 }
 

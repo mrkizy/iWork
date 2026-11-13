@@ -20,7 +20,7 @@ use iwork_domain::approval::{ApprovalState, Decider};
 use iwork_domain::event::{
     ApprovalDecided, ApprovalRequested, AssistantCreated, ConversationCreated, DomainEvent,
     MessageAppended, MessageCompleted, ProjectAdded, ToolCallFinished, ToolCallId, ToolCallStarted,
-    TurnFinished, TurnQueued, TurnStateChanged,
+    TurnFinished, TurnQueued, TurnStateChanged, UsageReported,
 };
 use iwork_domain::message::{MessageBody, MessageStatus};
 use iwork_domain::turn::TurnState;
@@ -49,6 +49,8 @@ struct World {
 
 struct SimTurn {
     id: u128,
+    /// 这个回合到现在一共的输入 token（事件里的用量口径：回合累计，续接接着加）
+    used: u64,
     conv: u128,
     state: TurnState,
     open_tools: Vec<String>,
@@ -139,6 +141,7 @@ impl World {
                     state: TurnState::Queued,
                     open_tools: Vec::new(),
                     approval: None,
+                    used: 0,
                 });
             }
             2 => {
@@ -239,6 +242,7 @@ impl World {
             }
             8 => {
                 if let Some(i) = pick(self, |t| t.state == TurnState::Running) {
+                    self.turns[i].used += u64::from(b) + 1;
                     let t = &self.turns[i];
                     let (to, reason) = if b.is_multiple_of(3) {
                         (TurnState::Failed, Some(format!("失败 {}", t.id)))
@@ -251,11 +255,7 @@ impl World {
                             conversation_id: Some(cid(t.conv)),
                             turn_id: tid(t.id),
                             state: to,
-                            usage: iwork_domain::common::Usage {
-                                input_tokens: 10,
-                                output_tokens: u64::from(b),
-                                ..Default::default()
-                            },
+                            usage: usage(t.used),
                             celebrate: b.is_multiple_of(2),
                             change_summary: None,
                         }
@@ -265,14 +265,27 @@ impl World {
                     self.turns[i].state = to;
                 }
             }
-            // 跑着的回合中断（进程丢失）：时间线上出继续卡片，没有结束行
+            // 跑着的回合中断：时间线上出继续卡片，没有结束行。`b` 为偶数时这一趟有过用量，编排收尾时连同
+            // 中断一起写 `UsageReported`（回合累计）
             9 => {
                 if let Some(i) = pick(self, |t| t.state == TurnState::Running) {
                     let to = TurnState::Interrupted {
                         reason: iwork_domain::turn::InterruptReason::Crash,
                     };
-                    let e = Self::change(&self.turns[i], to, None);
-                    self.commit(vec![e]);
+                    let mut e = vec![Self::change(&self.turns[i], to, None)];
+                    if b.is_multiple_of(2) {
+                        self.turns[i].used += u64::from(b) + 1;
+                        let t = &self.turns[i];
+                        e.push(
+                            UsageReported {
+                                runtime_id: turn(t.id, t.conv).runtime_id,
+                                turn_id: tid(t.id),
+                                usage: usage(t.used),
+                            }
+                            .into(),
+                        );
+                    }
+                    self.commit(e);
                     self.turns[i].state = to;
                 }
             }
@@ -291,7 +304,8 @@ impl World {
                                 conversation_id: Some(cid(t.conv)),
                                 turn_id: tid(t.id),
                                 state: TurnState::Cancelled,
-                                usage: Default::default(),
+                                // 放弃时宿主替它收尾，带上已记下的累计
+                                usage: usage(t.used),
                                 celebrate: false,
                                 change_summary: None,
                             }
@@ -319,6 +333,14 @@ impl World {
                 self.turns[i].state = to;
             }
         }
+    }
+}
+
+/// 回合累计 `used` 个输入 token 的用量。
+fn usage(used: u64) -> iwork_domain::common::Usage {
+    iwork_domain::common::Usage {
+        input_tokens: used,
+        ..Default::default()
     }
 }
 
@@ -491,16 +513,23 @@ fn rows_of_page(g: &pb::GetConversationResult) -> Rows {
         rows.insert(format!("a:{}", a.id), (a.created_seq, a.state.to_string()));
     }
     for t in &g.turns {
+        let used = t.usage.as_ref().map_or(0, |u| u.input_tokens);
         rows.insert(
             format!("turn:{}", t.id),
-            (t.created_seq, t.state.to_string()),
+            (t.created_seq, format!("{} {used}", t.state)),
         );
         if t.ended_seq != 0 {
             rows.insert(format!("end:{}", t.id), (t.ended_seq, t.state.to_string()));
         }
     }
+    // 本对话用量（标题栏）：客户端在快照的值上，每个结束的回合加上它结束事件带的用量
+    let total = g.usage_total.as_ref().map_or(0, |u| u.input_tokens);
+    rows.insert(USAGE_TOTAL.into(), (0, total.to_string()));
     rows
 }
+
+/// `Rows` 里放本对话用量的键。
+const USAGE_TOTAL: &str = "usage_total";
 
 /// 一条事件落到行上（客户端时间线的规则：创建事件建行，变化事件改已有的行）。
 fn apply(rows: &mut Rows, seq: u64, e: &DomainEvent) {
@@ -555,20 +584,14 @@ fn apply(rows: &mut Rows, seq: u64, e: &DomainEvent) {
             }
         }
         DomainEvent::TurnQueued(x) => {
-            rows.insert(
-                format!("turn:{}", x.turn.id),
-                (
-                    seq,
-                    iwork_app::convert::turn_state_to_proto(x.turn.state)
-                        .0
-                        .to_string(),
-                ),
-            );
+            let state = iwork_app::convert::turn_state_to_proto(x.turn.state).0;
+            rows.insert(format!("turn:{}", x.turn.id), (seq, format!("{state} 0")));
         }
         DomainEvent::TurnStateChanged(x) => {
             let to = iwork_app::convert::turn_state_to_proto(x.to).0.to_string();
             if let Some(row) = rows.get_mut(&format!("turn:{}", x.turn_id)) {
-                row.1 = to.clone();
+                let used = row.1.split(' ').nth(1).unwrap_or("0").to_owned();
+                row.1 = format!("{to} {used}");
             }
             if let Some(end) = rows.get_mut(&format!("end:{}", x.turn_id)) {
                 end.1 = to;
@@ -578,6 +601,14 @@ fn apply(rows: &mut Rows, seq: u64, e: &DomainEvent) {
             let s = iwork_app::convert::turn_state_to_proto(x.state)
                 .0
                 .to_string();
+            // 客户端的规则（client-core `store/timeline.rs`）：回合的用量换成结束事件带的，本对话用量加上它
+            if let Some(row) = rows.get_mut(&format!("turn:{}", x.turn_id)) {
+                row.1 = format!("{s} {}", x.usage.input_tokens);
+            }
+            if let Some(total) = rows.get_mut(USAGE_TOTAL) {
+                let sum: u64 = total.1.parse::<u64>().unwrap() + x.usage.input_tokens;
+                total.1 = sum.to_string();
+            }
             rows.insert(format!("end:{}", x.turn_id), (seq, s));
         }
         _ => {}
@@ -594,6 +625,61 @@ fn conversation_page(snap: &pb::Snapshot) -> &pb::GetConversationResult {
         .expect("会话范围的快照有一页")
 }
 
+/// S2 的一次检查：照 `ops` 走场景，在第 `cut` 步之前取对话 `CONVS[which]` 的会话快照；返回（那个快照加上之后
+/// 路由到会话范围的事件归约出的行，最后直接取的快照的行）。两者应当相等。
+fn s2_rows(ops: &[(u8, u8, u8)], cut: usize, which: usize) -> (Rows, Rows) {
+    let env = Env::new();
+    let mut w = World::new(&env);
+    let snaps = ReadSnapshots::new(read(&w.store));
+    let c = CONVS[which];
+    let scope = [conv_scope(c)];
+    let keys = scope_streams(&scope[0]);
+    let mut early = None;
+    for (i, (op, a, b)) in ops.iter().enumerate() {
+        if i == cut.min(ops.len() - 1) {
+            early = Some(block(snaps.snapshot(&scope)).unwrap());
+        }
+        w.step(*op, *a, *b);
+    }
+    let (early, s1) = early.unwrap();
+    let (late, s2) = block(snaps.snapshot(&scope)).unwrap();
+    let mut rows = rows_of_page(conversation_page(&early));
+    let events = block(
+        w.store
+            .read_events(EventFilter::All, iwork_domain::id::Seq(s1), 100_000),
+    )
+    .unwrap();
+    for e in events.iter().filter(|e| e.seq.0 <= s2) {
+        let routes = routes_for(&e.event);
+        if keys.iter().any(|k| routes.iter().any(|r| k.covers(r))) {
+            apply(&mut rows, e.seq.0, &e.event);
+        }
+    }
+    (rows, rows_of_page(conversation_page(&late)))
+}
+
+/// 1/F-3 的反例：回合中断时记下了用量（`UsageReported`，回合累计），这时取快照；续接后回合结束，结束事件带
+/// 回合累计。快照加之后的事件，本对话用量和回合用量都等于之后直接取的快照。
+#[test]
+fn usage_after_interrupt_and_resume_matches_later_snapshot() {
+    // 对话 10：消息 → 排回合 → 开跑 → 中断（这一趟用了 1）→【取快照】→ 续接 → 完成（这一趟用了 2）
+    let ops = [
+        (0, 0, 0),
+        (1, 0, 0),
+        (2, 0, 0),
+        (9, 0, 0),
+        (10, 0, 0),
+        (8, 0, 1),
+    ];
+    let (from_events, later) = s2_rows(&ops, 4, 0);
+    assert_eq!(
+        later.get(USAGE_TOTAL).map(|r| r.1.as_str()),
+        Some("3"),
+        "对照：回合一共用了 1 + 2"
+    );
+    assert_eq!(from_events, later);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 48, ..ProptestConfig::default() })]
 
@@ -604,30 +690,8 @@ proptest! {
         cut in 0usize..40,
         which in 0usize..2,
     ) {
-        let env = Env::new();
-        let mut w = World::new(&env);
-        let snaps = ReadSnapshots::new(read(&w.store));
-        let c = CONVS[which];
-        let scope = [conv_scope(c)];
-        let keys = scope_streams(&scope[0]);
-        let mut early = None;
-        for (i, (op, a, b)) in ops.iter().enumerate() {
-            if i == cut.min(ops.len() - 1) {
-                early = Some(block(snaps.snapshot(&scope)).unwrap());
-            }
-            w.step(*op, *a, *b);
-        }
-        let (early, s1) = early.unwrap();
-        let (late, s2) = block(snaps.snapshot(&scope)).unwrap();
-        let mut rows = rows_of_page(conversation_page(&early));
-        let events = block(w.store.read_events(EventFilter::All, iwork_domain::id::Seq(s1), 100_000)).unwrap();
-        for e in events.iter().filter(|e| e.seq.0 <= s2) {
-            let routes = routes_for(&e.event);
-            if keys.iter().any(|k| routes.iter().any(|r| k.covers(r))) {
-                apply(&mut rows, e.seq.0, &e.event);
-            }
-        }
-        prop_assert_eq!(rows, rows_of_page(conversation_page(&late)));
+        let (from_events, later) = s2_rows(&ops, cut, which);
+        prop_assert_eq!(from_events, later);
     }
 }
 
@@ -736,7 +800,11 @@ fn six_paging_ways_match_fake_daemon() {
             other => panic!("{other:?}"),
         };
         let messages: Vec<String> = full.messages.iter().map(|m| m.id.clone()).collect();
-        let mut seqs: Vec<u64> = rows_of_page(&full).values().map(|v| v.0).collect();
+        let mut seqs: Vec<u64> = rows_of_page(&full)
+            .iter()
+            .filter(|(k, _)| k.as_str() != USAGE_TOTAL)
+            .map(|(_, v)| v.0)
+            .collect();
         seqs.sort_unstable();
         seqs.dedup();
         let mut kinds: Vec<Q> = vec![get(c, |_| {}), get(c, |g| g.limit = 0)];

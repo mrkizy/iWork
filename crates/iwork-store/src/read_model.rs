@@ -420,8 +420,15 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
             )? {
                 cards.push(decode_card(codec, &s)?);
             }
+            let mut recorded_usage = std::collections::BTreeMap::new();
+            for t in &turns {
+                if let Some(u) = recorded_usage_on(conn, &t.id.to_string())? {
+                    recorded_usage.insert(t.id, u);
+                }
+            }
             Ok(Unsettled {
                 turns,
+                recorded_usage,
                 streaming,
                 cards,
             })
@@ -680,6 +687,37 @@ fn summary_line(conn: &Connection, m: &Message) -> Result<Option<SummaryLine>, S
         text,
         attachments,
     }))
+}
+
+/// 一个回合已记下的用量累计（`turn_usage` 里那一行；事件里的用量是回合累计，这一行就是最后一条）。没记过为 `None`。
+pub(crate) fn recorded_usage_on(
+    conn: &Connection,
+    turn_id: &str,
+) -> Result<Option<iwork_domain::common::Usage>, StorageError> {
+    type Row = (i64, i64, i64, i64, Option<f64>);
+    let row: Option<Row> = conn
+        .prepare_cached(
+            "SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd \
+             FROM turn_usage WHERE turn_id = ?1",
+        )
+        .and_then(|mut st| {
+            st.query_row([turn_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .optional()
+        })
+        .map_err(sql_err)?;
+    const T: &str = "turn_usage";
+    row.map(|(input, output, read, write, cost)| {
+        Ok(iwork_domain::common::Usage {
+            input_tokens: u64_col(T, "input_tokens", input)?,
+            output_tokens: u64_col(T, "output_tokens", output)?,
+            cache_read_tokens: u64_col(T, "cache_read_tokens", read)?,
+            cache_write_tokens: u64_col(T, "cache_write_tokens", write)?,
+            cost_usd: cost,
+        })
+    })
+    .transpose()
 }
 
 fn unread_u32(v: i64) -> u32 {
