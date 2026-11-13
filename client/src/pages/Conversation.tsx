@@ -3,7 +3,7 @@
 // 拖文件进窗口时整块对话区盖一层虚线框（文字由 Rust 给，没在拖时不设）。
 // 消息锚点（2a 第 11 条）：内容超出一屏才显示。宽形态（主区域 ≥ 600px）是左边距里的导轨，窄形态是标题栏最右端的按钮
 // 加弹出面板（形态按主区域宽度判断、有回差，见 anchor/layout.ts）；⌥↑ / ⌥↓ 两种形态都不经滚轮直接逐处跳。
-import { createSignal, onCleanup, onMount, Show } from "solid-js";
+import { createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { AnchorButton } from "../anchor/AnchorButton";
 import { AnchorRail } from "../anchor/AnchorRail";
 import { nextNarrow } from "../anchor/layout";
@@ -16,7 +16,13 @@ import { VirtualRows } from "../ui/VirtualRows";
 import { ProjectSelector } from "./ProjectSelector";
 import "./pages.css";
 
-export function ConversationPage(props: { id: string; rowKey?: string; openRuntimeDetails: () => void }) {
+export function ConversationPage(props: {
+  id: string;
+  rowKey?: string;
+  openRuntimeDetails: () => void;
+  /** 标题栏右端、锚点按钮左边的按钮（助手私聊页的「助手资料」，ui-m1 2a 第 18 条 d）。 */
+  headerEnd?: JSX.Element;
+}) {
   const host = useHost();
   // 切换对话的那一刻，store 里可能还是上一个对话：只认 id 对得上的
   const conv = () => (host.view.conversation?.id === props.id ? host.view.conversation : undefined);
@@ -65,6 +71,7 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
             </span>
           )}
         </Show>
+        {props.headerEnd}
         <Show when={narrow() && shownAnchors()}>
           {(a) => <AnchorButton anchors={a()} currentKey={conv()?.anchorKey} onJump={jumpTo} onBrowse={browseAt} />}
         </Show>

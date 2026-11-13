@@ -1,5 +1,6 @@
 /* 助手主页（画布 09、13）：左边私聊，右边资料栏 */
 .iw-assistant-page {
+  position: relative;
   display: flex;
   flex: 1;
   min-height: 0;
@@ -11,7 +12,7 @@
   display: flex;
   flex: none;
   flex-direction: column;
-  width: 356px;
+  width: var(--profile-w);
   min-height: 0;
   overflow-y: auto;
   padding: 24px 18px;
@@ -113,6 +114,54 @@
   border: 2px solid var(--brand);
 }
 .iw-config__color:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+/* 放不下时的浮层：从右边盖在对话上（ui-m1 2a 第 18 条 d），同弹出菜单的阴影 */
+.iw-profile--overlay {
+  position: absolute;
+  z-index: 15;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  border-left: 1px solid var(--bd2);
+  background: var(--surf);
+  box-shadow: var(--shadow-pop);
+  animation: iw-profile-in 0.16s ease;
+}
+@keyframes iw-profile-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0.6;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .iw-profile--overlay {
+    animation: none;
+  }
+}
+
+/* 标题栏右端、锚点按钮左边的「助手资料」按钮，32×32，同锚点按钮 */
+.iw-profile-btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--tx2);
+  cursor: pointer;
+}
+.iw-profile-btn:hover,
+.iw-profile-btn--open {
+  background: var(--sideOn);
+}
+.iw-profile-btn:focus-visible {
   outline: 2px solid var(--brand);
   outline-offset: 2px;
 }

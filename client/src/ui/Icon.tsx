@@ -22,6 +22,7 @@ const PATHS = {
   copy: "M9 9h10v10H9zM5 15V5h10",
   arrowDown: "M12 5v14M6 13l6 6 6-6",
   folder: "M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z",
+  sidePanel: "M4 5h16v14H4zM15 5v14",
 } as const;
 
 export type IconName = keyof typeof PATHS;

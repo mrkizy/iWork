@@ -3,15 +3,19 @@
 // 配置改了就自动保存：网页只说「改了哪一项」（UpdateAssistantField），合并与版本由 Rust 的闸管
 // （client-core store::assistant_edits）；显示的值来自 patch（摘要 + 还没落定的改动）。
 // 文字框失焦或回车才提交、Esc 还原，编辑中不被下一帧覆盖；下拉与开关一改就提交。
-// 头像配色等设计窗口定色值，这次不画（主管 2026-11-13）。资料栏窄窗口下怎么收起也等设计窗口，现在常驻。
-import { createEffect, createSignal, For, Match, Show, Switch as Choose } from "solid-js";
+// 资料栏（ui-m1 2a 第 18 条 d）：主区域放得下（≥ 924，回差见 profileLayout）且用户没手动收起时常驻；放不下时收起，
+// 标题栏的「助手资料」按钮点开一块盖在对话上的浮层（Esc、点外面收起，变宽到放得下就回到常驻）。放得下时同一个按钮
+// 手动收起 / 展开，这个选择是后台的全局偏好（SetProfilePanelCollapsed），不只记在网页里。
+import { createEffect, createSignal, For, Match, onCleanup, onMount, Show, Switch as Choose } from "solid-js";
 import type { AssistantProfileView } from "../gen/iwork/v1/view_pb";
 import { useHost } from "../host";
 import type { AssistantTab, Route } from "../shell/route";
 import { Avatar } from "../ui/Avatar";
+import { Icon } from "../ui/Icon";
 import { Switch } from "../ui/Switch";
 import { ConversationPage } from "./Conversation";
 import { ModelSelects, pickedFrom } from "./AssistantModelSelects";
+import { nextRoomy } from "./profileLayout";
 import "./assistant.css";
 
 /** 配置页改的一项（UpdateAssistantFieldIntent.field）。 */
@@ -36,14 +40,91 @@ export function AssistantPage(props: {
   const host = useHost();
   // 切换助手的那一刻 store 里可能还是上一个：只认 id 对得上的
   const view = () => (host.view.assistant?.assistantId === props.route.id ? host.view.assistant : undefined);
+
+  // 主区域放不放得下资料栏：布局事实，网页自己量
+  const [roomy, setRoomy] = createSignal(true);
+  // 放不下时点开的浮层
+  const [overlay, setOverlay] = createSignal(false);
+  let page!: HTMLDivElement;
+  let button!: HTMLButtonElement;
+  let panel: HTMLElement | undefined;
+  onMount(() => {
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width;
+      if (width !== undefined && width > 0) setRoomy((was) => nextRoomy(was, width));
+    });
+    observer.observe(page);
+    onCleanup(() => observer.disconnect());
+  });
+  // 变宽到放得下：浮层收掉，回到常驻（或用户收起的状态）
+  createEffect(() => {
+    if (roomy()) setOverlay(false);
+  });
+  const userCollapsed = () => view()?.profilePanelCollapsed ?? false;
+  const docked = () => roomy() && !userCollapsed();
+  const shown = () => docked() || overlay();
+
+  const closeOverlay = () => {
+    setOverlay(false);
+    button.focus();
+  };
+  const toggle = () => {
+    if (roomy()) void host.act({ case: "setProfilePanelCollapsed", value: { on: !userCollapsed() } });
+    else setOverlay((o) => !o);
+  };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key !== "Escape") return;
+    e.stopPropagation();
+    closeOverlay();
+  };
+  const onPointer = (e: PointerEvent) => {
+    const t = e.target as Node | null;
+    if (t && (panel?.contains(t) || button.contains(t))) return;
+    closeOverlay();
+  };
+  createEffect(() => {
+    if (!overlay()) return;
+    document.addEventListener("keydown", onKey, true);
+    document.addEventListener("pointerdown", onPointer, true);
+    onCleanup(() => {
+      document.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("pointerdown", onPointer, true);
+    });
+  });
+
+  const profileButton = (
+    <button
+      ref={button}
+      type="button"
+      class={`iw-profile-btn${shown() ? " iw-profile-btn--open" : ""}`}
+      aria-label="助手资料"
+      aria-expanded={shown()}
+      aria-controls="iw-profile"
+      onClick={toggle}
+    >
+      <Icon name="sidePanel" size={16} />
+    </button>
+  );
+
   return (
-    <div class="iw-assistant-page">
-      <ConversationPage id={props.route.conversationId} openRuntimeDetails={props.openRuntimeDetails} />
-      <aside class="iw-profile" aria-label="助手资料">
-        <Show when={view()}>
-          {(v) => <Profile view={v()} tab={props.route.tab} setTab={(tab) => props.go({ ...props.route, tab })} />}
-        </Show>
-      </aside>
+    <div ref={page} class="iw-assistant-page">
+      <ConversationPage
+        id={props.route.conversationId}
+        openRuntimeDetails={props.openRuntimeDetails}
+        headerEnd={profileButton}
+      />
+      <Show when={shown()}>
+        <aside
+          ref={panel}
+          id="iw-profile"
+          class={`iw-profile${docked() ? "" : " iw-profile--overlay"}`}
+          aria-label="助手资料"
+        >
+          <Show when={view()}>
+            {(v) => <Profile view={v()} tab={props.route.tab} setTab={(tab) => props.go({ ...props.route, tab })} />}
+          </Show>
+        </aside>
+      </Show>
     </div>
   );
 }
