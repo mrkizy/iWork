@@ -286,6 +286,25 @@ fn turn_work_bindings_counts_and_snapshot_inputs() {
     assert_eq!(block(rm.last_session_binding(cid(11))).unwrap(), None);
     assert!(block(rm.session_ids_of(cid(11))).unwrap().is_empty());
 
+    // ---- 会话替换（诊断）：s-a → s-b 那一次，后面又记回了 s-a，算退回 ----
+    let replacements = block(rm.view(|tx| tx.session_replacements(cid(10)))).unwrap();
+    assert_eq!(
+        replacements,
+        vec![iwork_ports::read_model::SessionReplacement {
+            turn_id: tid(20),
+            seq: Seq(resumed.0 - 1),
+            old_runtime_session_id: "s-a".into(),
+            new_runtime_session_id: "s-b".into(),
+            reason: SessionLostReason::NotFound,
+            rolled_back: true,
+        }]
+    );
+    assert!(
+        block(rm.view(|tx| tx.session_replacements(cid(11))))
+            .unwrap()
+            .is_empty()
+    );
+
     // ---- 退出前的数 ----
     assert_eq!(
         block(rm.quit_counts()).unwrap(),
@@ -325,4 +344,46 @@ fn turn_work_bindings_counts_and_snapshot_inputs() {
     let before = dump_projections(&env.db());
     block(store.rebuild_projections()).unwrap();
     assert_eq!(dump_projections(&env.db()), before);
+}
+
+/// 会话替换的另两格：替换后没有记回旧编号的不算退回；另一个回合绑到同一个旧编号也不算（只看同一回合）。
+#[test]
+fn session_replacement_kept_unless_same_turn_rebinds_old() {
+    let env = Env::new();
+    let store = env.open();
+    let rm = read_model(&store);
+    let feed = Feed {
+        store: &store,
+        next: std::cell::Cell::new(1),
+    };
+    feed.ok(vec![
+        ProjectAdded {
+            project: project(1),
+        }
+        .into(),
+        AssistantCreated {
+            assistant: assistant(1, false),
+        }
+        .into(),
+        ConversationCreated {
+            conversation: project_conversation(10, 1),
+        }
+        .into(),
+    ]);
+    feed.ok(vec![TurnQueued { turn: turn(20, 10) }.into()]);
+    feed.ok(vec![TurnQueued { turn: turn(21, 10) }.into()]);
+    feed.ok(vec![bound(20, "s-a", None)]);
+    let replaced = feed.ok(vec![bound(20, "s-b", Some("s-a"))]);
+    feed.ok(vec![bound(21, "s-a", None)]);
+    let got = block(rm.view(|tx| tx.session_replacements(cid(10)))).unwrap();
+    assert_eq!(got.len(), 1, "对照：只有一次替换");
+    assert_eq!(got[0].seq, replaced);
+    assert_eq!(
+        (
+            got[0].old_runtime_session_id.as_str(),
+            got[0].new_runtime_session_id.as_str()
+        ),
+        ("s-a", "s-b")
+    );
+    assert!(!got[0].rolled_back, "记回 s-a 的是另一个回合");
 }
