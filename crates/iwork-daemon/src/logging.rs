@@ -609,6 +609,7 @@ mod tests {
     }
 
     fn capture(f: impl FnOnce()) -> Vec<Value> {
+        keep_callsites_interested();
         let mem = Arc::new(Memory::default());
         let sub = tracing_subscriber::registry().with(JsonLayer::new(mem.clone()));
         tracing::subscriber::with_default(sub, f);
@@ -617,6 +618,44 @@ mod tests {
             .iter()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()
+    }
+
+    /// 本线程装的订阅者（`with_default` / `set_default`）收不全事件的竞态，在这里堵上；整个测试程序只装一次。
+    ///
+    /// tracing 按「第一次命中某个 callsite 时有哪些订阅者」算 interest 并缓存。只有一个分发器时，
+    /// 它用命中线程自己的默认订阅者来算：别的测试线程（比如 `handler` 的测试走 `span::command`、
+    /// 或碰到 ipc 审计）没装订阅者，先命中就会把 callsite 缓存成 never，本线程的订阅者从此收不到。
+    /// 全局装一个对谁都答 sometimes、自己不收事件的订阅者，没装订阅者的线程算出来的也不再是 never。
+    /// 同一个竞态在 iwork-ipc 有一个必红的复现：`crates/iwork-ipc/tests/audit_capture.rs`。
+    fn keep_callsites_interested() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            tracing::subscriber::set_global_default(KeepInterest)
+                .expect("iwork-daemon 的单元测试里只有这里装全局订阅者");
+        });
+    }
+
+    /// 对每个 callsite 都答 sometimes、自己一条事件都不收的订阅者。
+    struct KeepInterest;
+
+    impl tracing::Subscriber for KeepInterest {
+        fn register_callsite(
+            &self,
+            _: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
+        }
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            false
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
     }
 
     /// 对拍（方案 2.10）：用内存传输真的触发一次服务端拒绝与一次交接超时，旁路都收得到；
@@ -688,6 +727,7 @@ mod tests {
         }
 
         let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        keep_callsites_interested();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::registry().with(AuditTap::new(tx)),
         );

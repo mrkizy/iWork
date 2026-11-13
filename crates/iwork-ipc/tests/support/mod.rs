@@ -664,6 +664,7 @@ pub struct Captured(pub Arc<Mutex<Vec<BTreeMap<String, String>>>>);
 
 impl Captured {
     pub fn install() -> (Captured, tracing::subscriber::DefaultGuard) {
+        keep_callsites_interested();
         let c = Captured::default();
         let guard = tracing::subscriber::set_default(CaptureSubscriber(c.clone()));
         (c, guard)
@@ -682,6 +683,44 @@ impl Captured {
     pub fn all(&self) -> Vec<BTreeMap<String, String>> {
         self.0.lock().unwrap().clone()
     }
+}
+
+/// 装一个进程级的全局订阅者 [`KeepInterest`]，整个测试程序只装一次。
+///
+/// tracing 按「第一次命中某个 callsite 时有哪些订阅者」算这个 callsite 的 interest 并缓存。
+/// 只有一个分发器时，它用命中线程自己的默认订阅者来算：同一测试程序里别的测试线程没装订阅者，
+/// 先命中审计 callsite 就会把它缓存成 never，之后本线程的 `Captured` 再也收不到这条审计
+/// （必红的复现见 `tests/audit_capture.rs`）。
+/// 有了全局的 `KeepInterest`，没装订阅者的线程算出来的也是 sometimes，事件照常问到各线程自己的订阅者。
+fn keep_callsites_interested() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::subscriber::set_global_default(KeepInterest)
+            .expect("iwork-ipc 的测试程序里只有这里装全局订阅者");
+    });
+}
+
+/// 对每个 callsite 都答 sometimes、自己一条事件都不收的订阅者。
+struct KeepInterest;
+
+impl tracing::Subscriber for KeepInterest {
+    fn register_callsite(
+        &self,
+        _: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        false
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, _: &tracing::Event<'_>) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
 }
 
 struct CaptureSubscriber(Captured);
