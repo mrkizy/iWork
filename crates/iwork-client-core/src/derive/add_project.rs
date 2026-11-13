@@ -93,7 +93,7 @@ pub fn candidate(c: &Candidate, d: &AddProjectDraft, home: Option<&str>) -> pb::
                     v.notice_body = text::ADD_NOT_VERSIONED_BODY.into();
                     v.notice_tone = pb::Tone::Warning.into();
                     v.init_label = Some(text::ADD_INIT_LABEL.into());
-                    v.initializing = d.busy == Some(Busy::Initializing);
+                    v.initializing = d.busy_kind() == Some(Busy::Initializing);
                     draft_row(&mut v);
                 }
                 pb::ProjectPathState::Addable => {

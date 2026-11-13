@@ -206,6 +206,8 @@ pub struct Session<D: Dialer> {
     inspect_in_flight: Option<(u64, u64)>,
     /// 上一次克隆的参数（「重试」用，网页不重传）。
     last_clone: Option<pb::CloneRepository>,
+    /// 添加项目草稿发出的命令（command_id → 草稿操作编号）：回包按编号交回草稿（store::add_project）。
+    add_project_ops: HashMap<String, u64>,
     /// 「已重新连接，回到最新」提示到时撤掉的时刻（Q9）。
     back_to_latest_until: Option<Instant>,
     /// 时钟（方案 2.4 第 10 条：注入）。一轮循环只读一次，service 与 next_deadline 用同一个时刻（审查 2/F-1）。
@@ -281,6 +283,7 @@ impl<D: Dialer> Session<D> {
             start_steps: None,
             inspect_in_flight: None,
             last_clone: None,
+            add_project_ops: HashMap::new(),
             back_to_latest_until: None,
             clock,
         }
@@ -613,7 +616,9 @@ impl<D: Dialer> Session<D> {
                 self.on_local(l);
                 let _ = tx.send(ok);
             }
-            Action::Command(kind) => self.send_command(kind, Some(tx)),
+            Action::Command(kind) => {
+                self.send_command(kind, Some(tx));
+            }
             Action::AttachPasted(x) => self.on_attach(attach::Source::Pasted(x), tx),
             Action::Pick(p) => self.open_picker(p, tx),
         }
@@ -659,13 +664,15 @@ impl<D: Dialer> Session<D> {
                 tx,
             ),
             // 选文件夹的框只给一个路径
-            Pick::ProjectLocation { project_id } => self.send_command(
-                pb::command::Kind::RelocateProject(pb::RelocateProject {
-                    project_id,
-                    new_path: first,
-                }),
-                Some(tx),
-            ),
+            Pick::ProjectLocation { project_id } => {
+                self.send_command(
+                    pb::command::Kind::RelocateProject(pb::RelocateProject {
+                        project_id,
+                        new_path: first,
+                    }),
+                    Some(tx),
+                );
+            }
             Pick::ProjectFolder => {
                 self.add_project_picked(add_project::AddProjectPick::Candidate, first);
                 let _ = tx.send(pb::IntentAck { error: None });
@@ -674,10 +681,12 @@ impl<D: Dialer> Session<D> {
                 self.add_project_picked(add_project::AddProjectPick::Parent, first);
                 let _ = tx.send(pb::IntentAck { error: None });
             }
-            Pick::ProjectsRoot => self.send_command(
-                pb::command::Kind::SetProjectsRoot(pb::SetProjectsRoot { path: first }),
-                Some(tx),
-            ),
+            Pick::ProjectsRoot => {
+                self.send_command(
+                    pb::command::Kind::SetProjectsRoot(pb::SetProjectsRoot { path: first }),
+                    Some(tx),
+                );
+            }
         }
     }
 
@@ -832,11 +841,12 @@ impl<D: Dialer> Session<D> {
 
     // ---------- 命令 ----------
 
+    /// 发一条命令，返回它的 command_id（断线时不发，回 None）。
     fn send_command(
         &mut self,
         kind: pb::command::Kind,
         reply: Option<oneshot::Sender<pb::IntentAck>>,
-    ) {
+    ) -> Option<String> {
         if !self.live() {
             // 断线期间不接新命令（D8：发送禁用，草稿留在网页本地）。
             if let Some(tx) = reply {
@@ -844,7 +854,7 @@ impl<D: Dialer> Session<D> {
                     error: Some(offline_error()),
                 });
             }
-            return;
+            return None;
         }
         let command_id = ulid::Ulid::generate().to_string();
         let command = pb::Command {
@@ -852,7 +862,7 @@ impl<D: Dialer> Session<D> {
             kind: Some(kind),
         };
         self.outbox.insert(
-            command_id,
+            command_id.clone(),
             InFlight {
                 command: command.clone(),
                 reply,
@@ -860,6 +870,7 @@ impl<D: Dialer> Session<D> {
             },
         );
         self.dispatch(command);
+        Some(command_id)
     }
 
     fn dispatch(&self, command: pb::Command) {
@@ -960,8 +971,8 @@ impl<D: Dialer> Session<D> {
                     if let Some(pb::command::Kind::UpdateAssistant(u)) = &f.command.kind {
                         self.assistant_update_done(&u.assistant_id, ack.as_ref());
                     }
-                    if let Some(kind) = &f.command.kind {
-                        self.add_project_done(kind, accepted, ack.as_ref());
+                    if let Some(op) = self.add_project_ops.remove(&command_id) {
+                        self.add_project_done(op, &f.command.kind, accepted, ack.as_ref());
                     }
                     if ack.is_none()
                         && matches!(f.command.kind, Some(pb::command::Kind::RevokeRule(_)))

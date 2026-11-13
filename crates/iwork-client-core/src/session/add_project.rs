@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use super::{Internal, Session, offline_error};
 use crate::intent::AddProjectAct;
 use crate::session::dial::Dialer;
-use crate::store::add_project::{Busy, Confirm};
+use crate::store::add_project::Confirm;
 
 /// 不能做时的错误（候选状态不对、正在忙）。
 fn not_ready(message: &str) -> pb::IntentError {
@@ -54,9 +54,10 @@ impl<D: Dialer> Session<D> {
                 reply(tx, None);
             }
             AddProjectAct::InitCandidate => match self.store.edit_add_project(|d| d.init()) {
-                Ok(path) => self.send_command(
+                Ok((op, path)) => self.send_draft_command(
+                    op,
                     pb::command::Kind::InitRepository(pb::InitRepository { path }),
-                    Some(tx),
+                    tx,
                 ),
                 Err(e) => reply(tx, Some(not_ready(e))),
             },
@@ -64,12 +65,14 @@ impl<D: Dialer> Session<D> {
                 Ok(Confirm::Add {
                     path,
                     propose_draft,
-                }) => self.send_command(
+                    op,
+                }) => self.send_draft_command(
+                    op,
                     pb::command::Kind::AddProject(pb::AddProject {
                         path,
                         propose_agents_md_draft: Some(propose_draft),
                     }),
-                    Some(tx),
+                    tx,
                 ),
                 Ok(Confirm::Open { project_id }) => {
                     self.store.navigate_project(project_id);
@@ -79,13 +82,14 @@ impl<D: Dialer> Session<D> {
             },
             AddProjectAct::Create { name } => match self
                 .store
-                .edit_add_project(|d| d.begin(Busy::Creating))
+                .edit_add_project(|d| d.begin_create())
             {
-                Ok(()) => {
+                Ok(op) => {
                     let parent_dir = self.store.add_project.parent_dir.clone();
-                    self.send_command(
+                    self.send_draft_command(
+                        op,
                         pb::command::Kind::CreateProject(pb::CreateProject { name, parent_dir }),
-                        Some(tx),
+                        tx,
                     );
                 }
                 Err(e) => reply(tx, Some(not_ready(e))),
@@ -109,44 +113,54 @@ impl<D: Dialer> Session<D> {
     }
 
     fn start_clone(&mut self, c: pb::CloneRepository, tx: oneshot::Sender<pb::IntentAck>) {
-        if let Err(e) = self.store.edit_add_project(|d| d.begin(Busy::Cloning)) {
-            let _ = tx.send(pb::IntentAck {
-                error: Some(not_ready(e)),
-            });
-            return;
-        }
+        let op = match self.store.edit_add_project(|d| d.begin_clone()) {
+            Ok(op) => op,
+            Err(e) => {
+                let _ = tx.send(pb::IntentAck {
+                    error: Some(not_ready(e)),
+                });
+                return;
+            }
+        };
         // 参数记在会话层，「重试」不让网页重传
         self.last_clone = Some(c.clone());
-        self.send_command(pb::command::Kind::CloneRepository(c), Some(tx));
+        self.send_draft_command(op, pb::command::Kind::CloneRepository(c), tx);
     }
 
-    /// 添加项目一组的命令有了结果。`accepted` 是受理的 seq 范围。
+    /// 发草稿操作 `op` 的命令，记下 command_id → 编号，回包按编号交回草稿。
+    fn send_draft_command(
+        &mut self,
+        op: u64,
+        kind: pb::command::Kind,
+        tx: oneshot::Sender<pb::IntentAck>,
+    ) {
+        if let Some(command_id) = self.send_command(kind, Some(tx)) {
+            self.add_project_ops.insert(command_id, op);
+        }
+    }
+
+    /// 草稿操作 `op` 的命令有了结果。`accepted` 是受理的 seq 范围。草稿只认当前那件（弹窗关过的旧操作不动新草稿）。
     pub(super) fn add_project_done(
         &mut self,
-        kind: &pb::command::Kind,
+        op: u64,
+        kind: &Option<pb::command::Kind>,
         accepted: Option<(u64, u64)>,
         error: Option<&pb::IntentError>,
     ) {
         use pb::command::Kind as C;
-        if !matches!(
-            kind,
-            C::InitRepository(_) | C::AddProject(_) | C::CreateProject(_) | C::CloneRepository(_)
-        ) {
-            return;
-        }
         if let Some(e) = error {
             let why = e.message.clone();
-            self.store.edit_add_project(|d| d.finished(Err(why)));
+            self.store.edit_add_project(|d| d.finished(op, Err(why)));
             return;
         }
         match (kind, accepted) {
-            (C::AddProject(_) | C::CreateProject(_), Some((first, last))) => {
-                self.store.project_add_accepted(first, last);
+            (Some(C::AddProject(_) | C::CreateProject(_)), Some((first, last))) => {
+                self.store.project_add_accepted(first, last, op);
             }
             // 克隆受理了：等 CloneFinished（store 里收）
-            (C::CloneRepository(_), _) => {}
+            (Some(C::CloneRepository(_)), _) => {}
             _ => {
-                self.store.edit_add_project(|d| d.finished(Ok(())));
+                self.store.edit_add_project(|d| d.finished(op, Ok(())));
             }
         }
     }
@@ -248,4 +262,87 @@ impl<D: Dialer> Session<D> {
 pub(super) enum AddProjectPick {
     Candidate,
     Parent,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::add_project::{Busy, Check};
+
+    struct NoDial;
+    impl Dialer for NoDial {
+        async fn dial(
+            &mut self,
+        ) -> Result<(iwork_ipc::client::Client, iwork_ipc::client::Incoming), crate::DialError>
+        {
+            std::future::pending().await
+        }
+    }
+
+    fn session() -> Session<NoDial> {
+        let opts = crate::Options::default();
+        let (effects, _) = tokio::sync::mpsc::unbounded_channel();
+        Session::new(
+            NoDial,
+            opts.chunk_max,
+            opts.timeline_cap,
+            opts.clock,
+            effects,
+        )
+    }
+
+    fn unversioned(root: &str) -> pb::InspectProjectPathResult {
+        pb::InspectProjectPathResult {
+            root_path: root.into(),
+            state: pb::ProjectPathState::NotVersionControlled.into(),
+            ..Default::default()
+        }
+    }
+
+    /// 审查 g3 1/F-2（复现原样）：初始化 A 在途时关掉弹窗、再初始化 B；A 的受理回包不能结束 B 的初始化。
+    #[tokio::test]
+    async fn old_init_reply_does_not_finish_new_draft() {
+        let mut s = session();
+        let d = &mut s.store.add_project;
+        let t = d.set_candidate("/A".into()).token;
+        d.inspected(t, Ok(unversioned("/A")));
+        let (a, _) = d.init().unwrap();
+        d.clear();
+        let t = d.set_candidate("/B".into()).token;
+        d.inspected(t, Ok(unversioned("/B")));
+        let (b, _) = d.init().unwrap();
+        let init = Some(pb::command::Kind::InitRepository(pb::InitRepository {
+            path: "/A".into(),
+        }));
+        s.add_project_done(a, &init, Some((10, 10)), None);
+        assert_eq!(s.store.add_project.busy_kind(), Some(Busy::Initializing));
+        s.add_project_done(b, &init, Some((11, 11)), None);
+        assert_eq!(s.store.add_project.busy, None, "对照：B 自己的回包结束它");
+    }
+
+    /// 审查 g3 附注：重连后候选 token 不变；旧连接上迟到的成功回包不记，只认本连接上发的那次。
+    #[tokio::test]
+    async fn old_connection_success_for_unchanged_candidate_is_dropped() {
+        let mut s = session();
+        s.conn_epoch = 1;
+        let token = s.store.add_project.set_candidate("/same".into()).token;
+        s.conn_epoch = 2;
+        s.inspect_in_flight = Some((2, token));
+        let ok = pb::InspectProjectPathResult {
+            root_path: "/same".into(),
+            state: pb::ProjectPathState::Addable.into(),
+            ..Default::default()
+        };
+        s.on_inspected(1, token, Ok(ok.clone()));
+        assert_eq!(
+            s.store.add_project.candidate.as_ref().unwrap().check,
+            Check::Checking
+        );
+        assert_eq!(s.inspect_in_flight, Some((2, token)), "本连接那次还在飞");
+        s.on_inspected(2, token, Ok(ok));
+        assert!(matches!(
+            s.store.add_project.candidate.as_ref().unwrap().check,
+            Check::Done(_)
+        ));
+    }
 }

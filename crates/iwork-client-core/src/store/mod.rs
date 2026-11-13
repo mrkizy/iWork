@@ -307,7 +307,7 @@ pub struct Store {
     /// 添加项目草稿（见 add_project 模块）：选好的文件夹与检查结果；绝对路径只在这里（方案 15.2 RD1）。
     pub add_project: add_project::AddProjectDraft,
     /// 本客户端加的、新建的项目：配上受理范围里的 ProjectAdded 就打开它（与新建对话同一套配法）。
-    pub projects_created: created::CreatedWatch,
+    pub projects_created: created::CreatedWatch<u64>,
     /// 家目录：界面上的路径把它写成 `~`。
     pub home_dir: Option<String>,
     /// 「已重新连接，回到最新」提示挂在哪个对话上（Q9）；会话层到时撤掉。
@@ -684,19 +684,23 @@ impl Store {
         self.dirty.mark(ViewKey::Navigate);
     }
 
-    /// 本客户端的 AddProject / CreateProject 受理了：配上受理范围里的 ProjectAdded 就打开那个项目。
+    /// 本客户端的 AddProject / CreateProject（草稿操作 `op`）受理了：配上受理范围里的 ProjectAdded 就打开那个项目。
     /// 配不上（事件随快照来了）就不跳：项目已经在侧栏里；草稿的忙碌照常收掉。
-    pub fn project_add_accepted(&mut self, first: u64, last: u64) {
-        let purpose = created::Purpose::Open;
-        match self
-            .projects_created
-            .accepted(first, last, purpose, self.cursor)
-        {
-            created::Accepted::Matched(id, _) => self.navigate_project(id),
+    pub fn project_add_accepted(&mut self, first: u64, last: u64, op: u64) {
+        match self.projects_created.accepted(first, last, op, self.cursor) {
+            created::Accepted::Matched(id, op) => self.project_added(id, op),
             created::Accepted::Waiting => {}
-            created::Accepted::Missed(_) => self.edit_add_project(|d| {
-                d.finished(Ok(()));
+            created::Accepted::Missed(op) => self.edit_add_project(|d| {
+                d.finished(op, Ok(()));
             }),
+        }
+    }
+
+    /// 草稿操作 `op` 加的项目到了：还是当前草稿在等它就打开（打开会清草稿）；弹窗关过就不跳，项目在侧栏里，
+    /// 新草稿不动。
+    fn project_added(&mut self, project_id: String, op: u64) {
+        if self.add_project.is_current(op) {
+            self.navigate_project(project_id);
         }
     }
 
@@ -930,28 +934,25 @@ impl Store {
                     job.error.clone_from(&error);
                     self.dirty.mark(ViewKey::AddProject);
                 }
-                // 草稿在等克隆：克隆完的目录设成候选（之后和本机文件夹走同一条路，方案 15.2）
-                if self.add_project.busy == Some(add_project::Busy::Cloning) {
-                    let path = e.path.clone().filter(|_| e.ok);
-                    self.edit_add_project(|d| {
-                        d.finished(error.map_or(Ok(()), Err));
-                        if let Some(p) = path {
-                            d.set_candidate(p);
-                        }
-                    });
-                }
+                // 发起它的草稿还开着：克隆完的目录设成候选（草稿里按操作编号认，见 store::add_project）
+                let result = match (error, e.path.clone()) {
+                    (None, Some(path)) => Ok(path),
+                    (Some(why), _) => Err(why),
+                    (None, None) => Err("克隆完成了，但后台没给目录".to_owned()),
+                };
+                self.edit_add_project(|d| d.clone_finished(result));
             }
             // rule 流：只记过期、重查 ListRules，不按事件推演列表（方案 2.2）
             E::RuleRemembered(_) | E::RuleRevoked(_) | E::RulesDeleted(_) => {
                 self.rules_stale = true;
             }
             E::ProjectAdded(e) => {
-                if let Some((id, _)) = e
+                if let Some((id, op)) = e
                     .project
                     .as_ref()
                     .and_then(|p| self.projects_created.created(seq, &p.id))
                 {
-                    self.navigate_project(id);
+                    self.project_added(id, op);
                 }
             }
             E::ConversationCreated(e) => {
@@ -1073,13 +1074,9 @@ impl Store {
             for purpose in self.created.covered_by_snapshot(s.snapshot_seq) {
                 self.created_missed(purpose);
             }
-            if !self
-                .projects_created
-                .covered_by_snapshot(s.snapshot_seq)
-                .is_empty()
-            {
+            for op in self.projects_created.covered_by_snapshot(s.snapshot_seq) {
                 self.edit_add_project(|d| {
-                    d.finished(Ok(()));
+                    d.finished(op, Ok(()));
                 });
             }
             self.snapshot_tables.extend(

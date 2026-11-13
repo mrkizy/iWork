@@ -5,6 +5,11 @@
 //! 检查（`InspectProjectPath`）是附带查询，结果是某一刻盘上的样子：每换一次候选或重查一次 `token` 加一，
 //! 迟到的结果 token 对不上就丢（RD4）。能不能加以 `AddProject` 受理时后台再判一次为准（RD2）：被拒就记下原因并重查。
 //!
+//! 草稿发出去的每件事（初始化、添加、新建、克隆）带一个编号（[`Op`]）。回包、`CloneFinished` 只认编号对得上的那件：
+//! 弹窗关了又开一个新草稿以后，旧的那件照常在后台做完，但不能结束新草稿的忙碌、改它的错误或候选。
+//! 克隆的完成事件只带后台的 `job_id`，配不上本客户端的命令（受理回包里没有它），所以同一时间只放一个克隆：
+//! 克隆在后台跑着时（弹窗关了也算）不受理第二个，`CloneFinished` 就是那一个的。
+//!
 //! 这里只有状态与决定，不发命令、不发查询；会话层按返回值去做（`session::add_project`）。
 
 use iwork_proto::pb;
@@ -41,17 +46,30 @@ pub enum Busy {
     Cloning,
 }
 
+/// 草稿正在做的一件事与它的编号。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Op {
+    pub kind: Busy,
+    pub id: u64,
+}
+
 /// 「确认」该做什么。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Confirm {
-    /// 发 AddProject。
-    Add { path: String, propose_draft: bool },
+    /// 发 AddProject。`op` 是这次添加的编号（回包按它认）。
+    Add {
+        path: String,
+        propose_draft: bool,
+        op: u64,
+    },
     /// 已经是项目：不发命令，直接打开它。
     Open { project_id: String },
 }
 
 /// 当前状态下不能做这件事（回 `IntentAck.error`）。
 pub const NOT_READY: &str = "这个文件夹现在还不能这样做";
+/// 已经有一个克隆在后台跑着。
+pub const CLONE_RUNNING: &str = "上一个克隆还没完成，完成后再克隆";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AddProjectDraft {
@@ -60,9 +78,12 @@ pub struct AddProjectDraft {
     pub parent_dir: Option<String>,
     /// 「让 iWork 生成 AGENTS.md 草稿」勾着没。默认勾着（画布 07）。
     pub propose_draft: bool,
-    pub busy: Option<Busy>,
+    pub busy: Option<Op>,
     /// 上一次被拒的原因；下一次操作清掉。
     pub error: Option<String>,
+    /// 后台跑着的克隆（它的编号）。弹窗关了也留着：完成事件来了才清。
+    clone: Option<u64>,
+    /// 候选的 token 与操作编号共用一个计数（只要求各自不重复）。
     next_token: u64,
 }
 
@@ -74,6 +95,7 @@ impl Default for AddProjectDraft {
             propose_draft: true,
             busy: None,
             error: None,
+            clone: None,
             next_token: 0,
         }
     }
@@ -145,14 +167,27 @@ impl AddProjectDraft {
         }
     }
 
-    /// 「初始化为仓库」：候选没有版本控制才受理，返回要初始化的目录。
-    pub fn init(&mut self) -> Result<String, &'static str> {
+    /// 正在做的事。
+    pub fn busy_kind(&self) -> Option<Busy> {
+        self.busy.map(|o| o.kind)
+    }
+
+    fn start(&mut self, kind: Busy) -> u64 {
+        self.next_token += 1;
+        self.busy = Some(Op {
+            kind,
+            id: self.next_token,
+        });
+        self.error = None;
+        self.next_token
+    }
+
+    /// 「初始化为仓库」：候选没有版本控制才受理，返回这次的编号与要初始化的目录。
+    pub fn init(&mut self) -> Result<(u64, String), &'static str> {
         match self.state() {
             Some((pb::ProjectPathState::NotVersionControlled, r)) if self.busy.is_none() => {
                 let path = r.root_path.clone();
-                self.busy = Some(Busy::Initializing);
-                self.error = None;
-                Ok(path)
+                Ok((self.start(Busy::Initializing), path))
             }
             _ => Err(NOT_READY),
         }
@@ -165,13 +200,13 @@ impl AddProjectDraft {
         }
         match self.state() {
             Some((pb::ProjectPathState::Addable, r)) => {
-                let c = Confirm::Add {
-                    path: r.root_path.clone(),
-                    propose_draft: self.propose_draft && !r.has_agents_md,
-                };
-                self.busy = Some(Busy::Adding);
-                self.error = None;
-                Ok(c)
+                let path = r.root_path.clone();
+                let propose_draft = self.propose_draft && !r.has_agents_md;
+                Ok(Confirm::Add {
+                    path,
+                    propose_draft,
+                    op: self.start(Busy::Adding),
+                })
             }
             Some((pb::ProjectPathState::Known, r)) => r
                 .project_id
@@ -182,36 +217,75 @@ impl AddProjectDraft {
         }
     }
 
-    /// 新建、克隆开始了（忙着，主按钮不可点）。
-    pub fn begin(&mut self, busy: Busy) -> Result<(), &'static str> {
+    /// 新建开始了（忙着，主按钮不可点）。返回这次的编号。
+    pub fn begin_create(&mut self) -> Result<u64, &'static str> {
         if self.busy.is_some() {
             return Err(NOT_READY);
         }
-        self.busy = Some(busy);
-        self.error = None;
-        Ok(())
+        Ok(self.start(Busy::Creating))
     }
 
-    /// 在做的那件事有了结果。`Err` 是后台给的原因。初始化成功、添加被拒都要重查（盘上可能变了）。
-    pub fn finished(&mut self, result: Result<(), String>) -> Option<Inspect> {
-        let busy = self.busy.take();
+    /// 克隆开始了。后台已经有一个克隆在跑（哪怕是关掉的弹窗发的）就不受理，见模块说明。
+    pub fn begin_clone(&mut self) -> Result<u64, &'static str> {
+        if self.busy.is_some() {
+            return Err(NOT_READY);
+        }
+        if self.clone.is_some() {
+            return Err(CLONE_RUNNING);
+        }
+        let op = self.start(Busy::Cloning);
+        self.clone = Some(op);
+        Ok(op)
+    }
+
+    /// 编号为 `op` 的那件事有了结果（回包）。`Err` 是后台给的原因。不是当前草稿正在做的那件（弹窗关过）就只
+    /// 收掉它在后台的记录，不动草稿。初始化成功、添加被拒都要重查（盘上可能变了）。
+    pub fn finished(&mut self, op: u64, result: Result<(), String>) -> Option<Inspect> {
+        // 克隆被拒（受理就没过）：后台没有在跑的克隆了
+        if result.is_err() && self.clone == Some(op) {
+            self.clone = None;
+        }
+        let busy = self.busy.filter(|b| b.id == op)?;
+        self.busy = None;
         if let Err(why) = result {
             self.error = Some(why);
-            return match busy {
-                Some(Busy::Adding) => self.reinspect(),
+            return match busy.kind {
+                Busy::Adding => self.reinspect(),
                 _ => None,
             };
         }
-        match busy {
-            Some(Busy::Initializing) => self.reinspect(),
+        match busy.kind {
+            Busy::Initializing => self.reinspect(),
             _ => None,
         }
     }
 
-    /// 弹窗关了：清掉草稿（克隆在后台照常跑，进度不在这里）。
+    /// 后台的克隆做完了（`CloneFinished`）。还是发起它的那个草稿（没关过）：结束忙碌，成功就把克隆好的目录设成
+    /// 候选（之后和本机文件夹走同一条路，方案 15.2）。弹窗关过：草稿不动。
+    pub fn clone_finished(&mut self, result: Result<String, String>) -> Option<Inspect> {
+        let op = self.clone.take()?;
+        if self.busy.is_none_or(|b| b.id != op) {
+            return None;
+        }
+        match result {
+            Ok(path) => {
+                self.busy = None;
+                Some(self.set_candidate(path))
+            }
+            Err(why) => self.finished(op, Err(why)),
+        }
+    }
+
+    /// 编号为 `op` 的事还是当前草稿正在做的那件。
+    pub fn is_current(&self, op: u64) -> bool {
+        self.busy.is_some_and(|b| b.id == op)
+    }
+
+    /// 弹窗关了：清掉草稿。后台跑着的克隆照常跑（进度不在这里），它的记录留着。
     pub fn clear(&mut self) {
         *self = AddProjectDraft {
             next_token: self.next_token,
+            clone: self.clone,
             ..Default::default()
         };
     }
@@ -256,16 +330,21 @@ mod tests {
         assert_eq!(d.confirm(), Err(NOT_READY), "没版本控制");
         let i = d.set_candidate("/sub".into());
         d.inspected(i.token, Ok(result(pb::ProjectPathState::Addable, true)));
+        let Ok(Confirm::Add {
+            path,
+            propose_draft,
+            op,
+        }) = d.confirm()
+        else {
+            panic!("能加");
+        };
         assert_eq!(
-            d.confirm(),
-            Ok(Confirm::Add {
-                path: "/r".into(),
-                propose_draft: false
-            }),
+            (path.as_str(), propose_draft),
+            ("/r", false),
             "已有 AGENTS.md：勾着也不生成；发的是仓库根"
         );
         assert_eq!(d.confirm(), Err(NOT_READY), "正在加：不能再点");
-        d.finished(Ok(()));
+        d.finished(op, Ok(()));
         let i = d.set_candidate("/k".into());
         d.inspected(i.token, Ok(result(pb::ProjectPathState::Known, false)));
         assert_eq!(
@@ -285,16 +364,19 @@ mod tests {
             i.token,
             Ok(result(pb::ProjectPathState::NotVersionControlled, false)),
         );
-        assert_eq!(d.init(), Ok("/r".into()));
-        let again = d.finished(Ok(())).expect("初始化成功后重查");
+        let (op, path) = d.init().unwrap();
+        assert_eq!(path, "/r");
+        let again = d.finished(op, Ok(())).expect("初始化成功后重查");
         assert!(again.token > i.token);
         d.inspected(
             again.token,
             Ok(result(pb::ProjectPathState::Addable, false)),
         );
-        d.confirm().unwrap();
+        let Ok(Confirm::Add { op, .. }) = d.confirm() else {
+            panic!("能加");
+        };
         let again = d
-            .finished(Err("目录被挪走了".into()))
+            .finished(op, Err("目录被挪走了".into()))
             .expect("添加被拒后重查");
         assert_eq!(
             d.error.as_deref(),
@@ -305,9 +387,67 @@ mod tests {
             again.token,
             Ok(result(pb::ProjectPathState::NotVersionControlled, false)),
         );
-        d.init().unwrap();
-        assert_eq!(d.finished(Err("没配提交身份".into())), None);
+        let (op, _) = d.init().unwrap();
+        assert_eq!(d.finished(op, Err("没配提交身份".into())), None);
         assert_eq!(d.error.as_deref(), Some("没配提交身份"));
         assert!(d.candidate.is_some(), "候选还在");
+    }
+
+    /// 审查 g3 1/F-2：初始化 A 在途时关掉弹窗、对 B 也点初始化；A 的回包不能结束 B 的忙碌、不重查 B。
+    #[test]
+    fn old_reply_does_not_touch_new_draft() {
+        let mut d = AddProjectDraft::default();
+        let i = d.set_candidate("/A".into());
+        d.inspected(
+            i.token,
+            Ok(result(pb::ProjectPathState::NotVersionControlled, false)),
+        );
+        let (a, _) = d.init().unwrap();
+        d.clear();
+        let i = d.set_candidate("/B".into());
+        d.inspected(
+            i.token,
+            Ok(result(pb::ProjectPathState::NotVersionControlled, false)),
+        );
+        let (b, _) = d.init().unwrap();
+        assert_eq!(d.finished(a, Ok(())), None, "旧回包：不重查");
+        assert_eq!(d.finished(a, Err("旧的错".into())), None);
+        assert_eq!(d.busy_kind(), Some(Busy::Initializing), "B 还在初始化");
+        assert_eq!(d.error, None, "旧的错误不挂到 B 上");
+        assert!(
+            d.finished(b, Ok(())).is_some(),
+            "对照：B 自己的回包结束它并重查"
+        );
+        assert_eq!(d.busy, None);
+    }
+
+    /// 审查 g3 1/F-2：克隆 A 时关掉弹窗，新草稿选了本机文件夹 B；A 做完不改 B 的候选。克隆在后台跑着时不受理
+    /// 第二个克隆；A 做完以后才行，B 的克隆做完照常把目录设成候选。
+    #[test]
+    fn old_clone_does_not_replace_new_draft() {
+        let mut d = AddProjectDraft::default();
+        d.begin_clone().unwrap();
+        d.clear();
+        assert_eq!(d.begin_clone(), Err(CLONE_RUNNING), "A 还在后台跑");
+        d.set_candidate("/B".into());
+        assert_eq!(d.clone_finished(Ok("/projects/A".into())), None);
+        assert_eq!(d.candidate.as_ref().unwrap().path, "/B", "候选还是 B");
+        d.clear();
+        d.begin_clone().expect("A 做完了：可以再克隆");
+        let i = d
+            .clone_finished(Ok("/projects/C".into()))
+            .expect("对照：自己的克隆做完设成候选");
+        assert_eq!(i.path, "/projects/C");
+        assert_eq!(d.busy, None);
+    }
+
+    /// 克隆受理就被拒：后台没有在跑的克隆，可以重试。
+    #[test]
+    fn rejected_clone_can_be_retried() {
+        let mut d = AddProjectDraft::default();
+        let op = d.begin_clone().unwrap();
+        d.finished(op, Err("地址不对".into()));
+        assert_eq!(d.error.as_deref(), Some("地址不对"));
+        assert!(d.begin_clone().is_ok());
     }
 }

@@ -454,3 +454,29 @@ async fn create_project_navigates_on_project_added() {
     .await;
     assert!(project_root(&h, "新服务").is_some());
 }
+
+/// 审查 g3 1/F-2：克隆 A 时关掉弹窗，新草稿选了本机文件夹 B；A 的 CloneFinished 到了不改 B 的候选与忙碌。
+#[test]
+fn old_clone_does_not_replace_new_draft() {
+    let mut s = support::store_with_open();
+    s.add_project.begin_clone().unwrap();
+    s.add_project.clear();
+    s.add_project.set_candidate("/projects/B".into());
+    s.apply(support::persisted(
+        10,
+        &[support::SIDEBAR],
+        pb::domain_event::Event::CloneFinished(pb::CloneFinished {
+            job_id: "clone-A".into(),
+            ok: true,
+            path: Some("/projects/A".into()),
+            error: None,
+        }),
+    ));
+    let c = s.add_project.candidate.as_ref().unwrap();
+    assert_eq!(c.path, "/projects/B", "旧克隆没改候选");
+    assert_eq!(s.add_project.busy, None);
+    assert!(
+        s.add_project.begin_clone().is_ok(),
+        "A 做完了：后台没有在跑的克隆"
+    );
+}
