@@ -6,7 +6,6 @@
 //!   ③ 读一次库，把每个对话里还排着的回合提交成已取消，一个对话一笔。然后等各条线空下来。
 //! - `abort_all`（E3、E4）：锁里置「封口」，再封存储的闸；每条线丢掉手上的一整趟、清树、报告。不写回合状态。
 
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use iwork_app::lifecycle::{QuitInputs, decide_shutdown};
@@ -20,7 +19,7 @@ use iwork_ports::store::{CommitRequest, StoragePort};
 
 use super::plan::{Closing, JobKind};
 use super::ports::HostPorts;
-use super::{Bounded, HOST_ACTOR, HOST_IO_LIMIT, TurnHost, bounded};
+use super::{Bounded, HOST_ACTOR, HOST_IO_LIMIT, TurnHost, bounded, with_permit};
 use crate::work::{AbortReport, QUIT_COUNT_LIMIT, QuitCounts, RunningWork, ShutdownDecision};
 
 /// 封口后等各条线清完树、报回来，最多这么久（停机第 3 步的上限里）。
@@ -97,12 +96,24 @@ impl<P: HostPorts> TurnHost<P> {
                 events,
                 outbox: Vec::new(),
             };
-            let ports = self.ports.clone();
-            let committed = bounded(
-                &self.shared.withdraw_commit_busy,
+            // 和补账等宿主自己的提交共用一份在途额度（B3，方案 0a.8）：一笔正常的补账在途时等它，不立刻落进 KA1；
+            // 等多久由停机第 2 步的期限管，这里只给一个上限
+            let permit = match tokio::time::timeout(
                 HOST_IO_LIMIT,
-                async move { ports.store().commit(req).await },
+                self.shared.host_commit.clone().acquire_owned(),
             )
+            .await
+            {
+                Ok(Ok(p)) => p,
+                Ok(Err(_)) | Err(_) => {
+                    tracing::warn!(conversation = %w.conversation.id, "完全退出时宿主的上一笔提交一直没回来，排着的回合留着（KA1）");
+                    return;
+                }
+            };
+            let ports = self.ports.clone();
+            let committed = with_permit(permit, HOST_IO_LIMIT, async move {
+                ports.store().commit(req).await
+            })
             .await;
             match committed {
                 Bounded::Done(Ok(_)) => {}
@@ -207,7 +218,7 @@ impl<P: HostPorts> RunningWork for TurnHost<P> {
         let all_out = async {
             loop {
                 let out = self.shared.idle.notified();
-                if self.shared.live_lines.load(Ordering::SeqCst) == 0 {
+                if self.shared.tally().unreported == 0 {
                     return;
                 }
                 out.await;
@@ -215,29 +226,34 @@ impl<P: HostPorts> RunningWork for TurnHost<P> {
         };
         if tokio::time::timeout(ABORT_LIMIT, all_out).await.is_err() {
             tracing::warn!(
-                stuck = self.shared.live_lines.load(Ordering::SeqCst),
+                stuck = self.shared.tally().unreported,
                 "封口后到点还有会话线没清完树"
             );
         }
         self.abort_snapshot()
     }
 
-    /// 已报回来的照实记；还活着的会话线（还没清完树、没报回来）都算没清空。
+    /// 一把锁里读：已报回来的照实记，还没报回来的会话线（还没清完树）都算没清空（b45 2/F-2）。
     fn abort_snapshot(&self) -> AbortReport {
-        let mut report = *self.shared.abort.lock().unwrap_or_else(|e| e.into_inner());
-        let stuck = self.shared.live_lines.load(Ordering::SeqCst);
-        report.not_cleared += u32::try_from(stuck).unwrap_or(u32::MAX);
-        report
-    }
-}
-
-/// 一条线的任务在封口时报回来的（`line::run` 里用）。
-pub(super) fn record_abort(shared: &super::Shared, had_session: bool, cleared: bool) {
-    let mut r = shared.abort.lock().unwrap_or_else(|e| e.into_inner());
-    if had_session {
-        r.sessions += 1;
-        if !cleared {
-            r.not_cleared += 1;
+        let (mut report, unreported) = {
+            let t = self.shared.tally();
+            (t.report, t.unreported)
+        };
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            // 先取出来再调：调它的时候不拿着这把锁
+            let hook = self
+                .shared
+                .counters
+                .during_snapshot
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            if let Some(h) = hook {
+                h();
+            }
         }
+        report.not_cleared += u32::try_from(unreported).unwrap_or(u32::MAX);
+        report
     }
 }

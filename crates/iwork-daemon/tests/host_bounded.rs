@@ -318,3 +318,69 @@ async fn last_binding_read_is_bounded() {
     h.wait_state(t, |s| s == TurnState::Completed).await;
     h.stop().await;
 }
+
+/// b45 2/F-1：一个对话补账前的读永不返回，时钟走过几个 30 秒：别的对话排着的消息照样被派发（判据：这条消息的回合
+/// 被交了活，放开之后跑完）。补账的读属于「宿主提交」这件活，不占对账的读。
+#[tokio::test(flavor = "current_thread")]
+async fn unsettled_read_does_not_block_other_conversations() {
+    use iwork_ports::store::StoragePort;
+    use support::fixtures::{cid, cmd, project_conversation};
+    const OTHER: u128 = 999;
+    let mut h = harness(Opts::default()).await;
+    h.gate.refuse_when(|r| finishes(r, TurnState::Completed));
+    h.knobs.unsettled.arm();
+    h.start_host();
+    h.send(1, "出错收场").await;
+    within("补账前的读停住", h.knobs.unsettled.wait_stuck()).await;
+    h.gate.stop_refusing();
+    h.raw
+        .commit(cmd(
+            800,
+            vec![
+                iwork_domain::event::ConversationCreated {
+                    conversation: project_conversation(OTHER, PROJECT),
+                }
+                .into(),
+            ],
+        ))
+        .await
+        .unwrap();
+    let r = h
+        .ask(
+            fresh_id(801),
+            iwork_proto::pb::command::Kind::SendMessage(iwork_proto::pb::SendMessage {
+                conversation_id: cid(OTHER).to_string(),
+                text: "别的对话".into(),
+                attachment_ids: vec![],
+            }),
+        )
+        .await;
+    let a = accepted(&r);
+    let other = events(&h.raw)
+        .await
+        .into_iter()
+        .filter(|(s, _)| *s >= a.first_seq && *s <= a.last_seq)
+        .find_map(|(_, e)| match e {
+            DomainEvent::TurnQueued(q) => Some(q.turn.id),
+            _ => None,
+        })
+        .unwrap();
+    let handed0 = handed(&h);
+    let clock = PausedClock::start();
+    // 旧写法下对账读一直回「上一次没回来」，走多少步都交不出活；正确的写法第二步起就交得出
+    for _ in 0..10 {
+        if handed(&h) > handed0 {
+            break;
+        }
+        walk_past(&h, HOST_IO_LIMIT.max(BACKSTOP)).await;
+    }
+    assert!(
+        handed(&h) > handed0,
+        "别的对话被派发了：交活 {handed0} → {}",
+        handed(&h)
+    );
+    assert_eq!(h.knobs.unsettled.calls(), 1, "补账前的读不重发");
+    release_and_recover(&h, &h.knobs.unsettled, clock, BACKSTOP).await;
+    h.wait_state(other, |s| s == TurnState::Completed).await;
+    h.stop().await;
+}

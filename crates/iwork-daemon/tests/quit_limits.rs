@@ -196,3 +196,97 @@ async fn seal_during_host_commit_wait() {
     assert_eq!(h.host.counters().cancels_sent.load(Ordering::SeqCst), 0);
     h.stop().await;
 }
+
+/// b45 2/F-3：宿主自己的提交合计至多一笔在途（方案 0a.8：补账、删除的最后一笔、退出时撤排队）。补账那一笔停在入队
+/// 之前时完全退出：撤排队的那一笔不同时发出（同时停着的宿主提交始终只有 1 笔）；补账那一笔回来以后它照常提交，
+/// 排着的回合是 `Cancelled`。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quit_withdraw_shares_host_commit_budget() {
+    let mut h = harness(Opts::default()).await;
+    h.gate.refuse_when(|r| finishes(r, TurnState::Completed));
+    h.knobs.commit.select(|r| r.actor.0 == HOST_ACTOR);
+    h.knobs.commit.stall.arm();
+    h.start_host();
+    h.send(1, "出错收场").await;
+    within("补账那一笔停住", h.knobs.commit.stall.wait_stuck()).await;
+    h.gate.stop_refusing();
+    let queued = h.send(2, "排着").await;
+    h.host.try_quit(true, None, || {});
+    let quit = {
+        let host = h.host.clone();
+        tokio::spawn(async move { host.cancel_all().await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        h.knobs.commit.stall.stuck.load(Ordering::SeqCst),
+        1,
+        "同时在途的宿主提交只有 1 笔（停着的数）：调用 {} 次",
+        h.knobs.commit.stall.calls()
+    );
+    h.knobs.commit.stall.release();
+    within("cancel_all 走完", quit).await.unwrap();
+    h.wait_state(queued, |s| s == TurnState::Cancelled).await;
+    h.stop().await;
+}
+
+/// b45 2/F-2 的一种交错：一条线清完树、报回了「清空了」，还没退出时读快照：这条线只算一次、算清空了。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn abort_snapshot_counts_reported_line_once() {
+    let mut h = harness(Opts::default()).await;
+    h.start_host();
+    let t = h.send(1, "跑完").await;
+    h.wait_state(t, |s| s == TurnState::Completed).await;
+    let (hook, mut reached, release) = barrier();
+    h.host.counters().hooks.lock().unwrap().after_abort_report = Some(hook);
+    let abort = {
+        let host = h.host.clone();
+        tokio::spawn(async move { host.abort_all().await })
+    };
+    within("报回之后、退出之前", reached.recv()).await;
+    let snapshot = h.host.abort_snapshot();
+    release.notify_waiters();
+    let report = within("封口回来", abort).await.unwrap();
+    assert_eq!(snapshot.sessions, 1, "{snapshot:?}");
+    assert_eq!(
+        snapshot.not_cleared, 0,
+        "已报清空的不再算成没清空：{snapshot:?}"
+    );
+    assert_eq!(report.not_cleared, 0);
+    h.stop().await;
+}
+
+/// b45 2/F-2 的另一种交错：快照读到一半时，一条线报回「没清空」并退出：快照要么还把它算作没报回的（没清空），
+/// 要么算进它报回的失败——都是没清空 1 条，不会两头都没数到。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn abort_snapshot_does_not_miss_failure_reported_mid_read() {
+    let mut h = harness(Opts::default()).await;
+    h.agent.fail_terminate.store(true, Ordering::SeqCst);
+    h.start_host();
+    let t = h.send(1, "跑完").await;
+    h.wait_state(t, |s| s == TurnState::Completed).await;
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    *h.host.counters().during_snapshot.lock().unwrap() = Some(Box::new(move || {
+        let _ = entered_tx.send(());
+        let _ = go_rx.recv();
+    }));
+    let snapshot = {
+        let host = h.host.clone();
+        tokio::task::spawn_blocking(move || host.abort_snapshot())
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+        .await
+        .unwrap();
+    // 快照读到一半：这时封口，这条线清树失败、报回、退出
+    let report = tokio::time::timeout(Duration::from_secs(3), h.host.abort_all())
+        .await
+        .expect("封口 3 秒内回来");
+    assert_eq!(report.not_cleared, 1, "前提：这条线没清空：{report:?}");
+    go_tx.send(()).unwrap();
+    let snapshot = snapshot.await.unwrap();
+    assert_eq!(
+        snapshot.not_cleared, 1,
+        "读到一半时报回的失败没有漏掉：{snapshot:?}"
+    );
+    h.stop().await;
+}

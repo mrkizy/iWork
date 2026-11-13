@@ -88,6 +88,8 @@ pub struct Ctl {
     pub fail_next_prompt: std::sync::atomic::AtomicBool,
     /// 发权限请求之前停在这里（E4：先封口、再让请求进引擎）
     pub ask_gate: super::hooked::Stall,
+    /// 为真时清树报错（进程树没确认清空）
+    pub fail_terminate: std::sync::atomic::AtomicBool,
 }
 
 type Asker = Arc<
@@ -205,6 +207,11 @@ impl AgentSession for FakeSession {
             std::future::pending::<()>().await;
         }
         let _returned = self.ctl.terminate_stall.pass().await;
+        if self.ctl.fail_terminate.load(Ordering::SeqCst) {
+            return Err(AgentError::ProcessExited {
+                message: "进程树没清空".into(),
+            });
+        }
         Ok(())
     }
     async fn prompt(&self, blocks: Vec<ContentBlock>) -> Result<FakeUpdates, AgentError> {

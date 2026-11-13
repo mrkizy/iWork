@@ -163,7 +163,9 @@ async fn seal_at(wait: Wait) {
     );
     let opened = h.agent.opened_with.lock().unwrap().len();
     let prompts = h.agent.prompt_count();
-    // 封口；清树停着的那一格，封口时的清树也会走到同一处，放开它封口才回得来
+    // 观测从封口之前装上：封口之后这一趟要是还往下走，走到哪一步都数得到
+    let enqueued = count_enqueues(&h);
+    let finished = h.host.counters().finished.load(Ordering::SeqCst);
     let abort = {
         let host = h.host.clone();
         tokio::spawn(async move {
@@ -172,13 +174,19 @@ async fn seal_at(wait: Wait) {
         })
     };
     if let (Wait::Retire, Some(s)) = (wait, stall) {
+        // 第 2 次走到清树 = 会话线看到了封口、丢掉这一趟、进了封口那一支的清树；这时才放
+        within("封口那一支开始清树", async {
+            while s.calls() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
         s.release();
     }
     let report = within("封口回来", abort)
         .await
         .unwrap()
         .expect("封口 3 秒内回来");
-    let enqueued = count_enqueues(&h);
     match (wait, stall) {
         (Wait::Retire, _) => tokio::time::sleep(Duration::from_millis(300)).await,
         (_, Some(s)) => release(s).await,
@@ -207,6 +215,11 @@ async fn seal_at(wait: Wait) {
         "{wait:?}：没有开会话"
     );
     assert_eq!(h.agent.prompt_count(), prompts, "{wait:?}：没有 prompt");
+    assert_eq!(
+        h.host.counters().finished.load(Ordering::SeqCst),
+        finished,
+        "{wait:?}：被丢掉的一趟不在锁里记结局"
+    );
     assert_eq!(report.not_cleared, 0, "{wait:?}：清树做了：{report:?}");
     h.stop().await;
 }
@@ -245,6 +258,9 @@ async fn seal_during_close_job() {
         .await,
     );
     within("收线停在等清树", h.agent.terminate_stall.wait_stuck()).await;
+    // 观测从封口之前装上
+    let enqueued = count_enqueues(&h);
+    let finished = h.host.counters().finished.load(Ordering::SeqCst);
     let abort = {
         let host = h.host.clone();
         tokio::spawn(async move {
@@ -252,14 +268,26 @@ async fn seal_during_close_job() {
             tokio::time::timeout(Duration::from_secs(3), host.abort_all()).await
         })
     };
+    // 第 2 次走到清树 = 收线的那一趟被封口丢掉、进了封口那一支的清树；这时才放。收线绕过封口裁决的话，第 2 次永远
+    // 不会来（收线自己清完树就结束了）
+    within("封口那一支开始清树", async {
+        while h.agent.terminate_stall.calls() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
     h.agent.terminate_stall.release();
     let report = within("封口回来", abort)
         .await
         .unwrap()
         .expect("封口 3 秒内回来");
-    let enqueued = count_enqueues(&h);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(enqueued.load(Ordering::SeqCst), 0, "没有新入队的提交");
+    assert_eq!(
+        h.host.counters().finished.load(Ordering::SeqCst),
+        finished,
+        "收线那一趟被丢掉，不在锁里记结局"
+    );
     assert_eq!(report.not_cleared, 0, "清树做了：{report:?}");
     assert!(
         !events(&h.raw)

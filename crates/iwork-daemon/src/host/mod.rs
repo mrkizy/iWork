@@ -159,6 +159,8 @@ pub struct HostCounters {
     pub cancels_log: Mutex<Vec<(TurnId, RunTag)>>,
     pub round_done: Notify,
     pub hooks: Mutex<HostHooks>,
+    /// `abort_snapshot` 读的中途调一次（同步，在调用它的线程上阻塞；只调一次；b45 2/F-2 的另一种交错）
+    pub during_snapshot: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -173,6 +175,8 @@ pub struct HostHooks {
     pub after_round_read: Option<HostHook>,
     /// 会话线准备的读之前（读还没发）
     pub before_prepare_read: Option<HostHook>,
+    /// 封口那一支：这条线报回了清树结果之后、会话线任务退出之前（b45 2/F-2 的一种交错）
+    pub after_abort_report: Option<HostHook>,
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -203,25 +207,40 @@ struct Shared {
     sealed: watch::Sender<bool>,
     /// 一趟结束、一条线的任务退出时叫一声（`cancel_all`、`abort_all` 等它们）
     idle: Notify,
-    /// 还活着的会话线任务数
-    live_lines: std::sync::atomic::AtomicUsize,
-    /// 封口时各条线报回来的
-    abort: Mutex<crate::work::AbortReport>,
-    /// 宿主自己每一种等存储的地方各自至多一个在途（不变量 13，b45 1/F-2）。对账的读与补账前的读先后做，共用一个
+    /// 还活着的会话线任务与封口时它们报回的结果（b45 2/F-2：一把锁里一起改、一起读）
+    tally: Mutex<LineTally>,
+    // 等存储的地方各自的在途额度（不变量 13；方案 0a.8 表下，b45 第 2 轮定的划分）。会话线准备的读（B6）每条线一个，
+    // 在 `line.rs`；拍改动的读（全后台 2）在 `changes.rs`。
+    /// B1 宿主对账的读（全局 1）
     read_busy: Arc<AtomicBool>,
-    commit_busy: Arc<AtomicBool>,
+    /// B2 对账里引擎追平（全局 1）：卡住只意味着这一轮不按批准续接
     catch_up_busy: Arc<AtomicBool>,
-    /// 退出前数目（E1）、完全退出时撤排着的回合（E2 ③）：和对账的读、提交分开，碰上对账正在读不白白回「不知道」
+    /// B3 宿主自己的提交（全局 1）：补账连同它前面那次读、收掉回合、删除的最后一笔、完全退出时撤排队。许可跟着
+    /// 干活的小任务走，它真的结束才还
+    host_commit: Arc<tokio::sync::Semaphore>,
+    /// B4 退出前数目（E1，全局 1）：命令路径上的读，不挡对账，也不被对账的读挡成「不知道」
     quit_read_busy: Arc<AtomicBool>,
+    /// B5 完全退出时读排着的回合（E2 ③，全局 1）：同上，不被一次正常的对账读挡进 KA1
     withdraw_read_busy: Arc<AtomicBool>,
-    withdraw_commit_busy: Arc<AtomicBool>,
     #[cfg(any(test, feature = "test-hooks"))]
     counters: HostCounters,
+}
+
+/// 会话线任务的点名册：还活着、还没报回封口结果的条数，与已经报回的结果。一条线报回结果和从「没报回」里摘掉它是
+/// 同一次加锁里的一次改动，快照也在同一把锁里读（b45 2/F-2）。
+#[derive(Default)]
+struct LineTally {
+    unreported: usize,
+    report: crate::work::AbortReport,
 }
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, Lines> {
         self.lines.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn tally(&self) -> MutexGuard<'_, LineTally> {
+        self.tally.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -241,8 +260,8 @@ impl<P: HostPorts> Clone for TurnHost<P> {
 }
 
 /// 至多一个在途的一次读或提交：交给不随等的人被丢掉的小任务，在途标记跟着它，它真的结束才放（不变量 13）。
-/// 宿主与会话线里每一处等存储的地方都经它（b45 1/F-2）；唯一的例外是换线时补记绑定回退（`SessionLine::settle`），
-/// 见 `line.rs` 的 `settle_and_retire`。
+/// 宿主与会话线里每一处等存储的读都经它，宿主自己的提交经 [`with_permit`]（b45 1/F-2、第 2 轮的划分）；唯一的
+/// 例外是换线时补记绑定回退（`SessionLine::settle`），见 `line.rs` 的 `settle_and_retire`。
 pub(crate) enum Bounded<T> {
     Done(T),
     /// 上一次还没真回来：这一次没发
@@ -270,6 +289,32 @@ where
         Ok(Err(e)) => {
             tracing::error!(error = %e, "宿主的读或提交异常结束");
             flag.store(false, Ordering::SeqCst);
+            Bounded::TimedOut
+        }
+        Err(_) => Bounded::TimedOut,
+    }
+}
+
+/// 拿着一份许可（B3）做一次读写：交给小任务，许可跟着它，它真的结束才还；等的人到时只是走开。
+async fn with_permit<T, F>(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    limit: Duration,
+    work: F,
+) -> Bounded<T>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = T> + Send + 'static,
+{
+    let task = tokio::spawn(async move {
+        let out = work.await;
+        drop(permit);
+        out
+    });
+    match tokio::time::timeout(limit, task).await {
+        Ok(Ok(out)) => Bounded::Done(out),
+        // 小任务 panic：许可随它的栈一起放掉，照「去向不明」处理
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "宿主的提交异常结束");
             Bounded::TimedOut
         }
         Err(_) => Bounded::TimedOut,
@@ -308,14 +353,12 @@ impl<P: HostPorts> TurnHost<P> {
                 boot_head: work.head,
                 sealed: watch::Sender::new(false),
                 idle: Notify::new(),
-                live_lines: Default::default(),
-                abort: Mutex::default(),
+                tally: Mutex::default(),
                 read_busy: Arc::default(),
-                commit_busy: Arc::default(),
                 catch_up_busy: Arc::default(),
+                host_commit: Arc::new(tokio::sync::Semaphore::new(1)),
                 quit_read_busy: Arc::default(),
                 withdraw_read_busy: Arc::default(),
-                withdraw_commit_busy: Arc::default(),
                 #[cfg(any(test, feature = "test-hooks"))]
                 counters: HostCounters::default(),
             }),
@@ -359,7 +402,7 @@ impl<P: HostPorts> TurnHost<P> {
             };
             // 这一轮第一次交活的线：起它的任务（交活时这一项已写好，任务起来就取得到）
             for (c, wake) in spawn.drain(..) {
-                self.shared.live_lines.fetch_add(1, Ordering::SeqCst);
+                self.shared.tally().unreported += 1;
                 tasks.spawn(line::run(self.ports.clone(), self.shared.clone(), c, wake));
             }
             #[cfg(any(test, feature = "test-hooks"))]
@@ -539,7 +582,7 @@ impl<P: HostPorts> TurnHost<P> {
     async fn commit_action(&self, w: &ConversationWork, action: Action) -> Result<bool, ()> {
         let c = w.conversation.id;
         let deleting = w.conversation.state == ConversationState::Deleting;
-        let (turn_id, events, scope) = match action {
+        let (turn, job) = match action {
             Action::Settle {
                 turn,
                 reason,
@@ -548,104 +591,129 @@ impl<P: HostPorts> TurnHost<P> {
                 let Some(open) = w.open_turns.iter().find(|t| t.turn.id == turn) else {
                     return Ok(false);
                 };
-                // 和对账的读共用在途标记：同一轮里先后做
-                let ports = self.ports.clone();
-                let read = bounded(&self.shared.read_busy, HOST_IO_LIMIT, async move {
-                    ports.read().unsettled().await
-                })
-                .await;
-                let streaming = match read {
-                    Bounded::Done(Ok(u)) => u
-                        .streaming
-                        .into_iter()
-                        .filter(|m| m.turn_id == Some(turn))
-                        .collect::<Vec<_>>(),
-                    Bounded::Done(Err(e)) => {
-                        tracing::warn!(error = %e, %turn, "补账前读流式消息失败");
-                        return Err(());
-                    }
-                    Bounded::Busy | Bounded::TimedOut => {
-                        tracing::error!(%turn, "补账前读流式消息的上一次还没回来，这一轮不发新的");
-                        return Err(());
-                    }
-                };
-                let by = OwedBy::BrokenRun {
-                    cancel_requested,
-                    reason,
-                };
-                let events = owed_turn_events(&open.turn, &streaming, &by).map_err(|e| {
-                    tracing::error!(error = %e, %turn, "算补账的事件失败");
-                })?;
                 let void = if cancel_requested || open.turn.state == TurnState::Cancelling {
                     VoidReason::TurnCancelled
                 } else {
                     VoidReason::TurnFailed
                 };
-                (turn, events, Some(void))
+                let job = HostCommit::Settle {
+                    turn: open.turn.clone(),
+                    by: OwedBy::BrokenRun {
+                        cancel_requested,
+                        reason,
+                    },
+                    void,
+                };
+                (turn, job)
             }
             Action::Withdraw { turn, from } => {
                 let Some(open) = w.open_turns.iter().find(|t| t.turn.id == turn) else {
                     return Ok(false);
                 };
-                let events = owed_turn_events(&open.turn, &[], &OwedBy::Closing).map_err(|e| {
-                    tracing::error!(error = %e, %turn, "算收尾事件失败");
-                })?;
                 // 已中断的回合名下可能挂着待审批与放行：经引擎一并作废
                 let void = matches!(from, TurnState::Interrupted { .. }).then_some(if deleting {
                     VoidReason::ConversationDeleted
                 } else {
                     VoidReason::AssistantDeleted
                 });
-                (turn, events, void)
+                let job = HostCommit::Withdraw {
+                    turn: open.turn.clone(),
+                    void,
+                };
+                (turn, job)
             }
             // X4 归步 6（删除对话）
             Action::FinishDelete => return Ok(false),
             Action::Hand(_) | Action::Cancel { .. } | Action::Impossible(_) => return Ok(false),
         };
+        // 宿主提交这件活至多一份在途（B3）：上一份还没真回来就不发
+        let Ok(permit) = self.shared.host_commit.clone().try_acquire_owned() else {
+            tracing::error!(%turn, "宿主的上一笔提交还没回来，这一轮不发新的");
+            return Err(());
+        };
+        let ports = self.ports.clone();
+        match with_permit(permit, HOST_IO_LIMIT, job.run(ports, c)).await {
+            Bounded::Done(Ok(committed)) => Ok(committed),
+            Bounded::Done(Err(e)) => {
+                tracing::warn!(error = %e, %turn, "宿主的提交没成，重读重算");
+                Err(())
+            }
+            Bounded::Busy | Bounded::TimedOut => {
+                tracing::error!(%turn, "宿主的提交 30 秒没回来，这一轮不发新的");
+                Err(())
+            }
+        }
+    }
+}
+
+/// 宿主自己的一次提交（B3 的一份活）：补账连同它前面那次读，或收掉一个回合。整份交给拿着许可的小任务做。
+enum HostCommit {
+    /// D5：读这一趟留下的流式消息，算欠的事件，经引擎作废它的审批
+    Settle {
+        turn: iwork_domain::turn::Turn,
+        by: OwedBy,
+        void: VoidReason,
+    },
+    /// X2 / 归属没了：收成已取消；已中断的经引擎作废
+    Withdraw {
+        turn: iwork_domain::turn::Turn,
+        void: Option<VoidReason>,
+    },
+}
+
+impl HostCommit {
+    /// `Ok(true)` 落了盘，`Ok(false)` 没有要提交的。
+    async fn run<P: HostPorts>(self, ports: Arc<P>, c: ConversationId) -> Result<bool, String> {
+        let (turn, events, scope) = match self {
+            HostCommit::Settle { turn, by, void } => {
+                let streaming: Vec<_> = ports
+                    .read()
+                    .unsettled()
+                    .await
+                    .map_err(|e| format!("补账前读流式消息失败：{e}"))?
+                    .streaming
+                    .into_iter()
+                    .filter(|m| m.turn_id == Some(turn.id))
+                    .collect();
+                let events = owed_turn_events(&turn, &streaming, &by)
+                    .map_err(|e| format!("算补账的事件失败：{e}"))?;
+                (turn.id, events, Some(void))
+            }
+            HostCommit::Withdraw { turn, void } => {
+                let events = owed_turn_events(&turn, &[], &OwedBy::Closing)
+                    .map_err(|e| format!("算收尾事件失败：{e}"))?;
+                (turn.id, events, void)
+            }
+        };
         if events.is_empty() {
             return Ok(false);
         }
         let req = CommitRequest {
-            command_id: CommandId::from_raw(self.ports.ids().next()),
+            command_id: CommandId::from_raw(ports.ids().next()),
             actor: Actor(HOST_ACTOR.into()),
             events,
             outbox: Vec::new(),
         };
-        let ports = self.ports.clone();
-        let result = bounded(&self.shared.commit_busy, HOST_IO_LIMIT, async move {
-            match scope {
-                Some(reason) => ports
-                    .engine()
-                    .commit_with(
-                        Scope::VoidTurn {
-                            conversation: c,
-                            turn: turn_id,
-                            reason,
-                        },
-                        req,
-                    )
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string()),
-                None => ports
-                    .store()
-                    .commit(req)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| e.to_string()),
-            }
-        })
-        .await;
-        match result {
-            Bounded::Done(Ok(())) => Ok(true),
-            Bounded::Done(Err(e)) => {
-                tracing::warn!(error = %e, turn = %turn_id, "宿主的提交没成，重读重算");
-                Err(())
-            }
-            Bounded::Busy | Bounded::TimedOut => {
-                tracing::error!(turn = %turn_id, "宿主的上一笔提交还没回来，这一轮不发新的");
-                Err(())
-            }
+        match scope {
+            Some(reason) => ports
+                .engine()
+                .commit_with(
+                    Scope::VoidTurn {
+                        conversation: c,
+                        turn,
+                        reason,
+                    },
+                    req,
+                )
+                .await
+                .map(|_| true)
+                .map_err(|e| e.to_string()),
+            None => ports
+                .store()
+                .commit(req)
+                .await
+                .map(|_| true)
+                .map_err(|e| e.to_string()),
         }
     }
 }

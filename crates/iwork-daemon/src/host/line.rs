@@ -113,15 +113,34 @@ impl Shared {
     }
 }
 
-/// 会话线任务退出时（不管怎么退出，含 panic 的展开）把活着的数减一并叫一声。
-struct LiveGuard(Arc<Shared>);
+/// 会话线任务在点名册上的那一格。报回封口结果时摘掉；没报回就退出（正常收线、panic 的展开）时丢弃它摘掉。
+/// 两种都在点名册的锁里做，报回与摘掉是同一次改动（b45 2/F-2）。
+struct LiveGuard {
+    shared: Arc<Shared>,
+    reported: bool,
+}
+
+impl LiveGuard {
+    /// 封口那一支清完树：一次加锁里记下结果、从「没报回」里摘掉自己。
+    fn report(&mut self, had_session: bool, cleared: bool) {
+        let mut t = self.shared.tally();
+        if had_session {
+            t.report.sessions += 1;
+            if !cleared {
+                t.report.not_cleared += 1;
+            }
+        }
+        t.unreported -= 1;
+        self.reported = true;
+    }
+}
 
 impl Drop for LiveGuard {
     fn drop(&mut self) {
-        self.0
-            .live_lines
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        self.0.idle.notify_waiters();
+        if !self.reported {
+            self.shared.tally().unreported -= 1;
+        }
+        self.shared.idle.notify_waiters();
     }
 }
 
@@ -132,7 +151,10 @@ pub(super) async fn run<P: HostPorts>(
     conversation: ConversationId,
     wake: Arc<Notify>,
 ) {
-    let _live = LiveGuard(shared.clone());
+    let mut live = LiveGuard {
+        shared: shared.clone(),
+        reported: false,
+    };
     let mut bound: Option<Bound<P>> = None;
     let mut sealed = shared.sealed.subscribe();
     let read_busy = Arc::new(AtomicBool::new(false));
@@ -146,7 +168,7 @@ pub(super) async fn run<P: HostPorts>(
             tokio::select! {
                 biased;
                 _ = async { sealed.wait_for(|s| *s).await.map(|_| ()) } => {
-                    retire(&shared, &mut bound).await;
+                    retire(&shared, &mut bound, &mut live).await;
                     return;
                 }
                 _ = notified => {}
@@ -156,7 +178,7 @@ pub(super) async fn run<P: HostPorts>(
             biased;
             _ = async { sealed.wait_for(|s| *s).await.map(|_| ()) } => {
                 // 封口：这一趟的 future 已被丢掉，再清树（次序不能反，T04 第 11 节硬约束一）
-                retire(&shared, &mut bound).await;
+                retire(&shared, &mut bound, &mut live).await;
                 return;
             }
             end = one_run::<P>(&ports, &shared, conversation, job, &mut bound, &read_busy) => end,
@@ -170,8 +192,9 @@ pub(super) async fn run<P: HostPorts>(
 }
 
 /// 封口那一支：清树并核对，结果报给 `abort_all`。不提交任何东西。
-async fn retire<P: HostPorts>(shared: &Shared, bound: &mut Option<Bound<P>>) {
+async fn retire<P: HostPorts>(shared: &Shared, bound: &mut Option<Bound<P>>, live: &mut LiveGuard) {
     let Some(b) = bound.as_mut() else {
+        live.report(false, true);
         return;
     };
     let had_session = b.line.session().is_some();
@@ -182,7 +205,9 @@ async fn retire<P: HostPorts>(shared: &Shared, bound: &mut Option<Bound<P>>) {
             false
         }
     };
-    super::quit::record_abort(shared, had_session, cleared);
+    live.report(had_session, cleared);
+    #[cfg(any(test, feature = "test-hooks"))]
+    shared.counters.at(|h| h.after_abort_report.clone()).await;
 }
 
 type PortsOf<'a, P> = TurnPorts<

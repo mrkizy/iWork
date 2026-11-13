@@ -48,6 +48,7 @@ fn may_write(spec: &SessionSpec, dir: &Path) -> bool {
     matches!(&spec.constraints.allow_write, AllowWrite::Whitelist(v) if v.iter().any(|p| p == dir))
 }
 
+#[cfg(unix)]
 fn denies(spec: &SessionSpec, dir: &Path) -> bool {
     spec.constraints.deny_read_write.iter().any(|p| p == dir)
 }
@@ -144,6 +145,10 @@ async fn list_removed_while_sync_is_held() {
 
 /// D8 只改链接的一格：两轮之间把家目录下受保护的 `.ssh` 换成指进可写目录的链接，不发任何命令。下一个回合的快照里
 /// 有它真实位置的别名：交给运行时的禁读禁写里有那个位置，往那里写被拦下；上一个回合往同一处写是放行的。
+///
+/// 只在 unix 上跑：要在测试里建符号链接；M1 不支持 Windows（AGENTS.md「M1 不支持 Windows」，跟真实文件系统对拍的
+/// 测试限定 unix）。
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn link_only_change_is_seen_next_turn() {
     let mut h = harness(Opts {
