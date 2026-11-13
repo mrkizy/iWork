@@ -152,14 +152,14 @@ rh_check_root() {
     [ -d "$parent" ] || rh_refuse "$parent 不存在"
     # 建之前先算它将来的物理路径（~/work 本身可能是链接）
     root_real="$(cd -P "$parent" && pwd)/iwork-remote"
-    if rh_path_overlaps "$root_real" "$t11_real"; then rh_refuse "$ROOT 会建到 $root_real，和 T11 检出重叠"; fi
+    if rh_path_overlaps "$root_real" "$t11_real"; then rh_refuse "$ROOT 会建到 ${root_real}，和 T11 检出重叠"; fi
     mkdir "$ROOT" || rh_refuse "建不了 $ROOT"
   fi
   [ ! -L "$ROOT" ] || rh_refuse "$ROOT 是符号链接"
   [ -d "$ROOT" ] || rh_refuse "$ROOT 不是目录"
   root_real=$(cd -P "$ROOT" && pwd) || rh_refuse "解析不了 $ROOT"
   if rh_path_overlaps "$root_real" "$t11_real"; then
-    rh_refuse "$ROOT 解析到 $root_real，和 T11 检出 $t11_real 重叠"
+    rh_refuse "$ROOT 解析到 ${root_real}，和 T11 检出 $t11_real 重叠"
   fi
   for e in tasks repo.git heavy.lock heavy.holder repo.lock PERF_WINDOW; do
     [ ! -L "$root_real/$e" ] || rh_refuse "$root_real/$e 是符号链接"
