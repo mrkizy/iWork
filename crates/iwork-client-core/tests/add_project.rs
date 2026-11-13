@@ -460,3 +460,80 @@ async fn not_ready_reason_is_shown_in_dialog() {
     })
     .await;
 }
+
+// ---------- 克隆没接入：审查 g3 第 2 轮的两条复现，改成「不接」的回归 ----------
+
+fn start_clone_rejected(s: &iwork_client_core::store::Store) -> bool {
+    use iwork_client_core::intent::{Action, map};
+    matches!(
+        map(s, pb::UiIntent { kind: Some(I::StartClone(pb::StartCloneIntent {
+            url: "https://example.com/team/svc.git".into(),
+            name: None,
+        })) }),
+        Action::Reject(e) if e.code == "not_connected"
+    )
+}
+
+/// 审查 g3 2/F-1：别的客户端进程（或本客户端重启前）发起的克隆 A 完成了；当前草稿正在新建 B、有自己的候选。
+/// CloneFinished 不动草稿：B 还在做、候选不变，A 的路径不进来。
+#[test]
+fn foreign_clone_finished_does_not_touch_draft() {
+    let mut s = support::store_with_open();
+    s.add_project.set_candidate("/projects/B".into());
+    let b = s.add_project.begin_create().unwrap();
+    let before = s.add_project.clone();
+    s.apply(support::persisted(
+        10,
+        &[support::SIDEBAR],
+        pb::domain_event::Event::CloneFinished(pb::CloneFinished {
+            job_id: "old-client-A".into(),
+            ok: true,
+            path: Some("/projects/A".into()),
+            error: None,
+        }),
+    ));
+    assert_eq!(s.add_project, before, "草稿一点没变");
+    assert!(s.add_project.is_current(b));
+}
+
+/// 审查 g3 2/F-2：断线期间克隆完成、重连给了快照（完成事件不再逐条来）。没有克隆标记可以卡住：克隆意图从头到尾都回
+/// 「未接入」，新建照常能做。
+#[test]
+fn snapshot_after_disconnect_leaves_nothing_locked() {
+    use iwork_client_core::store::ScopeKind;
+    let mut s = support::store_with_open();
+    assert!(start_clone_rejected(&s), "克隆意图回未接入");
+    s.connection_closed();
+    s.register_subscription(support::SIDEBAR, ScopeKind::Sidebar);
+    s.apply(support::snapshot(support::SIDEBAR, 10, vec![]));
+    assert!(
+        start_clone_rejected(&s),
+        "快照之后同样回未接入（不是「上一个还没完成」）"
+    );
+    assert!(s.add_project.begin_create().is_ok(), "对照：新建不受影响");
+}
+
+/// 审查 g3 第 2 轮第三条复现：旧草稿 A 的新建受理了，弹窗关掉又开始新建 B；A 的 ProjectAdded 到了，不跳、不清 B。
+#[test]
+fn old_project_added_does_not_navigate_new_draft() {
+    use iwork_client_core::store::{ScopeKind, Store};
+    let mut s = Store::new();
+    s.register_subscription(support::SIDEBAR, ScopeKind::Sidebar);
+    s.apply(support::snapshot(support::SIDEBAR, 0, vec![]));
+    let a = s.add_project.begin_create().unwrap();
+    s.project_add_accepted(1, 1, a);
+    s.add_project.clear();
+    let b = s.add_project.begin_create().unwrap();
+    s.apply(support::persisted(
+        1,
+        &[support::SIDEBAR],
+        pb::domain_event::Event::ProjectAdded(pb::ProjectAdded {
+            project: Some(pb::Project {
+                id: "A".into(),
+                ..Default::default()
+            }),
+        }),
+    ));
+    assert!(s.add_project.is_current(b), "B 还在做");
+    assert!(s.navigate.is_none(), "没跳到 A");
+}
