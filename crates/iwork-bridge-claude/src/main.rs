@@ -10,6 +10,7 @@ const ENV_LOG: &str = "IWORK_BRIDGE_LOG";
 
 #[cfg(unix)]
 fn main() {
+    abort_on_panic();
     // 最先记下父进程（后台）：之后它一换，就是后台没了（5.4a 第 5 条，审查 S6-5b 1/F-3）
     // SAFETY: getppid 不读写任何内存
     let parent = unsafe { libc::getppid() };
@@ -59,6 +60,20 @@ async fn run(parent: libc::pid_t) {
     if result.is_err() {
         std::process::exit(2);
     }
+}
+
+/// 任何线程、任何任务 panic 都让整个桥接立刻结束（先照默认的样子把 panic 信息写到 stderr）。会话任务是单独起的
+/// 任务，默认它 panic 只结束它自己：手里的 CLI 被丢掉（kill_on_drop 杀掉 CLI，父链断了，CLI 另立会话的命令就清不到），
+/// 收摊的状态也永远到不了，`TEARDOWN_WAIT` 兜底不会触发。abort 之后走「桥接崩了」那条路：后台看到输出到头就清树，
+/// 这时 CLI 还活着，范围找得全（5.4a 第 5 条，审查 S6-5b 停放期第 12 条）。
+#[cfg(unix)]
+fn abort_on_panic() {
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        report(info);
+        eprintln!("iwork-bridge-claude: panic，桥接立刻结束（abort）");
+        std::process::abort();
+    }));
 }
 
 /// 关掉从后台继承来的、0、1、2 以外的句柄。桥接只用 stdin、stdout、stderr，别的句柄都不是给它的：macOS 上 std

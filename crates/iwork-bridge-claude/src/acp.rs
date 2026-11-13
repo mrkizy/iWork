@@ -128,6 +128,23 @@ impl BridgeConfig {
 #[cfg(feature = "fault-injection")]
 pub const ENV_HOOK_TIMEOUT: &str = "IWORK_BRIDGE_HOOK_TIMEOUT_SECS";
 
+/// 故障注入：CLI 输出的某一行含这个环境变量的值时，会话任务 panic。只在 `fault-injection` feature 下认，用来测
+/// 「会话任务 panic → 桥接整个退出 → 后台按输出到头清树」（审查 S6-5b 停放期第 12 条）。
+#[cfg(feature = "fault-injection")]
+pub const ENV_PANIC_ON: &str = "IWORK_BRIDGE_FAULT_PANIC_ON";
+
+/// 这一行含 [`ENV_PANIC_ON`] 的值就 panic（故障注入）。
+#[cfg(feature = "fault-injection")]
+fn panic_if_marked(line: &Result<Option<String>, ReadError>) {
+    static MARK: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let mark = MARK.get_or_init(|| std::env::var(ENV_PANIC_ON).ok().filter(|m| !m.is_empty()));
+    if let (Some(mark), Ok(Some(line))) = (mark, line)
+        && line.contains(mark.as_str())
+    {
+        panic!("故障注入：CLI 输出里出现了 {ENV_PANIC_ON} 的标记");
+    }
+}
+
 /// PreToolUse hook 的 timeout：产品里是写死的常量；`fault-injection` 构建可以用环境变量改（方案 4.3）。
 fn hook_timeout() -> Result<Duration, String> {
     let product = Duration::from_secs(crate::launch::settings::HOOK_TIMEOUT_SECS);
@@ -750,7 +767,11 @@ async fn run_session(
                 // 连接没了：没有人再发 prompt，会话到此为止
                 None => break None,
             },
-            line = s.cli.next_line() => w.on_line(line),
+            line = s.cli.next_line() => {
+                #[cfg(feature = "fault-injection")]
+                panic_if_marked(&line);
+                w.on_line(line)
+            }
             ev = s.hook_events.recv() => match ev {
                 Some(ev) => w.on_hook(&s, ev, &answered_tx),
                 None => Err(SessionFatal::code("channel_failed")),

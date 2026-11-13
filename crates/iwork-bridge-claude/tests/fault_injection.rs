@@ -88,3 +88,75 @@ async fn too_small_timeout_is_refused() {
         "{err}"
     );
 }
+
+/// 会话任务 panic（审查 S6-5b 停放期第 12 条）：桥接整个退出（不留一个没有会话任务的桥接），后台看到输出到头就
+/// 清树。CLI 这时还活着、父链没断，它另立会话的命令一起被清掉。
+#[tokio::test(flavor = "multi_thread")]
+async fn session_task_panic_ends_the_bridge_and_daemon_clears() {
+    let mut steps = opening();
+    steps.extend([
+        read_user(),
+        init(),
+        json!({ "step": "spawn", "command": "exec sleep 30" }),
+        text("m1", "PANIC-HERE"),
+        json!({ "step": "log_signals_until_term" }),
+    ]);
+    let mut rig = Rig::new(Value::Array(steps));
+    rig.launch
+        .env
+        .push(("IWORK_BRIDGE_FAULT_PANIC_ON".into(), "PANIC-HERE".into()));
+    let session = rig
+        .open(rig.spec(), Handler(Default::default()))
+        .await
+        .unwrap();
+    let updates = turn(&session, "hi").await;
+    let started = Instant::now();
+    let cmd = pid_of(&rig, "spawned");
+    let cli = pid_of(&rig, "started");
+    let bridge = rig
+        .log()
+        .into_iter()
+        .find(|v| v["kind"] == "started")
+        .unwrap()["parent"]
+        .as_i64()
+        .unwrap() as i32;
+    // 桥接 panic 后整个进程没了
+    while alive(bridge) {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "5 秒内桥接退出（会话任务 panic 时不留着进程）：{updates:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // 后台按输出到头清树：CLI 和它另立会话的命令都没了
+    while alive(cli) || alive(cmd) {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "10 秒内 CLI 与命令被清掉：cli={} cmd={}",
+            alive(cli),
+            alive(cmd)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(session);
+}
+
+fn pid_of(rig: &Rig, kind: &str) -> i32 {
+    let v = rig
+        .log()
+        .into_iter()
+        .find(|v| v["kind"] == kind)
+        .unwrap_or_else(|| panic!("假 CLI 记了 {kind}：{:?}", rig.log()));
+    v["pid"].as_i64().unwrap() as i32
+}
+
+/// 进程还活着（僵尸不算）。
+fn alive(pid: i32) -> bool {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&out.stdout);
+    let stat = stat.trim();
+    !stat.is_empty() && !stat.starts_with('Z')
+}

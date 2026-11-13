@@ -501,7 +501,14 @@ fn main() {
         last_read: None,
         stdin: std::io::stdin().lock(),
     };
-    fake.log("started", json!({ "pid": std::process::id() }));
+    #[cfg(unix)]
+    let parent = std::os::unix::process::parent_id();
+    #[cfg(not(unix))]
+    let parent = 0;
+    fake.log(
+        "started",
+        json!({ "pid": std::process::id(), "parent": parent }),
+    );
     for step in script {
         fake.run(step);
     }
