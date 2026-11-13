@@ -98,8 +98,6 @@ pub enum AddProjectAct {
     Confirm,
     Clear,
     Create { name: String },
-    StartClone { url: String, name: Option<String> },
-    RetryClone,
 }
 
 impl Pick {
@@ -146,6 +144,9 @@ pub fn reject(code: &str, message: &str) -> Action {
         retryable: false,
     })
 }
+
+/// 克隆没接入时回的错误。
+pub const CLONE_NOT_CONNECTED: (&str, &str) = ("not_connected", "克隆还没接入");
 
 /// 重命名标题上限（技术设计 9.0a）。
 pub const TITLE_MAX_CHARS: usize = 50;
@@ -320,11 +321,9 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
         I::ConfirmAddProject(_) => Action::AddProject(AddProjectAct::Confirm),
         I::ClearAddProject(_) => Action::AddProject(AddProjectAct::Clear),
         I::CreateProject(x) => Action::AddProject(AddProjectAct::Create { name: x.name }),
-        I::StartClone(x) => Action::AddProject(AddProjectAct::StartClone {
-            url: x.url,
-            name: x.name,
-        }),
-        I::RetryClone(_) => Action::AddProject(AddProjectAct::RetryClone),
+        // 克隆的客户端一半没接：CloneFinished 只带后台的 job_id，客户端对不上自己的命令（重启、快照都会丢归属），
+        // 等 T10c 在协议里补上归属再接（主管 2026-11-13 定）。克隆页签也还在等 U-7d-4。
+        I::StartClone(_) | I::RetryClone(_) => reject(CLONE_NOT_CONNECTED.0, CLONE_NOT_CONNECTED.1),
         I::PinProject(x) => Action::Command(Cmd::PinProject(pb::PinProject {
             project_id: x.project_id,
             pinned: x.pinned,

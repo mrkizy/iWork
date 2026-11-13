@@ -948,13 +948,7 @@ impl Store {
                     job.error.clone_from(&error);
                     self.dirty.mark(ViewKey::AddProject);
                 }
-                // 发起它的草稿还开着：克隆完的目录设成候选（草稿里按操作编号认，见 store::add_project）
-                let result = match (error, e.path.clone()) {
-                    (None, Some(path)) => Ok(path),
-                    (Some(why), _) => Err(why),
-                    (None, None) => Err("克隆完成了，但后台没给目录".to_owned()),
-                };
-                self.edit_add_project(|d| d.clone_finished(result));
+                // 不碰添加项目草稿：克隆的客户端一半没接（见 intent.rs 的 CLONE_NOT_CONNECTED）
             }
             // rule 流：只记过期、重查 ListRules，不按事件推演列表（方案 2.2）
             E::RuleRemembered(_) | E::RuleRevoked(_) | E::RulesDeleted(_) => {

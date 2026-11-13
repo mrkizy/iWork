@@ -1,6 +1,6 @@
 //! 添加项目（T09 方案 15.2）：网页的意图作用在 Rust 的添加项目草稿上（store::add_project），会话层按草稿发
-//! 检查（`InspectProjectPath`，附带查询）与命令（`InitRepository`、`AddProject`、`CreateProject`、`CloneRepository`）。
-//! 路径只从系统选择框、拖入、`CloneFinished` 进来（RD1）。
+//! 检查（`InspectProjectPath`，附带查询）与命令（`InitRepository`、`AddProject`、`CreateProject`）。
+//! 路径只从系统选择框、拖入进来（RD1）。克隆的客户端一半没接（intent.rs 的 CLONE_NOT_CONNECTED）。
 //!
 //! 检查不在每个操作里各发一次：每轮主循环看草稿里有没有「检查中、还没在飞」的候选，有就发（[`Session::want_inspect`]）。
 //! 换候选、重查、断线后都走这一处（RD4：断线丢了的检查重连后重发）。
@@ -36,11 +36,7 @@ impl<D: Dialer> Session<D> {
         };
         let needs_backend = matches!(
             act,
-            AddProjectAct::InitCandidate
-                | AddProjectAct::Confirm
-                | AddProjectAct::Create { .. }
-                | AddProjectAct::StartClone { .. }
-                | AddProjectAct::RetryClone
+            AddProjectAct::InitCandidate | AddProjectAct::Confirm | AddProjectAct::Create { .. }
         );
         if needs_backend && !self.live() {
             return self.add_project_reject(tx, offline_error());
@@ -95,32 +91,7 @@ impl<D: Dialer> Session<D> {
                 }
                 Err(e) => self.add_project_reject(tx, not_ready(e)),
             },
-            AddProjectAct::StartClone { url, name } => {
-                let parent_dir = self.store.add_project.parent_dir.clone();
-                self.start_clone(
-                    pb::CloneRepository {
-                        url,
-                        parent_dir,
-                        name,
-                    },
-                    tx,
-                );
-            }
-            AddProjectAct::RetryClone => match self.last_clone.clone() {
-                Some(c) => self.start_clone(c, tx),
-                None => self.add_project_reject(tx, not_ready("还没有克隆过")),
-            },
         }
-    }
-
-    fn start_clone(&mut self, c: pb::CloneRepository, tx: oneshot::Sender<pb::IntentAck>) {
-        let op = match self.store.edit_add_project(|d| d.begin_clone()) {
-            Ok(op) => op,
-            Err(e) => return self.add_project_reject(tx, not_ready(e)),
-        };
-        // 参数记在会话层，「重试」不让网页重传
-        self.last_clone = Some(c.clone());
-        self.send_draft_command(op, pb::command::Kind::CloneRepository(c), tx);
     }
 
     /// 不受理：原因记进草稿（弹窗里显示），也回给这次操作。
@@ -160,8 +131,6 @@ impl<D: Dialer> Session<D> {
             (Some(C::AddProject(_) | C::CreateProject(_)), Some((first, last))) => {
                 self.store.project_add_accepted(first, last, op);
             }
-            // 克隆受理了：等 CloneFinished（store 里收）
-            (Some(C::CloneRepository(_)), _) => {}
             _ => {
                 self.store.edit_add_project(|d| d.finished(op, Ok(())));
             }

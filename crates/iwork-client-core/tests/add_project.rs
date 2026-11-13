@@ -391,45 +391,36 @@ async fn dropped_single_directory_opens_add_project() {
 
 /// 克隆：后台拒了地址（错误码照真后台）→ 受理结果带原因（网页弹提示），草稿不留候选；
 /// 接受的地址 → 克隆完的目录成了候选，之后和本机文件夹同一条路。
+/// 克隆的客户端一半没接（主管 2026-11-13 定，等 T10c 在协议里补上归属）：两个意图都回「未接入」，不发命令；
+/// 后台来的 CloneFinished 也不碰草稿。
 #[tokio::test(flavor = "multi_thread")]
-async fn clone_rejected_then_clone_finished_becomes_candidate() {
+async fn clone_is_not_connected() {
     let mut h = start().await;
-    h.daemon.mutate_tables(|t| {
-        t.rejected_clone_urls.insert(
-            "file:///etc".into(),
-            "只支持远程地址；本机已有的仓库请用『打开本机文件夹』".into(),
-        );
-    });
-    let ack = act(
-        &h,
-        I::StartClone(pb::StartCloneIntent {
-            url: "file:///etc".into(),
-            name: None,
-        }),
-    )
-    .await;
-    let e = ack.error.expect("后台拒了地址");
-    assert_eq!(e.code, "invalid_argument");
-    until(&mut h, "原因进弹窗、没有候选、不忙", |s| {
-        s.add_project
-            .as_ref()
-            .is_some_and(|a| a.error.is_some() && a.candidate.is_none() && !a.busy)
-    })
-    .await;
-    let ack = act(
-        &h,
+    pick(&mut h, "/Users/me/work/svc").await;
+    for kind in [
         I::StartClone(pb::StartCloneIntent {
             url: "https://example.com/team/svc.git".into(),
             name: None,
         }),
-    )
-    .await;
-    assert_eq!(ack.error, None);
-    until(
-        &mut h,
-        "克隆完的目录成了候选、检查完能加",
-        |s| candidate(s).is_some_and(|c| c.path_label.ends_with("/svc") && c.can_confirm),
-    )
+        I::RetryClone(pb::RetryClone {}),
+    ] {
+        let e = act(&h, kind).await.error.expect("未接入");
+        assert_eq!(e.code, "not_connected");
+    }
+    h.daemon.append(iwork_fake_daemon::fixtures::ev(
+        pb::domain_event::Event::CloneFinished(pb::CloneFinished {
+            job_id: "clone-other".into(),
+            ok: true,
+            path: Some("/Users/me/iWork/projects/other".into()),
+            error: None,
+        }),
+    ));
+    // 给事件时间到达：之后候选仍是选的那个、不忙
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    until(&mut h, "候选还是选的那个", |s| {
+        candidate(s).is_some_and(|c| c.path_label.ends_with("/svc"))
+            && s.add_project.as_ref().is_some_and(|a| !a.busy)
+    })
     .await;
 }
 
@@ -453,32 +444,6 @@ async fn create_project_navigates_on_project_added() {
     })
     .await;
     assert!(project_root(&h, "新服务").is_some());
-}
-
-/// 审查 g3 1/F-2：克隆 A 时关掉弹窗，新草稿选了本机文件夹 B；A 的 CloneFinished 到了不改 B 的候选与忙碌。
-#[test]
-fn old_clone_does_not_replace_new_draft() {
-    let mut s = support::store_with_open();
-    s.add_project.begin_clone().unwrap();
-    s.add_project.clear();
-    s.add_project.set_candidate("/projects/B".into());
-    s.apply(support::persisted(
-        10,
-        &[support::SIDEBAR],
-        pb::domain_event::Event::CloneFinished(pb::CloneFinished {
-            job_id: "clone-A".into(),
-            ok: true,
-            path: Some("/projects/A".into()),
-            error: None,
-        }),
-    ));
-    let c = s.add_project.candidate.as_ref().unwrap();
-    assert_eq!(c.path, "/projects/B", "旧克隆没改候选");
-    assert_eq!(s.add_project.busy, None);
-    assert!(
-        s.add_project.begin_clone().is_ok(),
-        "A 做完了：后台没有在跑的克隆"
-    );
 }
 
 /// 当下不能做（还没选文件夹就点确认）：不受理，原因记进弹窗的视图（网页不再另弹提示，UI 审查 F-8）。

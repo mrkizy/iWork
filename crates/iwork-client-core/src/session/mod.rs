@@ -204,8 +204,6 @@ pub struct Session<D: Dialer> {
     start_steps: Option<std::collections::VecDeque<pb::command::Kind>>,
     /// 在飞的目录检查：(连接代次, token)。换了连接就算不在飞（断线丢了的检查重连后重发）。
     inspect_in_flight: Option<(u64, u64)>,
-    /// 上一次克隆的参数（「重试」用，网页不重传）。
-    last_clone: Option<pb::CloneRepository>,
     /// 添加项目草稿发出的命令（command_id → 草稿操作编号）：回包按编号交回草稿（store::add_project）。
     add_project_ops: HashMap<String, u64>,
     /// 「已重新连接，回到最新」提示到时撤掉的时刻（Q9）。
@@ -282,7 +280,6 @@ impl<D: Dialer> Session<D> {
             query_backoff: HashMap::new(),
             start_steps: None,
             inspect_in_flight: None,
-            last_clone: None,
             add_project_ops: HashMap::new(),
             back_to_latest_until: None,
             clock,
