@@ -221,10 +221,14 @@ while :; do
     fi
     sleep 0.3
     rm -f '{st}/follow'
-    line '"target":"iwork_daemon::tasks::install_watch","fields":{{"message":"磁盘上装齐了另一版，自行重启"}}'
     # 换成看到变化时的那一版，不再读一次磁盘：这期间又装了新版的话，下一轮循环另记一次「自行重启」（真后台也是
-    # 重启成哪一版就是哪一版）；读当下的磁盘会一步跳到新版、却没有新版那条「自行重启」，等它的那一格就等不到
+    # 重启成哪一版就是哪一版）；读当下的磁盘会一步跳到新版、却没有新版那条「自行重启」，等它的那一格就等不到。
+    # 先换映像再记「自行重启」：演练一看到这条就按进程号取 CDHash，真后台在这两步之间只隔 exec 那一下，假后台
+    # 不能让它看到旧映像
     echo "$cur" > '{st}/image'
+    line '"target":"iwork_daemon::tasks::install_watch","fields":{{"message":"磁盘上装齐了另一版，自行重启"}}'
+    # 慢机器：新进程过这么久才就绪（状态里放了 restart_delay 时，内容是秒数）
+    [ -f '{st}/restart_delay' ] && sleep "$(cat '{st}/restart_delay')"
     line '"target":"iwork_daemon","fields":{{"message":"后台服务就绪"}}'
     unsigned_manifest
     c=$(cat '{st}/pids/iwork-client' 2>/dev/null)
@@ -594,6 +598,31 @@ fn drill_window_cells_hold_when_client_starts_late() {
     let record = w.record();
     assert!(record.contains("W1 PASS"), "{}\n{record}", text(&out));
     assert!(record.contains("W2 PASS"), "{}\n{record}", text(&out));
+    assert!(!record.contains("FAIL："), "{record}");
+    assert_eq!(out.status.code(), Some(0), "{}\n{record}", text(&out));
+}
+
+/// 慢机器上的换版本轮次（9.7）：假后台记完「自行重启」要过 0.5 秒新进程才就绪，这期间演练已经装上下一版
+/// （U4 救回之后紧接着 9.7 的第一轮）。每一轮照样等到自己那条「自行重启」，四轮都 PASS。
+#[test]
+fn drill_upgrade_rounds_hold_when_daemon_restarts_slowly() {
+    let w = World::new();
+    w.flag("reactive");
+    std::fs::write(w.state.join("restart_delay"), "0.5").unwrap();
+    let out = w.drill();
+    let record = w.record();
+    for round in [
+        "b-signed→a-signed",
+        "a-signed→b-signed",
+        "b-signed→b-unsigned",
+        "b-unsigned→a-signed",
+    ] {
+        assert!(
+            record.contains(&format!("9.7 {round} PASS")),
+            "{round}：{}\n{record}",
+            text(&out)
+        );
+    }
     assert!(!record.contains("FAIL："), "{record}");
     assert_eq!(out.status.code(), Some(0), "{}\n{record}", text(&out));
 }
