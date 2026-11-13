@@ -523,22 +523,55 @@ mod tests {
         }
     }
 
-    /// 采样在阻塞线程池里做：单线程运行时上，一次很慢的扫描（300ms）期间，定时器照常触发。
-    /// 扫描若跑在异步线程上，这里会出现 ≥300ms 的停顿。
+    /// 采样不卡住异步任务：单线程运行时上，扫描进行中异步任务照样能推进。
+    ///
+    /// 扫描和异步侧握手：扫描一开始就通知异步侧，然后等异步侧放行才返回。扫描若卡住异步线程（直接在异步线程上
+    /// 扫，或在别的线程扫、异步线程同步等它），放行的任务跑不起来，扫描等到兜底时限、记一次「没放行」。
+    /// 不比停顿时长（CI 机器的调度抖动就能有上百毫秒）；兜底时限只防测试本身死锁，给得很宽。
+    /// 等两份样本：首轮扫描和第一次周期扫描（间隔 [`SAMPLE_INTERVAL`]）都覆盖。
     #[test]
     fn slow_scan_does_not_block_the_async_thread() {
+        const RELEASE_LIMIT: Duration = Duration::from_secs(10);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         rt.block_on(async {
-            let (tx, rx) = watch::channel(None);
-            let scans = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let counter = scans.clone();
+            // 握手带轮次号：上一轮超时后才迟到的放行不能算给这一轮
+            let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<u32>();
+            // 异步侧：扫描每开始一次就放行一次
+            let releaser = tokio::spawn(async move {
+                while let Some(round) = started_rx.recv().await {
+                    if release_tx.send(round).is_err() {
+                        return;
+                    }
+                }
+            });
+            // 单线程运行时：所有异步任务都在 block_on 的这个线程上跑
+            let async_thread = std::thread::current().id();
+            // 每次扫描：是否在兜底时限内等到放行、跑在哪个线程上
+            let released = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let record = released.clone();
+            let (tx, mut rx) = watch::channel(None);
+            let mut round = 0u32;
             let sampler = tokio::spawn(sample_loop(
                 move || {
-                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    std::thread::sleep(Duration::from_millis(300));
+                    round += 1;
+                    started_tx.send(round).unwrap();
+                    let deadline = std::time::Instant::now() + RELEASE_LIMIT;
+                    let ok = loop {
+                        let left = deadline.saturating_duration_since(std::time::Instant::now());
+                        match release_rx.recv_timeout(left) {
+                            Ok(r) if r == round => break true,
+                            Ok(_) => {}
+                            Err(_) => break false,
+                        }
+                    };
+                    record
+                        .lock()
+                        .unwrap()
+                        .push((ok, std::thread::current().id()));
                     Some(ResourceSample {
                         rss_bytes: 1,
                         cpu_percent: 0.0,
@@ -547,26 +580,27 @@ mod tests {
                 },
                 tx,
             ));
-            let start = tokio::time::Instant::now();
-            let mut worst = Duration::ZERO;
-            let mut last = start;
-            // 覆盖首次扫描与一次周期扫描
-            while start.elapsed() < Duration::from_millis(2600) {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-                let now = tokio::time::Instant::now();
-                worst = worst.max(now - last);
-                last = now;
+            for round in ["首轮", "周期"] {
+                tokio::time::timeout(Duration::from_secs(60), rx.changed())
+                    .await
+                    .unwrap_or_else(|_| panic!("60s 内没收到{round}扫描的样本"))
+                    .unwrap();
             }
             sampler.abort();
+            releaser.abort();
+            let released = released.lock().unwrap().clone();
             assert!(
-                scans.load(std::sync::atomic::Ordering::SeqCst) >= 2,
-                "对照：期间确实扫了两次"
+                released.len() >= 2,
+                "对照：首轮和周期扫描都做了：{released:?}"
             );
-            assert!(rx.borrow().is_some(), "对照：样本送到了");
-            eprintln!("最长停顿 {worst:?}");
             assert!(
-                worst < Duration::from_millis(150),
-                "异步线程被卡了 {worst:?}"
+                released.iter().all(|(ok, _)| *ok),
+                "扫描进行中异步任务没能推进（{RELEASE_LIMIT:?} 内没放行）：{released:?}"
+            );
+            // 辅助：扫描本身也不在异步线程上
+            assert!(
+                released.iter().all(|(_, t)| *t != async_thread),
+                "扫描跑在了异步线程 {async_thread:?} 上：{released:?}"
             );
         });
     }
