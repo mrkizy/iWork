@@ -85,7 +85,12 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
-.iw-dialog--form .iw-field + .iw-field,
+/* 资料栏窄：三个下拉按内容宽（画布 13），思考强度占剩下的；放不下时前两个一起收 */
+.iw-profile .iw-model-selects {
+  grid-template-columns: minmax(0, max-content) minmax(0, max-content) minmax(64px, 1fr);
+}
+/* 只隔开弹窗正文里的一项项；三个下拉那一行里的不隔（隔了会比「运行时」低一截，UI 审查 g3 F-1） */
+.iw-dialog--form .iw-dialog__body > .iw-field + .iw-field,
 .iw-dialog--form .iw-model-selects {
   margin-top: 12px;
 }
