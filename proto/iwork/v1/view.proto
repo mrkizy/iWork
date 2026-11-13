@@ -657,8 +657,20 @@ message RuleGroup {
 
 message RuleItem {
   string rule_id = 1;
+  // 原文（读屏、复制用）；画的时候用 label_spans。
   string label = 2;
   bool can_revoke = 3;
+  // label 按反引号切开：code 的一段照代码样式画（ui-m1 第 2 节第 15 条的例子「执行 `npm test …`」）。
+  repeated TextSpan label_spans = 4;
+  // 记在哪个助手或项目上（如「项目 demo」「助手 阿森」「所有项目与助手」）。
+  string owner_label = 5;
+  // 创建时间（今天写时刻，更早写日期）；后台没给就不设。
+  string created_label = 6;
+}
+
+message TextSpan {
+  string text = 1;
+  bool code = 2;
 }
 
 message ImportGroup {

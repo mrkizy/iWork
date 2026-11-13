@@ -57,8 +57,35 @@ describe.skipIf(noFixtures)("设置页", () => {
   it("审批：记住的规则按 Rust 给的分组列出，撤销发带 id 的操作", () => {
     const { acts, store } = renderScenario("settings-rules", { page: "settings", section: "approval" });
     const groups = [
-      create(RuleGroupSchema, { title: "永久", rules: [{ ruleId: "r1", label: "执行 `npm test …` 不再问", canRevoke: true }] }),
-      create(RuleGroupSchema, { title: "本项目", rules: [{ ruleId: "r2", label: "本项目内写 `src/` 不再问", canRevoke: false }] }),
+      create(RuleGroupSchema, {
+        title: "永久",
+        rules: [
+          {
+            ruleId: "r1",
+            label: "执行 `npm test …` 不再问",
+            canRevoke: true,
+            labelSpans: [
+              { text: "执行 " },
+              { text: "npm test …", code: true },
+              { text: " 不再问" },
+            ],
+            ownerLabel: "所有项目与助手",
+            createdLabel: "14:05",
+          },
+        ],
+      }),
+      create(RuleGroupSchema, {
+        title: "本项目 · demo",
+        rules: [
+          {
+            ruleId: "r2",
+            label: "写 `src/`",
+            canRevoke: false,
+            labelSpans: [{ text: "写 " }, { text: "src/", code: true }],
+            ownerLabel: "项目 demo",
+          },
+        ],
+      }),
     ];
     store.applyPatch(
       create(ViewPatchSchema, {
@@ -67,7 +94,12 @@ describe.skipIf(noFixtures)("设置页", () => {
     );
     for (const g of groups) {
       const sec = within(body()).getByRole("region", { name: g.title });
-      for (const r of g.rules) expect(sec.textContent).toContain(r.label);
+      for (const r of g.rules) {
+        // 反引号不原样显示：代码那段画成 code，「记在哪 · 何时」一行小字
+        expect(sec.textContent).not.toContain("`");
+        for (const s of r.labelSpans.filter((x) => x.code)) expect(within(sec).getByText(s.text).tagName).toBe("CODE");
+        expect(sec.textContent).toContain([r.ownerLabel, r.createdLabel].filter(Boolean).join(" · "));
+      }
       expect(within(sec).queryByRole("button", { name: "撤销" }) !== null, "撤销按钮跟着 can_revoke").toBe(g.rules[0].canRevoke);
     }
     fireEvent.click(within(within(body()).getByRole("region", { name: "永久" })).getByRole("button", { name: "撤销" }));

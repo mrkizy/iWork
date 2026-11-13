@@ -451,7 +451,7 @@ fn no_verification_label_outside_runtime_views() {
         &[SIDEBAR],
         E::RuntimeUpdated(pb::RuntimeUpdated { runtime: Some(rt) }),
     ));
-    let settings = derive::settings::settings(&s);
+    let settings = derive::settings::settings(&s, ctx());
     assert_eq!(
         settings.runtimes[0].verification_label.as_deref(),
         Some("验证中")
@@ -478,7 +478,7 @@ fn settings_lists_upcoming_runtimes_after_real_ones() {
         vec![],
     );
     let list = |s: &iwork_client_core::store::Store| {
-        derive::settings::settings(s)
+        derive::settings::settings(s, ctx())
             .runtimes
             .into_iter()
             .map(|r| (r.display_name, r.state_label, r.upcoming, r.can_redetect))
@@ -563,4 +563,100 @@ fn quota_dash_and_tooltip() {
 /// 徽标上的字；没有徽标时为空串。
 fn badge(b: &Option<pb::CountBadge>) -> &str {
     b.as_ref().map_or("", |b| b.text.as_str())
+}
+
+/// 设置 › 审批的记住的规则（ui-m1 第 2 节第 15 条；UI 审查 g3 2/F-2、2/F-3）：「永久」在前，之后每个项目、每个对话
+/// 各一组、标题写明是哪个；每行写明记在哪个助手或项目上、创建时间；反引号里的照代码画。找不到的目标不瞎猜。
+#[test]
+fn rule_rows_say_where_and_when() {
+    use pb::scope::Kind as S;
+    let mut s = with_summary(
+        vec![project(0)],
+        vec![dm("c-dm", "a2", 0)],
+        vec![
+            assistant("a1", "iWork", true),
+            assistant("a2", "阿森", false),
+        ],
+        vec![],
+        vec![],
+    );
+    let today = ctx().now - Duration::from_secs(60);
+    let at = |t: SystemTime| {
+        let d = t.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        prost_types::Timestamp {
+            seconds: d.as_secs() as i64,
+            nanos: 0,
+        }
+    };
+    let rule = |id: &str, label: &str, scope: S| pb::Rule {
+        id: id.into(),
+        layer: pb::RuleLayer::Remembered.into(),
+        scope: Some(pb::Scope { kind: Some(scope) }),
+        label: label.into(),
+        created_at: Some(at(today)),
+        ..Default::default()
+    };
+    s.rules = Some(vec![
+        rule(
+            "r-conv",
+            "执行 `ls` 不再问",
+            S::ConversationId("c-dm".into()),
+        ),
+        rule("r-proj", "写 `src/`", S::ProjectId(PID.into())),
+        rule("r-asst", "联网不再问", S::AssistantId("a2".into())),
+        rule("r-all", "执行 `make` 不再问", S::Global(pb::GlobalScope {})),
+        rule("r-gone", "删掉的项目", S::ProjectId("p-gone".into())),
+    ]);
+    let v = derive::settings::settings(&s, ctx());
+    let groups: Vec<(String, Vec<(String, String)>)> = v
+        .rule_groups
+        .iter()
+        .map(|g| {
+            (
+                g.title.clone(),
+                g.rules
+                    .iter()
+                    .map(|r| (r.rule_id.clone(), r.owner_label.clone()))
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        groups,
+        vec![
+            (
+                "永久".to_owned(),
+                vec![
+                    ("r-asst".to_owned(), "助手 阿森".to_owned()),
+                    ("r-all".to_owned(), "所有项目与助手".to_owned()),
+                ]
+            ),
+            (
+                "本项目 · web".to_owned(),
+                vec![("r-proj".to_owned(), "项目 web".to_owned())]
+            ),
+            (
+                "本项目 · （找不到）".to_owned(),
+                vec![("r-gone".to_owned(), "项目 （找不到）".to_owned())]
+            ),
+            (
+                "本对话 · 小林".to_owned(),
+                vec![("r-conv".to_owned(), "助手 阿森".to_owned())]
+            ),
+        ]
+    );
+    let conv = &v.rule_groups[3].rules[0];
+    assert_eq!(conv.label, "执行 `ls` 不再问", "原文留着");
+    assert_eq!(
+        conv.label_spans
+            .iter()
+            .map(|x| (x.text.as_str(), x.code))
+            .collect::<Vec<_>>(),
+        vec![("执行 ", false), ("ls", true), (" 不再问", false)]
+    );
+    assert!(
+        conv.created_label.contains(':'),
+        "今天记的写时刻：{}",
+        conv.created_label
+    );
 }

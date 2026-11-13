@@ -202,7 +202,7 @@ impl FrameEngine {
                     view: Some(derive::pending::pending(store)),
                 })),
                 ViewKey::Settings if v.settings => Some(C::Settings(pb::SettingsPatch {
-                    view: Some(derive::settings::settings(store)),
+                    view: Some(derive::settings::settings(store, ctx)),
                 })),
                 ViewKey::Assistant => v
                     .assistant_id

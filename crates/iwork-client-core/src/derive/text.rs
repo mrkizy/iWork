@@ -261,6 +261,42 @@ pub fn login_label(subscription_type: &str) -> String {
     }
 }
 
+/// 规则的「记在哪」：全局的规则。
+pub const RULE_OWNER_ALL: &str = "所有项目与助手";
+/// 规则记在的项目、助手或对话在本机摘要里找不到（已删或还没查到）。
+pub const RULE_TARGET_GONE: &str = "（找不到）";
+
+/// 按反引号切开：成对的反引号之间是代码。落单的反引号原样留在文字里。
+pub fn code_spans(s: &str) -> Vec<pb::TextSpan> {
+    let parts: Vec<&str> = s.split('`').collect();
+    // 段数为偶数说明最后一个反引号落单：把它和最后一段并回文字
+    let paired = if parts.len() % 2 == 0 {
+        parts.len() - 1
+    } else {
+        parts.len()
+    };
+    let mut out: Vec<pb::TextSpan> = Vec::new();
+    for (i, p) in parts[..paired].iter().enumerate() {
+        if !p.is_empty() {
+            out.push(pb::TextSpan {
+                text: (*p).to_owned(),
+                code: i % 2 == 1,
+            });
+        }
+    }
+    if paired < parts.len() {
+        let rest = format!("`{}", parts[paired]);
+        match out.last_mut() {
+            Some(last) if !last.code => last.text.push_str(&rest),
+            _ => out.push(pb::TextSpan {
+                text: rest,
+                code: false,
+            }),
+        }
+    }
+    out
+}
+
 pub fn runtime_state(state: pb::RuntimeState) -> &'static str {
     use pb::RuntimeState as S;
     match state {
@@ -653,6 +689,34 @@ mod anchor_text_tests {
             "前一天（本地时区）"
         );
         assert_eq!(clock_or_date(now, at(400 * 86_400), &tz), "2025年10月8日");
+    }
+
+    #[test]
+    fn code_spans_split_on_backticks() {
+        let spans = |s: &str| {
+            code_spans(s)
+                .into_iter()
+                .map(|x| (x.text, x.code))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            spans("执行 `npm test …` 不再问"),
+            vec![
+                ("执行 ".to_owned(), false),
+                ("npm test …".to_owned(), true),
+                (" 不再问".to_owned(), false),
+            ]
+        );
+        assert_eq!(
+            spans("写 `src/`"),
+            vec![("写 ".to_owned(), false), ("src/".to_owned(), true)]
+        );
+        assert_eq!(spans("没有代码"), vec![("没有代码".to_owned(), false)]);
+        assert_eq!(
+            spans("落单 `反引号"),
+            vec![("落单 `反引号".to_owned(), false)],
+            "落单的反引号原样留着"
+        );
     }
 
     #[test]

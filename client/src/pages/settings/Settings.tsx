@@ -144,7 +144,14 @@ function Rules(props: { view: SettingsView }) {
                 <For each={g.rules}>
                   {(rule) => (
                     <li class="iw-settings__row">
-                      <span>{rule.label}</span>
+                      <span class="iw-settings__rule">
+                        <span class="iw-settings__rule-label">
+                          <For each={rule.labelSpans}>{(s) => (s.code ? <code>{s.text}</code> : <>{s.text}</>)}</For>
+                        </span>
+                        <span class="iw-settings__rule-meta">
+                          {[rule.ownerLabel, rule.createdLabel].filter(Boolean).join(" · ")}
+                        </span>
+                      </span>
                       <Show when={rule.canRevoke}>
                         <IconButton
                           icon="close"

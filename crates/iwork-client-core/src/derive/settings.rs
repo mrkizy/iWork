@@ -3,7 +3,7 @@
 use iwork_proto::pb;
 
 use super::sidebar::{conversation_item, waiting_conversations};
-use super::{Ctx, text};
+use super::{Ctx, text, to_system_time};
 use crate::store::Store;
 
 pub fn runtime_view(r: &pb::RuntimeStatus) -> pb::RuntimeView {
@@ -44,39 +44,97 @@ fn upcoming_runtime(name: &str) -> pb::RuntimeView {
     }
 }
 
-/// 记住的规则按「永久 / 本项目 / 本对话」分组（ui-m1.md 第 2 节第 15 条）。只列记住的规则。
-fn rule_groups(rules: &[pb::Rule]) -> Vec<pb::RuleGroup> {
+/// 记住的规则分组（ui-m1.md 第 2 节第 15 条）：「永久」一组（全局与记在助手上的），之后每个项目一组「本项目 · 名字」、
+/// 每个对话一组「本对话 · 标题」（UI 审查 g3 2/F-2：标题写明是哪个）。每行写明记在哪、什么时候记的。只列记住的规则。
+fn rule_groups(store: &Store, ctx: Ctx, rules: &[pb::Rule]) -> Vec<pb::RuleGroup> {
     use pb::scope::Kind as S;
-    type Belongs = fn(&S) -> bool;
-    let groups: [(&str, Belongs); 3] = [
-        ("永久", |k| matches!(k, S::Global(_) | S::AssistantId(_))),
-        ("本项目", |k| matches!(k, S::ProjectId(_))),
-        ("本对话", |k| matches!(k, S::ConversationId(_))),
-    ];
-    groups
-        .into_iter()
-        .filter_map(|(title, belongs)| {
-            let items: Vec<pb::RuleItem> = rules
-                .iter()
-                .filter(|r| r.layer == pb::RuleLayer::Remembered as i32)
-                .filter(|r| {
-                    r.scope
-                        .as_ref()
-                        .and_then(|s| s.kind.as_ref())
-                        .is_some_and(belongs)
-                })
-                .map(|r| pb::RuleItem {
-                    rule_id: r.id.clone(),
-                    label: r.label.clone(),
-                    can_revoke: true,
-                })
-                .collect();
-            (!items.is_empty()).then(|| pb::RuleGroup {
-                title: title.into(),
-                rules: items,
-            })
-        })
-        .collect()
+    let tz = jiff::tz::TimeZone::system();
+    // 分组键：(先后, 目标 id)。永久一组在前，其次按项目、对话，组内照后台给的顺序
+    let mut groups: Vec<((u8, String), pb::RuleGroup)> = Vec::new();
+    for r in rules
+        .iter()
+        .filter(|r| r.layer == pb::RuleLayer::Remembered as i32)
+    {
+        let Some(kind) = r.scope.as_ref().and_then(|s| s.kind.as_ref()) else {
+            continue;
+        };
+        let (key, title) = match kind {
+            S::Global(_) | S::AssistantId(_) => ((0, String::new()), "永久".to_owned()),
+            S::ProjectId(p) => (
+                (1, p.clone()),
+                format!("本项目 · {}", project_label(store, p)),
+            ),
+            S::ConversationId(c) => (
+                (2, c.clone()),
+                format!("本对话 · {}", conversation_label(store, c)),
+            ),
+        };
+        let item = pb::RuleItem {
+            rule_id: r.id.clone(),
+            label: r.label.clone(),
+            can_revoke: true,
+            label_spans: text::code_spans(&r.label),
+            owner_label: owner_label(store, kind),
+            created_label: r
+                .created_at
+                .as_ref()
+                .map(|t| text::clock_or_date(ctx.now, to_system_time(t), &tz))
+                .unwrap_or_default(),
+        };
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, g)) => g.rules.push(item),
+            None => groups.push((
+                key,
+                pb::RuleGroup {
+                    title,
+                    rules: vec![item],
+                },
+            )),
+        }
+    }
+    groups.sort_by(|(a, _), (b, _)| a.0.cmp(&b.0));
+    groups.into_iter().map(|(_, g)| g).collect()
+}
+
+fn project_label(store: &Store, id: &str) -> String {
+    store
+        .summary
+        .project(id)
+        .map_or_else(|| text::RULE_TARGET_GONE.to_owned(), |p| p.name.clone())
+}
+
+fn assistant_label(store: &Store, id: &str) -> String {
+    store
+        .summary
+        .assistant(id)
+        .and_then(|a| a.config.as_ref())
+        .map_or_else(|| text::RULE_TARGET_GONE.to_owned(), |c| c.name.clone())
+}
+
+fn conversation_label(store: &Store, id: &str) -> String {
+    store.summary.conversation(id).map_or_else(
+        || text::RULE_TARGET_GONE.to_owned(),
+        |c| super::conversation_title(store, c),
+    )
+}
+
+/// 规则记在哪个助手或项目上。对话范围的规则算在对话所属的项目或助手上。
+fn owner_label(store: &Store, kind: &pb::scope::Kind) -> String {
+    use pb::scope::Kind as S;
+    match kind {
+        S::Global(_) => text::RULE_OWNER_ALL.to_owned(),
+        S::ProjectId(p) => format!("项目 {}", project_label(store, p)),
+        S::AssistantId(a) => format!("助手 {}", assistant_label(store, a)),
+        S::ConversationId(c) => match store.summary.conversation(c).and_then(|c| c.kind.as_ref()) {
+            Some(pb::conversation::Kind::Project(p)) => {
+                format!("项目 {}", project_label(store, &p.project_id))
+            }
+            Some(pb::conversation::Kind::AssistantDm(dm)) => {
+                format!("助手 {}", assistant_label(store, &dm.assistant_id))
+            }
+            None => text::RULE_TARGET_GONE.to_owned(),
+        },
+    }
 }
 
 fn import_groups(store: &Store) -> Vec<pb::ImportGroup> {
@@ -105,9 +163,13 @@ fn import_groups(store: &Store) -> Vec<pb::ImportGroup> {
         .collect()
 }
 
-pub fn settings(store: &Store) -> pb::SettingsView {
+pub fn settings(store: &Store, ctx: Ctx) -> pb::SettingsView {
     let s = store.settings.clone().unwrap_or_default();
-    let rule_groups = store.rules.as_deref().map(rule_groups).unwrap_or_default();
+    let rule_groups = store
+        .rules
+        .as_deref()
+        .map(|r| rule_groups(store, ctx, r))
+        .unwrap_or_default();
     let import_groups = import_groups(store);
     pb::SettingsView {
         playful_ui: s.playful_ui,

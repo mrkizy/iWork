@@ -1423,6 +1423,8 @@ impl Store {
         self.dirty.mark(ViewKey::Pending);
         self.dirty.mark(ViewKey::Assistant);
         self.dirty.mark(ViewKey::AddProject);
+        // 设置 › 审批的规则分组标题与「记在哪」读项目、助手、对话的名字
+        self.dirty.mark(ViewKey::Settings);
     }
 }
 

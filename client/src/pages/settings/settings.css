@@ -117,6 +117,25 @@
 .iw-settings__rules {
   padding: 4px 16px;
 }
+/* 规则一行：动作与范围（反引号里的照代码画），下面一行小字写记在哪、什么时候（ui-m1 第 2 节第 15 条） */
+.iw-settings__rule {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 0;
+}
+.iw-settings__rule-label code {
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  background: var(--tag);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+.iw-settings__rule-meta {
+  color: var(--tx3);
+  font-size: var(--fs-sm);
+}
 .iw-settings__rules > li + li {
   border-top: 1px solid var(--bd);
 }
