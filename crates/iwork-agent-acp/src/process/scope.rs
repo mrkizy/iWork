@@ -56,14 +56,6 @@ impl Table {
 /// 读完进程表**之后**对见证的复核：进程号 → 此刻的（出生时间，会话号）；没了或读不到为 `None`。
 pub type Recheck = BTreeMap<Pid, Option<(Birth, Pid)>>;
 
-/// 一个记到过的进程。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Recorded {
-    birth: Birth,
-    /// 最近一次看到它时的会话号
-    sid: Pid,
-}
-
 /// 范围里的一个活进程。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
@@ -85,6 +77,8 @@ pub struct Members {
     pub list: Vec<Member>,
     /// 这一遍被别的提交超过去了（只加不删地并进了范围）：不拿它下结论（「空了」「都停住了」「只剩见证了」）
     pub stale: bool,
+    /// 提交时还有别的扫描在飞（取了快照、还没提交也没放弃）：不拿它判「清空了」（方案 5.4a 第 4a 条）
+    pub busy: bool,
 }
 
 impl Members {
@@ -100,11 +94,21 @@ impl Members {
 /// 一遍扫描算出来、还没提交的结果（[`Scope::compute`]）。
 #[derive(Debug, Clone)]
 pub struct Pass {
-    /// 这一遍开始时范围的代次
-    since: u64,
+    /// 这一遍开始时的范围（快照）
+    snapshot: Scope,
+    table: Table,
+    recheck: Recheck,
     /// 照完整提交算出来的范围
     next: Scope,
     members: Vec<Member>,
+}
+
+impl Pass {
+    /// 测试用：这一遍算出来的成员（还没提交）。
+    #[cfg(test)]
+    pub fn members_for_test(&self) -> &[Member] {
+        &self.members
+    }
 }
 
 /// 清理范围。由 `ProcessTree` 一处持有。
@@ -114,13 +118,17 @@ pub struct Scope {
     root: Option<Pid>,
     /// 根会话（桥接所在、也是后台所在的会话）：永远不当受管会话
     root_sid: Pid,
-    recorded: BTreeMap<Pid, Recorded>,
+    /// 记到过的进程：身份（进程号，出生时间）→ 记它时的会话号。同一个进程号可以有两条不同出生时间的身份
+    /// （只加不删并进来的，没了的那条等下一遍完整提交删）
+    recorded: BTreeMap<(Pid, Birth), Pid>,
     /// 还有效的受管会话
     sessions: BTreeSet<Pid>,
     /// 作废的会话号：以后不再按它认领
     dropped: BTreeSet<Pid>,
     /// 代次：范围每改一次加一（扫描提交、会话作废、根组作废）。一遍扫描提交时拿它判断中间有没有别的改动
     generation: u64,
+    /// 在飞的扫描有几遍（取了快照、还没提交也没放弃）。不属于范围的内容：完整提交时保留当前值，不取快照里的
+    in_flight: usize,
 }
 
 impl Scope {
@@ -128,15 +136,7 @@ impl Scope {
     /// 一遍扫描都没做成时范围里也有它，审查 S6-5 1/F-3）；`root_sid`：桥接所在的会话。
     pub fn new(root: Pid, root_birth: Option<Birth>, root_sid: Pid) -> Self {
         let recorded = root_birth
-            .map(|birth| {
-                (
-                    root,
-                    Recorded {
-                        birth,
-                        sid: root_sid,
-                    },
-                )
-            })
+            .map(|birth| ((root, birth), root_sid))
             .into_iter()
             .collect();
         Self {
@@ -146,6 +146,7 @@ impl Scope {
             sessions: BTreeSet::new(),
             dropped: BTreeSet::new(),
             generation: 0,
+            in_flight: 0,
         }
     }
 
@@ -161,11 +162,58 @@ impl Scope {
 
     /// 读完进程表之后要复核的进程号：受管会话里记到过的成员。
     pub fn witness_pids(&self) -> Vec<Pid> {
-        self.recorded
+        let pids: BTreeSet<Pid> = self
+            .recorded
             .iter()
-            .filter(|(_, r)| self.sessions.contains(&r.sid))
-            .map(|(pid, _)| *pid)
-            .collect()
+            .filter(|(_, sid)| self.sessions.contains(sid))
+            .map(|((pid, _), _)| *pid)
+            .collect();
+        pids.into_iter().collect()
+    }
+
+    /// 一遍扫描开始：在飞的数加一，返回快照。调用方在提交或放弃时调 [`Scope::end_scan`]（用离开作用域就减的守卫）。
+    pub fn begin_scan(&mut self) -> Scope {
+        self.in_flight += 1;
+        self.clone()
+    }
+
+    /// 一遍扫描结束（提交了、报错了、崩了）。
+    pub fn end_scan(&mut self) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+    }
+
+    /// 在飞的扫描有几遍（测试用）。
+    #[cfg(test)]
+    pub fn in_flight(&self) -> usize {
+        self.in_flight
+    }
+
+    /// 这个身份是不是记到过的进程。
+    pub fn is_recorded(&self, pid: Pid, birth: Birth) -> bool {
+        self.recorded.contains_key(&(pid, birth))
+    }
+
+    /// 记一个身份；同一个身份已经记着别的会话号时，取等于它自己进程号的那个（进程换会话只有自己另立会话一条路，
+    /// 立完会话号就是它自己的进程号，之后不再变，所以那个是后来的；审查 S6-5 3/F-1）。
+    fn record(&mut self, pid: Pid, birth: Birth, sid: Pid) {
+        let e = self.recorded.entry((pid, birth)).or_insert(sid);
+        if *e != sid && sid == pid {
+            *e = sid;
+        }
+    }
+
+    /// 只加不删：把成员按身份并进来，它们带来的会话也并进来（作废过的不恢复）。不删任何记到过的进程，不作废会话。
+    fn merge(&mut self, members: &[Member]) {
+        for m in members {
+            let (Some(birth), Some(sid)) = (m.birth, m.sid) else {
+                continue;
+            };
+            self.record(m.pid, birth, sid);
+            if sid != self.root_sid && !self.dropped.contains(&sid) {
+                self.sessions.insert(sid);
+            }
+        }
+        self.generation += 1;
     }
 
     /// 让一个会话作废（清理时杀掉了它最后的见证）。
@@ -183,49 +231,55 @@ impl Scope {
         let mut next = snapshot.clone();
         let members = next.apply(table, recheck);
         Pass {
-            since: snapshot.generation,
+            snapshot: snapshot.clone(),
+            table: table.clone(),
+            recheck: recheck.clone(),
             next,
             members,
         }
     }
 
-    /// 提交一遍扫描。开始之后没有别的改动 → 完整提交（可删、可作废会话）；有 → 只加不删：这一遍的新成员与它们
-    /// 带来的会话并进来（作废过的不恢复），不删记到过的、不作废会话，返回的成员标成旧的。根组不归扫描管，哪一遍都
-    /// 碰不到它；快照之后根组作废了的那一遍整个丢掉。
+    /// 提交一遍扫描。开始之后没有别的改动 → 完整提交（可删、可作废会话）；有 → 只加不删（[`Scope::merge`]），返回的
+    /// 成员标成旧的。根组不归扫描管，哪一遍都碰不到它的有效期。返回的成员带上「提交时还有没有别的扫描在飞」（调用方
+    /// 这时还算在在飞的数里，提交之后再 [`Scope::end_scan`]）。
     pub fn commit(&mut self, pass: Pass) -> Members {
-        // 快照之后根组作废了（桥接被回收）：这一遍是按「根组有效」算的，读表时那个组号可能已经换了人，凭根组认下的
-        // 成员不可信。整遍丢掉，什么都不并进来，当没做成（回收只在一次成功的清理之后，那时范围里已没有活成员）
-        if self.root.is_none() && pass.next.root.is_some() {
+        let mut members = self.commit_inner(pass);
+        members.busy = self.in_flight > 1;
+        members
+    }
+
+    fn commit_inner(&mut self, pass: Pass) -> Members {
+        // 3a（审查 S6-5 3/F-2）：快照里根组有效、现在已经作废（桥接在这期间被回收）。这一遍原来的结果是按「根组有效」
+        // 算的，读表时那个组号可能已经换了人：照「根组无效」用同一份快照、同一张表、同一次复核重算，只加不删。丢掉的只有
+        // 凭根组号认下的（和只能顺它们的父链走到的）；凭身份、凭会话、顺它们的父链认下的照样留下
+        if self.root.is_none() && pass.snapshot.root.is_some() {
+            let mut again = pass.snapshot.clone();
+            again.root = None;
+            let members = again.apply(&pass.table, &pass.recheck);
+            self.merge(&members);
             return Members {
-                list: Vec::new(),
+                list: members,
                 stale: true,
+                busy: false,
             };
         }
-        if pass.since == self.generation {
-            let root = self.root;
+        if pass.snapshot.generation == self.generation {
+            let (root, in_flight) = (self.root, self.in_flight);
             *self = pass.next;
             self.root = root;
-            self.generation = pass.since + 1;
+            self.in_flight = in_flight;
+            self.generation = pass.snapshot.generation + 1;
             return Members {
                 list: pass.members,
                 stale: false,
+                busy: false,
             };
         }
-        for m in &pass.members {
-            let (Some(birth), Some(sid)) = (m.birth, m.sid) else {
-                continue;
-            };
-            self.recorded
-                .entry(m.pid)
-                .or_insert(Recorded { birth, sid });
-            if sid != self.root_sid && !self.dropped.contains(&sid) {
-                self.sessions.insert(sid);
-            }
-        }
-        self.generation += 1;
+        self.merge(&pass.members);
         Members {
             list: pass.members,
             stale: true,
+            busy: false,
         }
     }
 
@@ -240,18 +294,18 @@ impl Scope {
     fn apply(&mut self, table: &Table, recheck: &Recheck) -> Vec<Member> {
         // 记到过的进程没了就失效：表里没有这个号，或者有、读到的出生时间不一样（那是别的进程）。表里有这个号但
         // 这一遍没读到出生时间 → 不删，留给下一遍（这一遍它也不凭身份算成员、不发信号）
-        self.recorded.retain(|pid, r| {
+        self.recorded.retain(|(pid, birth), _| {
             table
                 .0
                 .get(pid)
-                .is_some_and(|p| p.birth.is_none_or(|b| b == r.birth))
+                .is_some_and(|p| p.birth.is_none_or(|b| b == *birth))
         });
         // 受管会话：读完进程表之后，至少一个记到过的成员还活着（出生时间对得上）、还在这个会话里
         let witnessed: BTreeSet<Pid> = self
             .recorded
             .iter()
-            .filter(|(pid, r)| recheck.get(pid) == Some(&Some((r.birth, r.sid))))
-            .map(|(_, r)| r.sid)
+            .filter(|((pid, birth), sid)| recheck.get(pid) == Some(&Some((*birth, **sid))))
+            .map(|(_, sid)| *sid)
             .collect();
         let gone: Vec<Pid> = self
             .sessions
@@ -264,8 +318,7 @@ impl Scope {
         }
 
         let base = |p: &Proc| -> bool {
-            let recorded =
-                p.birth.is_some() && self.recorded.get(&p.pid).map(|r| r.birth) == p.birth;
+            let recorded = p.birth.is_some_and(|b| self.is_recorded(p.pid, b));
             let in_root = self.root == Some(p.pgid);
             let in_session = p.sid.is_some_and(|s| self.sessions.contains(&s));
             recorded || in_root || in_session
@@ -295,7 +348,7 @@ impl Scope {
         for pid in &members {
             let p = &table.0[pid];
             if let (Some(birth), Some(sid)) = (p.birth, p.sid) {
-                self.recorded.insert(*pid, Recorded { birth, sid });
+                self.recorded.insert((*pid, birth), sid);
                 if sid != self.root_sid && !self.dropped.contains(&sid) {
                     self.sessions.insert(sid);
                 }
@@ -326,7 +379,7 @@ impl Scope {
                     sid: p.sid,
                     run: p.run,
                     depth: depth_of(p.pid),
-                    recorded: self.recorded.contains_key(pid),
+                    recorded: p.birth.is_some_and(|b| self.is_recorded(p.pid, b)),
                 }
             })
             .collect();

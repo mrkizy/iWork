@@ -61,6 +61,10 @@ struct Faults {
     signal_delay_once: Option<Duration>,
     /// 每一遍扫描提交之前，先有另一遍提交落下（这一遍因此被超过去）
     overtake: bool,
+    /// 下一遍扫描读完表、提交之前：先报「到了」，再等放行
+    pause_commit: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    /// 下一遍扫描读表时崩掉
+    panic_once: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +155,35 @@ impl ProcessTree {
         lock(&self.faults).overtake = on;
     }
 
+    /// 测试用：下一遍扫描读完表之后停在提交之前；返回（到了的通知，放行）。
+    #[cfg(test)]
+    pub fn pause_next_commit(
+        &self,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel();
+        lock(&self.faults).pause_commit = Some((reached_tx, go_rx));
+        (reached_rx, go_tx)
+    }
+
+    /// 测试用：下一遍扫描读表时崩掉。
+    #[cfg(test)]
+    pub fn panic_next_scan(&self) {
+        lock(&self.faults).panic_once = true;
+    }
+
+    /// 测试用：在飞的扫描有几遍。
+    #[cfg(test)]
+    pub fn in_flight(&self) -> usize {
+        lock(&self.scope).in_flight()
+    }
+
+    /// 测试用：在当前线程上做一遍扫描（停在提交之前的那一遍用它在别的线程里跑）。
+    #[cfg(test)]
+    pub fn scan_now(&self) -> io::Result<Members> {
+        self.observe_blocking()
+    }
+
     /// 测试用：下一批「复核 + 发送」先睡 `d`（只一次）。
     #[cfg(test)]
     pub fn delay_next_signals(&self, d: Duration) {
@@ -189,28 +222,47 @@ impl ProcessTree {
     /// （采样、清理、上一次放弃的清理留下的迟到扫描）：提交按代次（[`Scope::commit`]），被超过去的那一遍只加不删、
     /// 返回的成员标成旧的（审查 S6-5 2/F-1）。没有哪一遍等别的扫描。
     fn observe_blocking(&self) -> io::Result<Members> {
+        // 次序固定（方案 5.4a「扫描怎么提交到范围」）：锁里取快照、在飞的数加一 → 放锁读表 → 复核快照里的见证 → 算 →
+        // 拿锁提交，同一把锁里看还有没有别的在飞，再减一。报错、崩掉时由守卫减
+        let (snapshot, mut flight) = {
+            let mut scope = lock(&self.scope);
+            (scope.begin_scan(), InFlight::new(&self.scope))
+        };
         #[cfg(test)]
         {
-            let delay = lock(&self.faults).delay_once.take();
+            let (delay, panic) = {
+                let mut f = lock(&self.faults);
+                (f.delay_once.take(), std::mem::take(&mut f.panic_once))
+            };
             if let Some(d) = delay {
                 std::thread::sleep(d);
             }
+            assert!(!panic, "测试注入的扫描崩溃");
             if lock(&self.faults).fail {
                 return Err(io::Error::other("测试注入的扫描失败"));
             }
         }
-        // 次序固定（方案 5.4a「扫描怎么提交到范围」）：锁里取快照 → 放锁读表 → 复核快照里的见证 → 算 → 拿锁提交
-        let snapshot = lock(&self.scope).clone();
         let table = scan::read_table()?;
         let recheck = scan::recheck(&snapshot.witness_pids())?;
         let pass = Scope::compute(&snapshot, &table, &recheck);
+        #[cfg(test)]
+        {
+            let pause = lock(&self.faults).pause_commit.take();
+            if let Some((reached, go)) = pause {
+                let _ = reached.send(());
+                let _ = go.recv();
+            }
+        }
         let mut scope = lock(&self.scope);
         #[cfg(test)]
         if lock(&self.faults).overtake {
             let other = Scope::compute(&scope.clone(), &table, &recheck);
             scope.commit(other);
         }
-        Ok(scope.commit(pass))
+        let members = scope.commit(pass);
+        scope.end_scan();
+        flight.done();
+        Ok(members)
     }
 
     /// 记一次范围（采样、取消一开始）。最多等 [`TREE_CLEAR_LIMIT`]。
@@ -240,7 +292,7 @@ impl ProcessTree {
     /// 答「不空」。
     pub fn is_empty(&self) -> bool {
         match self.observe_blocking() {
-            Ok(m) => !m.stale && m.is_empty(),
+            Ok(m) => !m.stale && !m.busy && m.is_empty(),
             Err(e) => {
                 tracing::warn!(root = self.root, error = %e, "扫描进程表失败，按不空答");
                 false
@@ -252,6 +304,10 @@ impl ProcessTree {
     /// [`Tick::Skip`]（这一次不采，不算树空了）。
     pub fn sample(&self, system: &mut sysinfo::System) -> Tick {
         use sysinfo::{Pid as SPid, ProcessRefreshKind, ProcessesToUpdate};
+        // 清理进行时不另起扫描：clear() 自己每 50 毫秒扫一遍，范围不缺记录；少一个老和它撞的（方案 5.4a 第 4a 条）
+        if self.clearing.try_lock().is_err() {
+            return Tick::Skip;
+        }
         let members = match self.observe_blocking() {
             Ok(m) => m,
             Err(e) => {
@@ -259,8 +315,13 @@ impl ProcessTree {
                 return Tick::Skip;
             }
         };
+        // 只有一遍不旧、提交时没有别的在飞的空结果才算树没了；旧的空结果跳过这一拍（审查 S6-5 3/F-3）
         if members.is_empty() {
-            return Tick::Done;
+            return if members.stale || members.busy {
+                Tick::Skip
+            } else {
+                Tick::Done
+            };
         }
         let pids: Vec<SPid> = members
             .list
@@ -385,7 +446,9 @@ impl ProcessTree {
         loop {
             self.gate(GateStep::Kill).await;
             if let Some(m) = self.observe_until(deadline).await {
+                // 下「清空了」的结论：这一遍不旧（observe_until 已经滤掉）、提交时没有别的扫描在飞、桥接自己已退出
                 if m.is_empty()
+                    && !m.busy
                     && self
                         .blocking(deadline, |t| t.root_exited())
                         .await
@@ -504,6 +567,30 @@ impl ProcessTree {
                     }
                 }
             }
+        }
+    }
+}
+
+/// 一遍在飞的扫描：离开作用域时（报错、崩掉）把在飞的数减一；正常提交时在提交的那把锁里已经减过，`done()`。
+struct InFlight<'a> {
+    scope: &'a Mutex<Scope>,
+    armed: bool,
+}
+
+impl<'a> InFlight<'a> {
+    fn new(scope: &'a Mutex<Scope>) -> Self {
+        Self { scope, armed: true }
+    }
+
+    fn done(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            lock(self.scope).end_scan();
         }
     }
 }

@@ -380,13 +380,14 @@ fn run_staged(steps: &[Staged]) -> Result<(), String> {
     let bridge_birth = w.procs[&BRIDGE].birth;
     let mut scope = Scope::new(BRIDGE, Some(Birth(bridge_birth)), DAEMON);
     let mut scans = [Scan::default(), Scan::default()];
+    let mut claimed: BTreeSet<(Pid, u64)> = BTreeSet::new();
     for (n, s) in steps.iter().enumerate() {
         match s {
             Staged::World(op) => w.apply(op, &mut scope),
             Staged::Advance(k) => {
                 let scan = &mut scans[*k];
                 if scan.snapshot.is_none() {
-                    scan.snapshot = Some(scope.clone());
+                    scan.snapshot = Some(scope.begin_scan());
                     continue;
                 }
                 if scan.table.is_none() {
@@ -409,10 +410,43 @@ fn run_staged(steps: &[Staged]) -> Result<(), String> {
                 let before = scope.clone();
                 let pass = Scope::compute(&snap, &table, &recheck);
                 let members = scope.commit(pass);
+                scope.end_scan();
+                // 这一遍凭什么认下了谁：记着，之后判「清空了」时它们一个都不能还活着
+                for m in &members.list {
+                    if let Some(b) = m.birth {
+                        claimed.insert((m.pid, b.0));
+                    }
+                }
+                // clear() 下「清空了」的结论（空的、不旧、提交时没有别的在飞）：任何一遍读过表的扫描（提交了的、还在飞的）
+                // 曾经认下的我们的进程，此刻一个都不能还活着（方案 5.4a 第 4a 条）
+                if members.is_empty() && !members.stale && !members.busy {
+                    let mut seen: Vec<(Pid, u64)> = claimed.iter().copied().collect();
+                    for other in scans.iter().filter(|o| o.table.is_some()) {
+                        let (Some(s0), Some(t0)) = (&other.snapshot, &other.table) else {
+                            continue;
+                        };
+                        let r0 = other.recheck.clone().unwrap_or_default();
+                        for m in Scope::compute(s0, t0, &r0).members_for_test() {
+                            if let Some(b) = m.birth {
+                                seen.push((m.pid, b.0));
+                            }
+                        }
+                    }
+                    for (pid, birth) in seen {
+                        if w.procs
+                            .get(&pid)
+                            .is_some_and(|p| p.birth == birth && p.ours)
+                        {
+                            return Err(format!(
+                                "第 {n} 步判了清空，但被扫到过的我们的进程 {pid} 还活着"
+                            ));
+                        }
+                    }
+                }
                 // 记到过的、此刻还活着（同一个身份）的，提交之后都还在
-                for (pid, r) in &before.recorded {
-                    let alive = w.procs.get(pid).is_some_and(|p| p.birth == r.birth.0);
-                    if alive && !scope.recorded.contains_key(pid) {
+                for (pid, birth) in before.recorded.keys() {
+                    let alive = w.procs.get(pid).is_some_and(|p| p.birth == birth.0);
+                    if alive && !scope.is_recorded(*pid, *birth) {
                         return Err(format!(
                             "第 {n} 步的提交删掉了还活着的记到过的进程 {pid}（旧={}）",
                             members.stale
@@ -869,28 +903,78 @@ fn unread_birth_keeps_the_record() {
     let recheck = recheck_of(&t, &s.witness_pids());
     let got = s.observe(&tt, &recheck);
     assert!(!got.pids().contains(&20));
-    assert!(s.recorded.contains_key(&20), "没读到出生时间的不删");
+    assert!(s.is_recorded(20, Birth(20)), "没读到出生时间的不删");
 }
 
-/// 属性测试找到的：一遍扫描取快照时根组还有效，之后桥接被回收、号码被外人重用并建成同号的组；这一遍照快照里的
-/// 「根组有效」把外人认成根组成员。提交时发现根组在快照之后作废了，整遍丢掉，什么都不并进来。
+/// 3a（审查 S6-5 3/F-2）：快照取在回收之前；读表时根组号被一个外人拿到、建了同号的组；表里另有记到过的进程 X 和它
+/// 刚生的孩子 Y。提交时照「根组无效」重算、只加不删：外人不在范围里，Y 被记下了，返回的成员标成旧的。
 #[test]
-fn scan_spanning_a_reap_is_discarded() {
+fn scan_spanning_a_reap_drops_only_root_group_claims() {
     let mut s = Scope::new(10, Some(Birth(10)), 2);
+    observe(&mut s, base_table());
     let snap = s.clone();
     s.mark_reaped();
-    // 号码 10 被外人拿到、自成一组
     let table = vec![
         proc(1, 1, 1, 1, 1),
         proc(2, 1, 2, 2, 2),
-        proc(10, 1, 10, 1, 99),
+        // 号码 10 被外人拿到、自成一组（组号等于旧根组号）
+        proc(10, 1, 10, 10, 99),
+        // X = 20 还活着（父进程没了），它刚生的孩子 Y = 23
+        proc(20, 1, 20, 20, 20),
+        proc(23, 20, 20, 20, 23),
     ];
     let got = s.commit(pass(&snap, table.clone(), &table));
-    assert!(got.stale && got.is_empty());
+    assert!(got.stale);
     assert!(
-        !s.recorded.contains_key(&10) || s.recorded[&10].birth == Birth(10),
+        !got.pids().contains(&10) && !s.is_recorded(10, Birth(99)),
         "外人没被记下"
     );
+    assert!(s.is_recorded(23, Birth(23)), "Y 被记下了");
+}
+
+/// 3/F-1：同一个进程号、出生时间不同的两个后代。旧的那一遍（看到号 21 上原来那个）先提交，新的那一遍（看到号 21 上后来
+/// 那个，也是我们的）后提交、只加不删：两条身份都在；之后那个活着的成了孤儿（父链断、自成会话），仍凭身份在范围里。
+#[test]
+fn stale_merge_is_by_identity() {
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
+    let snap = s.clone();
+    // 甲：号 21 上是原来那个（出生时间 21）
+    let a = base_table();
+    // 乙：原来那个已经没了，号 21 被 CLI 新生的孩子拿到（出生时间 77）
+    let mut b: Vec<Proc> = base_table().into_iter().filter(|p| p.pid != 21).collect();
+    b.push(proc(21, 11, 21, 21, 77));
+    assert!(!s.commit(pass(&snap, a.clone(), &a)).stale);
+    let got = s.commit(pass(&snap, b.clone(), &b));
+    assert!(got.stale);
+    assert!(
+        s.is_recorded(21, Birth(21)) && s.is_recorded(21, Birth(77)),
+        "两条身份都在"
+    );
+    // CLI 退出，新的 21 成了孤儿
+    let mut later: Vec<Proc> = b.into_iter().filter(|p| p.pid != 11).collect();
+    later.iter_mut().find(|p| p.pid == 21).unwrap().ppid = 1;
+    assert!(observe(&mut s, later).contains(&21));
+}
+
+/// 3/F-1：记到过的进程另立了会话。旧表（它还在原会话里）先提交，新表（会话号等于它自己的进程号）后提交、只加不删：
+/// 它记着的会话号是新的，下一遍完整提交不会把它的新会话作废。
+#[test]
+fn stale_merge_takes_the_newer_session() {
+    let mut s = Scope::new(10, Some(Birth(10)), 2);
+    observe(&mut s, base_table());
+    let snap = s.clone();
+    // 21 另立会话 21
+    let mut newer = base_table();
+    let x = newer.iter_mut().find(|p| p.pid == 21).unwrap();
+    x.sid = Some(21);
+    x.pgid = 21;
+    assert!(!s.commit(pass(&snap, base_table(), &base_table())).stale);
+    assert!(s.commit(pass(&snap, newer.clone(), &newer)).stale);
+    assert_eq!(s.recorded[&(21, Birth(21))], 21, "取等于自己进程号的那个");
+    // 下一遍完整提交：20 没了，会话 21 靠 21 自己当见证，不作废
+    let next: Vec<Proc> = newer.into_iter().filter(|p| p.pid != 20).collect();
+    observe(&mut s, next);
+    assert!(s.sessions.contains(&21) && !s.dropped.contains(&21));
 }
 
 /// reviewer 探针在四步模型里的样子：甲取快照、读表；桥接 fork 出一个孩子；乙走完四步、把孩子记下；甲复核、提交。

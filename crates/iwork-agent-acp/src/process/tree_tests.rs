@@ -550,9 +550,145 @@ async fn stale_scan_is_not_a_conclusion() {
     assert!(!f.process.kill_tree_and_wait().await);
     assert!(tree.holds_child());
     tree.overtake_scans(false);
-    assert!(
-        f.process.tree_is_empty().unwrap(),
-        "对照：不旧的那一遍是空的"
-    );
+    // clear() 到期时它的最后一遍可能还没开始跑（排在阻塞线程池里，迟到的扫描），之后才落下：那一遍在飞时 is_empty
+    // 照第 4a 条答「不空」。等它们落下，最终答「空」
+    let mut empty = false;
+    for _ in 0..200 {
+        if f.process.tree_is_empty().unwrap() {
+            empty = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(empty, "对照：不旧、没有别的在飞的那一遍是空的");
     assert!(f.process.kill_tree_and_wait().await);
+}
+
+// ---------- 第 4a 条：下「清空了」的结论时没有别的扫描在飞（审查 S6-5 3/F-2、3/F-3） ----------
+
+/// 在别的线程里做一遍停在提交之前的扫描；返回（等它落下的句柄，放行）。
+fn paused_scan(
+    tree: &super::tree::ProcessTree,
+) -> (
+    std::thread::JoinHandle<std::io::Result<super::scope::Members>>,
+    std::sync::mpsc::Sender<()>,
+) {
+    let (reached, go) = tree.pause_next_commit();
+    let t = tree.clone();
+    let handle = std::thread::spawn(move || t.scan_now());
+    reached
+        .recv_timeout(Duration::from_secs(10))
+        .expect("那一遍读完了表");
+    (handle, go)
+}
+
+/// 桥接 → CLI → 另立会话的 X → X 的孩子 Y；三个触发文件让桥接、CLI、X 分别退出。
+fn chain_fixture() -> Fixture {
+    let cli = format!(
+        r#"{SETSID} sh "$D/x.sh" & echo $! > "$D/x.pid"; while [ ! -e "$D/cli_exit" ]; do sleep 0.01; done"#
+    );
+    Fixture::start_files(
+        &[
+            ("cli.sh", &cli),
+            (
+                "x.sh",
+                r#"sleep 30 & echo $! > "$D/y.pid"; while [ ! -e "$D/x_exit" ]; do sleep 0.01; done"#,
+            ),
+        ],
+        r#"sh "$D/cli.sh" & echo $! > "$D/cli.pid"; while [ ! -e "$D/root_exit" ]; do sleep 0.01; done"#,
+    )
+}
+
+/// 3/F-2 的反例写成确定性交错：扫描甲读到整条链后停在提交之前；桥接、CLI、X 退出，Y 成了孤儿。`clear()` 自己的扫描
+/// 证明不了 Y 是我们的、算出来是空的，但甲还在飞：不下结论、不回收桥接。两格：放行甲之后，`clear()` 的下一遍凭身份
+/// 认领 Y、杀掉它，之后才返回 `true`；甲一直不放行 → 到期 `false`，桥接没回收，根组仍有效。
+#[tokio::test(flavor = "multi_thread")]
+async fn clear_does_not_conclude_while_another_scan_is_in_flight() {
+    for release in [true, false] {
+        let f = chain_fixture();
+        let (cli, x, y) = (
+            f.pid("cli.pid").await,
+            f.pid("x.pid").await,
+            f.pid("y.pid").await,
+        );
+        let _cleanup = Leftover(vec![cli, x, y]);
+        let tree = f.process.unix_tree().clone();
+        let (scan_a, go) = paused_scan(&tree);
+        for name in ["x_exit", "cli_exit", "root_exit"] {
+            f.touch(name);
+        }
+        wait_gone(x).await;
+        wait_gone(cli).await;
+        f.process.exited().await;
+        assert!(alive(y), "对照：Y 成了孤儿、还活着");
+        let clearing = {
+            let t = tree.clone();
+            tokio::spawn(async move { t.clear().await })
+        };
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            !clearing.is_finished(),
+            "release={release}：甲在飞时不下结论"
+        );
+        assert!(tree.holds_child(), "release={release}：不回收桥接");
+        if release {
+            go.send(()).unwrap();
+            assert!(scan_a.join().unwrap().is_ok());
+            assert!(clearing.await.unwrap(), "甲提交之后清得掉");
+            assert!(!alive(y), "Y 被认领、杀掉了");
+        } else {
+            assert!(!clearing.await.unwrap(), "甲一直不放行：到期 false");
+            assert!(tree.holds_child() && tree.scope_copy().root_valid());
+            go.send(()).unwrap();
+            scan_a.join().unwrap().unwrap();
+            assert!(f.process.kill_tree_and_wait().await);
+            assert!(!alive(y));
+        }
+    }
+}
+
+/// 在飞的数不会只增不减：读表报错、扫描任务崩掉之后都回到零，`clear()` 下得了结论。
+#[tokio::test]
+async fn in_flight_count_drops_on_error_and_panic() {
+    let f = Fixture::start("exit 0");
+    f.process.exited().await;
+    let tree = f.process.unix_tree().clone();
+    tree.fail_scans(true);
+    assert!(tree.scan_now().is_err());
+    assert_eq!(tree.in_flight(), 0, "报错之后减回去");
+    tree.fail_scans(false);
+    tree.panic_next_scan();
+    let t = tree.clone();
+    assert!(
+        std::thread::spawn(move || t.scan_now()).join().is_err(),
+        "对照：那一遍崩了"
+    );
+    assert_eq!(tree.in_flight(), 0, "崩了之后减回去");
+    assert!(f.process.kill_tree_and_wait().await);
+}
+
+/// 有别的扫描在飞时 `is_empty()` 答「不空」；它落下之后答「空」。
+#[tokio::test]
+async fn is_empty_is_false_while_a_scan_is_in_flight() {
+    let f = Fixture::start("exit 0");
+    f.process.exited().await;
+    let tree = f.process.unix_tree().clone();
+    let (scan_a, go) = paused_scan(&tree);
+    assert!(!f.process.tree_is_empty().unwrap());
+    go.send(()).unwrap();
+    scan_a.join().unwrap().unwrap();
+    assert!(f.process.tree_is_empty().unwrap());
+}
+
+/// 3/F-3：采样拿到旧的空结果 → 跳过这一拍（不当成树没了而停止采样）；不旧的空结果才是结束。
+#[tokio::test]
+async fn stale_empty_sample_does_not_stop_sampling() {
+    let f = Fixture::start("exit 0");
+    f.process.exited().await;
+    let tree = f.process.unix_tree().clone();
+    let mut system = sysinfo::System::new().unwrap();
+    tree.overtake_scans(true);
+    assert_eq!(tree.sample(&mut system), super::Tick::Skip);
+    tree.overtake_scans(false);
+    assert_eq!(tree.sample(&mut system), super::Tick::Done);
 }
