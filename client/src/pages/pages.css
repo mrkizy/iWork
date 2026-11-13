@@ -59,6 +59,29 @@
   font-size: var(--fs-lg);
   font-weight: 600;
 }
+/* 私聊的项目选择器（画布 09、13 顶栏右侧的描边胶囊） */
+.iw-project-selector {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  padding: 3px 10px;
+  border: 1px solid var(--bd2);
+  border-radius: var(--r-pill);
+  background: var(--surf);
+  color: var(--tx2);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.iw-project-selector:hover {
+  color: var(--tx);
+}
+.iw-project-selector__text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .iw-conv-header__usage {
   padding: 2px 8px;
   border-radius: var(--r-xs);
