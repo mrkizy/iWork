@@ -172,7 +172,7 @@ impl World {
                         conversation_id: Some(cid(t.conv)),
                         turn_id: tid(t.id),
                         tool_call_id: ToolCallId(call),
-                        ok: b % 2 == 0,
+                        ok: b.is_multiple_of(2),
                         output_artifact: None,
                     };
                     self.commit(vec![e.into()]);
@@ -215,7 +215,7 @@ impl World {
             7 => {
                 if let Some(i) = pick(self, |t| t.state == TurnState::WaitingApproval) {
                     let t = &self.turns[i];
-                    let state = if b % 2 == 0 {
+                    let state = if b.is_multiple_of(2) {
                         ApprovalState::Approved {
                             decider: Decider::User,
                         }
@@ -240,7 +240,7 @@ impl World {
             8 => {
                 if let Some(i) = pick(self, |t| t.state == TurnState::Running) {
                     let t = &self.turns[i];
-                    let (to, reason) = if b % 3 == 0 {
+                    let (to, reason) = if b.is_multiple_of(3) {
                         (TurnState::Failed, Some(format!("失败 {}", t.id)))
                     } else {
                         (TurnState::Completed, None)
@@ -256,7 +256,7 @@ impl World {
                                 output_tokens: u64::from(b),
                                 ..Default::default()
                             },
-                            celebrate: b % 2 == 0,
+                            celebrate: b.is_multiple_of(2),
                             change_summary: None,
                         }
                         .into(),
@@ -280,7 +280,7 @@ impl World {
             _ => {
                 if let Some(i) = pick(self, |t| matches!(t.state, TurnState::Interrupted { .. })) {
                     let t = &self.turns[i];
-                    if b % 2 == 0 {
+                    if b.is_multiple_of(2) {
                         let e = Self::change(t, TurnState::Running, None);
                         self.commit(vec![e]);
                         self.turns[i].state = TurnState::Running;

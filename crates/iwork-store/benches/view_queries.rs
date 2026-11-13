@@ -31,6 +31,9 @@ use iwork_domain::turn::TurnState;
 use iwork_ports::read_model::{AnchorWindow, ConversationPaging};
 use iwork_ports::store::StoragePort;
 
+/// 一组要量的查询：跑一次，返回取到的行数。
+type Case<'a> = Box<dyn Fn() -> usize + 'a>;
+
 fn env_or(key: &str, default: u128) -> u128 {
     std::env::var(key)
         .ok()
@@ -88,7 +91,7 @@ fn one_turn(conv: u128, n: u128, tools: u128) -> Vec<Vec<DomainEvent>> {
             .into(),
         ]);
     }
-    if n % 10 == 0 {
+    if n.is_multiple_of(10) {
         commits.push(vec![
             ApprovalRequested {
                 approval: approval(t, t, conv),
@@ -123,7 +126,7 @@ fn one_turn(conv: u128, n: u128, tools: u128) -> Vec<Vec<DomainEvent>> {
         }
         .into(),
     ]);
-    let end = if n % 7 == 0 {
+    let end = if n.is_multiple_of(7) {
         TurnState::Failed
     } else {
         TurnState::Completed
@@ -189,7 +192,7 @@ fn main() {
     let mid_seq = Seq(head / 2);
     let read = read_model(&store);
     let c = cid(10);
-    let cases: Vec<(&str, Box<dyn Fn() -> usize>)> = vec![
+    let cases: Vec<(&str, Case<'_>)> = vec![
         (
             "row_before_mid",
             Box::new(|| {

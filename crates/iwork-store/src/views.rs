@@ -510,8 +510,8 @@ impl<C: EventCodec + ?Sized> ViewTx<'_, C> {
         }
         // 紧挨游标的在前
         match side {
-            RowSide::Before => candidates.sort_by(|a, b| b.0.cmp(&a.0)),
-            RowSide::After => candidates.sort_by(|a, b| a.0.cmp(&b.0)),
+            RowSide::Before => candidates.sort_by_key(|c| std::cmp::Reverse(c.0)),
+            RowSide::After => candidates.sort_by_key(|c| c.0),
         }
         let beyond = candidates.len() > limit as usize;
         candidates.truncate(limit as usize);
