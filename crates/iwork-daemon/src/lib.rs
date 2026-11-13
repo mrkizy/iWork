@@ -32,4 +32,6 @@ pub use boot::run;
 #[path = "../../iwork-store/tests/support/fixtures.rs"]
 mod fixtures;
 #[cfg(test)]
+mod notify_text_tests;
+#[cfg(test)]
 mod query_tests;
