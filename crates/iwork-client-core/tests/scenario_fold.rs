@@ -64,7 +64,27 @@ async fn every_scenario_folds_to_full() {
                 .filter(|(k, v)| folded.rows.get(*k) != Some(*v))
                 .map(|(k, _)| k.clone())
                 .collect();
-            mismatched.push(format!("{}（对不上的行：{diff:?}）", s.name));
+            // 行以外的视图哪几份对不上（调试时一眼看出是哪个视图漏了增量）
+            let views: Vec<&str> = [
+                ("sidebar", folded.sidebar != full.sidebar),
+                ("pending", folded.pending != full.pending),
+                ("settings", folded.settings != full.settings),
+                ("assistant", folded.assistant != full.assistant),
+                ("add_project", folded.add_project != full.add_project),
+                ("connection", folded.connection != full.connection),
+                ("list", folded.list != full.list),
+                ("header", folded.header != full.header),
+                ("composer", folded.composer != full.composer),
+                ("home", folded.home != full.home),
+                ("anchors", folded.anchors != full.anchors),
+            ]
+            .into_iter()
+            .filter_map(|(n, differ)| differ.then_some(n))
+            .collect();
+            mismatched.push(format!(
+                "{}（对不上的行：{diff:?}；对不上的视图：{views:?}）",
+                s.name
+            ));
         }
     }
     assert!(mismatched.is_empty(), "逐帧折叠与全量不等：{mismatched:#?}");

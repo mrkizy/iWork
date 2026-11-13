@@ -23,7 +23,24 @@ pub const CONNECTING: &str = "正在连接后台服务";
 pub const QUERY_RETRYING: &str = "部分数据暂时没取到，稍后自动重试";
 pub const OVERLOADED: &str = "后台负载过高，稍后重试或重新打开 iWork";
 pub const DIAGNOSTICS_TITLE: &str = "连不上后台服务";
+/// 版本不一致页的说明（ui-m1 2a 第 17 条）。两种成因都要说到：新装了新版（「重新打开 iWork」只重启客户端，
+/// 后台不动），和装回了旧版（后台正在重启，退避重连会自己连上）。升级降级时后台自己重启、回合按中断处理，
+/// 所以不能说回合不受影响。
+pub const VERSION_MISMATCH_MESSAGE: &str = "这个窗口和后台服务不是同一版，暂时连不上。通常是刚装了新版：重新打开 iWork 就会用上新装的那一版；\
+     刚装回旧版的话，等后台服务重启好就会自动连上。后台服务仍在运行，重启时被打断的回合可以点「继续」接着做，\
+     待你批准的事项都还在。";
+/// 不支持的环境整页的标题。
+pub const ENVIRONMENT_TITLE: &str = "iWork 暂时不能在这台电脑上运行";
 pub const NEWER_SCHEMA_HINT: &str = "装回更新的那一版可继续使用";
+/// 诊断页正文：按连不上的原因说一句人话；系统给的原始错误收进「详细信息」（UI 审查 g3 F-5）。
+pub const DIAG_NOT_RUNNING: &str =
+    "后台服务没在运行，或者还没启动好。iWork 会自动重试，也可以点「重试」。";
+pub const DIAG_PEER_REJECTED: &str = "连到的后台服务没通过身份校验，iWork 没有和它通信。";
+pub const DIAG_TIMEOUT: &str = "后台服务没有及时回应。iWork 会自动重试。";
+pub const DIAG_PROTOCOL: &str = "后台服务的回应不对，可能和客户端不是同一版。";
+pub const DIAG_OTHER: &str = "连接后台服务时出了问题。iWork 会自动重试。";
+/// 诊断行里放原始错误的那一行。
+pub const DIAG_RAW_ERROR: &str = "原始错误";
 pub const UNKNOWN_RESULT: &str = "执行结果未知，请自行核对";
 pub const UNKNOWN_BLOCKS_DELETE: &str = "有一张卡片的执行结果无法核对，请确认后继续删除";
 pub const OUTSIDE_SANDBOX_NOTE: &str = "将在沙箱外运行，命令带起的脚本也不受沙箱约束";
@@ -228,6 +245,62 @@ pub fn usage_tooltip(u: &pb::Usage) -> String {
     s
 }
 
+/// 登录方式给用户看的说法（画布 00「已登录 · 本人订阅」）：按 `claude auth status` 的 `subscriptionType` 认；
+/// 认不出就不写，不露原值（UI 审查 g3 F-10）。表里的值是 Claude Code 的套餐名，真实取值待 T06 实测核对。
+const SUBSCRIPTIONS: &[(&str, &str)] = &[
+    ("pro", "本人订阅"),
+    ("max", "本人订阅"),
+    ("team", "团队订阅"),
+    ("enterprise", "企业订阅"),
+];
+
+pub fn login_label(subscription_type: &str) -> String {
+    let kind = SUBSCRIPTIONS
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(subscription_type.trim()))
+        .map(|(_, v)| *v);
+    match kind {
+        Some(k) => format!("已登录 · {k}"),
+        None => "已登录".into(),
+    }
+}
+
+/// 规则的「记在哪」：全局的规则。
+pub const RULE_OWNER_ALL: &str = "所有项目与助手";
+/// 规则记在的项目、助手或对话在本机摘要里找不到（已删或还没查到）。
+pub const RULE_TARGET_GONE: &str = "（找不到）";
+
+/// 按反引号切开：成对的反引号之间是代码。落单的反引号原样留在文字里。
+pub fn code_spans(s: &str) -> Vec<pb::TextSpan> {
+    let parts: Vec<&str> = s.split('`').collect();
+    // 段数为偶数说明最后一个反引号落单：把它和最后一段并回文字
+    let paired = if parts.len().is_multiple_of(2) {
+        parts.len() - 1
+    } else {
+        parts.len()
+    };
+    let mut out: Vec<pb::TextSpan> = Vec::new();
+    for (i, p) in parts[..paired].iter().enumerate() {
+        if !p.is_empty() {
+            out.push(pb::TextSpan {
+                text: (*p).to_owned(),
+                code: i % 2 == 1,
+            });
+        }
+    }
+    if paired < parts.len() {
+        let rest = format!("`{}", parts[paired]);
+        match out.last_mut() {
+            Some(last) if !last.code => last.text.push_str(&rest),
+            _ => out.push(pb::TextSpan {
+                text: rest,
+                code: false,
+            }),
+        }
+    }
+    out
+}
+
 pub fn runtime_state(state: pb::RuntimeState) -> &'static str {
     use pb::RuntimeState as S;
     match state {
@@ -294,12 +367,13 @@ pub const OFFLINE_TRY_LATER: &str = "正在重新连接，连上后再试";
 pub const ATTACH_AFTER_FIRST_MESSAGE: &str = "发出第一条消息后可以添加附件";
 pub const DETAILS: &str = "查看详情";
 
+/// 助手工具开关的标签（画布 13，ui-m1 2a 第 18 条 g ②）。
 pub fn tool_group(g: pb::ToolGroup) -> &'static str {
     match g {
-        pb::ToolGroup::ReadAndSearch => "读取与搜索",
+        pb::ToolGroup::ReadAndSearch => "读文件与搜索",
         pb::ToolGroup::EditFiles => "编辑文件",
-        pb::ToolGroup::RunCommands => "运行命令",
-        pb::ToolGroup::Web => "联网",
+        pb::ToolGroup::RunCommands => "执行命令",
+        pb::ToolGroup::Web => "网页抓取与搜索",
         pb::ToolGroup::Unspecified => "",
     }
 }
@@ -325,17 +399,6 @@ pub fn size_label(bytes: u64) -> String {
     }
 }
 
-/// 相对时间：「刚刚」「N 分钟前」……
-pub fn relative_past(now: SystemTime, at: SystemTime) -> String {
-    let d = now.duration_since(at).unwrap_or(Duration::ZERO).as_secs();
-    match d {
-        0..60 => "刚刚".into(),
-        60..3600 => format!("{} 分钟前", d / 60),
-        3600..86_400 => format!("{} 小时前", d / 3600),
-        _ => format!("{} 天前", d / 86_400),
-    }
-}
-
 pub fn relative_future(now: SystemTime, at: SystemTime) -> String {
     let d = at.duration_since(now).unwrap_or(Duration::ZERO).as_secs();
     match d {
@@ -357,6 +420,39 @@ pub fn quota_tooltip(window: &str, used: u32, reset: Option<String>) -> String {
 
 pub const RUNTIME_LOCKED_TIP: &str = "要换运行时请开新对话";
 pub const RUNTIME_NOT_IN_M1: &str = "M2 接入";
+/// 添加项目（画布 07 原文；T09 方案 15.2 的表）。「git」这个词只出现在这张文案表里。
+pub const ADD_NOT_VERSIONED_TITLE: &str = "这个文件夹还没有版本控制";
+pub const ADD_NOT_VERSIONED_BODY: &str = "审查、返工和集成都依赖版本快照，需要先初始化。";
+pub const ADD_INIT_LABEL: &str = "初始化为 git 仓库并首次提交";
+pub const ADD_SUBDIR_TITLE: &str = "将添加整个仓库";
+pub const ADD_CHECK_FAILED_TITLE: &str = "这个文件夹不能添加";
+pub const AGENTS_MD_MISSING: &str = "未找到";
+pub const AGENTS_MD_PRESENT: &str = "已有";
+pub const ADD_CONFIRM: &str = "添加并开始对话";
+pub const ADD_OPEN_KNOWN: &str = "打开已有项目";
+pub const RUNTIME_GLOBAL_DEFAULT: &str = "（全局默认）";
+
+/// 给人看的路径：家目录写成 `~`（家目录本身是 `~`，之下是 `~/…`）。名字以家目录为前缀的兄弟目录
+/// （`/Users/al` 与 `/Users/alice`）不缩写。没有家目录就原样。
+pub fn display_path(path: &str, home: Option<&str>) -> String {
+    let Some(home) = home
+        .map(|h| h.trim_end_matches('/'))
+        .filter(|h| !h.is_empty())
+    else {
+        return path.to_owned();
+    };
+    if path == home {
+        return "~".into();
+    }
+    match path.strip_prefix(home) {
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_owned(),
+    }
+}
+
+/// 连接类整页的出口。
+pub const EXIT_RETRY: &str = "重试";
+pub const EXIT_RELAUNCH: &str = "重新打开 iWork";
 
 /// 徽标上最多写到的数（ui-m1.md 第 2 节第 4 条，产品负责人 2026-11-11 定）；再多写「99+」。
 pub const BADGE_MAX: u32 = 99;
@@ -507,6 +603,27 @@ mod badge_tests {
 }
 
 #[cfg(test)]
+mod tool_group_tests {
+    use super::tool_group;
+    use iwork_proto::pb::ToolGroup as G;
+
+    /// 助手工具开关的标签照画布 13（ui-m1 2a 第 18 条 g ②）。不用「联网」：那是审批与沙箱里「联网不受控」
+    /// 的说法，这里管的只是 Agent 能不能调网页抓取与搜索两个工具。
+    #[test]
+    fn labels_follow_canvas_13() {
+        let labels: Vec<_> = [G::ReadAndSearch, G::EditFiles, G::RunCommands, G::Web]
+            .into_iter()
+            .map(tool_group)
+            .collect();
+        assert_eq!(
+            labels,
+            ["读文件与搜索", "编辑文件", "执行命令", "网页抓取与搜索"]
+        );
+        assert!(labels.iter().all(|l| !l.contains("联网")), "{labels:?}");
+    }
+}
+
+#[cfg(test)]
 mod composer_block_tests {
     use super::composer_block;
     use iwork_proto::pb::RuntimeState as S;
@@ -561,8 +678,9 @@ pub fn anchor_failure(had_output: bool, reason: &str) -> String {
     }
 }
 
-/// 锚点的时间：今天写时刻（14:05），今年更早写日期（11月3日），往年带年份（2025年11月3日）。按 `tz` 算日期。
-pub fn anchor_time(now: SystemTime, at: SystemTime, tz: &jiff::tz::TimeZone) -> String {
+/// 一个时刻怎么写（锚点、全部对话的最近活动，ui-m1 2a 第 5 条）：今天写时刻（14:05），今年更早写日期（11月3日），
+/// 往年带年份（2025年11月3日）。按 `tz` 算日期。
+pub fn clock_or_date(now: SystemTime, at: SystemTime, tz: &jiff::tz::TimeZone) -> String {
     let (Ok(now), Ok(at)) = (
         jiff::Timestamp::try_from(now),
         jiff::Timestamp::try_from(at),
@@ -590,13 +708,50 @@ mod anchor_text_tests {
         // 2026-11-12 10:00 +08:00
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_794_448_800);
         let at = |back: u64| now - Duration::from_secs(back);
-        assert_eq!(anchor_time(now, at(3600 + 15 * 60), &tz), "08:45");
+        assert_eq!(clock_or_date(now, at(3600 + 15 * 60), &tz), "08:45");
         assert_eq!(
-            anchor_time(now, at(11 * 3600), &tz),
+            clock_or_date(now, at(11 * 3600), &tz),
             "11月11日",
             "前一天（本地时区）"
         );
-        assert_eq!(anchor_time(now, at(400 * 86_400), &tz), "2025年10月8日");
+        assert_eq!(clock_or_date(now, at(400 * 86_400), &tz), "2025年10月8日");
+    }
+
+    #[test]
+    fn code_spans_split_on_backticks() {
+        let spans = |s: &str| {
+            code_spans(s)
+                .into_iter()
+                .map(|x| (x.text, x.code))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            spans("执行 `npm test …` 不再问"),
+            vec![
+                ("执行 ".to_owned(), false),
+                ("npm test …".to_owned(), true),
+                (" 不再问".to_owned(), false),
+            ]
+        );
+        assert_eq!(
+            spans("写 `src/`"),
+            vec![("写 ".to_owned(), false), ("src/".to_owned(), true)]
+        );
+        assert_eq!(spans("没有代码"), vec![("没有代码".to_owned(), false)]);
+        assert_eq!(
+            spans("落单 `反引号"),
+            vec![("落单 `反引号".to_owned(), false)],
+            "落单的反引号原样留着"
+        );
+    }
+
+    #[test]
+    fn login_label_is_readable() {
+        assert_eq!(login_label("max"), "已登录 · 本人订阅");
+        assert_eq!(login_label("Pro"), "已登录 · 本人订阅");
+        assert_eq!(login_label("team"), "已登录 · 团队订阅");
+        assert_eq!(login_label("x-unknown"), "已登录", "认不出：不露原值");
+        assert_eq!(login_label(""), "已登录");
     }
 
     #[test]

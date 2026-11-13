@@ -27,9 +27,9 @@ render(
     <App
       host={{
         view: store.state,
-        async act(kind) {
+        async act(kind, opts) {
           const ack = await send(kind);
-          if (ack.error) toaster.show(ack.error.message);
+          if (ack.error && !opts?.quiet) toaster.show(ack.error.message);
           return ack;
         },
       }}

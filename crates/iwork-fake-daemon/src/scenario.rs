@@ -11,7 +11,7 @@ use iwork_proto::pb::TurnState as T;
 use iwork_proto::pb::UserActionState as U;
 
 use crate::fixtures::{self as f, IWORK};
-use crate::tables::Tables;
+use crate::tables::{FakeDir, Tables};
 
 /// 场景的一步。
 pub enum Step {
@@ -62,6 +62,12 @@ pub enum ClientAct {
     DropOversized,
     /// 文件拖进窗口、还没松开（对话区出现「松开以添加」虚线框）。
     DragHover,
+    /// 打开这个助手的主页（私聊 + 资料栏）：可见视图里加上助手资料（AssistantProfileView）。
+    ShowAssistant(&'static str),
+    /// 打开这个项目的「全部对话」列表页（ConversationListView，不筛选）。
+    ShowAllConversations(&'static str),
+    /// 打开添加项目弹窗，在选择框里选了这个文件夹（候选与检查结果进 AddProjectView）。
+    PickProjectFolder(&'static str),
 }
 
 impl Scenario {
@@ -226,6 +232,104 @@ pub const REGISTRY: &[Scenario] = &[
         about: "崩溃中断的回合：继续 / 放弃卡片",
         build: resume_card,
         focus: Some("c-resume"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "pending-kinds",
+        about: "待你处理：审批、亲手执行、继续卡片、AGENTS.md 草稿四种各一项，分在不同对话与项目",
+        build: pending_kinds,
+        focus: None,
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "assistant-profile",
+        about: "助手主页：阿森的私聊（聊过一轮）与右侧资料栏（动态、记忆、配置）",
+        build: assistant_profile,
+        focus: Some("c-dm-asen"),
+        characters: &[],
+        client: &[ClientAct::ShowAssistant("as-asen")],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "all-conversations",
+        about: "全部对话：一个项目 55 个对话（一批 50 条，还有下一批），各聊过一句",
+        build: all_conversations,
+        focus: None,
+        characters: &[],
+        client: &[ClientAct::ShowAllConversations(PROJECT)],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "all-conversations-today",
+        about: "全部对话：今天聊过的写时刻、更早的写日期（ui-m1 2a 第 5 条；时刻按录像那一刻算）",
+        build: all_conversations_today,
+        focus: None,
+        characters: &[],
+        client: &[ClientAct::ShowAllConversations(PROJECT)],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "settings-rules",
+        about: "设置：记住的规则三组（永久、本项目、本对话）各一条，运行时就绪",
+        build: settings_rules,
+        focus: Some("c-rules"),
+        characters: &[],
+        client: &[],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "add-project-ready",
+        about: "添加项目：选了一个受版本控制、没有 AGENTS.md 的文件夹（能加，默认勾着生成草稿）",
+        build: || add_project_disk(ADD_READY, FakeDir::repo(ADD_READY)),
+        focus: None,
+        characters: &[],
+        client: &[ClientAct::PickProjectFolder(ADD_READY)],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "add-project-unversioned",
+        about: "添加项目：选的文件夹还没有版本控制（提示 + 初始化按钮，主按钮不可点）",
+        build: || {
+            add_project_disk(
+                ADD_RAW,
+                FakeDir {
+                    versioned: false,
+                    ..FakeDir::repo(ADD_RAW)
+                },
+            )
+        },
+        focus: None,
+        characters: &[],
+        client: &[ClientAct::PickProjectFolder(ADD_RAW)],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "add-project-known",
+        about: "添加项目：选的文件夹已经是项目（主按钮「打开已有项目」）",
+        build: || add_project_disk(KNOWN_ROOT, FakeDir::repo(KNOWN_ROOT)),
+        focus: None,
+        characters: &[],
+        client: &[ClientAct::PickProjectFolder(KNOWN_ROOT)],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "add-project-subdir",
+        about: "添加项目：选的是仓库的子目录（一行「将添加整个仓库」，路径显示仓库根）",
+        build: || add_project_disk(ADD_SUBDIR, FakeDir::repo(ADD_READY)),
+        focus: None,
+        characters: &[],
+        client: &[ClientAct::PickProjectFolder(ADD_SUBDIR)],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "full-access-note",
+        about: "对话里切到全开：那一行说明用赭红（ui-m1 第 2 节第 9 条）；前面一行切到自动作对照",
+        build: full_access_note,
+        focus: Some("c-full"),
         characters: &[],
         client: &[],
         timeline_cap: None,
@@ -978,6 +1082,171 @@ fn resume_card() -> Vec<Step> {
         T::Interrupted,
         None,
     )));
+    s
+}
+
+fn pending_kinds() -> Vec<Step> {
+    let mut s = base();
+    let (ca, cu, cr) = ("c-pk-approval", "c-pk-action", "c-pk-resume");
+    for c in [ca, cu, cr] {
+        s.push(a(f::project_conversation(c, PROJECT)));
+    }
+    s.extend(exchange(
+        ca,
+        "pk-approval",
+        "发布一下",
+        "要发布到 npm，需要你批准。",
+    ));
+    s.push(a(f::approval(
+        "ap-pk",
+        ca,
+        "t-pk-approval",
+        f::command_action("npm publish"),
+        pb::ApprovalKind::Ask,
+        &[],
+    )));
+    s.extend(exchange(
+        cu,
+        "pk-action",
+        "看看我加载了哪些密钥",
+        "要读钥匙串，得你来跑。",
+    ));
+    s.push(a(f::user_action("ua-pk", cu, "t-pk-action", "ssh-add -l")));
+    s.extend(exchange(
+        cr,
+        "pk-resume",
+        "把依赖都升级一遍",
+        "先升级 tokio……",
+    ));
+    s.push(a(f::turn_state(
+        "t-pk-resume",
+        T::Running,
+        T::Interrupted,
+        None,
+    )));
+    s.push(a(f::agents_md_draft("draft-pk", PROJECT)));
+    s
+}
+
+fn assistant_profile() -> Vec<Step> {
+    let (id, dm) = ("as-asen", "c-dm-asen");
+    let mut s = base();
+    s.push(a(f::assistant(id, "阿森", false)));
+    s.push(a(f::dm(dm, id)));
+    s.push(a(f::user_message(
+        "m-asen-u",
+        dm,
+        "帮我看下 webhook 重试为什么一直打满",
+    )));
+    s.push(a(f::turn_queued("t-asen", dm, id)));
+    s.push(a(f::turn_state("t-asen", T::Queued, T::Running, None)));
+    s.push(a(f::assistant_message(
+        "m-asen-a", dm, "t-asen", id, "阿森",
+    )));
+    s.push(a(f::message_completed(
+        dm,
+        "m-asen-a",
+        "原因是重试没有上限，失败会无限排队。我加了指数退避和 5 次上限。",
+    )));
+    s.push(a(f::turn_finished("t-asen", T::Completed, false, None)));
+    s
+}
+
+fn all_conversations() -> Vec<Step> {
+    let mut s = base();
+    for i in 0..55 {
+        let c = format!("c-all-{i:02}");
+        s.push(a(f::project_conversation(&c, PROJECT)));
+        s.push(a(f::user_message(
+            &format!("m-all-{i:02}"),
+            &c,
+            &format!("第 {i} 个对话的第一句\n第二行不显示"),
+        )));
+    }
+    s
+}
+
+fn all_conversations_today() -> Vec<Step> {
+    let mut s = base();
+    // 假后台按最近活动的 seq 倒序列：先建旧的，列表顺序才和时间对得上
+    for (c, first) in [
+        ("c-old", "上个月聊的"),
+        ("c-today-2", "早些时候聊的"),
+        ("c-today-1", "刚才聊的"),
+    ] {
+        s.push(a(f::project_conversation(c, PROJECT)));
+        s.push(a(f::user_message(&format!("m-{c}"), c, first)));
+    }
+    // 信封时间是按 seq 排的固定时刻；把前两个的最近活动改成录像这一刻往前几分钟（只给预览看「今天」）
+    s.push(Step::Mutate(Box::new(|t: &mut Tables| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0));
+        for (id, ago) in [("c-today-1", 5 * 60), ("c-today-2", 40 * 60)] {
+            if let Some(row) = t.conversations.get_mut(id) {
+                row.conversation.updated_at = Some(prost_types::Timestamp {
+                    seconds: now - ago,
+                    nanos: 0,
+                });
+            }
+        }
+    })));
+    s
+}
+
+fn settings_rules() -> Vec<Step> {
+    use pb::scope::Kind as S;
+    let mut s = base();
+    // 规则排在建出 focus 对话之前（打开前那一段）：rule 流不在任何订阅范围里，设置页的 ListRules 只在连上时
+    // 查一次（方案 2.7；T10 给设置范围加上 rule 流后不用这样排）
+    s.push(a(f::remembered_rule(
+        "rule-forever",
+        "执行 `npm test …` 不再问",
+        S::Global(pb::GlobalScope {}),
+    )));
+    s.push(a(f::remembered_rule(
+        "rule-project",
+        "本项目内写 `src/` 不再问",
+        S::ProjectId(PROJECT.into()),
+    )));
+    s.push(a(f::remembered_rule(
+        "rule-conv",
+        "本对话内执行 `cargo build` 不再问",
+        S::ConversationId("c-rules".into()),
+    )));
+    s.push(a(f::project_conversation("c-rules", PROJECT)));
+    s.extend(exchange("c-rules", "rules", "跑一下测试", "测试都过了。"));
+    s
+}
+
+// 添加项目场景的目录（假「盘」上的，不碰真盘）
+const ADD_READY: &str = "/Users/demo/code/settlement-svc";
+const ADD_SUBDIR: &str = "/Users/demo/code/settlement-svc/src/refund";
+const ADD_RAW: &str = "/Users/demo/code/scratch";
+/// 基础世界里 demo 项目的根（与 world() 里 f::project 的一致）。
+const KNOWN_ROOT: &str = "~/work/demo";
+
+/// 基础世界 + 假「盘」上登记一个目录；之后加一轮对话事件，录像打开之后有增量。
+fn add_project_disk(path: &'static str, dir: FakeDir) -> Vec<Step> {
+    let mut s = base();
+    s.push(Step::Mutate(Box::new(move |t: &mut Tables| {
+        t.disk.insert(path.to_owned(), dir);
+    })));
+    // 先登记好目录，再做「选文件夹」（客户端动作在切点上）
+    s.push(Step::OpenHere);
+    s.push(a(f::project_conversation("c-add", PROJECT)));
+    s.extend(exchange("c-add", "add", "看看这个仓库", "好的。"));
+    s
+}
+
+fn full_access_note() -> Vec<Step> {
+    let c = "c-full";
+    let mut s = base();
+    s.push(a(f::project_conversation(c, PROJECT)));
+    // 打开之后实时到：当次说明只随实时事件出现
+    s.extend(exchange(c, "full", "帮我整理一下依赖", "好的，先看一眼。"));
+    s.push(a(f::approval_mode_changed(c, pb::ApprovalMode::Auto)));
+    s.push(a(f::approval_mode_changed(c, pb::ApprovalMode::FullAccess)));
     s
 }
 

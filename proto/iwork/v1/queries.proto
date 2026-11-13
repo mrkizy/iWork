@@ -30,6 +30,8 @@ message Query {
     ListAnchors list_anchors = 23;
     // 被系统通知叫到前台时跳到哪（T09 方案 2.8）：附带查询，结果不进视图。
     GetOpenTarget get_open_target = 24;
+    // 添加项目之前看一眼选的目录（T09 方案 15.2）：附带查询，只读，不产生事件。
+    InspectProjectPath inspect_project_path = 25;
   }
 }
 
@@ -52,7 +54,36 @@ message QueryResult {
     ArtifactChunk read_artifact = 22;
     ListAnchorsResult list_anchors = 23;
     GetOpenTargetResult get_open_target = 24;
+    InspectProjectPathResult inspect_project_path = 25;
   }
+}
+
+// 加之前看一眼这个目录：只读，不产生事件，不写任何东西。结果只用来画界面；能不能加以 AddProject 受理时再判
+// 一次为准（T09 方案 15.2、RD2）。路径不存在、不是目录、读不了：回错，用 AddProject 已有的错误码。
+message InspectProjectPath {
+  string path = 1;
+}
+
+message InspectProjectPathResult {
+  ProjectPathState state = 1;
+  // 会被加进来的目录：受版本控制时是仓库根（选的是子目录就和 path 不一样），否则是 path 自己。都是规范化后的绝对路径。
+  string root_path = 2;
+  // 项目名的默认取法：root_path 的最后一段。
+  string name = 3;
+  // state = KNOWN 时：已有项目的 id。
+  optional string project_id = 4;
+  // root_path 下有没有 AGENTS.md。只看在不在，不读内容。
+  bool has_agents_md = 5;
+}
+
+enum ProjectPathState {
+  PROJECT_PATH_STATE_UNSPECIFIED = 0;
+  // 受版本控制，还没登记：可以加。
+  PROJECT_PATH_STATE_ADDABLE = 1;
+  // 没有版本控制：要先初始化（InitRepository）。
+  PROJECT_PATH_STATE_NOT_VERSION_CONTROLLED = 2;
+  // 已经是列表里的项目（按仓库共享目录去重，设计 8.2）。
+  PROJECT_PATH_STATE_KNOWN = 3;
 }
 
 // 用户最近点过的那条系统通知指向哪（T09 方案 2.8）。后台只记用户确实点过的那一项；拿不到「点了哪一项」时不记。

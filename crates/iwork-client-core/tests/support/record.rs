@@ -20,6 +20,7 @@ use tokio::time::timeout;
 /// 这么久没有新块就算安静。要盖住一轮摘要重查（节流 250ms 加查询往返），CI 上 400ms 不够（run 42992011638）。
 pub const QUIET: Duration = Duration::from_millis(1200);
 
+#[derive(Clone)]
 pub struct Recording {
     /// 第一代收齐的每一帧（编码后的 ViewPatch）。
     pub frames: Vec<Vec<u8>>,
@@ -187,6 +188,58 @@ async fn client_act(
             }
         }
         ClientAct::DragHover => app.shell(ShellEvent::Dragging(true)),
+        ClientAct::ShowAllConversations(project) => {
+            // 首页照旧声明着：没有 focus 的场景连上时声明过首页，撤掉它不会有增量清掉网页里那一份，
+            // 逐帧折叠就会和全量对不上（不可见的视图不算增量，方案 2.4 第 9 条）
+            let mut v = visible(None, true);
+            if let Some(pb::ui_intent::Kind::SetVisible(s)) = v.kind.as_mut() {
+                s.conversation_list = Some(pb::ConversationListQuery {
+                    project_id: project.into(),
+                    filter: String::new(),
+                });
+            }
+            if let Some(e) = app.intent(v).await.error {
+                return Err(format!("SetVisible 被拒：{}", e.message));
+            }
+        }
+        ClientAct::PickProjectFolder(path) => {
+            let mut v = visible(None, true);
+            if let Some(pb::ui_intent::Kind::SetVisible(s)) = v.kind.as_mut() {
+                s.add_project = true;
+            }
+            if let Some(e) = app.intent(v).await.error {
+                return Err(format!("SetVisible 被拒：{}", e.message));
+            }
+            // 网页点「选择」，壳弹框（录像里没有壳），用户选了 path
+            let picking = {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    app.intent(pb::UiIntent {
+                        kind: Some(pb::ui_intent::Kind::PickProjectFolder(
+                            pb::PickProjectFolder {},
+                        )),
+                    })
+                    .await
+                })
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            app.shell(ShellEvent::Picked(vec![path.into()]));
+            let ack = picking
+                .await
+                .map_err(|e| format!("选文件夹的操作没回来：{e}"))?;
+            if let Some(e) = ack.error {
+                return Err(format!("选文件夹被拒：{}", e.message));
+            }
+        }
+        ClientAct::ShowAssistant(id) => {
+            let mut v = visible(Some(focus), false);
+            if let Some(pb::ui_intent::Kind::SetVisible(s)) = v.kind.as_mut() {
+                s.assistant_id = Some(id.into());
+            }
+            if let Some(e) = app.intent(v).await.error {
+                return Err(format!("SetVisible 被拒：{}", e.message));
+            }
+        }
         ClientAct::DropOversized => {
             // 稀疏文件：只占目录项，不真写 21MB
             let path = dir.join("超过二十兆.bin");
@@ -342,18 +395,19 @@ pub async fn record(s: &Scenario, mut opts: Options) -> Result<Recording, String
     // 先连上
     pump.run(&daemon, Vec::new(), |_| true).await?;
     let (before, after) = s.split_at_focus();
-    // 建出 focus 对话，打开它，等它的快照到
-    if let Some(focus) = s.focus {
+    // 打开之前的那一段（没有 focus 的场景用 OpenHere 标出切点时也有）；有 focus 就打开它，等它的快照到
+    if !before.is_empty() {
         pump.run(&daemon, before, |_| true).await?;
+    }
+    if let Some(focus) = s.focus {
         declare(&app, Some(focus), false).await?;
         pump.run(&daemon, Vec::new(), |seen| seen.conversation_opened)
             .await?;
     }
     let opened = pump.frames.len();
     for act in s.client {
-        let focus = s
-            .focus
-            .ok_or_else(|| format!("场景 {} 有客户端动作却没有 focus", s.name))?;
+        // 没有 focus 的场景只做不针对某个对话的动作（如打开「全部对话」）；针对对话的动作会被后台拒、录像失败
+        let focus = s.focus.unwrap_or_default();
         client_act(&mut pump, &daemon, &app, *act, focus, dir.path()).await?;
     }
     // 剩下的事件：这一段的帧才是增量

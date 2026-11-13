@@ -1,0 +1,168 @@
+/* 时间线里的卡片：审批、亲手执行、继续 / 放弃、改动摘要（画布 10、15、14-Style） */
+.iw-card {
+  position: relative;
+  padding: 12px 16px;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-lg);
+  background: var(--surf);
+  color: var(--tx);
+  font-size: var(--fs-md);
+}
+/* 等你决定的两种卡片用芥末黄描边（画布 10-ApprovalMode-auto、15-UserAction-pending） */
+.iw-card--approval,
+.iw-card--action {
+  border-color: var(--warnBd);
+}
+/* 已作废：置灰，不降 opacity（提示也会跟着变淡，见 ui/Button.css） */
+.iw-card--muted {
+  border-color: var(--bd);
+  background: var(--surf2);
+  color: var(--tx3);
+}
+.iw-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.iw-card__title {
+  font-weight: 600;
+}
+.iw-card__state {
+  margin-left: auto;
+  color: var(--tx2);
+  font-size: var(--fs-sm);
+}
+.iw-card__aside {
+  color: var(--tx3);
+  font-size: var(--fs-sm);
+}
+.iw-card__head .iw-card__aside {
+  margin-left: auto;
+}
+.iw-card__reason,
+.iw-card__note,
+.iw-card__review,
+.iw-card__notice {
+  margin: 6px 0;
+  color: var(--tx2);
+  line-height: 1.6;
+}
+.iw-card__notice {
+  color: var(--warnTx);
+}
+.iw-card__code {
+  margin: 0;
+  padding: 8px 12px;
+  overflow-x: auto;
+  border-radius: var(--r-md);
+  background: var(--surf2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm2);
+  white-space: pre;
+  user-select: text;
+}
+.iw-card__codebox {
+  margin: 8px 0;
+  border: 1px solid var(--bd);
+  border-radius: var(--r-md);
+  background: var(--surf2);
+}
+.iw-card__codehead {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--bd);
+  color: var(--tx3);
+  font-size: var(--fs-sm);
+}
+.iw-card__code--flat {
+  border-radius: 0 0 var(--r-md) var(--r-md);
+}
+.iw-card__actions,
+.iw-card__result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.iw-card__remember {
+  gap: 4px;
+}
+/* 拒绝：赭红描边，和主按钮「允许」分开 */
+.iw-btn--deny {
+  border-color: var(--acc);
+  color: var(--acc);
+}
+.iw-card__output-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--tx2);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.iw-card__output {
+  margin: 6px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: var(--r-md);
+  background: var(--surf2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+  user-select: text;
+}
+/* 切档放行后的折叠形态：一行命令 + 标签 */
+.iw-approval-folded {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--tx2);
+  font-size: var(--fs-md);
+}
+.iw-approval-folded__code {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm2);
+}
+.iw-card--resume .iw-card__head {
+  color: var(--warnTx);
+}
+/* 改动摘要卡：印章贴在右边（14-Style） */
+.iw-changes__line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--tx);
+  font: inherit;
+  cursor: pointer;
+}
+.iw-changes__line:disabled {
+  cursor: default;
+}
+.iw-changes__stamp {
+  position: absolute;
+  top: 50%;
+  right: 20px;
+  margin-top: -18px;
+}
+.iw-changes__paths {
+  margin: 8px 0 0 18px;
+  padding: 0;
+  color: var(--tx2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm2);
+  list-style: none;
+}
