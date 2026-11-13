@@ -240,6 +240,7 @@ rh_run() {
     if rh_session_gone; then
       rh_say "ssh 会话断了，收掉进程组 $pid"
       rh_kill_group "$pid"
+      rh_unlock_heavy
       exit 129
     fi
     now=$(date +%s)
@@ -478,17 +479,29 @@ EOF
   rh exit0 --task t-a "$pushed" -- /bin/sh -c 'exit 0'
   check "退出码透传（0）" [ "$rc" -eq 0 ]
 
-  # 锁：A 持锁睡 3 秒，B 在 A 开始后才发起，B 必须等 A 结束才开始。
-  local order="$out/order"
-  "$self" --task t-lock-a "$pushed" -- /bin/sh -c "echo A-start >>'$order'; sleep 3; echo A-end >>'$order'" \
+  # 锁：A 拿锁后一直等到测试放行；测试先看到 B 报「等锁」再放 A，所以不靠睡多久，机器再忙也不抖。
+  # B 必须等 A 结束才开始。等待都有上限（60 秒），超了按失败记。
+  local order="$out/order" release="$out/release-a"
+  "$self" --task t-lock-a "$pushed" -- /bin/sh -c \
+    "echo A-start >>'$order'; i=0; while [ ! -e '$release' ] && [ \$i -lt 600 ]; do sleep 0.1; i=\$((i+1)); done; echo A-end >>'$order'" \
     >"$out/lock-a" 2>&1 &
   local a_pid=$!
-  local i=0
-  while ! grep -q A-start "$order" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-  rh lock-b --task t-lock-b "$pushed" -- /bin/sh -c "echo B-start >>'$order'"
+  wait_for() { # 文件 模式
+    local i=0
+    while ! grep -q "$2" "$1" 2>/dev/null; do
+      [ "$i" -lt 600 ] || return 1
+      sleep 0.1
+      i=$((i + 1))
+    done
+  }
+  check "锁：A 开始了" wait_for "$order" A-start
+  "$self" --task t-lock-b "$pushed" -- /bin/sh -c "echo B-start >>'$order'" >"$out/lock-b" 2>&1 &
+  local b_pid=$!
+  check "锁：B 报了在等锁、点名持有者" wait_for "$out/lock-b" '等锁：task=t-lock-a'
+  touch "$release"
   wait "$a_pid" || true
+  wait "$b_pid" || true
   check "锁：B 在 A 结束后才开始" [ "$(tr '\n' ' ' <"$order")" = "A-start A-end B-start " ]
-  check "锁：B 报了在等锁、点名持有者" grep -q '等锁：task=t-lock-a' "$out/lock-b"
 
   touch "$root/PERF_WINDOW"
   rh perf --task t-a "$pushed" -- /bin/sh -c "touch '$out/ran-perf'"
