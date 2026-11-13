@@ -5,9 +5,15 @@ import { HOME_DRAFT, setDraft } from "../composer/drafts";
 import { ConnectionState } from "../gen/iwork/v1/view_pb";
 import { HostProvider, type Host } from "../host";
 import { ConversationPage } from "../pages/Conversation";
+import { AddProjectDialog } from "../pages/AddProject";
+import { AllConversationsPage } from "../pages/AllConversations";
+import { AssistantPage } from "../pages/Assistant";
 import { HomePage } from "../pages/Home";
+import { PendingPage } from "../pages/Pending";
+import { SettingsPage } from "../pages/settings/Settings";
 import { Spinner } from "../ui/Badge";
 import { applyPlayful } from "../ui/theme";
+import { ConnectionPage, isFullPage, QuitConfirm } from "./ConnectionGate";
 import { createRouter, visibleFor, type Route } from "./route";
 import { Sidebar } from "./Sidebar";
 import { TransportFailurePage } from "./TransportFailure";
@@ -27,6 +33,7 @@ export function App(props: { host: Host; toasts: Component; initialRoute?: Route
           sidebar: v.sidebar,
           settings: v.settings,
           pending: v.pending,
+          addProject: v.addProject,
           conversationId: v.conversationId,
           assistantId: v.assistantId,
           conversationList: v.conversationList,
@@ -46,6 +53,8 @@ export function App(props: { host: Host; toasts: Component; initialRoute?: Route
     if (n.startedProjectId !== undefined) setDraft(HOME_DRAFT + n.startedProjectId, "");
     // 被系统通知叫到前台、那一项没有对话归属：打开「待你处理」页（方案 2.8）
     if (n.pendingList) router.go({ page: "pending" });
+    else if (n.addProject) router.go({ page: "addProject" });
+    else if (n.projectId !== undefined) router.go({ page: "home", projectId: n.projectId });
     else router.go({ page: "conversation", id: n.conversationId, rowKey: n.rowKey || undefined });
   });
 
@@ -62,12 +71,14 @@ export function App(props: { host: Host; toasts: Component; initialRoute?: Route
       <Show when={host.view.transportFailure} fallback={<Body router={router} connecting={connecting()} />}>
         {(f) => <TransportFailurePage failure={f()} />}
       </Show>
+      <QuitConfirm />
       <props.toasts />
     </HostProvider>
   );
 
   function Body(p: { router: typeof router; connecting: boolean }): JSX.Element {
     return (
+      <Show when={!isFullPage(conn())} fallback={<ConnectionPage view={conn()!} />}>
       <Show
         when={host.view.sidebar !== undefined}
         fallback={
@@ -77,21 +88,56 @@ export function App(props: { host: Host; toasts: Component; initialRoute?: Route
           </div>
         }
       >
+        <Show
+          when={settings(p.router.route())}
+          fallback={<Main router={p.router} />}
+        >
+          {(r) => (
+            <SettingsPage
+              section={r().section}
+              go={(section) => p.router.go({ page: "settings", section })}
+              back={p.router.back}
+            />
+          )}
+        </Show>
+      </Show>
+      </Show>
+    );
+  }
+
+  /** 侧栏 + 主区域（设置页以外的各页；设置页是整页，画布 12）。 */
+  function Main(p: { router: typeof router }): JSX.Element {
+    return (
         <div class="iw-app">
           <Sidebar router={p.router} />
           <main class="iw-main">
             <ConnectionBar />
             <Switch fallback={<div class="iw-placeholder">这一页在下一组实现</div>}>
               <Match when={home(p.router.route())}>
-                <HomePage openRuntimeDetails={() => p.router.go({ page: "settings" })} />
+                <HomePage openRuntimeDetails={() => p.router.go({ page: "settings", section: "runtimes" })} />
               </Match>
               <Match when={conversation(p.router.route())}>{(r) => (
-                  <ConversationPage id={r().id} rowKey={r().rowKey} openRuntimeDetails={() => p.router.go({ page: "settings" })} />
+                  <ConversationPage id={r().id} rowKey={r().rowKey} openRuntimeDetails={() => p.router.go({ page: "settings", section: "runtimes" })} />
                 )}</Match>
+              <Match when={assistant(p.router.route())}>
+                {(r) => (
+                  <AssistantPage route={r()} go={p.router.go} openRuntimeDetails={() => p.router.go({ page: "settings", section: "runtimes" })} />
+                )}
+              </Match>
+              <Match when={allConversations(p.router.route())}>
+                {(r) => <AllConversationsPage route={r()} go={p.router.go} />}
+              </Match>
+              <Match when={p.router.route().page === "addProject"}>
+                {/* 添加项目是弹窗：底下照常是首页 */}
+                <HomePage openRuntimeDetails={() => p.router.go({ page: "settings", section: "runtimes" })} />
+                <AddProjectDialog onClose={() => p.router.go({ page: "home" })} />
+              </Match>
+              <Match when={p.router.route().page === "pending"}>
+                <PendingPage open={p.router.go} />
+              </Match>
             </Switch>
           </main>
         </div>
-      </Show>
     );
   }
 
@@ -114,3 +160,6 @@ export function App(props: { host: Host; toasts: Component; initialRoute?: Route
 
 const home = (r: Route) => (r.page === "home" ? r : undefined);
 const conversation = (r: Route) => (r.page === "conversation" ? r : undefined);
+const assistant = (r: Route) => (r.page === "assistant" ? r : undefined);
+const allConversations = (r: Route) => (r.page === "allConversations" ? r : undefined);
+const settings = (r: Route) => (r.page === "settings" ? r : undefined);

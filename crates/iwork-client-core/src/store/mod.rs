@@ -3,7 +3,9 @@
 //! 连接来的数据只经 [`Store::apply`] 写入，吃的是 `iwork_ipc` `Incoming` 给出的全序；网页声明的视图状态经
 //! `set_*` 写入。两者都只往 [`DirtySet`] 记「哪块脏了」，帧在网页来取时才由 `derive` 从当前状态算（方案 2.4）。
 
+pub mod add_project;
 pub mod anchors;
+pub mod assistant_edits;
 pub mod created;
 pub mod home;
 pub mod models;
@@ -234,12 +236,10 @@ pub enum Connection {
     Connecting,
     Live,
     Reconnecting,
-    /// 升级窗口的中性提示：文字与出口取 `WaitPrompt`。
-    Waiting {
-        title: &'static str,
-        exits: Vec<&'static str>,
-    },
+    /// 升级窗口的中性提示（标题、说明、出口由 derive::connection 按提示种类给）。
+    Waiting(iwork_ipc::client::WaitPrompt),
     Diagnostics(Diagnostics),
+    /// 不支持的运行环境（M1 的 Windows）：说明取启动错误原文。不给「重试」：环境不会自己变。
     Environment(String),
 }
 
@@ -265,6 +265,11 @@ pub struct Store {
     pub quota: BTreeMap<String, pb::RuntimeQuota>,
     pub settings: Option<pb::GlobalSettings>,
     pub rules: Option<Vec<pb::Rule>>,
+    /// 记住的规则过期了（来了 rule 流的事件，或设置范围走了一次快照）：会话层重查 ListRules，期间照旧显示
+    /// 旧列表。照方案 2.2「失效后重查，不推演」。
+    pub rules_stale: bool,
+    /// 本客户端的 CreateAssistant 在途（会话层发出时设、回包时清）：不受理第二次，弹窗的「创建」不可点。
+    creating_assistant: bool,
     pub local_config: BTreeMap<String, Vec<pb::LocalConfigItem>>,
     pub clone_job: Option<CloneJob>,
     pub open: Option<Timeline>,
@@ -289,6 +294,14 @@ pub struct Store {
     pub created: created::CreatedWatch,
     /// 各运行时的模型清单（ListModels 附带查询的结果，见 models 模块）。
     pub models: models::ModelCatalog,
+    /// 助手配置的自动保存闸（见 assistant_edits 模块）：会话层按它的决定发 UpdateAssistant。
+    pub assistant_edits: assistant_edits::AssistantEdits,
+    /// 添加项目草稿（见 add_project 模块）：选好的文件夹与检查结果；绝对路径只在这里（方案 15.2 RD1）。
+    pub add_project: add_project::AddProjectDraft,
+    /// 本客户端加的、新建的项目：配上受理范围里的 ProjectAdded 就打开它（与新建对话同一套配法）。
+    pub projects_created: created::CreatedWatch<u64>,
+    /// 家目录：界面上的路径把它写成 `~`。
+    pub home_dir: Option<String>,
     /// 「已重新连接，回到最新」提示挂在哪个对话上（Q9）；会话层到时撤掉。
     pub back_to_latest: Option<String>,
     /// 这一轮刚挂上提示：会话层取走后开始计时。
@@ -315,6 +328,52 @@ pub struct Store {
 impl Store {
     pub fn new() -> Self {
         Self::with_timeline_cap(timeline::TIMELINE_CAP)
+    }
+
+    pub fn creating_assistant(&self) -> bool {
+        self.creating_assistant
+    }
+
+    /// 新建助手的命令发出了 / 有了回包。
+    pub fn set_creating_assistant(&mut self, on: bool) {
+        if self.creating_assistant != on {
+            self.creating_assistant = on;
+            self.dirty.mark(ViewKey::Sidebar);
+        }
+    }
+
+    /// 按摘要里这个助手此刻的样子推一步自动保存闸（`step` 是闸的某个方法），配置页随之重算。
+    /// 摘要里没有这个助手（删了）时闸一起丢掉。
+    pub fn step_assistant_edit(
+        &mut self,
+        id: &str,
+        step: impl FnOnce(
+            &mut assistant_edits::AssistantEdits,
+            Option<assistant_edits::Base<'_>>,
+        ) -> Option<assistant_edits::Send>,
+    ) -> Option<assistant_edits::Send> {
+        // 会话层每轮主循环都推一次忙着的闸：闸没变就不让助手主页重算、重发（热路径，基准 assistant_edits）
+        let before = self.assistant_edits.clone();
+        let sent = match self.summary.assistant(id) {
+            None => {
+                self.assistant_edits.forget(id);
+                None
+            }
+            Some(a) => match a.config.as_ref() {
+                None => None,
+                Some(config) => step(
+                    &mut self.assistant_edits,
+                    Some(assistant_edits::Base {
+                        version: a.version,
+                        config,
+                    }),
+                ),
+            },
+        };
+        if self.assistant_edits != before {
+            self.dirty.mark(ViewKey::Assistant);
+        }
+        sent
     }
 
     pub fn with_timeline_cap(cap: usize) -> Self {
@@ -391,6 +450,9 @@ impl Store {
     pub fn set_models(&mut self, runtime_id: &str, result: pb::ListModelsResult) {
         self.models.loaded(runtime_id, result);
         self.mark_header();
+        // 侧栏的新建助手菜单、助手配置页的三个下拉也读模型清单
+        self.dirty.mark(ViewKey::Sidebar);
+        self.dirty.mark(ViewKey::Assistant);
     }
 
     // ---------- 本地视图状态 ----------
@@ -597,9 +659,63 @@ impl Store {
             conversation_id,
             row_key,
             started_project_id: started,
-            pending_list: false,
+            ..Default::default()
         });
         self.dirty.mark(ViewKey::Navigate);
+    }
+
+    /// 打开这个项目的首页（加了、新建了项目之后，或「打开已有项目」）。添加项目草稿随之清掉。
+    pub fn navigate_project(&mut self, project_id: String) {
+        let seq = self.navigate.as_ref().map_or(1, |n| n.seq + 1);
+        self.navigate = Some(pb::NavigatePatch {
+            seq,
+            project_id: Some(project_id),
+            ..Default::default()
+        });
+        self.add_project.clear();
+        self.dirty.mark(ViewKey::Navigate);
+        self.dirty.mark(ViewKey::AddProject);
+    }
+
+    /// 请网页打开添加项目弹窗（拖入一个文件夹时）。
+    pub fn navigate_add_project(&mut self) {
+        let seq = self.navigate.as_ref().map_or(1, |n| n.seq + 1);
+        self.navigate = Some(pb::NavigatePatch {
+            seq,
+            add_project: true,
+            ..Default::default()
+        });
+        self.dirty.mark(ViewKey::Navigate);
+    }
+
+    /// 本客户端的 AddProject / CreateProject（草稿操作 `op`）受理了：配上受理范围里的 ProjectAdded 就打开那个项目。
+    /// 配不上（事件随快照来了）就不跳：项目已经在侧栏里；草稿的忙碌照常收掉。
+    pub fn project_add_accepted(&mut self, first: u64, last: u64, op: u64) {
+        match self.projects_created.accepted(first, last, op, self.cursor) {
+            created::Accepted::Matched(id, op) => self.project_added(id, op),
+            created::Accepted::Waiting => {}
+            created::Accepted::Missed(op) => self.edit_add_project(|d| {
+                d.finished(op, Ok(()));
+            }),
+        }
+    }
+
+    /// 草稿操作 `op` 加的项目到了：还是当前草稿在等它就打开（打开会清草稿）；弹窗关过就不跳，项目在侧栏里，
+    /// 新草稿不动。
+    fn project_added(&mut self, project_id: String, op: u64) {
+        if self.add_project.is_current(op) {
+            self.navigate_project(project_id);
+        }
+    }
+
+    /// 改添加项目草稿，弹窗随之重算。
+    pub fn edit_add_project<R>(
+        &mut self,
+        f: impl FnOnce(&mut add_project::AddProjectDraft) -> R,
+    ) -> R {
+        let r = f(&mut self.add_project);
+        self.dirty.mark(ViewKey::AddProject);
+        r
     }
 
     /// 首页的选择（模型、档位）改了。
@@ -811,15 +927,30 @@ impl Store {
                 self.mark_rows(|r| matches!(r, Row::TurnEnd(_)));
             }
             E::CloneFinished(e) => {
+                let error = (!e.ok).then(|| {
+                    e.error
+                        .as_ref()
+                        .map_or_else(String::new, |x| x.message.clone())
+                });
                 if let Some(job) = self.clone_job.as_mut()
                     && job.progress.job_id == e.job_id
                 {
-                    job.error = (!e.ok).then(|| {
-                        e.error
-                            .as_ref()
-                            .map_or_else(String::new, |x| x.message.clone())
-                    });
+                    job.error.clone_from(&error);
                     self.dirty.mark(ViewKey::AddProject);
+                }
+                // 不碰添加项目草稿：克隆的客户端一半没接（见 intent.rs 的 CLONE_NOT_CONNECTED）
+            }
+            // rule 流：只记过期、重查 ListRules，不按事件推演列表（方案 2.2）
+            E::RuleRemembered(_) | E::RuleRevoked(_) | E::RulesDeleted(_) => {
+                self.rules_stale = true;
+            }
+            E::ProjectAdded(e) => {
+                if let Some((id, op)) = e
+                    .project
+                    .as_ref()
+                    .and_then(|p| self.projects_created.created(seq, &p.id))
+                {
+                    self.project_added(id, op);
                 }
             }
             E::ConversationCreated(e) => {
@@ -930,12 +1061,21 @@ impl Store {
             return;
         };
         sub.state = ViewState::Ready;
+        // 设置范围走了快照（连上、重连）：期间可能漏了 rule 流的事件，记住的规则按过期重查
+        if sub.scope == ScopeKind::Settings {
+            self.rules_stale = true;
+        }
         if let Some(snapshot) = s.snapshot {
             applied.had_seq = true;
             self.cursor = self.cursor.max(s.snapshot_seq);
             // 快照盖过的新建：建出它的事件不会再逐条来了（受理后到的那种先后在 create_accepted 里收）。
             for purpose in self.created.covered_by_snapshot(s.snapshot_seq) {
                 self.created_missed(purpose);
+            }
+            for op in self.projects_created.covered_by_snapshot(s.snapshot_seq) {
+                self.edit_add_project(|d| {
+                    d.finished(op, Ok(()));
+                });
             }
             self.snapshot_tables.extend(
                 snapshot
@@ -1245,7 +1385,8 @@ impl Store {
                 K::ListSecurityLists(_)
                 | K::ReadArtifact(_)
                 | K::ListModels(_)
-                | K::GetOpenTarget(_),
+                | K::GetOpenTarget(_)
+                | K::InspectProjectPath(_),
             ) => {}
         }
         if let (Some(QueryPurpose::Summary { round, table: want }), Some(got)) = (purpose, table)
@@ -1282,6 +1423,8 @@ impl Store {
         self.dirty.mark(ViewKey::Pending);
         self.dirty.mark(ViewKey::Assistant);
         self.dirty.mark(ViewKey::AddProject);
+        // 设置 › 审批的规则分组标题与「记在哪」读项目、助手、对话的名字
+        self.dirty.mark(ViewKey::Settings);
     }
 }
 

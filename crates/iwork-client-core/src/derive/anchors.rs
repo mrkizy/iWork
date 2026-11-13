@@ -74,7 +74,7 @@ fn item(store: &Store, a: &pb::Anchor, now: SystemTime, tz: &jiff::tz::TimeZone)
         time_label: a
             .at
             .as_ref()
-            .map(|t| text::anchor_time(now, to_system_time(t), tz))
+            .map(|t| text::clock_or_date(now, to_system_time(t), tz))
             .unwrap_or_default(),
         preview,
     }

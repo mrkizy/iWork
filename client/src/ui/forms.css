@@ -1,0 +1,48 @@
+/* 表单件（全站共用）：带标签的一项、输入框、多行输入、下拉 */
+.iw-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.iw-field__label {
+  color: var(--tx2);
+  font-size: var(--fs-sm2);
+}
+.iw-field__hint {
+  margin: 4px 0 0;
+  color: var(--tx3);
+  font-size: var(--fs-sm2);
+}
+.iw-input,
+.iw-select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--bd2);
+  border-radius: var(--r-md);
+  background: var(--surf);
+  color: var(--tx);
+  font: inherit;
+  font-size: var(--fs-md);
+}
+/* 下拉：系统箭头占宽、窄处把选中值挤成「Claude Cc」；换成按主题取色的小箭头（两段渐变拼的，跟着令牌变色） */
+.iw-select {
+  appearance: none;
+  padding-right: 26px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--tx2) 50%),
+    linear-gradient(135deg, var(--tx2) 50%, transparent 50%);
+  background-position:
+    right 14px center,
+    right 10px center;
+  background-size:
+    4px 4px,
+    4px 4px;
+  background-repeat: no-repeat;
+  text-overflow: ellipsis;
+}
+.iw-input--area {
+  min-height: 112px;
+  line-height: 1.6;
+  resize: vertical;
+}

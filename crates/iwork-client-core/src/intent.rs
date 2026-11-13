@@ -26,6 +26,15 @@ pub enum Action {
     Reject(pb::IntentError),
     /// 首页：新建对话并发出首条消息（会话层 session::start 一步步推进）。
     Start { project_id: String, text: String },
+    /// 添加项目一组（方案 15.2）：都不带路径，作用在 Rust 的添加项目草稿上（session::add_project）。
+    AddProject(AddProjectAct),
+    /// 助手配置页改了一项：进自动保存闸（store::assistant_edits），由会话层按闸的决定发命令。
+    AssistantField {
+        assistant_id: String,
+        field: crate::store::assistant_edits::Field,
+    },
+    /// 新建助手：同一时间只有一条在途（一次点击一个助手，审查 g3 1/F-4；command_id 只去重重发，合不了两次点击）。
+    CreateAssistant(pb::CreateAssistant),
     /// 什么都不用做（如标题没变）。
     Nothing,
 }
@@ -73,13 +82,32 @@ pub enum Pick {
     Attachments { conversation_id: String },
     /// 「重新定位」：选中的文件夹交给后台，由它核对 project.toml（技术设计 8.2）。
     ProjectLocation { project_id: String },
+    /// 设置 › 项目位置：选中的文件夹设成新建项目的默认父目录。
+    ProjectsRoot,
+    /// 添加项目：选中的文件夹设成候选、发检查（方案 15.2）。
+    ProjectFolder,
+    /// 添加项目：选中的文件夹作为这一次新建、克隆的父目录。
+    ProjectsParent,
+}
+
+/// 添加项目草稿上的操作（方案 15.2 的意图表）。网页给的字符串只有新建、克隆的名字与克隆地址，由后台判。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddProjectAct {
+    InitCandidate,
+    SetProposeDraft(bool),
+    Confirm,
+    Clear,
+    Create { name: String },
 }
 
 impl Pick {
     pub fn kind(&self) -> PickKind {
         match self {
             Pick::Attachments { .. } => PickKind::Files,
-            Pick::ProjectLocation { .. } => PickKind::Folder,
+            Pick::ProjectLocation { .. }
+            | Pick::ProjectsRoot
+            | Pick::ProjectFolder
+            | Pick::ProjectsParent => PickKind::Folder,
         }
     }
 }
@@ -97,6 +125,8 @@ pub enum PickKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     OpenExternal(String),
+    /// 重启客户端进程（连接类整页的「重新打开 iWork」）。只重启客户端自己，后台照常跑。
+    Relaunch,
     /// Dock 角标：「待你处理」徽标的文字（超过 99 写「99+」）；`None` 清掉角标。只在 macOS 上落地。
     SetBadge(Option<String>),
     /// 出现了新的待处理项：让 Dock 图标跳一次（Q15：Informational）。系统只在应用不在前台时跳。
@@ -114,6 +144,9 @@ pub fn reject(code: &str, message: &str) -> Action {
         retryable: false,
     })
 }
+
+/// 克隆没接入时回的错误。
+pub const CLONE_NOT_CONNECTED: (&str, &str) = ("not_connected", "克隆还没接入");
 
 /// 重命名标题上限（技术设计 9.0a）。
 pub const TITLE_MAX_CHARS: usize = 50;
@@ -280,7 +313,17 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
             conversation_id: x.conversation_id,
         }),
 
-        I::AddProject(x) => Action::Command(Cmd::AddProject(pb::AddProject { path: x.path })),
+        I::PickProjectsRoot(_) => Action::Pick(Pick::ProjectsRoot),
+        I::PickProjectFolder(_) => Action::Pick(Pick::ProjectFolder),
+        I::PickProjectsParent(_) => Action::Pick(Pick::ProjectsParent),
+        I::InitCandidateRepository(_) => Action::AddProject(AddProjectAct::InitCandidate),
+        I::SetProposeAgentsMdDraft(x) => Action::AddProject(AddProjectAct::SetProposeDraft(x.on)),
+        I::ConfirmAddProject(_) => Action::AddProject(AddProjectAct::Confirm),
+        I::ClearAddProject(_) => Action::AddProject(AddProjectAct::Clear),
+        I::CreateProject(x) => Action::AddProject(AddProjectAct::Create { name: x.name }),
+        // 克隆的客户端一半没接：CloneFinished 只带后台的 job_id，客户端对不上自己的命令（重启、快照都会丢归属），
+        // 等 T10c 在协议里补上归属再接（主管 2026-11-13 定）。克隆页签也还在等 U-7d-4。
+        I::StartClone(_) | I::RetryClone(_) => reject(CLONE_NOT_CONNECTED.0, CLONE_NOT_CONNECTED.1),
         I::PinProject(x) => Action::Command(Cmd::PinProject(pb::PinProject {
             project_id: x.project_id,
             pinned: x.pinned,
@@ -292,9 +335,9 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
             project_id: x.project_id,
         }),
 
-        I::CreateAssistant(x) => Action::Command(Cmd::CreateAssistant(pb::CreateAssistant {
+        I::CreateAssistant(x) => Action::CreateAssistant(pb::CreateAssistant {
             config: Some(assistant_config(x)),
-        })),
+        }),
         I::UpdateAssistant(x) => {
             let expected_version = store.summary.assistant(&x.assistant_id).map(|a| a.version);
             match expected_version {
@@ -304,6 +347,30 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
                     expected_version: v,
                 })),
                 None => reject("assistant_not_found", "找不到这个助手"),
+            }
+        }
+        I::UpdateAssistantField(x) => {
+            use crate::store::assistant_edits::Field;
+            use pb::update_assistant_field_intent::Field as F;
+            let field = match x.field {
+                Some(F::Name(v)) => Field::Name(v),
+                Some(F::Prompt(v)) => Field::Prompt(v),
+                Some(F::Model(m)) => Field::Model(pb::ModelSelection {
+                    model_id: m.model_id,
+                    effort: m.effort,
+                }),
+                Some(F::Tool(c)) => Field::Tool {
+                    group: c.group,
+                    enabled: c.enabled,
+                },
+                None => return reject("invalid_intent", "没说改哪一项"),
+            };
+            if store.summary.assistant(&x.assistant_id).is_none() {
+                return reject("assistant_not_found", "找不到这个助手");
+            }
+            Action::AssistantField {
+                assistant_id: x.assistant_id,
+                field,
             }
         }
         I::DeleteAssistant(x) => Action::Command(Cmd::DeleteAssistant(pb::DeleteAssistant {
@@ -317,6 +384,7 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
         }
         I::RevokeRule(x) => Action::Command(Cmd::RevokeRule(pb::RevokeRule { rule_id: x.rule_id })),
         I::Quit(x) => Action::Local(Local::Quit { confirm: x.confirm }),
+        I::Relaunch(_) => Action::Effect(Effect::Relaunch),
         I::RedetectRuntime(x) => Action::Command(Cmd::RedetectRuntime(pb::RedetectRuntime {
             runtime_id: x.runtime_id,
         })),

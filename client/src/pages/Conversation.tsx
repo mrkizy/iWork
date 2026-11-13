@@ -1,4 +1,4 @@
-// 对话页（画布 04、10、15）：标题栏（标题、本对话用量）、提示条、时间线（虚拟行）、回到最新、输入框。
+// 对话页（画布 04、10、15）：标题栏（标题、私聊的项目选择器、本对话用量）、提示条、时间线（虚拟行）、回到最新、输入框。
 // 还没有消息的对话显示和首页一样的「要做点什么？」。整页说明（如「数据不完整」）设了就不显示行。
 // 拖文件进窗口时整块对话区盖一层虚线框（文字由 Rust 给，没在拖时不设）。
 // 消息锚点（2a 第 11 条）：内容超出一屏才显示。宽形态（主区域 ≥ 600px）是左边距里的导轨，窄形态是标题栏最右端的按钮
@@ -13,6 +13,7 @@ import { RowView } from "../rows/RowView";
 import { Button } from "../ui/Button";
 import { Icon } from "../ui/Icon";
 import { VirtualRows } from "../ui/VirtualRows";
+import { ProjectSelector } from "./ProjectSelector";
 import "./pages.css";
 
 export function ConversationPage(props: { id: string; rowKey?: string; openRuntimeDetails: () => void }) {
@@ -56,6 +57,7 @@ export function ConversationPage(props: { id: string; rowKey?: string; openRunti
     <div ref={page} class={`iw-conv-page${narrow() ? "" : " iw-conv-page--wide"}`}>
       <div class="iw-conv-header">
         <span class="iw-conv-header__title">{header()?.title}</span>
+        <Show when={header()}>{(h) => <ProjectSelector conversationId={props.id} header={h()} />}</Show>
         <Show when={header()?.usageText}>
           {(u) => (
             <span class="iw-conv-header__usage" data-tip={header()?.usageTooltip}>

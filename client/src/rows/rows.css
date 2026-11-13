@@ -134,6 +134,12 @@
   font-size: var(--fs-sm);
   text-align: center;
 }
+.iw-note--full {
+  color: var(--acc);
+}
+.iw-note--failed {
+  color: var(--acc);
+}
 .iw-divider {
   display: flex;
   align-items: center;
@@ -147,11 +153,4 @@
   flex: 1;
   height: 1px;
   background: var(--bd);
-}
-.iw-row-later {
-  padding: 8px 12px;
-  border: 1px dashed var(--bd2);
-  border-radius: var(--r-lg);
-  color: var(--tx3);
-  font-size: var(--fs-sm);
 }

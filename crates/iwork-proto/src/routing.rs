@@ -66,9 +66,11 @@ pub fn query_lane(kind: &QueryKind) -> QueryLane {
         | QueryKind::ListSecurityLists(_)
         | QueryKind::GetSettings(_)
         | QueryKind::ListAnchors(_) => QueryLane::ViewQuery,
-        QueryKind::ReadArtifact(_) | QueryKind::ListModels(_) | QueryKind::GetOpenTarget(_) => {
-            QueryLane::SideQuery
-        }
+        // 检查目录：某一刻盘上的样子，不是事件推出来的状态，不进视图的全序（T09 方案 15.2）
+        QueryKind::ReadArtifact(_)
+        | QueryKind::ListModels(_)
+        | QueryKind::GetOpenTarget(_)
+        | QueryKind::InspectProjectPath(_) => QueryLane::SideQuery,
     }
 }
 

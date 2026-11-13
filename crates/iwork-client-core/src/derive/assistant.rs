@@ -3,12 +3,16 @@
 use iwork_proto::pb;
 
 use super::avatar::{AvatarState, avatar};
+use super::model_menu::{MenuInput, model_menu};
 use super::text;
 use crate::store::Store;
 
 pub fn assistant(store: &Store, id: &str) -> Option<pb::AssistantProfileView> {
     let a = store.summary.assistant(id)?;
-    let c = a.config.clone().unwrap_or_default();
+    // 摘要里的配置叠上还没落定的改动：摘要要等重查才追上，不叠会闪回旧值（store::assistant_edits）
+    let c = store
+        .assistant_edits
+        .shown(id, &a.config.clone().unwrap_or_default());
     let model = c.model.clone().unwrap_or_default();
     Some(pb::AssistantProfileView {
         assistant_id: a.id.clone(),
@@ -49,5 +53,14 @@ pub fn assistant(store: &Store, id: &str) -> Option<pb::AssistantProfileView> {
         runtime_locked: false,
         activity_empty_text: text::ACTIVITY_EMPTY.into(),
         memory_empty_text: text::MEMORY_EMPTY.into(),
+        model_menu: Some(model_menu(
+            store,
+            &MenuInput {
+                runtime_id: &c.runtime_id,
+                model: c.model.as_ref(),
+                runtime_locked: false,
+            },
+        )),
+        save_error: store.assistant_edits.error(id).map(str::to_owned),
     })
 }

@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use iwork_proto::pb;
 
 use super::avatar::{AvatarState, avatar, state_of_turn};
+use super::model_menu::{MenuInput, model_menu};
 use super::{Ctx, can_rename, conversation_title, pending_conversation, text, to_system_time};
 use crate::store::Store;
 
@@ -29,7 +30,33 @@ pub fn sidebar(store: &Store, ctx: Ctx) -> pb::SidebarView {
             .collect(),
         quota: quota_cells(store, ctx),
         title_max_chars: u32::try_from(crate::intent::TITLE_MAX_CHARS).unwrap_or(u32::MAX),
+        new_assistant_menu: Some(new_assistant_menu(store)),
+        creating_assistant: store.creating_assistant(),
     }
+}
+
+/// 新建助手默认用哪个运行时：内置 iWork 的（M1 只有一个运行时）。会话层据此取模型清单。
+pub fn new_assistant_runtime(store: &Store) -> Option<&str> {
+    let id = builtin(store)?.config.as_ref()?.runtime_id.as_str();
+    (!id.is_empty()).then_some(id)
+}
+
+/// 新建助手弹窗的运行时 / 模型 / 思考强度三个下拉（侧栏「助手 +」打开，画布 13-AssistantConfig-new）：
+/// 默认选中内置 iWork 的运行时与模型；弹窗里改选是网页本地的表单状态，创建时整份发 CreateAssistant。
+fn new_assistant_menu(store: &Store) -> pb::ModelMenuView {
+    let base = builtin(store).and_then(|a| a.config.as_ref());
+    model_menu(
+        store,
+        &MenuInput {
+            runtime_id: base.map_or("", |c| c.runtime_id.as_str()),
+            model: base.and_then(|c| c.model.as_ref()),
+            runtime_locked: false,
+        },
+    )
+}
+
+fn builtin(store: &Store) -> Option<&pb::Assistant> {
+    store.summary.assistants.iter().find(|a| a.builtin)
 }
 
 /// 助手分区的顺序：内置 iWork 排第一（ui-m1.md 第 2 节第 1 条），其余照后台给的顺序。
@@ -84,7 +111,7 @@ pub(crate) fn conversation_item(
         last_active_label: c
             .updated_at
             .as_ref()
-            .map(|t| text::relative_past(ctx.now, to_system_time(t)))
+            .map(|t| text::clock_or_date(ctx.now, to_system_time(t), &jiff::tz::TimeZone::system()))
             .unwrap_or_default(),
     }
 }

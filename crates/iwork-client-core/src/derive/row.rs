@@ -63,30 +63,38 @@ pub fn row(store: &Store, tl: &Timeline, key: RowKey, identity: &str, row: &Row)
             can_resume: live,
             can_abandon: live,
         }),
-        Row::ModelSwitch { model } => V::ModelSwitch(pb::NoteRow {
-            text: text::switched_model(model),
-        }),
-        Row::Divider { project_id } => V::Divider(pb::NoteRow {
-            text: text::switched_project(project_name(store, project_id.as_deref()).as_deref()),
-        }),
+        Row::ModelSwitch { model } => V::ModelSwitch(note(text::switched_model(model))),
+        Row::Divider { project_id } => V::Divider(note(text::switched_project(
+            project_name(store, project_id.as_deref()).as_deref(),
+        ))),
         // 视图种类按「说的是什么」选，不按行从哪来（当次说明还是重建得出）：同一件事一个样子（审查 2a 2/F-4，
         // 画布 09 的项目切换只有分隔线一种）。
         Row::Note { text: t, .. } => match t {
-            NoteText::ApprovalMode(m) => V::Note(pb::NoteRow {
-                text: text::switched_mode(m.and_then(|m| pb::ApprovalMode::try_from(m).ok())),
-            }),
-            NoteText::Model(m) => V::ModelSwitch(pb::NoteRow {
-                text: text::switched_model(m),
-            }),
-            NoteText::DmProject(p) => V::Divider(pb::NoteRow {
-                text: text::switched_project(project_name(store, p.as_deref()).as_deref()),
-            }),
+            NoteText::ApprovalMode(m) => {
+                let mode = m.and_then(|m| pb::ApprovalMode::try_from(m).ok());
+                V::Note(pb::NoteRow {
+                    text: text::switched_mode(mode),
+                    full_access: mode == Some(pb::ApprovalMode::FullAccess),
+                })
+            }
+            NoteText::Model(m) => V::ModelSwitch(note(text::switched_model(m))),
+            NoteText::DmProject(p) => V::Divider(note(text::switched_project(
+                project_name(store, p.as_deref()).as_deref(),
+            ))),
         },
     };
     pb::RowView {
         ordinal: key.ordinal(),
         key: identity.to_owned(),
         row: Some(v),
+    }
+}
+
+/// 普通说明行（模型切换、项目分隔线、档位以外的说明）。
+fn note(text: String) -> pb::NoteRow {
+    pb::NoteRow {
+        text,
+        full_access: false,
     }
 }
 
@@ -307,6 +315,11 @@ fn user_action(tl: &Timeline, c: &pb::UserActionCard, live: bool) -> pb::UserAct
             .to_owned(),
         muted: state == S::Voided,
         notice,
+        succeeded: state == S::Done
+            && matches!(
+                c.exit.as_ref().and_then(|e| e.kind),
+                Some(pb::exit_status::Kind::Code(0))
+            ),
     }
 }
 

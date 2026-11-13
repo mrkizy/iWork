@@ -1,4 +1,5 @@
-//! 取模型清单（附带查询 ListModels，见 store::models）：打开的对话用哪个运行时，就取哪个的清单。
+//! 取模型清单（附带查询 ListModels，见 store::models）：打开的对话用哪个运行时就取哪个的清单；新建助手弹窗
+//! 要内置 iWork 那个运行时的（侧栏的 new_assistant_menu）。
 //! 结果从回包拿，经 `Internal::ModelsLoaded` 回到主循环；失败按用途 "models" 退避后再取。
 
 use iwork_ipc::client::ClientError;
@@ -7,6 +8,7 @@ use tokio::time::Instant;
 
 use super::{Internal, Session, log_fields};
 use crate::derive::conversation::menu_runtime;
+use crate::derive::sidebar::new_assistant_runtime;
 use crate::session::dial::Dialer;
 
 /// 退避表里这种用途的名字。
@@ -17,12 +19,17 @@ impl<D: Dialer> Session<D> {
         if !self.live() || self.backed_off(PURPOSE, now) {
             return;
         }
-        let Some(runtime_id) = menu_runtime(&self.store).map(str::to_owned) else {
+        // 输入框菜单要的那个，和新建助手弹窗要的那个（内置 iWork 的运行时）；一次取一个，取完下一轮再看
+        let Some(runtime_id) = [
+            menu_runtime(&self.store),
+            new_assistant_runtime(&self.store),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|r| self.store.models.wants(r))
+        .map(str::to_owned) else {
             return;
         };
-        if !self.store.models.wants(&runtime_id) {
-            return;
-        }
         let Some(client) = self.client.clone() else {
             return;
         };

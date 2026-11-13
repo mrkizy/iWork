@@ -52,6 +52,10 @@ message NavigatePatch {
   optional string started_project_id = 4;
   // 打开「待你处理」页（被系统通知叫到前台、那一项没有对话归属时；T09 方案 2.8）。此时 conversation_id 为空。
   bool pending_list = 5;
+  // 打开这个项目的首页（添加、新建项目之后；T09 方案 15.2）。此时 conversation_id 为空。
+  optional string project_id = 6;
+  // 请网页打开添加项目弹窗（拖入一个文件夹时）。
+  bool add_project = 7;
 }
 
 // ---------- 通用小件 ----------
@@ -111,6 +115,10 @@ message SidebarView {
   CountBadge pending_badge = 5;
   // 对话标题最多几个字符（按码点算）：就地重命名时截到这么长，Rust 提交时再校验一次。
   uint32 title_max_chars = 6;
+  // 新建助手弹窗的运行时 / 模型 / 思考强度（默认选中内置 iWork 的）。
+  ModelMenuView new_assistant_menu = 7;
+  // 新建助手的命令在途：「创建」不可点（Rust 同时拒第二次，审查 g3 1/F-4）。
+  bool creating_assistant = 8;
 }
 
 // 数字徽标（ui-m1.md 第 2 节第 4 条）：超过 99 写「99+」，侧栏徽标、「待你处理」与 Dock 角标同一个规则。
@@ -515,6 +523,8 @@ message UserActionRow {
   bool muted = 15;
   // 「执行结果未知，请自行核对」等说明。
   optional string notice = 16;
+  // 你已执行且退出码 0：结果用成功色（画布 15-UserAction-done）。
+  bool succeeded = 17;
 }
 
 message TurnEndRow {
@@ -537,6 +547,8 @@ message ResumeRow {
 
 message NoteRow {
   string text = 1;
+  // 切到全开的那一行（ui-m1 第 2 节第 9 条：全开时提示用赭红色）；网页按它上色，不看文字。
+  bool full_access = 2;
 }
 
 // ---------- 全部对话 ----------
@@ -620,6 +632,8 @@ message SettingsView {
   string rules_empty_text = 7;
   repeated ImportGroup import_groups = 8;
   string import_empty_text = 9;
+  // 关于页「版本 x.y.z」里的版本号：客户端自己的构建版本，不依赖后台（ui-m1 2a 第 18 条 g ③）。
+  string app_version = 10;
 }
 
 message RuntimeView {
@@ -634,6 +648,8 @@ message RuntimeView {
   optional string guidance = 7;
   bool can_redetect = 8;
   bool ready = 9;
+  // 还没接入（M2）的运行时：只列名字与「M2 接入」，置灰（画布 12、ui-m1 第 1 节引导页一行）。
+  bool upcoming = 10;
 }
 
 message RuleGroup {
@@ -643,8 +659,20 @@ message RuleGroup {
 
 message RuleItem {
   string rule_id = 1;
+  // 原文（读屏、复制用）；画的时候用 label_spans。
   string label = 2;
   bool can_revoke = 3;
+  // label 按反引号切开：code 的一段照代码样式画（ui-m1 第 2 节第 15 条的例子「执行 `npm test …`」）。
+  repeated TextSpan label_spans = 4;
+  // 记在哪个助手或项目上（如「项目 demo」「助手 阿森」「所有项目与助手」）。
+  string owner_label = 5;
+  // 创建时间（今天写时刻，更早写日期）；后台没给就不设。
+  string created_label = 6;
+}
+
+message TextSpan {
+  string text = 1;
+  bool code = 2;
 }
 
 message ImportGroup {
@@ -685,6 +713,10 @@ message AssistantProfileView {
   // 「动态」「记忆」空态说明（D3）。
   string activity_empty_text = 15;
   string memory_empty_text = 16;
+  // 运行时 / 模型 / 思考强度三个下拉（同一套 model_menu 派生，ui-m1 第 2 节第 14 条）。
+  ModelMenuView model_menu = 17;
+  // 自动保存没成功的说明（字段非法、后台校验拒）；下一次改动清掉。
+  optional string save_error = 18;
 }
 
 message ToolToggle {
@@ -702,6 +734,38 @@ message AddProjectPatch {
 message AddProjectView {
   optional CloneProgressView clone = 1;
   repeated DraftCardView drafts = 2;
+  // 选中的文件夹与检查结果；没选时不设（T09 方案 15.2）。
+  optional CandidateView candidate = 3;
+  // 新建、克隆要放到的父目录（家目录写成 ~）。
+  string parent_label = 4;
+  // 上一次操作被拒的原因（目录非空、没配提交身份等，文字用后台给的）。
+  optional string error = 5;
+  // 「Claude Code（全局默认）」那一行。
+  string runtime_label = 6;
+  // 正在加或正在新建：主按钮转圈、不可点。
+  bool busy = 7;
+}
+
+message CandidateView {
+  // 给人看的路径（家目录写成 ~）。会被加进来的那个目录：选了子目录时这里是仓库根。
+  string path_label = 1;
+  // 检查还没回来。
+  bool checking = 2;
+  // 提示框：没有版本控制、选的是子目录、检查失败。没有就都为空。
+  string notice_title = 3;
+  string notice_body = 4;
+  Tone notice_tone = 5;
+  // 「初始化为 git 仓库并首次提交」那个按钮：显不显示、文字、是不是正在初始化。
+  optional string init_label = 6;
+  bool initializing = 7;
+  // 「AGENTS.md　未找到 / 已有」；检查中为空。
+  string agents_md_label = 8;
+  // 显不显示「让 iWork 生成草稿」的勾选框，以及勾着没。
+  bool can_propose_draft = 9;
+  bool propose_draft = 10;
+  // 主按钮：可不可点、文字（「添加并开始对话」「打开已有项目」）。
+  bool can_confirm = 11;
+  string confirm_label = 12;
 }
 
 message CloneProgressView {
@@ -742,11 +806,12 @@ enum ConnectionState {
 }
 
 message ConnectionView {
+  // 原来的出口纯文字：换成了带动作的 exit_actions（网页不按文字猜动作）。
+  reserved 4;
+  reserved "exits";
   ConnectionState state = 1;
   string title = 2;
   string message = 3;
-  // 提示上的出口文字。
-  repeated string exits = 4;
   // 「后台负载过高」提示条；不过载时不设。
   optional string overload_notice = 5;
   // 会发命令的按钮可不可点（断线时不可点，D8）。
@@ -756,6 +821,23 @@ message ConnectionView {
   bool quit_requested = 8;
   // 有数据没取到、正在退避重试时的一行说明（如「部分数据暂时没取到，稍后自动重试」）；没有就不设。
   optional string query_notice = 9;
+  // 整页提示上的出口：只列 Rust 有实现的（查看诊断等 T04p 接上真诊断再给）。
+  repeated ConnectionExit exit_actions = 10;
+}
+
+message ConnectionExit {
+  string label = 1;
+  ConnectionExitKind kind = 2;
+}
+
+enum ConnectionExitKind {
+  CONNECTION_EXIT_KIND_UNSPECIFIED = 0;
+  // 发 UiIntent.retry。
+  CONNECTION_EXIT_KIND_RETRY = 1;
+  // 打开诊断页（T04p 步 10 接真 Diagnostics 后才给）。
+  CONNECTION_EXIT_KIND_SHOW_DIAGNOSTICS = 2;
+  // 发 UiIntent.relaunch：只重启客户端自己，不碰后台。
+  CONNECTION_EXIT_KIND_RELAUNCH = 3;
 }
 
 message DiagnosticsView {
@@ -799,9 +881,9 @@ message FrameChunk {
 
 // ui_intent 的请求。
 message UiIntent {
-  // 原来网页直接带路径的两个操作，换成了 pick_attachments、pick_project_location（T09 组 2b）。
-  reserved 60, 73;
-  reserved "attach_paths", "relocate_project";
+  // 原来网页直接带路径的几个操作，换成了 Rust 弹选择框的 pick_*（R7：网页拿不到本机路径；T09 组 2b、组 3）。
+  reserved 60, 70, 73;
+  reserved "attach_paths", "add_project", "relocate_project";
   oneof kind {
     // 视图声明
     SetVisible set_visible = 1;
@@ -849,11 +931,31 @@ message UiIntent {
     PickAttachments pick_attachments = 62;
 
     // 项目
-    ProjectPathIntent add_project = 70;
     PinProjectIntent pin_project = 71;
     ProjectIntent remove_project = 72;
     // 「重新定位」：Rust 弹文件夹选择框，选好后发 RelocateProject，由后台校验 project.toml。
     ProjectIntent pick_project_location = 74;
+    // 添加项目一组（T09 方案 15.2）：都不带路径，路径只在 Rust 的添加项目草稿里（RD1）。
+    // 弹选文件夹的框，选好的设成候选、发检查。
+    PickProjectFolder pick_project_folder = 75;
+    // 候选没有版本控制时：初始化它。
+    InitCandidateRepository init_candidate_repository = 76;
+    // 「让 iWork 生成 AGENTS.md 草稿」。
+    ToggleIntent set_propose_agents_md_draft = 77;
+    // 「添加并开始对话」/「打开已有项目」。
+    ConfirmAddProject confirm_add_project = 78;
+    // 弹窗关了：清掉草稿。
+    ClearAddProject clear_add_project = 79;
+    // 新建项目：name 只当一个目录名，由后台判（方案 15.2「从网页来的字符串」）。
+    CreateProjectIntent create_project = 92;
+    // 克隆：url 只收远程地址、name 只当一个目录名，都由后台判。
+    StartCloneIntent start_clone = 93;
+    // 用上一次的参数重新克隆（参数记在 Rust，网页不重传）。
+    RetryClone retry_clone = 94;
+    // 弹选文件夹的框，选好的作为这一次新建、克隆的父目录。
+    PickProjectsParent pick_projects_parent = 95;
+    // 设置 › 项目位置的「更换」：Rust 弹文件夹选择框，选好后发 SetProjectsRoot（方案 15.2）。
+    PickProjectsRoot pick_projects_root = 96;
 
     // 助手与设置
     AssistantEditIntent create_assistant = 80;
@@ -865,8 +967,14 @@ message UiIntent {
     RuntimeIntent redetect_runtime = 86;
     // 「完全退出 iWork」确认框的结果：确认则关后台服务并退出，取消则关掉确认框。
     QuitIntent quit = 87;
+    // 助手配置页改了一项（自动保存）：Rust 合并、按版本发 UpdateAssistant（store::assistant_edits）。
+    UpdateAssistantFieldIntent update_assistant_field = 88;
+    // 连接类整页的「重新打开 iWork」：壳重启客户端进程，不碰后台。
+    RelaunchIntent relaunch = 89;
   }
 }
+
+message RelaunchIntent {}
 
 message QuitIntent {
   bool confirm = 1;
@@ -1034,8 +1142,27 @@ message AttachPasted {
   bytes data = 4;
 }
 
-message ProjectPathIntent {
-  string path = 1;
+message PickProjectsRoot {}
+
+message PickProjectFolder {}
+
+message InitCandidateRepository {}
+
+message ConfirmAddProject {}
+
+message ClearAddProject {}
+
+message RetryClone {}
+
+message PickProjectsParent {}
+
+message CreateProjectIntent {
+  string name = 1;
+}
+
+message StartCloneIntent {
+  string url = 1;
+  optional string name = 2;
 }
 
 message PinProjectIntent {
@@ -1058,6 +1185,29 @@ message AssistantEditIntent {
   repeated int32 disabled_groups = 7;
   string avatar_initial = 8;
   string avatar_color = 9;
+}
+
+// 助手配置页的一项改动。网页不拼整份配置、不管版本：同一个助手的改动由 Rust 排队合并（步 7c）。
+message UpdateAssistantFieldIntent {
+  string assistant_id = 1;
+  oneof field {
+    string name = 2;
+    string prompt = 3;
+    ModelChoice model = 4;
+    ToolChoice tool = 5;
+  }
+}
+
+// 模型与思考强度一起改（菜单里是同一次选择）；value 取 ModelMenuView 里的。
+message ModelChoice {
+  string model_id = 1;
+  optional string effort = 2;
+}
+
+message ToolChoice {
+  // ToolToggle.group。
+  int32 group = 1;
+  bool enabled = 2;
 }
 
 message AssistantIntent {

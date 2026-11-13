@@ -1,9 +1,12 @@
 // 行登记表的网页一侧：RowView 的每一种变体一个组件（加一种行 = 这里一臂）。
-// 审批、亲手执行、继续 / 放弃卡片与回合结束行的完整样子归步 7b，先画只读的占位，免得时间线缺行。
 import type { JSX } from "solid-js";
-import type { RowView as Row, TurnEndRow } from "../gen/iwork/v1/view_pb";
+import type { RowView as Row } from "../gen/iwork/v1/view_pb";
+import { ApprovalCard } from "./ApprovalCard";
 import { MessageRow } from "./MessageRow";
+import { ResumeCard } from "./ResumeCard";
 import { ToolRow } from "./ToolRow";
+import { TurnEndRow } from "./TurnEndRow";
+import { UserActionCard } from "./UserActionCard";
 import "./rows.css";
 
 export function RowView(props: { row: Row }): JSX.Element {
@@ -18,33 +21,21 @@ function renderRow(r: Row["row"]): JSX.Element {
     case "tool":
       return <ToolRow row={r.value} />;
     case "note":
+      // 切到全开的那一行用赭红（ui-m1 第 2 节第 9 条），按 Rust 给的字段，不看文字
+      return <div class={`iw-row iw-note${r.value.fullAccess ? " iw-note--full" : ""}`}>{r.value.text}</div>;
     case "modelSwitch":
       return <div class="iw-row iw-note">{r.value.text}</div>;
     case "divider":
       return <div class="iw-row iw-divider">{r.value.text}</div>;
     case "turnEnd":
-      return <TurnEndLater row={r.value} />;
+      return <TurnEndRow row={r.value} />;
     case "approval":
-      return <Later what="审批卡片" />;
+      return <ApprovalCard row={r.value} />;
     case "userAction":
-      return <Later what="亲手执行卡片" />;
+      return <UserActionCard row={r.value} />;
     case "resume":
-      return <Later what="继续 / 放弃卡片" />;
+      return <ResumeCard row={r.value} />;
     case undefined:
       return null;
   }
-}
-
-function Later(props: { what: string }) {
-  return (
-    <div class="iw-row">
-      <div class="iw-row-later">{props.what}（卡片下一组实现）</div>
-    </div>
-  );
-}
-
-/** 回合结束行（步 7b 画完整的摘要与印章）：先只显示 Rust 给的摘要与结果文字，都为空就不占地方。 */
-function TurnEndLater(props: { row: TurnEndRow }) {
-  const text = () => [props.row.summaryLine, props.row.outcomeLabel].filter(Boolean).join(" · ");
-  return <>{text() ? <div class="iw-row iw-note">{text()}</div> : null}</>;
 }

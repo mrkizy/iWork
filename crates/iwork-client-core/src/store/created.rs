@@ -29,26 +29,36 @@ pub enum Purpose {
 
 /// 一次受理的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Accepted {
+pub enum Accepted<P = Purpose> {
     /// 事件已经到了，配上了。
-    Matched(String, Purpose),
+    Matched(String, P),
     /// 事件还没到，等着。
     Waiting,
     /// 范围已在游标之内却配不上：事件是随快照来的（或早已挤出「最近建的」），再也配不上了。
-    Missed(Purpose),
+    Missed(P),
 }
 
-#[derive(Debug, Default)]
-pub struct CreatedWatch {
+/// `P` 是调用方给每次受理记的用途（对话用 [`Purpose`]；添加项目用草稿操作的编号）。
+#[derive(Debug)]
+pub struct CreatedWatch<P = Purpose> {
     /// 受理了、还没见到对应事件的 seq 范围。
-    pending: Vec<(u64, u64, Purpose)>,
+    pending: Vec<(u64, u64, P)>,
     /// 见到了、还没配上受理回包的 (seq, 对话 id)。
     recent: VecDeque<(u64, String)>,
 }
 
-impl CreatedWatch {
+impl<P> Default for CreatedWatch<P> {
+    fn default() -> Self {
+        CreatedWatch {
+            pending: Vec::new(),
+            recent: VecDeque::new(),
+        }
+    }
+}
+
+impl<P: Copy> CreatedWatch<P> {
     /// 本客户端的 CreateConversation 受理了。`cursor` 是已经应用到的 seq（含快照）。
-    pub fn accepted(&mut self, first: u64, last: u64, purpose: Purpose, cursor: u64) -> Accepted {
+    pub fn accepted(&mut self, first: u64, last: u64, purpose: P, cursor: u64) -> Accepted<P> {
         if let Some(i) = self
             .recent
             .iter()
@@ -65,7 +75,7 @@ impl CreatedWatch {
     }
 
     /// 见到一个 ConversationCreated：落在等着的受理范围里就返回要打开的对话。
-    pub fn created(&mut self, seq: u64, conversation_id: &str) -> Option<(String, Purpose)> {
+    pub fn created(&mut self, seq: u64, conversation_id: &str) -> Option<(String, P)> {
         if let Some(i) = self
             .pending
             .iter()
@@ -82,7 +92,7 @@ impl CreatedWatch {
     }
 
     /// 来了一份截至 `snapshot_seq` 的快照：范围落在它之内、还没配上的，事件不会再来了，交出它们的用途。
-    pub fn covered_by_snapshot(&mut self, snapshot_seq: u64) -> Vec<Purpose> {
+    pub fn covered_by_snapshot(&mut self, snapshot_seq: u64) -> Vec<P> {
         let (gone, keep) = std::mem::take(&mut self.pending)
             .into_iter()
             .partition(|(_, last, _)| *last <= snapshot_seq);

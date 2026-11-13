@@ -486,6 +486,33 @@ pub fn user_action(
     }))
 }
 
+/// 记住的放行规则（设置 › 审批 里列出、可撤销）。
+pub fn remembered_rule(id: &str, label: &str, scope: pb::scope::Kind) -> pb::DomainEvent {
+    ev(E::RuleRemembered(pb::RuleRemembered {
+        rule: Some(pb::Rule {
+            id: id.into(),
+            layer: pb::RuleLayer::Remembered.into(),
+            scope: Some(pb::Scope { kind: Some(scope) }),
+            label: label.into(),
+            created_at: Some(ts(0)),
+            ..Default::default()
+        }),
+    }))
+}
+
+/// 添加项目后提议的 AGENTS.md 草稿（待你处理里的一项，没有对话归属）。
+pub fn agents_md_draft(card_id: &str, project_id: &str) -> pb::DomainEvent {
+    ev(E::AgentsMdDraftProposed(pb::AgentsMdDraftProposed {
+        card_id: card_id.into(),
+        project_id: project_id.into(),
+        content_artifact: Some(pb::ArtifactRef {
+            sha256: "0".repeat(64),
+            area: pb::ArtifactArea::Unspecified as i32,
+            size: 0,
+        }),
+    }))
+}
+
 /// 假的提议哈希：命令文字的字节（假后台只比相等）。
 pub fn proposal_hash(command: &str) -> bytes::Bytes {
     bytes::Bytes::copy_from_slice(command.as_bytes())
