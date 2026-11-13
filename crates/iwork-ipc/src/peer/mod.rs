@@ -334,6 +334,16 @@ pub fn file_image_ids(path: &Path, want: Want<'_>) -> Result<Vec<ImageId>, PeerE
     Ok(ids)
 }
 
+/// 磁盘上一个程序文件是谁签的：有证书 → `Certificate{叶证书的 SHA-256}`；没有 → `Image(映像身份)`；验不过、
+/// 读不了 → `Unavailable`。和 [`SelfIdentity::detect`] 判「有没有证书、叶证书是谁」是同一段代码，只是对象从运行中的
+/// 映像换成磁盘上的文件（T04p 方案 4.4：出包前按信任规则核包里的两个程序）。
+///
+/// macOS：读签名信息里的证书或 cdhash，钉成代码要求后对文件做全量静态校验（不验包资源，同 [`SelfIdentity::detect`]）。
+/// Linux：文件全文的 SHA-256。Windows（M1 不支持）：`Unavailable`。
+pub fn file_signer(path: &Path) -> SignerIdentity {
+    platform::file_signer(path)
+}
+
 /// macOS：对 .app 做整包静态验签（严格模式、含嵌套代码、全部架构）。每次都完整重查，不记上次的结果。
 #[cfg(target_os = "macos")]
 pub fn verify_bundle(app: &Path) -> Result<(), PeerError> {

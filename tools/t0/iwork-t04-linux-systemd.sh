@@ -84,21 +84,21 @@ for m in "exit 0" "exit 12" "exit 20" "exit 21" "signal 9" "signal 15" "signal 1
   ended=$(awk -v t="$t" '$1 > t && /(exiting|raising)/ {print $1; exit}' "$LOG")
   second=$(awk -v t="$t" '$1 > t && / start / {print $1}' "$LOG" | sed -n 2p)
   gap=-; [ -n "$second" ] && [ -n "$ended" ] && gap=$(awk -v a="$second" -v b="$ended" 'BEGIN{printf "%.1f", a-b}')
-  note "  $m：14 秒内启动 $n 次（含 restart 那一次）；再拉=$([ "$n" -gt 1 ] && echo 是 || echo 否)；结束到再拉 ${gap}s；$(U show -p Result -p ExecMainStatus -p ExecMainCode iwork-t04probe.service | tr '\n' ' ')"
+  note "  ${m}：14 秒内启动 $n 次（含 restart 那一次）；再拉=$([ "$n" -gt 1 ] && echo 是 || echo 否)；结束到再拉 ${gap}s；$(U show -p Result -p ExecMainStatus -p ExecMainCode iwork-t04probe.service | tr '\n' ' ')"
   echo sleep > /home/t/mode; U reset-failed iwork-t04probe.service >/dev/null 2>&1; U restart iwork-t04probe.service >/dev/null 2>&1; sleep 1
 done
 note "## exec 自己（N3 第 3 项）"
 echo exec > /home/t/mode; t=$(date +%s.%N | cut -c1-14); U restart iwork-t04probe.service >/dev/null 2>&1; sleep 3
 before=$(awk -v t="$t" '$1 > t && /exec self/ {print $2; exit}' "$LOG")
 mp=$(U show -p MainPID --value iwork-t04probe.service)
-note "  exec 前 $before，exec 后 MainPID=$mp，状态 $(U is-active iwork-t04probe.service)，带 --execd 的启动行：$(awk -v t="$t" '$1 > t && /--execd/' "$LOG" | wc -l)"
+note "  exec 前 ${before}，exec 后 MainPID=${mp}，状态 $(U is-active iwork-t04probe.service)，带 --execd 的启动行：$(awk -v t="$t" '$1 > t && /--execd/' "$LOG" | wc -l)"
 t=$(date +%s.%N | cut -c1-14); kill -9 "$mp"; sleep 12
 note "  kill -9 exec 后的进程：12 秒内再拉 $(starts_after $t) 次"
 note "## disable --now"
 echo sleep > /home/t/mode; U restart iwork-t04probe.service >/dev/null 2>&1; sleep 1
 mp=$(U show -p MainPID --value iwork-t04probe.service); t=$(date +%s.%N | cut -c1-14)
 U disable --now iwork-t04probe.service >/dev/null 2>&1; sleep 2
-note "  正在跑的实例（pid $mp）收到 SIGTERM：$(awk -v t="$t" '$1 > t && /got SIGTERM/' "$LOG" | wc -l)；进程还在：$(kill -0 $mp 2>/dev/null && echo 是 || echo 否)；状态：$(U is-active iwork-t04probe.service)；is-enabled：$(U is-enabled iwork-t04probe.service 2>&1)"
+note "  正在跑的实例（pid ${mp}）收到 SIGTERM：$(awk -v t="$t" '$1 > t && /got SIGTERM/' "$LOG" | wc -l)；进程还在：$(kill -0 $mp 2>/dev/null && echo 是 || echo 否)；状态：$(U is-active iwork-t04probe.service)；is-enabled：$(U is-enabled iwork-t04probe.service 2>&1)"
 note "## 启动次数上限（StartLimitBurst=10 / 300s）"
 echo "exit 20" > /home/t/mode; U enable --now iwork-t04probe.service >/dev/null 2>&1
 t=$(date +%s.%N | cut -c1-14); sleep 125

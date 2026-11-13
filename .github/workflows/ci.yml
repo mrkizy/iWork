@@ -69,7 +69,28 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo test
+        if: runner.os != 'macOS'
         run: cargo test --workspace
+      - name: cargo test（macOS：签名测试用 CI 建的共用钥匙串）
+        if: runner.os == 'macOS'
+        run: |
+          # 共用的签名钥匙串：CI 的 macOS 上 codesign 只在用户搜索列表里的钥匙串找身份（探针 CI run 43302065465）。
+          # 改搜索列表只在这里做：先存原列表（读不出或读出空列表就让这一步失败，不改），加进去，跑完不论成败恢复原列表、
+          # 删钥匙串。仓库里的脚本与 Rust 测试一概不改搜索列表（审查 2/F-2）；证书由 test-signing-identity.sh 导入它。
+          kc="$RUNNER_TEMP/iwork-test-signing.keychain-db"
+          security create-keychain -p t "$kc"
+          # 建好就装收尾：之后哪一步失败都删掉这个临时钥匙串；存好原列表之后才把「恢复原列表」加进收尾
+          trap 'security delete-keychain "$kc"' EXIT
+          security unlock-keychain -p t "$kc"
+          security set-keychain-settings "$kc"
+          saved=$(security list-keychains -d user)
+          orig=()
+          while IFS= read -r k; do k=${k#*\"}; k=${k%\"*}; [ -n "$k" ] && orig+=("$k"); done <<< "$saved"
+          [ ${#orig[@]} -gt 0 ] || { echo "读出的钥匙串搜索列表是空的，不改" >&2; exit 1; }
+          trap 'security list-keychains -d user -s "${orig[@]}"; security delete-keychain "$kc"' EXIT
+          security list-keychains -d user -s "$kc" "${orig[@]}"
+          export IWORK_TEST_SIGNING_KEYCHAIN="$kc"
+          cargo test --workspace
       # T06 方案 4.3：hook timeout 调成 10 秒的故障注入（只在测试 feature 下编译，见 scripts/check-no-dev-trust.sh）
       - name: 桥接故障注入
         if: runner.os != 'Windows'
@@ -84,6 +105,8 @@ jobs:
           cargo test -p iwork-daemon --features dev --test process
           cargo build -p iwork-daemon --features dev
           cargo test -p iwork-client-core --features dev --test launcher_process
+          # 桌面客户端的拨号器在 dev 构建里只用 DirectDialer（T04p 方案 4.7）
+          cargo test -p iwork-client-core --features dev --test app_dialer
 
       # T04：M1 不支持 Windows，后台在启动表第 1 步就拒绝（退出码 10）。按名字核对这一条真的跑到且通过
       - name: 后台在 Windows 上启动即拒绝（Windows）
@@ -132,12 +155,14 @@ jobs:
           IWORK_TEST_OTHER_USER=1 \
             cargo test -p iwork-bridge-claude --test hook_channel -- --ignored --exact other_user_rejected
 
-  # T03 验收 2：发布构建里没有 --dev-trust（feature 图、产物字符串含阳性对照、发布进程拒绝该参数）。
-  #   从 test 拆出来单独跑（release 构建约 6 分钟，和 test 并行；release 的编译缓存也不再挤占 test 的缓存）。
-  #   打包步骤（tauri build）还没进 CI，先对 release 的客户端二进制做同样的 grep；打包进 CI 后把产物路径加到 --artifacts
+  # 发布构建（T04p 方案 4.6）：macOS、Linux 上走打包命令 `pnpm -C client tauri build`，它编后台与客户端、装配、
+  #   核对（恰好一种形态、两个程序互认），核对不过就是非零退出、不发布；CI 上它返回 0 就是核对过了。
+  #   之后对成品里的两个程序跑 T03 验收 2 的检查（发布构建里没有 --dev-trust、没有 IWORK_DEV_）。
+  #   macOS 打两种形态：A 无证书（带清单）；B 用现建的临时钥匙串里的自签证书（PD-2 定：进 CI），结束时删钥匙串。
+  #   Windows：M1 不出包，仍只编客户端、查裸二进制。
   release-check:
-    # ubuntu 上 release 构建约 6 分钟（run 43210134953），无缓存冷编时更长；留足余量
-    timeout-minutes: 30
+    # 实测时长写进 T04p 的完成记录；接近上限就把形态 B 拆成单独的 job（方案第 7 节）
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -156,11 +181,65 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
       - uses: Swatinem/rust-cache@v2
-      - name: 发布构建没有 dev-trust
+      - name: 发布构建没有 dev-trust（Windows：只编客户端）
+        if: runner.os == 'Windows'
         run: |
-          exe=""; [ "$RUNNER_OS" = "Windows" ] && exe=".exe"
           cargo build --release --locked -p iwork-client
-          scripts/check-no-dev-trust.sh --artifacts "target/release/iwork-client${exe}"
+          scripts/check-no-dev-trust.sh --artifacts target/release/iwork-client.exe
+      # 打包命令要先编前端（tauri.build.conf.json 的 beforeBuildCommand 是 pnpm build，要 gen 出的 TS）
+      - uses: pnpm/action-setup@v4
+        if: runner.os != 'Windows'
+        with:
+          package_json_file: client/package.json
+      - uses: actions/setup-node@v4
+        if: runner.os != 'Windows'
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+      - name: 前端依赖与生成代码
+        if: runner.os != 'Windows'
+        run: |
+          pnpm -C client install --frozen-lockfile
+          pnpm -C client gen
+      - name: 发布包（Linux：带清单的目录）
+        if: runner.os == 'Linux'
+        run: |
+          pnpm -C client tauri build
+          scripts/check-no-dev-trust.sh --artifacts \
+            target/release/dist/linux/iwork/iwork-client target/release/dist/linux/iwork/iwork-daemon
+      - name: 发布包（macOS 形态 A：无证书，带清单）
+        if: runner.os == 'macOS'
+        run: |
+          pnpm -C client tauri build
+          bin=target/release/dist/unsigned/iWork.app/Contents/MacOS
+          scripts/check-no-dev-trust.sh --artifacts "$bin/iwork-client" "$bin/iwork-daemon"
+      - name: 发布包（macOS 形态 B：自签证书，整包签名）
+        if: runner.os == 'macOS'
+        run: |
+          # 共用的签名钥匙串：CI 的 macOS 上 codesign 只在用户搜索列表里的钥匙串找身份（探针 CI run 43302065465）。
+          # 改搜索列表只在这里做：先存原列表（读不出或读出空列表就让这一步失败，不改），加进去，跑完不论成败恢复原列表、
+          # 删钥匙串。仓库里的脚本与 Rust 测试一概不改搜索列表（审查 2/F-2）；证书由 test-signing-identity.sh 导入它。
+          kc="$RUNNER_TEMP/iwork-test-signing.keychain-db"
+          security create-keychain -p t "$kc"
+          # 建好就装收尾：之后哪一步失败都删掉这个临时钥匙串；存好原列表之后才把「恢复原列表」加进收尾
+          trap 'security delete-keychain "$kc"' EXIT
+          security unlock-keychain -p t "$kc"
+          security set-keychain-settings "$kc"
+          saved=$(security list-keychains -d user)
+          orig=()
+          while IFS= read -r k; do k=${k#*\"}; k=${k%\"*}; [ -n "$k" ] && orig+=("$k"); done <<< "$saved"
+          [ ${#orig[@]} -gt 0 ] || { echo "读出的钥匙串搜索列表是空的，不改" >&2; exit 1; }
+          trap 'security list-keychains -d user -s "${orig[@]}"; security delete-keychain "$kc"' EXIT
+          security list-keychains -d user -s "$kc" "${orig[@]}"
+          export IWORK_TEST_SIGNING_KEYCHAIN="$kc"
+          sign="$RUNNER_TEMP/iwork-sign"
+          mkdir -p "$sign"
+          out=$(scripts/test-signing-identity.sh "$sign" "iWork CI Signer")
+          identity=$(printf '%s\n' "$out" | sed -n 's/^identity=//p')
+          IWORK_SIGN_IDENTITY="$identity" IWORK_SIGN_KEYCHAIN="$kc" pnpm -C client tauri build
+          bin=target/release/dist/signed/iWork.app/Contents/MacOS
+          scripts/check-no-dev-trust.sh --artifacts "$bin/iwork-client" "$bin/iwork-daemon"
 
   # 前端：类型检查与 vitest。从 test 拆出来单独跑，和 Rust 测试并行，各有各的时限。
   #   pnpm test 先 gen、再编译假后台录场景（fixtures）、再跑 vitest，所以这里要 rust-cache。

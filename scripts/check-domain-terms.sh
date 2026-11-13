@@ -14,7 +14,7 @@ set +e
 hits="$(grep -rniE "$PATTERN" "${DIRS[@]}")"
 code=$?
 set -e
-[ "$code" -le 1 ] || { echo "check-domain-terms: grep 出错（退出码 $code）" >&2; exit 2; }
+[ "$code" -le 1 ] || { echo "check-domain-terms: grep 出错（退出码 ${code}）" >&2; exit 2; }
 if [ "$code" -eq 0 ]; then
   echo "check-domain-terms: iwork-domain 里出现了厂商名或 git 字样："
   echo "$hits"
