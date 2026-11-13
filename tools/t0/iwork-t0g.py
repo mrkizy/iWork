@@ -754,7 +754,8 @@ VERDICT_FUNCS = {
     "cell_verdict", "g2_summary", "excluded_guard_verdict", "g3_verdict", "g4_no_retry_verdict", "corpus_verdict", "g5_verdict",
     "mcp_disable_verdict", "integrity_verdict", "unsandboxed_pair_verdict", "g5_env_verdict", "g5_memory_read_verdict", "g5_memory_write_verdict",
     "g5_agent_memory_verdict", "g5_guard_precheck", "target_guard_decision", "unsandboxed_group_verdict", "g4_write_outside_verdict",
-    "p4_verdict", "cfgdir_verdict", "rc5_verdict", "rc8_verdict", "vdir_pair", "v13a_verdict", "v4b_verdict", "v2_verdicts", "bash_guard_status", "bash_guard_verdict", "r2x_vdir_v1",
+    "p4_verdict", "cfgdir_verdict", "rc5_verdict", "rc8_verdict", "vdir_pair", "v13a_verdict", "v4b_verdict", "v2_verdicts",
+    "bash_guard_status", "bash_guard_verdict", "marker_verdict", "r2x_vdir_v1", "r2x_vdir_v10", "r2x_vdir_v12",
 }
 
 
@@ -906,7 +907,7 @@ def pass_literal_sites(src):
 
 
 # 计数表的键、自测里的期望值、检查函数自己拿来比较的那一个；别的只许出现在 VERDICT_FUNCS 登记的函数里
-PASS_LITERAL_ALLOWED = {"COUNTS", "selftest", "selftest_g2_matrix", "selftest_g5_isolation", "selftest_recheck_and_p4", "selftest_cfgdir_isolation", "selftest_repo", "selftest_vdir_a", "pass_literal_sites"}
+PASS_LITERAL_ALLOWED = {"COUNTS", "selftest", "selftest_g2_matrix", "selftest_g5_isolation", "selftest_recheck_and_p4", "selftest_cfgdir_isolation", "selftest_repo", "selftest_vdir_a", "selftest_vdir_b", "pass_literal_sites"}
 
 
 def live_seen(events, alive, results_needed):
@@ -4965,12 +4966,14 @@ def vdir_cell_gate(label):
     record("INCONCLUSIVE", f"R2X vdir {label}", VDIR["why"]); return False
 
 
-def vdir_run(tag, d, prompt, behaviour="deny", exp=None, extra=None, sources="user", plugin_roots=(), memory_redirect=DEFAULT_REDIRECT, **kw):
+def vdir_run(tag, d, prompt, behaviour="deny", exp=None, extra=None, sources="user", plugin_roots=(), memory_redirect=DEFAULT_REDIRECT, args=None,
+             **kw):
     """专用目录里起一个实例：iWork 的设置照旧经 --settings（产品设置，extra 给了就用它），--setting-sources 用 sources。
-    专用目录之下的插件在核对时算该有的（用户装的）。memory_redirect 照 make_settings（V7 要看不改道时记忆落在哪，给 None）。
-    返回 (运行, 探针的全部记录)。"""
+    args 给了就整个换掉候选甲的启动参数（V10 的三种 MCP 加载形状）。专用目录之下的插件在核对时算该有的（用户装的）。
+    memory_redirect 照 make_settings（V7 要看不改道时记忆落在哪，给 None）。返回 (运行, 探针的全部记录)。"""
     s, logdir = product_settings(tag, behaviour, exp, extra=extra, memory_redirect=memory_redirect)
-    r = claude(tag, prompt, settings=s, extra_args=vdir_args(sources), iso=False, env=vdir_env(d), plugin_roots=(d, *plugin_roots), **kw)
+    r = claude(tag, prompt, settings=s, extra_args=vdir_args(sources) if args is None else args, iso=False, env=vdir_env(d),
+               plugin_roots=(d, *plugin_roots), **kw)
     return r, hook_rows(logdir)
 
 
@@ -4980,17 +4983,21 @@ def vdir_pair(cell, control):
     return cell
 
 
-def vdir_plugin_market(tag):
-    """一个本地插件市场（V1b、V12 用）：里面一个插件，可选带 SessionStart hook（写一个标记）。返回 (市场目录, 插件名, 标记路径)。"""
-    market = R.p(f"vdir-market-{tag}")
-    name = f"t0g-vplugin-{tag}-{secrets.token_hex(3)}"
-    marker = os.path.join(R.obs, f"{name}.sessionstart")
-    pdir = os.path.join(market, "plugins", name)
-    write_new(os.path.join(pdir, ".claude-plugin", "plugin.json"), json.dumps({"name": name, "version": "0.0.1", "description": "iwork t0g vdir probe"}))
-    write_new(os.path.join(pdir, "hooks", "hooks.json"), json.dumps({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": f"touch {marker}"}]}]}}))
+def vdir_plugin_market(tag, count=1, marks=None):
+    """一个本地插件市场（V1b、V12 用）：里面 count 个插件，各带一条 SessionStart hook，往 marks（不给就是观测目录）里写自己的标记。
+    返回 (市场目录, 市场名, [(插件名, 标记路径), ...])。插件在 CLI 里的全名是「插件名@市场名」。"""
+    market, market_name = R.p(f"vdir-market-{tag}"), f"t0g-market-{tag}"
+    plugins = []
+    for _ in range(count):
+        name = f"t0g-vplugin-{tag}-{secrets.token_hex(3)}"
+        marker = os.path.join(marks or R.obs, f"{name}.sessionstart")
+        pdir = os.path.join(market, "plugins", name)
+        write_new(os.path.join(pdir, ".claude-plugin", "plugin.json"), json.dumps({"name": name, "version": "0.0.1", "description": "iwork t0g vdir probe"}))
+        write_new(os.path.join(pdir, "hooks", "hooks.json"), json.dumps({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": f"touch {marker}"}]}]}}))
+        plugins.append((name, marker))
     write_new(os.path.join(market, ".claude-plugin", "marketplace.json"),
-              json.dumps({"name": f"t0g-market-{tag}", "owner": {"name": "iwork-t0g"}, "plugins": [{"name": name, "source": f"./plugins/{name}"}]}))
-    return market, name, marker
+              json.dumps({"name": market_name, "owner": {"name": "iwork-t0g"}, "plugins": [{"name": n, "source": f"./plugins/{n}"} for n, _ in plugins]}))
+    return market, market_name, plugins
 
 
 def vdir_install(d, market, name):
@@ -5019,7 +5026,7 @@ def r2x_vdir_v1():
     V1b 用 --setting-sources user：插件在 init 里、路径在专用目录之下；V1c 同一目录 --setting-sources ""：插件不在。"""
     if not vdir_cell_gate("V1b、V1c"): return
     d = vdir_dir("v1")
-    market, name, _ = vdir_plugin_market("v1")
+    market, _, ((name, _),) = vdir_plugin_market("v1")
     installed = vdir_install(d, market, name)
     code = new_codeword("t0g-vglobal")
     write_new(os.path.join(d, "CLAUDE.md"), f"# Global notes\n\nThe global codeword is {code}.\n")
@@ -5229,6 +5236,202 @@ def v13a_verdict(unclean, per, created, changed):
     return combine(*per.values())
 
 
+def marker_verdict(r, forbid=(), want=(), need=(), control="PASS"):
+    """一次运行看启动标记的判定（V10、V12）。纯函数。forbid：不该出现的标记（出现就是痕迹，FAIL）；want：被断言该出现的
+    （运行有效、对照成立时没出现 → FAIL）；need：这次运行本身的活证（没出现说明这次没测成 → INCONCLUSIVE）；control：这一格的阳性对照。
+    环境不干净先判 INCONCLUSIVE（5/F-1：痕迹先判 FAIL 的几处也先看它）。"""
+    if r.get("unclean_plugins"): return "INCONCLUSIVE"
+    if any(forbid): return "FAIL"
+    if not run_valid(r) or not all(need) or control != "PASS": return "INCONCLUSIVE"
+    return "PASS" if all(want) else "FAIL"
+
+
+def reset_marks(path):
+    """每个子格一个新的标记目录（方案 3.1d V10 前置）。测试 MCP 与插件 hook 的标记路径在登记时就定死了，所以不换路径，
+    而是把上一格的目录整个挪到旁边（带序号），在原处新建一个空的：上一格的标记留着可查，不会被这一格当成证据。只动本次根目录里的东西。"""
+    if os.path.lexists(path):
+        n = 1
+        while os.path.lexists(f"{path}.{n}"): n += 1
+        os.rename(path, f"{path}.{n}")
+    os.makedirs(path)
+
+
+# V10 的测试 MCP：启动第一步往标记文件里追加自己的进程号（方案 3.1d：「启动没启动」只看标记，不看 init.mcp_servers）；
+# exit 变体写完标记就退出，不握手（启动后握手失败的服务可能不在清单里，1/F-5）
+VDIR_MCP_BODY = r'''import json, os, sys
+marker, mode = sys.argv[1], sys.argv[2]
+fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+os.write(fd, (str(os.getpid()) + "\n").encode()); os.close(fd)
+if mode == "exit": sys.exit(3)
+for line in sys.stdin:
+    try: m = json.loads(line)
+    except Exception: continue
+    if not isinstance(m, dict) or "id" not in m: continue
+    if m.get("method") == "initialize":
+        out = {"result": {"protocolVersion": (m.get("params") or {}).get("protocolVersion", "2025-06-18"), "capabilities": {"tools": {}},
+                          "serverInfo": {"name": "iwork-t0g-vdir", "version": "0.1"}}}
+    elif m.get("method") == "tools/list": out = {"result": {"tools": []}}
+    else: out = {"error": {"code": -32601, "message": "not supported"}}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": m["id"], **out}) + "\n"); sys.stdout.flush()
+'''
+V10_USER, V10_REPO = ("t0g-u1", "t0g-u2"), "t0g-repo"
+V10_VARIANTS = {"正常握手": "ok", "握手前退出": "exit"}
+
+
+def v10_shapes(d):
+    """三种加载形状的启动参数（方案 3.1d V10 前置）。形状三只把专用目录里 .claude.json 的路径递给 CLI，脚本不读它（硬约束第 5 条）。"""
+    return {"形状一": vdir_args(), "形状二": ["--setting-sources", "user"],
+            "形状三": ["--setting-sources", "user", "--strict-mcp-config", "--mcp-config", os.path.join(d, ".claude.json")]}
+
+
+def v10_project(tag, marks, variant=None):
+    """V10 一格用的项目目录（独占新建）。variant 给了就放一份 .mcp.json，里面是仓库级的测试 MCP（那个握手变体）。"""
+    work = R.p(f"vdir-v10-work-{tag}")
+    os.makedirs(work)
+    if variant is not None:
+        write_new(os.path.join(work, ".mcp.json"), json.dumps({"mcpServers": {V10_REPO: {
+            "command": sys.executable, "args": ["-I", R.p("cfg", "vdir_mcp.py"), os.path.join(marks, V10_REPO), variant]}}}))
+    return work
+
+
+def mcp_status_rows(reply):
+    """mcp_status 的回复里只取本脚本的测试服务（名字以 t0g- 开头）的名字与状态，别的字段、别的服务一概不留。纯函数。"""
+    rows = ((reply or {}).get("body") or {}).get("mcpServers")
+    return {x["name"]: x.get("status") for x in rows if isinstance(x, dict) and isinstance(x.get("name"), str) and x["name"].startswith("t0g-")} \
+        if isinstance(rows, list) else None
+
+
+def v10_toggle(tag, d, work, enabled):
+    """V10 停用前置（0 个模型实例）：用 CLI 自己的办法停用（或再启用）U2。在 work 这个项目里起一条不发用户消息的会话，发控制请求
+    mcp_toggle；会话结束后另起一条，同样不发消息，发 mcp_status 看 U2 的状态留没留下。返回 (成立没有, 事实)。脚本不手改 .claude.json。"""
+    s, _ = product_settings(f"vdir-{tag}", "deny", extra=sandbox_settings(local_binding=True))
+    args = v10_shapes(d)["形状二"]
+    _, toggled = control_session(f"vdir-{tag}", s, [{"subtype": "mcp_toggle", "serverName": V10_USER[1], "enabled": enabled}],
+                                 extra_args=args, env=vdir_env(d), iso=False, cwd=work)
+    _, status = control_session(f"vdir-{tag}-status", s, [{"subtype": "mcp_status"}], extra_args=args, env=vdir_env(d), iso=False, cwd=work)
+    rows = mcp_status_rows(status[1])
+    after = (rows or {}).get(V10_USER[1])
+    accepted = bool(toggled[1] and toggled[1]["ok"])
+    held = after is not None and ((after == "disabled") != enabled)
+    return accepted and held, {"mcp_toggle 被接受": accepted, "报错": (toggled[1] or {}).get("error"), "下一条会话里 U2 的状态": after}
+
+
+def r2x_vdir_v10():
+    """V10（11 个实例，另有 4 条不发消息的控制会话、2 次 claude mcp add）：用户级 MCP 进得来、仓库的不被启动、停用的不被启动。
+    看启动标记，不看 init.mcp_servers。顺序：仓库级对照 V10p、V10q → 形状一 V10a → 形状二、三各两个握手变体 V10b–V10e →
+    停用 U2 → V10f、V10g → 再启用 → V10h、V10i。被对照的格在对照没过时一律 INCONCLUSIVE（vdir_pair 的规矩，这里经 marker_verdict 的 control）。"""
+    if not vdir_cell_gate("V10"): return
+    d, marks = vdir_dir("v10"), R.p("vdir-v10-marks")
+    reset_marks(marks)
+    write_new(R.p("cfg", "vdir_mcp.py"), VDIR_MCP_BODY)
+    added = {}
+    for name in V10_USER:
+        _, _, code, timed_out, _ = run_instance([CLAUDE_CLI, "mcp", "add", "--scope", "user", name, "--", sys.executable, "-I",
+                                                 R.p("cfg", "vdir_mcp.py"), os.path.join(marks, name), "ok"], f"vdir-mcp-add-{name}",
+                                                env=vdir_env(d), timeout=60)
+        added[name] = code == 0 and not timed_out
+    if not all(added.values()):
+        record("INCONCLUSIVE", "R2X vdir V10", f"用 claude mcp add --scope user 加不进专用目录：{json.dumps(added)}"); return
+    shapes, plain = v10_shapes(d), "Reply with exactly: OK"
+    mark = lambda name: os.path.exists(os.path.join(marks, name))
+
+    def run(tag, args, work, extra=None):
+        reset_marks(marks)
+        r, _ = vdir_run(f"vdir-{tag}", d, plain, args=args, cwd=work, extra=extra)
+        return r, {n: mark(n) for n in (*V10_USER, V10_REPO)}
+
+    # 仓库级阳性对照：--setting-sources project、不带 --strict-mcp-config，用 CLI 自己的设置把 .mcp.json 的服务批掉（iWork 的 --settings 里写）
+    approve = {**sandbox_settings(local_binding=True), "enableAllProjectMcpServers": True}
+    controls = {}
+    for (label, variant), cell in zip(V10_VARIANTS.items(), ("V10p", "V10q")):
+        r, seen = run(cell.lower(), ["--setting-sources", "project"], v10_project(cell.lower(), marks, variant), extra=approve)
+        controls[variant] = marker_verdict(r, want=[seen[V10_REPO]])
+        settle(f"R2X vdir {cell} 仓库级阳性对照（{label}）：批准之后仓库的测试 MCP 起得来", controls[variant], json.dumps(seen))
+    facts = {}
+    for (label, variant), (cell_2, cell_3) in zip(V10_VARIANTS.items(), (("V10b", "V10d"), ("V10c", "V10e"))):
+        for cell, shape in ((cell_2, "形状二"), (cell_3, "形状三")):
+            r, seen = run(cell.lower(), shapes[shape], v10_project(cell.lower(), marks, variant))
+            facts[cell] = (r, seen, label, shape, variant)
+    r_a, seen_a = run("v10a", shapes["形状一"], v10_project("v10a", marks, "ok"))
+    rb, seen_b = facts["V10b"][:2]
+    settle("R2X vdir V10a 形状一（现在的 --strict-mcp-config 加空配置）：三个测试 MCP 都不被启动", marker_verdict(
+        r_a, forbid=seen_a.values(), control=marker_verdict(rb, need=[seen_b[V10_USER[0]]])), json.dumps(seen_a))
+    for cell, (r, seen, label, shape, variant) in facts.items():
+        settle(f"R2X vdir {cell} {shape}、仓库 MCP {label}：用户级 U1 被启动，仓库的不被启动",
+               marker_verdict(r, forbid=[seen[V10_REPO]], want=[seen[V10_USER[0]]], control=controls[variant]), json.dumps(seen))
+    # 停用 U2，再启用：同一个项目目录（MCP 的停用按项目记）
+    work = v10_project("fi", marks)
+    off, off_facts = v10_toggle("v10-off", d, work, enabled=False)
+    record(info_if(off), "R2X vdir V10 停用前置：mcp_toggle 停用 U2，状态留到了下一条会话（0 个模型实例）", json.dumps(off_facts, ensure_ascii=False))
+    after_off = {cell: run(cell.lower(), shapes[shape], work) for cell, shape in (("V10f", "形状二"), ("V10g", "形状三"))}
+    on, on_facts = v10_toggle("v10-on", d, work, enabled=True)
+    record(info_if(on), "R2X vdir V10 再启用前置：mcp_toggle 启用 U2，状态留到了下一条会话（0 个模型实例）", json.dumps(on_facts, ensure_ascii=False))
+    after_on = {cell: run(cell.lower(), shapes[shape], work) for cell, shape in (("V10h", "形状二"), ("V10i", "形状三"))}
+    why = "" if off and on else "；停用办法没成立：回 architect 重定硬约束第 2 条对 MCP 的含义"
+    for (cell, (r, seen)), (ctl_cell, (rc, seen_c)) in zip(after_off.items(), after_on.items()):
+        control = marker_verdict(rc, want=[seen_c[V10_USER[1]]], control="PASS" if off and on else "INCONCLUSIVE")
+        shape = "形状二" if cell == "V10f" else "形状三"
+        settle(f"R2X vdir {ctl_cell} 再启用 U2 之后（{shape}）：U2 被启动", control, json.dumps(seen_c) + why)
+        settle(f"R2X vdir {cell} 停用 U2 之后（{shape}）：U1 被启动、U2 不被启动",
+               marker_verdict(r, forbid=[seen[V10_USER[1]]], need=[seen[V10_USER[0]]], control=control),
+               json.dumps(seen) + why)
+
+
+def plugin_list_facts(stdout, names, d):
+    """V12c：`claude plugin list --json` 的输出里，这几个插件各带了什么（只记事实，候选乙才用得上）。纯函数。
+    只留：认没认出这个插件、它那一项有哪些键、布尔值的键各是什么、有没有一个字符串值是专用目录之下的路径。原文不留。"""
+    try: data = json.loads(stdout)
+    except (ValueError, TypeError): return {"输出是 JSON": False}
+    root = os.path.realpath(d)
+    under = lambda v: isinstance(v, str) and os.path.isabs(v) and (os.path.realpath(v) + os.sep).startswith(root + os.sep)
+    entries, stack = [], [data]
+    while stack:
+        x = stack.pop()
+        if isinstance(x, dict):
+            entries.append(x); stack.extend(x.values())
+        elif isinstance(x, list): stack.extend(x)
+    out = {"输出是 JSON": True}
+    for name in names:
+        hit = next((e for e in entries if any(isinstance(v, str) and v.split("@")[0] == name for v in e.values())), None)
+        out[name] = None if hit is None else {"键": sorted(hit), "布尔值": {k: v for k, v in hit.items() if isinstance(v, bool)},
+                                              "有专用目录之下的路径": any(under(v) for v in hit.values())}
+    return out
+
+
+def r2x_vdir_v12():
+    """V12a、V12b（2 个实例）与 V12c（0 个）：专用目录里装两个带 SessionStart hook（各写一个标记）的本地测试插件，
+    用 claude plugin disable 停用一个（V12c 停用前后各跑一次 plugin list --json）；V12a 停用的那个的标记不出现；
+    V12b 用 claude plugin enable 打开之后两个都出现（V12a 的对照）。V12x 只在甲的门槛有 FAIL 时才跑，这里不跑。"""
+    if not vdir_cell_gate("V12"): return
+    d, marks = vdir_dir("v12"), R.p("vdir-v12-marks")
+    reset_marks(marks)
+    market, market_name, ((on_name, on_mark), (off_name, off_mark)) = vdir_plugin_market("v12", count=2, marks=marks)
+    if not (vdir_install(d, market, on_name) and vdir_install(d, market, off_name)):
+        record("INCONCLUSIVE", "R2X vdir V12", "用 claude plugin install 装不进专用目录"); return
+
+    def cli(tag, *argv):
+        out, _, code, timed_out, _ = run_instance([CLAUDE_CLI, "plugin", *argv], f"vdir-{tag}", env=vdir_env(d), timeout=60)
+        return out, code == 0 and not timed_out
+
+    listed_before, _ = cli("v12c-before", "list", "--json")          # 退出码不当成「没有输出」：输出能不能认由 plugin_list_facts 说
+    _, disabled = cli("v12-disable", "disable", f"{off_name}@{market_name}")
+    listed_after, _ = cli("v12c-after", "list", "--json")
+    record("INFO", "R2X vdir V12c plugin list --json 带不带启用状态与安装路径（停用前后各一次，只记事实）",
+           json.dumps({"停用前": plugin_list_facts(listed_before, (on_name, off_name), d), "停用后": plugin_list_facts(listed_after, (on_name, off_name), d)},
+                      ensure_ascii=False))
+    reset_marks(marks)
+    ra, _ = vdir_run("vdir-v12a", d, "Reply with exactly: OK")
+    seen_a = {"启用的": os.path.exists(on_mark), "停用的": os.path.exists(off_mark)}
+    reset_marks(marks)
+    _, enabled = cli("v12-enable", "enable", f"{off_name}@{market_name}")
+    rb, _ = vdir_run("vdir-v12b", d, "Reply with exactly: OK")
+    seen_b = {"启用的": os.path.exists(on_mark), "再启用的": os.path.exists(off_mark)}
+    v12b = marker_verdict(rb, want=seen_b.values(), control="PASS" if enabled else "INCONCLUSIVE")
+    v12a = marker_verdict(ra, forbid=[seen_a["停用的"]], need=[seen_a["启用的"]], control=v12b if disabled else "INCONCLUSIVE")
+    settle("R2X vdir V12a 停用的插件不进来：它的 SessionStart hook 不跑", v12a, json.dumps({**seen_a, "plugin disable 成功": disabled}, ensure_ascii=False))
+    settle("R2X vdir V12b 对照：plugin enable 之后两个插件的 hook 都跑", v12b, json.dumps({**seen_b, "plugin enable 成功": enabled}, ensure_ascii=False))
+
+
 # 一次性环境的子格（方案 3.1d 第五小节，命中 ①② 两条规则）：这一版只登记，都记 INCONCLUSIVE，排 R3
 VDIR_DISPOSABLE = ("V4e", "V4f", "V4g", "V4h", "V4i", "V4j", "V6a", "V6b", "V6c", "V6e", "V6f", "V6g", "V6h", "V6i", "V6j", "V6k", "V6l",
                    "V11a", "V11b", "V11c", "V11d", "V11e", "V11f", "V11g", "V11h", "V13b", "V13c", "V13c′", "V13d")
@@ -5250,11 +5453,12 @@ R2X_CELLS = {
     "rest": {"c1": g4_c1, "n1": lambda: r2x_background("n1", NO_BACKGROUND_SWITCH), "tools": r2x_tool_lists},
     "net": {"p1": lambda: r2x_net("p1"), "p2": lambda: r2x_net("p2"), "p4": lambda: r2x_net("p4")},
     "recheck": {"g1": g1, "g8": g8, "g7": g7_product_cells},             # G1 10、G8 8、G7 9 个实例，带产品设置重跑
-    "p4": {"f": r2x_p4},
-    "cfgdir": {"cfg": r2x_cfgdir},
-    "vdir": {"v1": r2x_vdir_v1, "v2": r2x_vdir_v2, "v4": r2x_vdir_v4, "v5": r2x_vdir_v5, "v7": r2x_vdir_v7, "v13": r2x_vdir_v13a,
-             "vx": r2x_vdir_disposable},                               # 这一批 9 个模型实例（V1 2、V4 4、V5 1、V7 1、V13a 1），V10、V12 下一批
-    "repo": {"rc1": r2x_rc1, "rc2": r2x_rc2, "rc3": r2x_rc3, "rc4": r2x_rc4, "rc5": r2x_rc5, "rc6": r2x_rc6, "rc7": r2x_rc7, "rc8": r2x_rc8},   # 15 个实例                                      # 四种情况各跑一次 claude mcp list，0 个模型实例                                                  # f 是 F1、F2 两格（F2 是 F1 的对照，一起跑），2 个实例
+    "p4": {"f": r2x_p4},                                                # f 是 F1、F2 两格（F2 是 F1 的对照，一起跑），2 个实例
+    "cfgdir": {"cfg": r2x_cfgdir},                                      # 四种情况各跑一次 claude mcp list，0 个模型实例
+    # 22 个模型实例：V1 2、V4 4、V5 1、V7 1、V10 11、V12 2、V13a 1（V2 只发 initialize，0 个）
+    "vdir": {"v1": r2x_vdir_v1, "v2": r2x_vdir_v2, "v4": r2x_vdir_v4, "v5": r2x_vdir_v5, "v7": r2x_vdir_v7, "v10": r2x_vdir_v10,
+             "v12": r2x_vdir_v12, "v13": r2x_vdir_v13a, "vx": r2x_vdir_disposable},
+    "repo": {"rc1": r2x_rc1, "rc2": r2x_rc2, "rc3": r2x_rc3, "rc4": r2x_rc4, "rc5": r2x_rc5, "rc6": r2x_rc6, "rc7": r2x_rc7, "rc8": r2x_rc8},   # 15 个实例
     "skill": {"l": r2x_repo_load, "k3b": lambda: r2x_inline("k3b"), "k3c": lambda: r2x_inline("k3c"),     # l 是 L1、L2 两格（L2 是 L1 的对照，一起跑）
               "k2c": r2x_allowed_tools, "h1": r2x_hook_vs_hook},
 }
@@ -6843,11 +7047,13 @@ print(json.dumps({{"loggedIn": store is not None, "email": "x@y"}})); sys.exit(0
         assert vdir_login() and VDIR["storage"] == "" and COUNTS["INFO"] == before + 1, "对照（不设）认出了 false，选了空串，记 INFO"
     finally:
         CLAUDE_CLI = saved_cli; VDIR.clear(); VDIR.update(saved_vdir)
-    market, name, marker = vdir_plugin_market("st")
+    market, market_name, plugins = vdir_plugin_market("st", count=2, marks=R.p("st-vdir-marks"))
     m = json.load(open(os.path.join(market, ".claude-plugin", "marketplace.json")))
-    assert m["plugins"][0]["name"] == name and os.path.isfile(os.path.join(market, m["plugins"][0]["source"], ".claude-plugin", "plugin.json"))
-    hooks = json.load(open(os.path.join(market, "plugins", name, "hooks", "hooks.json")))
-    assert hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] == f"touch {marker}"
+    assert m["name"] == market_name and [p["name"] for p in m["plugins"]] == [n for n, _ in plugins] and len({n for n, _ in plugins}) == 2
+    for (name, marker), entry in zip(plugins, m["plugins"]):
+        assert os.path.isfile(os.path.join(market, entry["source"], ".claude-plugin", "plugin.json"))
+        hooks = json.load(open(os.path.join(market, "plugins", name, "hooks", "hooks.json")))
+        assert hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"] == f"touch {marker}" and os.path.dirname(marker) == R.p("st-vdir-marks")
     assert vdir_args() == ["--setting-sources", "user", "--strict-mcp-config", "--mcp-config", R.p("cfg", "empty-mcp.json")] and vdir_args("")[1] == ""
     saved = dict(VDIR)
     try:
@@ -6859,7 +7065,7 @@ print(json.dumps({{"loggedIn": store is not None, "email": "x@y"}})); sys.exit(0
     finally:
         VDIR.clear(); VDIR.update(saved)
     assert len(VDIR_DISPOSABLE) == 29 and len(set(VDIR_DISPOSABLE)) == 29, "一次性环境的 29 个子格都登记了"
-    assert set(R2X_PARTS["vdir"]) == {"v1", "v2", "v4", "v5", "v7", "v13", "vx"}
+    assert set(R2X_PARTS["vdir"]) == {"v1", "v2", "v4", "v5", "v7", "v10", "v12", "v13", "vx"}
     # V2a–V2d（main 524b291）
     g = {"V2a": "dontAsk", "V2b": "acceptEdits", "V2c": "default", "V2d": "bypassPermissions"}
     assert v2_verdicts(g) == {"V2a": "PASS", "V2b": "PASS", "V2c": "PASS", "V2d": "PASS"}
@@ -6872,9 +7078,71 @@ print(json.dumps({{"loggedIn": store is not None, "email": "x@y"}})); sys.exit(0
     assert set(V2_CELLS["V2d"][1]) == {"defaultMode", "disableBypassPermissionsMode"} and V2_CELLS["V2a"][1] == ()
 
 
+# 假会话程序：对每条控制请求按 request_id 回一条 control_response；mcp_toggle 回报错，mcp_status 回一张服务表
+ST_FAKE_CONTROL = r'''import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    rid, sub = req["request_id"], req["request"]["subtype"]
+    if sub == "mcp_toggle": resp = {"subtype": "error", "request_id": rid, "error": "no such server"}
+    elif sub == "mcp_status": resp = {"subtype": "success", "request_id": rid, "response": {"mcpServers": [
+        {"name": "t0g-u2", "status": "disabled", "config": {"command": "x"}}, {"name": "claude.ai Other", "status": "connected"}]}}
+    else: resp = {"subtype": "success", "request_id": rid, "response": {"current_permission_mode": "dontAsk"}}
+    sys.stdout.write(json.dumps({"type": "control_response", "response": resp}) + "\n"); sys.stdout.flush()
+'''
+
+
+def selftest_vdir_b():
+    """--part vdir 第二批（V10、V12）能纯算、能本机假跑的几样，每样配反例。"""
+    ok = {"init": {}, "timed_out": False, "exit": 0, "unclean_plugins": []}
+    assert marker_verdict(ok, forbid=[False], want=[True], need=[True]) == "PASS"
+    assert marker_verdict(ok, forbid=[True], want=[True]) == "FAIL", "不该出现的标记出现了就是痕迹"
+    assert marker_verdict({**ok, "init": None}, forbid=[True]) == "FAIL", "痕迹不看运行有效没有"
+    assert marker_verdict({**ok, "unclean_plugins": ["x"]}, forbid=[True]) == "INCONCLUSIVE", "环境不干净先于痕迹"
+    assert marker_verdict(ok, want=[False]) == "FAIL" and marker_verdict({**ok, "timed_out": True}, want=[True]) == "INCONCLUSIVE"
+    assert marker_verdict(ok, need=[False], want=[True]) == "INCONCLUSIVE", "活证没出现：这次没测成"
+    assert marker_verdict(ok, want=[False], control="INCONCLUSIVE") == "INCONCLUSIVE" and marker_verdict(ok, want=[True], control="FAIL") == "INCONCLUSIVE"
+    assert marker_verdict(ok, forbid=[True], control="INCONCLUSIVE") == "FAIL", "对照没过也挡不住痕迹"
+    # 标记目录：上一格的挪到旁边、原处是空的新目录
+    marks = R.p("st-vdir-b-marks")
+    reset_marks(marks); write_new(os.path.join(marks, "a"), "1"); reset_marks(marks); write_new(os.path.join(marks, "b"), "2"); reset_marks(marks)
+    assert os.listdir(marks) == [] and os.listdir(marks + ".1") == ["a"] and os.listdir(marks + ".2") == ["b"]
+    # 测试 MCP 真跑：正常握手的写标记、回 initialize；握手前退出的写了标记就退出
+    body = R.p("cfg", "st-vdir-mcp.py"); open(body, "w").write(VDIR_MCP_BODY)
+    p = subprocess.run([sys.executable, "-I", body, os.path.join(marks, "ok"), "ok"], input=json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}) + "\n", capture_output=True, text=True, timeout=20)
+    assert p.returncode == 0 and json.loads(p.stdout)["result"]["serverInfo"]["name"] == "iwork-t0g-vdir"
+    q = subprocess.run([sys.executable, "-I", body, os.path.join(marks, "exit"), "exit"], input="", capture_output=True, text=True, timeout=20)
+    assert q.returncode == 3 and q.stdout == "" and all(open(os.path.join(marks, n)).read().strip().isdigit() for n in ("ok", "exit"))
+    # 三种形状、项目目录
+    d = R.p("st-vdir-b")
+    shapes = v10_shapes(d)
+    assert shapes["形状一"] == vdir_args() and "--strict-mcp-config" not in shapes["形状二"] and shapes["形状三"][-1] == os.path.join(d, ".claude.json")
+    work = v10_project("st", marks, "exit")
+    srv = json.load(open(os.path.join(work, ".mcp.json")))["mcpServers"][V10_REPO]
+    assert srv["args"][-2:] == [os.path.join(marks, V10_REPO), "exit"] and not os.path.exists(os.path.join(v10_project("st2", marks), ".mcp.json"))
+    # mcp_status 只留本脚本的服务、只留名字与状态
+    assert mcp_status_rows({"ok": True, "body": {"mcpServers": [{"name": "t0g-u2", "status": "disabled", "config": {}}, {"name": "other", "status": "x"}]},
+                            "error": None}) == {"t0g-u2": "disabled"}
+    assert mcp_status_rows(None) is None and mcp_status_rows({"ok": True, "body": {}, "error": None}) is None
+    # 控制会话：按次序发、按 request_id 收，报错的回复带原文
+    fake = R.p("cfg", "st-fake-control.py"); open(fake, "w").write(ST_FAKE_CONTROL)
+    alive_, replies = control_session("st-control", None, [{"subtype": "mcp_toggle", "serverName": "t0g-u2", "enabled": False}, {"subtype": "mcp_status"}],
+                                      argv=[sys.executable, "-I", fake])
+    assert alive_ and replies[0] == {"ok": True, "body": {"current_permission_mode": "dontAsk"}, "error": None}
+    assert replies[1] == {"ok": False, "body": {}, "error": "no such server"} and mcp_status_rows(replies[2]) == {"t0g-u2": "disabled"}
+    # plugin list --json：认得出名字（带不带 @市场名都行），只留键、布尔值与路径在不在专用目录之下
+    inside = os.path.join(d, "plugins", "cache", "x")
+    out = json.dumps([{"id": "t0g-a@m", "enabled": False, "installPath": inside, "version": "1"}, {"name": "t0g-b", "enabled": True, "installPath": "/elsewhere"}])
+    facts = plugin_list_facts(out, ("t0g-a", "t0g-b", "t0g-c"), d)
+    assert facts["t0g-a"] == {"键": ["enabled", "id", "installPath", "version"], "布尔值": {"enabled": False}, "有专用目录之下的路径": True}
+    assert facts["t0g-b"]["有专用目录之下的路径"] is False and facts["t0g-c"] is None and facts["输出是 JSON"]
+    assert plugin_list_facts("not json", ("t0g-a",), d) == {"输出是 JSON": False}
+
+
 def selftest():
     selftest_r2x()
     selftest_vdir_a()
+    selftest_vdir_b()
     selftest_repo()
     selftest_cfgdir_isolation()
     selftest_recheck_and_p4()
@@ -7648,7 +7916,7 @@ def main():
                          "allowed-tools 的故障探针 K2c，插件 hook 对 iWork hook H1（6 个，日常账号下 K2c 另加 1 个预检）；"
                          "recheck = G1、G8、G7 非 cfg 格带产品设置重跑（27 个）；p4 = macOS 上沙箱起不来时 F1、F2（2 个）；"
                          "cfgdir = CLI 读哪一份 .claude.json（四次 claude mcp list，0 个模型实例）；repo = 方案 3.1c 的 RC1–RC8（15 个）；"
-                         "vdir = 方案 3.1d 的日常账号格（这一批 9 个，V10、V12 下一批）；不给就都跑")
+                         "vdir = 方案 3.1d 的日常账号格（22 个模型实例）；不给就都跑")
     ap.add_argument("--cell", default=None,
                     help="只给 --only R2X：逗号分隔的格名，只跑这几格（优先于 --part），如 --cell k3（带产品设置重记 k3、k4，1 个实例）")
     ap.add_argument("--quick", action="store_true", help="G2 只跑普通 Bash 一行（结论只能是 INCONCLUSIVE，不能进已验证表）")
