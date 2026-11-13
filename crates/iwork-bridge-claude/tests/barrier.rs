@@ -11,6 +11,7 @@
 
 mod support;
 
+use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -618,4 +619,95 @@ async fn bridge_crash_clears_the_tree() {
     })
     .await;
     drop(s);
+}
+
+// ---------- 回合进行中后台没了 ----------
+
+/// 回合正在跑（CLI 不出结果）时后台关了连接：桥接照样收摊、给 CLI 发 SIGTERM、退出，不等那一轮的答复
+/// （会话任务不挂在连接上，连接收尾不等它；还在等答复的 prompt 任务随连接一起丢掉）。
+#[tokio::test(flavor = "multi_thread")]
+async fn hang_up_mid_turn_exits() {
+    let mut steps = opening();
+    steps.extend([
+        read_user(),
+        init(),
+        json!({ "step": "log_signals_until_term" }),
+    ]);
+    let rig = Rig::new(Value::Array(steps));
+    let (process, mut wire) = spawn_supervised(&rig);
+    let bridge = process.pid() as i32;
+    wire.send(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": 1, "clientCapabilities": {} } }))
+        .await;
+    assert!(wire.response(1).await["result"].is_object());
+    let meta = iwork_agent_acp::convert::session_setup_meta(&rig.spec()).unwrap();
+    wire.send(json!({ "jsonrpc": "2.0", "id": 2, "method": "session/new",
+        "params": { "cwd": rig.work.path(), "mcpServers": [], "_meta": meta } }))
+        .await;
+    let session = wire.response(2).await["result"]["sessionId"].clone();
+    assert!(session.is_string());
+    // 发 prompt，不等答复：CLI 收下这一轮就一直不出结果
+    wire.send(
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": { "sessionId": session, "prompt": [{ "type": "text", "text": "hi" }] } }),
+    )
+    .await;
+    let cli = pid_of(&logged(&rig, "started").await);
+    let _cleanup = Leftover(vec![cli, bridge]);
+    logged(&rig, "watching_signals").await;
+    wire.hang_up();
+    assert!(
+        process
+            .wait_exit(BRIDGE_TERM_WAIT + Duration::from_secs(5))
+            .await
+            .is_some(),
+        "回合进行中连接断了，桥接照样退出"
+    );
+    assert!(
+        signals(&rig).contains(&"SIGTERM".into()),
+        "桥接给 CLI 发了 SIGTERM：{:?}",
+        signals(&rig)
+    );
+}
+
+/// 别的进程继承到了桥接 stdin 的写端（macOS 上 std 建管道和设 close-on-exec 是两步，后台同时起两个子进程时，
+/// 后起的那个可能把先起那个的管道一起继承走）：桥接自己一启动就关掉继承来的句柄，不把它们带进 CLI。所以后台关掉
+/// 自己那一端，桥接照样读到 stdin 结束、退出，不被别的桥接拖着。这里用另一个桥接当「别的进程」，让它确定地拿到
+/// 第一个桥接 stdin 写端的副本。
+#[tokio::test(flavor = "multi_thread")]
+async fn inherited_stdin_copy_does_not_keep_bridge_alive() {
+    use std::os::fd::AsRawFd;
+    let rig = Rig::new(Value::Array(opening()));
+    let (process, mut wire) = spawn_supervised(&rig);
+    let first = process.pid() as i32;
+    // 第一个桥接 stdin 写端的副本，不带 close-on-exec：下面起的进程会继承它
+    // SAFETY: dup 只读一个整数参数；句柄是本测试拿着的管道写端
+    let copy = unsafe { libc::dup(wire.write.as_ref().unwrap().as_raw_fd()) };
+    assert!(copy > 2, "{}", std::io::Error::last_os_error());
+    let mut other = std::process::Command::new(BRIDGE)
+        .arg("acp")
+        .envs(rig.launch.env.iter().map(|(k, v)| (k, v)))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    // SAFETY: 关本测试 dup 出来的句柄，只关一次
+    unsafe { libc::close(copy) };
+    let _cleanup = Leftover(vec![first, other.id() as i32]);
+    // 等另一个桥接起来、走过启动（它那时候拿着副本；修好之后它一启动就关掉）
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        other.try_wait().unwrap().is_none(),
+        "另一个桥接还活着（它的 stdin 还开着）"
+    );
+    wire.hang_up();
+    let exited = process.wait_exit(Duration::from_secs(10)).await.is_some();
+    drop(other.stdin.take());
+    let _ = other.wait();
+    assert!(
+        exited,
+        "后台关了连接，第一个桥接就退出，不被继承了它 stdin 写端的进程拖着"
+    );
 }

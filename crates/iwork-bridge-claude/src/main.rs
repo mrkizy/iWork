@@ -9,10 +9,29 @@
 const ENV_LOG: &str = "IWORK_BRIDGE_LOG";
 
 #[cfg(unix)]
-// 一个 CLI、一条 ACP 连接、少量并发的 hook 连接，不需要线程池（方案第 14 节）
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
+fn main() {
+    // 先于运行时：运行时会开自己的句柄，关的时候不能把它们一起关掉
+    let inherited = close_inherited_fds();
     init_logging();
+    if let Err(e) = inherited {
+        tracing::warn!(error = %e, "列不出继承来的句柄，没有关");
+    }
+    // 一个 CLI、一条 ACP 连接、少量并发的 hook 连接，不需要线程池（方案第 14 节）
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("iwork-bridge-claude: 起不来异步运行时：{e}");
+            std::process::exit(2);
+        }
+    };
+    runtime.block_on(run());
+}
+
+#[cfg(unix)]
+async fn run() {
     let leader = become_group_leader();
     watch_hangup();
     let sub = std::env::args().nth(1);
@@ -36,6 +55,23 @@ async fn main() {
     if result.is_err() {
         std::process::exit(2);
     }
+}
+
+/// 关掉从后台继承来的、0、1、2 以外的句柄。桥接只用 stdin、stdout、stderr，别的句柄都不是给它的：macOS 上 std
+/// 建管道和设 close-on-exec 是两步，后台同时起两个子进程时，后起的那个可能继承到先起那个的管道（比如另一个桥接
+/// stdin 的写端）。桥接拿着它（再传给 CLI 和 CLI 起的命令），后台关掉自己那一端时，另一个桥接就读不到 stdin
+/// 结束，没人管地一直活着（漏桥接）。先把号码列全再关：列目录用的那个句柄这时已经关了，关它只会得到 EBADF。
+#[cfg(unix)]
+fn close_inherited_fds() -> std::io::Result<()> {
+    let fds: Vec<libc::c_int> = std::fs::read_dir("/dev/fd")?
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+        .filter(|fd| *fd > 2)
+        .collect();
+    for fd in fds {
+        // SAFETY: 这时还是单线程、运行时还没起，进程里没有别人拿着这些号码；关一个已经关了的号码只返回 EBADF
+        unsafe { libc::close(fd) };
+    }
+    Ok(())
 }
 
 /// 确认自己是进程组组长（后台以 `process_group(0)` 起桥接时本来就是）；不是就自立一组：开发时从 shell 直接起
