@@ -21,10 +21,12 @@ use tokio::time::timeout;
 
 const LIMIT: Duration = Duration::from_secs(300);
 
-/// 对拍时只比视图内容：跳转请求是一次性的事件，全量帧不重发它。
+/// 对拍时只比视图内容：跳转请求与滚动指令都是一次性的事件，全量帧不重发它们（网页重载后不再跳一次，
+/// 用户停在哪就是哪）。
 fn comparable(s: &WebState) -> WebState {
     WebState {
         navigate: None,
+        scroll_to: None,
         ..s.clone()
     }
 }
@@ -77,6 +79,9 @@ async fn every_scenario_folds_to_full() {
                 ("composer", folded.composer != full.composer),
                 ("home", folded.home != full.home),
                 ("anchors", folded.anchors != full.anchors),
+                ("anchor_cursor", folded.anchor_cursor != full.anchor_cursor),
+                ("window", folded.window != full.window),
+                ("scroll_to", folded.scroll_to != full.scroll_to),
             ]
             .into_iter()
             .filter_map(|(n, differ)| differ.then_some(n))
