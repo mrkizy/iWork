@@ -249,6 +249,10 @@ LAUNCH_ENV_SET = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_B
 NO_BACKGROUND_SWITCH = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",)
 # 结果包里记哪些环境变量的名字（只记名字，不记值）
 RECORDED_ENV_PREFIXES = ("CLAUDE", "ANTHROPIC")
+# P14 之外唯一按名字去掉的继承变量（vdir 审查 2/F-3）：它们能把自动记忆的根目录改到别处（2.1.322 程序：COWORK 那个最优先，
+# REMOTE 那个在没有显式改道时当记忆根），CLAUDE_CONFIG_DIR 与 autoMemoryDirectory 都挡不住，会把格子的记忆写进真实的 ~/.claude。
+# 只看名字在不在，不读值；去掉了哪些名字记进 env-names.json。用例要设它们得经 extra 显式给（现在没有这样的格子）。
+MEMORY_ROOT_OVERRIDES = ("CLAUDE_COWORK_MEMORY_PATH_OVERRIDE", "CLAUDE_CODE_REMOTE_MEMORY_DIR")
 
 
 def child_env(token, extra=None, skip=()):
@@ -256,7 +260,8 @@ def child_env(token, extra=None, skip=()):
     叠上用例给的变量（extra），再把 LAUNCH_ENV_SET 里的设成固定值（压过 extra 与继承来的值），最后加归属标记。
     用例要故意不设（G5 记忆行的对照格；cfgdir 那一格的 CLAUDE_CONFIG_DIR）就在 skip 里点名，这时继承来的值也去掉。
     所有起实例的地方都经它，不各写一份。"""
-    env = {**os.environ, **(extra or {})}
+    env = {k: v for k, v in os.environ.items() if k not in MEMORY_ROOT_OVERRIDES}
+    env.update(extra or {})
     for name in skip: env.pop(name, None)
     for name, value in LAUNCH_ENV_SET.items():
         if name not in skip: env[name] = value
@@ -266,9 +271,10 @@ def child_env(token, extra=None, skip=()):
 
 def env_names_record():
     """要写进结果包的环境变量记录：脚本启动时 CLAUDE*、ANTHROPIC* 开头的名字（事后核对这次是不是在干净的环境里跑的），
-    以及起实例时设上了哪几个。只有名字，没有值。"""
+    起实例时设上了哪几个，以及按名字去掉了哪几个（MEMORY_ROOT_OVERRIDES 里这次环境中有的）。只有名字，没有值。"""
     names = sorted(k for k in os.environ if k.startswith(RECORDED_ENV_PREFIXES))
-    return {"names": names, "set_for_instances": sorted(LAUNCH_ENV_SET)}
+    return {"names": names, "set_for_instances": sorted(LAUNCH_ENV_SET),
+            "dropped_for_instances": sorted(k for k in MEMORY_ROOT_OVERRIDES if k in os.environ)}
 
 
 def environment_refusal(env):
@@ -640,11 +646,13 @@ UNCLEAN = "环境不干净：init.plugins 里有不该有的插件（方案 16.1
 
 
 def claude(name, prompt, settings=None, extra_args=(), iso=True, cwd=None, env=None, timeout=300, env_skip=(), plugin_check=True, plugin_dirs=(),
-           launch_prefix=(), plugin_roots=()):
+           launch_prefix=(), plugin_roots=(), stderr_facts=None):
     """一次性运行。返回结构化证据 + exit / timed_out / secs。每个实例的 init.plugins 都过核对（plugin_check=False 只给 G5 环境行的阳性格），
     报了东西挂在 unclean_plugins 上：run_valid 当它无效，痕迹先判 FAIL 的几处也先看它（这一格只记「环境不干净」）。
     plugin_dirs：这一格自己给的插件目录（都在本次根目录里），经 --plugin-dir 给 CLI，核对时它们之下的插件算该有的（方案 3.5）。
     launch_prefix：套在 claude 外面的命令（P4 的 F 格用外层 sandbox-exec 造「沙箱起不来」）。
+    stderr_facts：给了就不存标准错误原文，只存它从原文里取出的结构化事实（{name}-stderr-facts.json）。V10 形状三把含账号信息的
+    .claude.json 交给 --mcp-config，校验不过时 CLI 会把「路径: 消息」原样打到标准错误，消息里可能带值。
     plugin_roots：只给插件核对用、不经 --plugin-dir 给的目录（vdir：装进专用目录的插件是用户的，核对时算该有的）。"""
     t0 = time.time()
     extra_args = list(extra_args) + [x for d in plugin_dirs for x in ("--plugin-dir", d)]
@@ -652,7 +660,8 @@ def claude(name, prompt, settings=None, extra_args=(), iso=True, cwd=None, env=N
     out, err, code, timed_out, pid = run_instance(argv, name, cwd, env, timeout, env_skip=env_skip)
     out, err = redact_stream(out), redact_stream(err)
     open(os.path.join(R.out, f"{name}-stream.jsonl"), "w").write(scrub(out))
-    open(os.path.join(R.out, f"{name}-stderr.txt"), "w").write(scrub(err))
+    if stderr_facts is None: open(os.path.join(R.out, f"{name}-stderr.txt"), "w").write(scrub(err))
+    else: json.dump(stderr_facts(err), open(os.path.join(R.out, f"{name}-stderr-facts.json"), "w"), ensure_ascii=False)
     r = parse_stream(out)
     r.update(exit=code, timed_out=timed_out, secs=round(time.time() - t0, 1), pid=pid)     # pid：出沙箱格判替身的调起是不是 CLI 自己调的
     return finish_run(r, name, plugin_check, tuple(plugin_dirs) + tuple(plugin_roots))
@@ -668,9 +677,10 @@ def finish_run(r, name, plugin_check=True, plugin_dirs=()):
 class Live:
     """流式输入的常驻会话：自己的进程组与标记，后台线程按到达时间收事件。用完必须 close()。
     argv 只给 selftest 用：换成一个假的会话程序，测收事件与落盘这条路。cwd 不给就是工作区（vdir 的 V10 要在自己的项目目录里起）。
-    stderr_path 给了就把标准错误写进这个文件（V2c 要看里面有没有那句提示），不给丢掉。"""
-    def __init__(self, name, settings, extra_args=(), env=None, argv=None, env_skip=(), iso=True, cwd=None, stderr_path=None):
-        self.name, self.events, self.lock, self.token = name, [], threading.Lock(), new_mark()
+    stderr_path 给了就把标准错误写进这个文件（V2c 要看里面有没有那句提示），不给丢掉。
+    keep_raw=False：收尾不把原始流写进结果包（control_session 按白名单另存，vdir 审查 3/F-1）。"""
+    def __init__(self, name, settings, extra_args=(), env=None, argv=None, env_skip=(), iso=True, cwd=None, stderr_path=None, keep_raw=True):
+        self.name, self.events, self.lock, self.token, self.keep_raw = name, [], threading.Lock(), new_mark(), keep_raw
         self._stderr = open(stderr_path, "w") if stderr_path else subprocess.DEVNULL
         self.proc = subprocess.Popen(argv or base_argv(settings, extra_args, iso, stream_input=True), cwd=cwd or R.work, stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=self._stderr, text=True,
@@ -721,7 +731,7 @@ class Live:
         except Exception: pass
         try: end_instance(self.proc, self.token, self.name, escape_expected=escape_expected)
         finally:
-            open(os.path.join(R.out, f"{self.name}-stream.jsonl"), "w").write(scrub("".join(self.raw)))
+            if self.keep_raw: open(os.path.join(R.out, f"{self.name}-stream.jsonl"), "w").write(scrub("".join(self.raw)))
             if self._stderr is not subprocess.DEVNULL: self._stderr.close()
 
 
@@ -907,7 +917,7 @@ def pass_literal_sites(src):
 
 
 # 计数表的键、自测里的期望值、检查函数自己拿来比较的那一个；别的只许出现在 VERDICT_FUNCS 登记的函数里
-PASS_LITERAL_ALLOWED = {"COUNTS", "selftest", "selftest_g2_matrix", "selftest_g5_isolation", "selftest_recheck_and_p4", "selftest_cfgdir_isolation", "selftest_repo", "selftest_vdir_a", "selftest_vdir_b", "pass_literal_sites"}
+PASS_LITERAL_ALLOWED = {"COUNTS", "selftest", "selftest_g2_matrix", "selftest_g5_isolation", "selftest_recheck_and_p4", "selftest_cfgdir_isolation", "selftest_repo", "selftest_vdir_a", "selftest_vdir_b", "selftest_vdir_handlers", "pass_literal_sites"}
 
 
 def live_seen(events, alive, results_needed):
@@ -1103,15 +1113,18 @@ def g1_agent_shape_verdict(r, sub_ev, sentinel_exists):
 
 def g1_bashbg_record(r, cmd, rows):
     """g1-BashBg 记录格（关后台任务时让模型后台跑 Bash）：目标调用的结果文字（CLI 拒 run_in_background 的报错）、
-    每次调用进没进 hook、输入里的字段名。只记录：证据齐了 INFO。返回 (状态, 行名, 说明)。纯函数。"""
+    每次调用进没进 hook、输入里的字段名。只记录：证据齐了 INFO。返回 (状态, 行名, 说明)。纯函数。
+    「证据齐」另要每一次目标调用的输入里都确实有 run_in_background: true（vdir 审查 2/F-4）：模型省掉或填 false 就是前台跑，
+    说明不了后台的事，记 INCONCLUSIVE。CLI 拒这个参数时结果文字（拒绝原文）照记。"""
     ev = bash_ev(r, cmd, many=True)
     hooked = {(row.get("input") or {}).get("tool_use_id") for row in rows}
     uses = ev.get("uses", [])
     facts = {"目标调用次数": len(uses), "每次都进了 hook": bool(uses) and all(u["id"] in hooked for u in uses),
              "输入里的字段名": sorted({k for u in uses for k in u["input"]}), "带 run_in_background": [u["input"].get("run_in_background") for u in uses],
              "结果（前 200 字）": [res["text"][:200] for res in ev.get("results", [])], "结果是报错": [res["is_error"] for res in ev.get("results", [])]}
-    return (info_if(ev["ok"]), "G1 BashBg 关后台任务时后台跑 Bash（只记录）",
-            "；".join(x for x in (ev["why"], json.dumps(facts, ensure_ascii=False)) if x))
+    background = ev["ok"] and all(u["input"].get("run_in_background") is True for u in uses)
+    why = ev["why"] or ("" if background else "有一次目标调用没带 run_in_background: true（前台跑的）")
+    return (info_if(background), "G1 BashBg 关后台任务时后台跑 Bash（只记录）", "；".join(x for x in (why, json.dumps(facts, ensure_ascii=False)) if x))
 
 
 def g1():
@@ -3394,25 +3407,47 @@ def g7c2_verdict(alive, body, mode):
                    "响应里有 current_permission_mode": has_key}, has_key and body["current_permission_mode"] == MODE_ALIASES.get(mode, mode))
 
 
-def control_session(name, settings_path, requests=(), extra_args=(), env=None, iso=True, cwd=None, argv=None, stderr_path=None):
+def control_session(name, settings_path, requests=(), extra_args=(), env=None, iso=True, cwd=None, argv=None, stderr_path=None, reply_timeout=20):
     """起一个常驻会话，不发用户消息（不起模型）：先发 initialize，再按次序发 requests 里的控制请求，每一条 20 秒内等按 request_id
-    对上的响应。返回 (最后一条等完那一刻会话还活着吗, [每条的回复])，第一条是 initialize 的。
-    回复：没等到是 None；等到了是 {"ok": subtype 是不是 success, "body": 响应体（不是对象就是 {}）, "error": 报错原文或 None}。
-    响应落盘前照账号信息那条规矩删减（Live 收事件时就删）。argv 只给 selftest 换假会话程序；cwd、stderr_path 见 Live。"""
-    live = Live(name, settings_path, extra_args, env=env, iso=iso, cwd=cwd, argv=argv, stderr_path=stderr_path)
+    对上的响应（reply_timeout 只给 selftest 改短）。返回 (最后一条等完那一刻会话还活着吗, [每条的回复])，第一条是 initialize 的，条数总等于请求数。
+    回复：没等到、没发出去是 None；等到了是 {"ok": subtype 是不是 success, "body": 响应体（不是对象就是 {}）, "has_error": 带没带报错}。
+    报错原文不往外给（vdir 审查 3/F-1：里面可能有服务配置）。某一条没等到回复、或者会话已经退出，后面的不再发（3/F-3），记 None；
+    往已经退出的进程写请求撞上的管道错误也算没发出去。
+    落盘只走 control_facts 的白名单（{name}-control.json），原始流不进结果包（3/F-1）。argv 只给 selftest 换假会话程序；cwd、stderr_path 见 Live。"""
+    live = Live(name, settings_path, extra_args, env=env, iso=iso, cwd=cwd, argv=argv, stderr_path=stderr_path, keep_raw=False)
+    all_requests = ({"subtype": "initialize"}, *requests)
+    replies = []
     try:
-        replies = []
-        for n, req in enumerate(({"subtype": "initialize"}, *requests)):
+        for n, req in enumerate(all_requests):
+            if replies and (replies[-1] is None or live.proc.poll() is not None): break
             rid = f"{req['subtype']}-{n}-{name}"
-            live.control(rid, req)
-            got = live.wait(lambda o: o.get("type") == "control_response" and (o.get("response") or {}).get("request_id") == rid, 20)
+            try: live.control(rid, req)
+            except (BrokenPipeError, OSError):
+                replies.append(None); break
+            got = live.wait(lambda o: o.get("type") == "control_response" and (o.get("response") or {}).get("request_id") == rid, reply_timeout)
             resp = (got[1].get("response") or {}) if got else None
             replies.append(None if resp is None else {"ok": resp.get("subtype") == "success",
                                                       "body": resp["response"] if isinstance(resp.get("response"), dict) else {},
-                                                      "error": resp.get("error")})
+                                                      "has_error": resp.get("error") is not None})
+        replies += [None] * (len(all_requests) - len(replies))
         return live.proc.poll() is None, replies
     finally:
         live.close()
+        json.dump([{"请求": req["subtype"], **control_facts(req["subtype"], rep_)} for req, rep_ in zip(all_requests, replies + [None] * len(all_requests))],
+                  open(os.path.join(R.out, f"{name}-control.json"), "w"), ensure_ascii=False)
+
+
+def control_facts(subtype, reply):
+    """一条控制请求的回复里能进结果包的事实（白名单，vdir 审查 3/F-1）。纯函数。别的字段、报错原文一概不留：
+    initialize 只留权限模式与顶层键名；mcp_status 只留本脚本测试服务（t0g- 开头）的名字与状态；别的请求只留成没成、带没带报错。"""
+    if reply is None: return {"回复": None}
+    facts = {"ok": reply["ok"], "有报错": reply["has_error"]}
+    if subtype == "initialize":
+        mode = reply["body"].get("current_permission_mode")
+        facts.update({"current_permission_mode": mode if isinstance(mode, str) else None, "键": sorted(reply["body"])})
+    elif subtype == "mcp_status":
+        facts["t0g 服务"] = mcp_status_rows(reply)
+    return facts
 
 
 def initialize_only(name, settings_path, extra_args=(), env=None, iso=True, stderr_path=None):
@@ -4311,6 +4346,11 @@ def p4_facts(r, written, cmd, rows, stderr):
             "看到了沙箱不可用的原文": startup, "目标调用的结果（前 200 字）": [res["text"][:200] for res in ev.get("results", [])]}
 
 
+def p4_not_run():
+    """预检没过、没起实例的那一格的事实。和 p4_facts 同一组键（p4_verdict 都要读），P4 与 vdir V4c/d 共用这一份（vdir 审查 2/F-1）。"""
+    return {"written": False, "refused": False, "blocked": False, "exit": None, "unclean": False}
+
+
 def p4_verdict(preflight_ok, f1, f2):
     """F1、F2 的结论（方案第 8 节）。纯函数。返回 (F1 的状态, F2 的状态, 说明)。
     预检没过 → 两格都没测成；F2 里文件没写进去 → 沙箱其实起来了、造法无效，两格都没测成；
@@ -4334,7 +4374,7 @@ def r2x_p4():
         target = os.path.join(out_dir, key)
         cmd = f"touch {target}"
         if not ok:
-            facts[key] = {"written": False, "refused": False, "blocked": False, "exit": None}
+            facts[key] = p4_not_run()
             continue
         st = sandbox_settings(local_binding=True)
         if fail_if: st["sandbox"]["failIfUnavailable"] = True
@@ -5070,13 +5110,12 @@ def r2x_vdir_v2():
 
 def v2_verdicts(got):
     """V2a–V2d 的结论。纯函数。got：各格报的模式（没等到响应、没有这个键是 None）。没报模式 → INCONCLUSIVE。
-    V2b（对照）报 acceptEdits 才 PASS；V2a 报 dontAsk 才 PASS，报别的（含 default）FAIL，V2b 没过 INCONCLUSIVE。
-    V2d（对照）报 bypassPermissions 才 PASS，报别的 FAIL（记成事实）；V2c 报 bypassPermissions 是 FAIL，别的值 PASS，V2d 没过 INCONCLUSIVE。
-    报了值的 FAIL 排在对照之前：用户层赢没赢是看得见的事实，不靠对照。"""
+    V2b（对照）报 acceptEdits 才 PASS；V2a 报 dontAsk 才 PASS，报别的（含 default）FAIL。
+    V2d（对照）报 bypassPermissions 才 PASS，报别的 FAIL（记成事实）；V2c 报 bypassPermissions 是 FAIL，别的值 PASS。
+    对照没过 → 被对照的格 INCONCLUSIVE，排在它自己的值之前（方案 524b291；vdir 审查 2/F-2）。"""
     def cell(mode, good, control="PASS", only_bad=None):
-        if mode is None: return "INCONCLUSIVE"
-        if (mode == only_bad) if only_bad else (mode != good): return "FAIL"
-        return "PASS" if control == "PASS" else "INCONCLUSIVE"
+        if mode is None or control != "PASS": return "INCONCLUSIVE"
+        return "FAIL" if ((mode == only_bad) if only_bad else (mode != good)) else "PASS"
     v2b, v2d = cell(got["V2b"], "acceptEdits"), cell(got["V2d"], "bypassPermissions")
     return {"V2a": cell(got["V2a"], "dontAsk", v2b), "V2b": v2b, "V2c": cell(got["V2c"], None, v2d, only_bad="bypassPermissions"), "V2d": v2d}
 
@@ -5122,7 +5161,7 @@ def r2x_vdir_v4():
     _, obs_b, unclean_b = vdir_bash_guard("vdir-v4b", d, no_enabled)
     v4b = v4b_verdict(obs_b, unclean_b)
     v4a = combine(*guards_a.values())
-    settle("R2X vdir V4a 用户层写 sandbox.enabled: false，iWork 的沙箱照样在（写不出、读不到）", v4a if v4a == "FAIL" else vdir_pair(v4a, v4b),
+    settle("R2X vdir V4a 用户层写 sandbox.enabled: false，iWork 的沙箱照样在（写不出、读不到）", vdir_pair(v4a, v4b),
            json.dumps(guards_a))
     settle("R2X vdir V4b 对照：iWork 只拿掉 sandbox.enabled，写得进", v4b, json.dumps({k: obs_b[k] for k in ("ctl_rc", "write_rc", "write_exists")}))
     # V4c、V4d：F 格的造法，先过同一条预检
@@ -5134,7 +5173,7 @@ def r2x_vdir_v4():
     for key, keep in (("v4c", True), ("v4d", False)):
         target = os.path.join(out_dir, key); cmd = f"touch {target}"
         if not pre:
-            facts[key] = {"written": False, "refused": False, "blocked": False, "exit": None, "unclean": False}; continue
+            facts[key] = p4_not_run(); continue
         st = sandbox_settings(local_binding=True)
         if keep: st["sandbox"]["failIfUnavailable"] = True
         else: st["sandbox"].pop("failIfUnavailable", None)
@@ -5239,7 +5278,8 @@ def v13a_verdict(unclean, per, created, changed):
 def marker_verdict(r, forbid=(), want=(), need=(), control="PASS"):
     """一次运行看启动标记的判定（V10、V12）。纯函数。forbid：不该出现的标记（出现就是痕迹，FAIL）；want：被断言该出现的
     （运行有效、对照成立时没出现 → FAIL）；need：这次运行本身的活证（没出现说明这次没测成 → INCONCLUSIVE）；control：这一格的阳性对照。
-    环境不干净先判 INCONCLUSIVE（5/F-1：痕迹先判 FAIL 的几处也先看它）。"""
+    次序：环境不干净先判 INCONCLUSIVE（审查 5/F-1）；不该出现的标记出现了就 FAIL，不看对照（方案 3.1d V10：对照没过时说明不了的是
+    「没出现」）；前置步骤（停用、再启用）没成立的格由调用方跳过、不经这里（vdir 审查 3/F-2）。"""
     if r.get("unclean_plugins"): return "INCONCLUSIVE"
     if any(forbid): return "FAIL"
     if not run_valid(r) or not all(need) or control != "PASS": return "INCONCLUSIVE"
@@ -5278,6 +5318,16 @@ V10_USER, V10_REPO = ("t0g-u1", "t0g-u2"), "t0g-repo"
 V10_VARIANTS = {"正常握手": "ok", "握手前退出": "exit"}
 
 
+MCP_CONFIG_INVALID = re.compile(r"--mcp-config validation failed \((\d+) errors?\)")
+
+
+def mcp_config_stderr_facts(err):
+    """形状三那几格的标准错误只留这些（原文不存）：CLI 认没认这份 --mcp-config、校验报了几条错。纯函数。"""
+    m = MCP_CONFIG_INVALID.search(err or "")
+    return {"字数": len(err or ""), "Invalid MCP configuration": "Invalid MCP configuration" in (err or ""),
+            "校验报错条数": int(m.group(1)) if m else None}
+
+
 def v10_shapes(d):
     """三种加载形状的启动参数（方案 3.1d V10 前置）。形状三只把专用目录里 .claude.json 的路径递给 CLI，脚本不读它（硬约束第 5 条）。"""
     return {"形状一": vdir_args(), "形状二": ["--setting-sources", "user"],
@@ -5313,7 +5363,7 @@ def v10_toggle(tag, d, work, enabled):
     after = (rows or {}).get(V10_USER[1])
     accepted = bool(toggled[1] and toggled[1]["ok"])
     held = after is not None and ((after == "disabled") != enabled)
-    return accepted and held, {"mcp_toggle 被接受": accepted, "报错": (toggled[1] or {}).get("error"), "下一条会话里 U2 的状态": after}
+    return accepted and held, {"mcp_toggle 被接受": accepted, "带报错": (toggled[1] or {}).get("has_error"), "下一条会话里 U2 的状态": after}
 
 
 def r2x_vdir_v10():
@@ -5337,7 +5387,8 @@ def r2x_vdir_v10():
 
     def run(tag, args, work, extra=None):
         reset_marks(marks)
-        r, _ = vdir_run(f"vdir-{tag}", d, plain, args=args, cwd=work, extra=extra)
+        hide = {"stderr_facts": mcp_config_stderr_facts} if args is shapes["形状三"] else {}     # 形状三的标准错误原文不入包
+        r, _ = vdir_run(f"vdir-{tag}", d, plain, args=args, cwd=work, extra=extra, **hide)
         return r, {n: mark(n) for n in (*V10_USER, V10_REPO)}
 
     # 仓库级阳性对照：--setting-sources project、不带 --strict-mcp-config，用 CLI 自己的设置把 .mcp.json 的服务批掉（iWork 的 --settings 里写）
@@ -5361,20 +5412,30 @@ def r2x_vdir_v10():
                marker_verdict(r, forbid=[seen[V10_REPO]], want=[seen[V10_USER[0]]], control=controls[variant]), json.dumps(seen))
     # 停用 U2，再启用：同一个项目目录（MCP 的停用按项目记）
     work = v10_project("fi", marks)
+    # 前置没成立的格不跑、直接记 INCONCLUSIVE（vdir 审查 3/F-2）：停用没成，U2 照常启动、写标记，跑了只会被当成痕迹
+    pairs = (("V10f", "V10h", "形状二"), ("V10g", "V10i", "形状三"))
+    off_why = "停用 U2 没成立（mcp_toggle 被拒、或状态没留到下一条会话）：这一格不跑，回 architect 重定硬约束第 2 条对 MCP 的含义"
     off, off_facts = v10_toggle("v10-off", d, work, enabled=False)
     record(info_if(off), "R2X vdir V10 停用前置：mcp_toggle 停用 U2，状态留到了下一条会话（0 个模型实例）", json.dumps(off_facts, ensure_ascii=False))
-    after_off = {cell: run(cell.lower(), shapes[shape], work) for cell, shape in (("V10f", "形状二"), ("V10g", "形状三"))}
+    if not off:
+        for cell, ctl_cell, shape in pairs:
+            record("INCONCLUSIVE", f"R2X vdir {cell} 停用 U2 之后（{shape}）：U1 被启动、U2 不被启动", off_why)
+            record("INCONCLUSIVE", f"R2X vdir {ctl_cell} 再启用 U2 之后（{shape}）：U2 被启动", off_why)
+        return
+    after_off = {cell: run(cell.lower(), shapes[shape], work) for cell, _, shape in pairs}
     on, on_facts = v10_toggle("v10-on", d, work, enabled=True)
     record(info_if(on), "R2X vdir V10 再启用前置：mcp_toggle 启用 U2，状态留到了下一条会话（0 个模型实例）", json.dumps(on_facts, ensure_ascii=False))
-    after_on = {cell: run(cell.lower(), shapes[shape], work) for cell, shape in (("V10h", "形状二"), ("V10i", "形状三"))}
-    why = "" if off and on else "；停用办法没成立：回 architect 重定硬约束第 2 条对 MCP 的含义"
-    for (cell, (r, seen)), (ctl_cell, (rc, seen_c)) in zip(after_off.items(), after_on.items()):
-        control = marker_verdict(rc, want=[seen_c[V10_USER[1]]], control="PASS" if off and on else "INCONCLUSIVE")
-        shape = "形状二" if cell == "V10f" else "形状三"
-        settle(f"R2X vdir {ctl_cell} 再启用 U2 之后（{shape}）：U2 被启动", control, json.dumps(seen_c) + why)
+    for cell, ctl_cell, shape in pairs:
+        if on:
+            rc, seen_c = run(ctl_cell.lower(), shapes[shape], work)
+            control = marker_verdict(rc, want=[seen_c[V10_USER[1]]])
+            settle(f"R2X vdir {ctl_cell} 再启用 U2 之后（{shape}）：U2 被启动", control, json.dumps(seen_c))
+        else:
+            control = "INCONCLUSIVE"
+            record(control, f"R2X vdir {ctl_cell} 再启用 U2 之后（{shape}）：U2 被启动", "再启用 U2 没成立：这一格不跑，回 architect")
+        r, seen = after_off[cell]
         settle(f"R2X vdir {cell} 停用 U2 之后（{shape}）：U1 被启动、U2 不被启动",
-               marker_verdict(r, forbid=[seen[V10_USER[1]]], need=[seen[V10_USER[0]]], control=control),
-               json.dumps(seen) + why)
+               marker_verdict(r, forbid=[seen[V10_USER[1]]], need=[seen[V10_USER[0]]], control=control), json.dumps(seen))
 
 
 def plugin_list_facts(stdout, names, d):
@@ -5419,17 +5480,24 @@ def r2x_vdir_v12():
     record("INFO", "R2X vdir V12c plugin list --json 带不带启用状态与安装路径（停用前后各一次，只记事实）",
            json.dumps({"停用前": plugin_list_facts(listed_before, (on_name, off_name), d), "停用后": plugin_list_facts(listed_after, (on_name, off_name), d)},
                       ensure_ascii=False))
+    a_label, b_label = "R2X vdir V12a 停用的插件不进来：它的 SessionStart hook 不跑", "R2X vdir V12b 对照：plugin enable 之后两个插件的 hook 都跑"
+    if not disabled:          # 前置没成立的格不跑（vdir 审查 3/F-2）：插件没停用，它的 hook 照跑，跑了只会被当成痕迹
+        why = "claude plugin disable 没成功：这一格不跑，回 architect"
+        record("INCONCLUSIVE", a_label, why); record("INCONCLUSIVE", b_label, why); return
     reset_marks(marks)
     ra, _ = vdir_run("vdir-v12a", d, "Reply with exactly: OK")
     seen_a = {"启用的": os.path.exists(on_mark), "停用的": os.path.exists(off_mark)}
     reset_marks(marks)
     _, enabled = cli("v12-enable", "enable", f"{off_name}@{market_name}")
-    rb, _ = vdir_run("vdir-v12b", d, "Reply with exactly: OK")
-    seen_b = {"启用的": os.path.exists(on_mark), "再启用的": os.path.exists(off_mark)}
-    v12b = marker_verdict(rb, want=seen_b.values(), control="PASS" if enabled else "INCONCLUSIVE")
-    v12a = marker_verdict(ra, forbid=[seen_a["停用的"]], need=[seen_a["启用的"]], control=v12b if disabled else "INCONCLUSIVE")
-    settle("R2X vdir V12a 停用的插件不进来：它的 SessionStart hook 不跑", v12a, json.dumps({**seen_a, "plugin disable 成功": disabled}, ensure_ascii=False))
-    settle("R2X vdir V12b 对照：plugin enable 之后两个插件的 hook 都跑", v12b, json.dumps({**seen_b, "plugin enable 成功": enabled}, ensure_ascii=False))
+    if enabled:
+        rb, _ = vdir_run("vdir-v12b", d, "Reply with exactly: OK")
+        seen_b = {"启用的": os.path.exists(on_mark), "再启用的": os.path.exists(off_mark)}
+        v12b = marker_verdict(rb, want=seen_b.values())
+        settle(b_label, v12b, json.dumps(seen_b, ensure_ascii=False))
+    else:
+        v12b = "INCONCLUSIVE"
+        record(v12b, b_label, "claude plugin enable 没成功：这一格不跑，回 architect")
+    settle(a_label, marker_verdict(ra, forbid=[seen_a["停用的"]], need=[seen_a["启用的"]], control=v12b), json.dumps(seen_a, ensure_ascii=False))
 
 
 # 一次性环境的子格（方案 3.1d 第五小节，命中 ①② 两条规则）：这一版只登记，都记 INCONCLUSIVE，排 R3
@@ -5975,7 +6043,7 @@ def selftest_child_env():
     assert LAUNCH_ENV_SET == {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}, "P14、D5：只设这两个，别的不动"
     marker, value = "t0g-plugins-" + secrets.token_hex(4), "t0g-envval-" + secrets.token_hex(4)
     planted = {"CLAUDE_CODE_PLUGIN_DIRS": marker, "CLAUDE_CODE_SAFE_MODE": marker, "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0",
-               "CLAUDE_T0G_SELFTEST": value, "ANTHROPIC_T0G_SELFTEST": value, "CLAUDE_CONFIG_DIR": value}
+               "CLAUDE_T0G_SELFTEST": value, "ANTHROPIC_T0G_SELFTEST": value, "CLAUDE_CONFIG_DIR": value, "CLAUDE_CODE_REMOTE_MEMORY_DIR": value}
     saved = {k: os.environ.get(k) for k in planted}
     os.environ.update(planted)
     watched = sorted(planted) + ["PATH", "HOME"]
@@ -5987,6 +6055,8 @@ def selftest_child_env():
         assert got["CLAUDE_CODE_PLUGIN_DIRS"] == got["CLAUDE_CODE_SAFE_MODE"] == marker, "P14：不筛选，继承来的照传"
         assert got["CLAUDE_T0G_SELFTEST"] == got["ANTHROPIC_T0G_SELFTEST"] == got["CLAUDE_CONFIG_DIR"] == value
         assert got["PATH"] == os.environ["PATH"] and got["HOME"] == os.environ["HOME"]
+        assert got["CLAUDE_CODE_REMOTE_MEMORY_DIR"] is None, "记忆根的覆盖变量按名字去掉（vdir 审查 2/F-3）"
+        assert child_env("t", {"CLAUDE_COWORK_MEMORY_PATH_OVERRIDE": "/x"})["CLAUDE_COWORK_MEMORY_PATH_OVERRIDE"] == "/x", "用例显式给的照传"
         assert child_env("t", {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0"})["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "用例给了别的值也压过"
         assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" not in child_env("t", skip=("CLAUDE_CODE_DISABLE_AUTO_MEMORY",)), "点名不设：继承来的也去掉"
         assert child_env("t", {"CLAUDE_CODE_SAFE_MODE": "1"})["CLAUDE_CODE_SAFE_MODE"] == "1", "用例给的变量照传（G9d）"
@@ -6007,6 +6077,7 @@ def selftest_child_env():
         text = open(os.path.join(R.out, "env-names.json")).read()
         rec = json.loads(text)
         assert set(planted) <= set(rec["names"]) and "PATH" not in rec["names"] and rec["set_for_instances"] == ["CLAUDE_CODE_DISABLE_AUTO_MEMORY", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"]
+        assert rec["dropped_for_instances"] == ["CLAUDE_CODE_REMOTE_MEMORY_DIR"], "去掉了哪些名字记进结果包"
         assert value not in text and marker not in text, "结果包里只有变量名，没有值"
     finally:
         for k, v in saved.items():
@@ -6650,6 +6721,7 @@ def selftest_prompts():
 
 def selftest_recheck_and_p4():
     """script6 第一批：G1d′ 与 BashBg 记录格、沙箱在场的证据、P4 的判定、产品设置、列进程不经 ps -ax。每样配反例。"""
+    global nested_sandbox_preflight
     init_, res_ = {"type": "system", "subtype": "init", "plugins": []}, {"type": "result"}
     run = lambda events, ok=True: {"init": init_ if ok else None, "timed_out": False, "exit": 0, "events": events, "tool_uses": [], "tool_results": {}}
     # G1d′（审查 1/F-2）：先要子代理真跑了（子代理里的目标调用、结果不是报错、哨兵在），再看形状
@@ -6675,6 +6747,10 @@ def selftest_recheck_and_p4():
     assert status == "INFO" and '"每次都进了 hook": true' in detail and "run_in_background is disabled" in detail and '"run_in_background"' in detail, detail
     assert g1_bashbg_record({**rbg, "tool_uses": []}, cmd, [])[0] == "INCONCLUSIVE", "没有目标调用：没测成"
     assert '"每次都进了 hook": false' in g1_bashbg_record(rbg, cmd, [])[2]
+    for fg in ({"command": cmd}, {"command": cmd, "run_in_background": False}):
+        assert g1_bashbg_record({**rbg, "tool_uses": [{**use, "input": fg}]}, cmd, [])[0] == "INCONCLUSIVE", "省掉或填 false：前台跑的，不算后台事实（2/F-4）"
+    two = {**rbg, "tool_uses": [use, {**use, "id": "u2", "input": {"command": cmd}}], "tool_results": {**rbg["tool_results"], "u2": {"is_error": False, "text": "ok"}}}
+    assert g1_bashbg_record(two, cmd, [])[0] == "INCONCLUSIVE", "重发的那一次前台跑了也不行"
     assert G1_COMMAND_PROBES == ("Bash", "Agent", "BashBg") and G1_EXPECTED_TOOLS == 24
     # 沙箱在场（审查 1/F-3）：对照写进去了、工作区外那一笔被沙箱的原文挡下
     good = {"ctl_rc": "0\n", "ctl_exists": True, "rc": "1\n", "err": "touch: /o/x: Operation not permitted\n", "target_exists": False}
@@ -6713,6 +6789,13 @@ def selftest_recheck_and_p4():
     f1 = p4_facts(no_init(1), False, pcmd, [], "Invalid API key")
     f2 = p4_facts(p_run("", err=False), True, "touch /o/p4-f2", [], "")
     assert p4_verdict(True, f1, {**f2, "written": True})[0] == "INCONCLUSIVE", "认证失败那一次：F1 没测成，不是 PASS"
+    assert set(p4_not_run()) <= set(f1), "占位与真取的事实同一组键"
+    # 预检没过的正常路径走一遍处理器（vdir 审查 2/F-1：占位缺键时这里 KeyError）
+    saved_pre, before = nested_sandbox_preflight, dict(COUNTS)
+    nested_sandbox_preflight = lambda: (False, "selftest：假装预检没过")
+    try: r2x_p4()
+    finally: nested_sandbox_preflight = saved_pre
+    assert COUNTS["INCONCLUSIVE"] == before["INCONCLUSIVE"] + 3, "预检一行、F1、F2 都记 INCONCLUSIVE，不起实例"
     assert p4_facts({**p_run(sbx_err), "unclean_plugins": ["x"]}, True, pcmd, [allow_row], "")["unclean"] and not f1["unclean"], "p4_facts 带上污染"
     # cfgdir（T10f A 1/F-2 的实测格）
     nm = {"home": "t0g-home-a", "cfgdir": "t0g-cfgdir-a", "custom": "t0g-custom-a"}
@@ -7071,24 +7154,73 @@ print(json.dumps({{"loggedIn": store is not None, "email": "x@y"}})); sys.exit(0
     assert v2_verdicts(g) == {"V2a": "PASS", "V2b": "PASS", "V2c": "PASS", "V2d": "PASS"}
     assert v2_verdicts({**g, "V2a": "default"})["V2a"] == "FAIL", "default 也是 FAIL：用户层赢了、bypass 被禁用设置跳过"
     assert v2_verdicts({**g, "V2b": "default"}) == {"V2a": "INCONCLUSIVE", "V2b": "FAIL", "V2c": "PASS", "V2d": "PASS"}, "用户层没被读到：V2a 说明不了"
-    assert v2_verdicts({**g, "V2b": None, "V2a": "bypassPermissions"})["V2a"] == "FAIL", "看得见的 FAIL 不靠对照"
+    assert v2_verdicts({**g, "V2b": None, "V2a": "default"})["V2a"] == "INCONCLUSIVE", "对照没过：V2a 报了值也不下结论（2/F-2）"
     assert v2_verdicts({**g, "V2c": "bypassPermissions"})["V2c"] == "FAIL"
     assert v2_verdicts({**g, "V2d": "default"})["V2c"] == "INCONCLUSIVE" and v2_verdicts({**g, "V2d": "default"})["V2d"] == "FAIL"
+    assert v2_verdicts({**g, "V2d": "default", "V2c": "bypassPermissions"})["V2c"] == "INCONCLUSIVE", "V2d 没过：V2c 报 bypass 也不下结论（2/F-2）"
     assert v2_verdicts({**g, "V2c": None})["V2c"] == "INCONCLUSIVE" and v2_verdicts({**g, "V2d": None})["V2c"] == "INCONCLUSIVE"
     assert set(V2_CELLS["V2d"][1]) == {"defaultMode", "disableBypassPermissionsMode"} and V2_CELLS["V2a"][1] == ()
 
 
 # 假会话程序：对每条控制请求按 request_id 回一条 control_response；mcp_toggle 回报错，mcp_status 回一张服务表
+# 回复里塞了「秘密」（ST_SECRET）：外来服务名、服务配置的参数、报错原文、initialize 里没登记的字段。结果包里一个都不许有（vdir 审查 3/F-1）
+ST_SECRET = "t0g-secret-ZQ81"
 ST_FAKE_CONTROL = r'''import json, sys
+S = sys.argv[1]
 for line in sys.stdin:
     req = json.loads(line)
     rid, sub = req["request_id"], req["request"]["subtype"]
-    if sub == "mcp_toggle": resp = {"subtype": "error", "request_id": rid, "error": "no such server"}
+    if sub == "mcp_toggle": resp = {"subtype": "error", "request_id": rid, "error": "no such server " + S}
     elif sub == "mcp_status": resp = {"subtype": "success", "request_id": rid, "response": {"mcpServers": [
-        {"name": "t0g-u2", "status": "disabled", "config": {"command": "x"}}, {"name": "claude.ai Other", "status": "connected"}]}}
-    else: resp = {"subtype": "success", "request_id": rid, "response": {"current_permission_mode": "dontAsk"}}
+        {"name": "t0g-u2", "status": "disabled", "config": {"command": "x", "args": ["--token", S]}, "serverInfo": {"name": S}},
+        {"name": "claude.ai " + S, "status": "connected", "error": S}]}}
+    else: resp = {"subtype": "success", "request_id": rid, "response": {"current_permission_mode": "dontAsk", "emailAddress": S}}
     sys.stdout.write(json.dumps({"type": "control_response", "response": resp}) + "\n"); sys.stdout.flush()
 '''
+
+
+# V10、V12 处理器的替身：mcp add、plugin install/list 成功，plugin disable 失败；常驻会话里 initialize 成功、mcp_toggle 报错；
+# 一次性运行（-p 带提示词）什么都不输出。每次调起都记一行 argv，selftest 拿它查前置没成立的格有没有被起
+ST_VDIR_STUB = r'''#!{python}
+import json, sys
+open({log!r}, "a").write(json.dumps(sys.argv[1:]) + "\n")
+a = sys.argv[1:]
+if a[:2] == ["plugin", "disable"]: sys.exit(1)
+if a[:2] == ["plugin", "list"]: print("[]"); sys.exit(0)
+if a[:1] in (["mcp"], ["plugin"]): sys.exit(0)
+if "--input-format" in a:
+    for line in sys.stdin:
+        req = json.loads(line)
+        ok = req["request"]["subtype"] == "initialize"
+        resp = {{"subtype": "success" if ok else "error", "request_id": req["request_id"], **({{"response": {{}}}} if ok else {{"error": "refused"}})}}
+        print(json.dumps({{"type": "control_response", "response": resp}}), flush=True)
+sys.exit(0)
+'''
+
+
+def selftest_vdir_handlers():
+    """V10、V12 前置没成立时（mcp_toggle 被拒、plugin disable 失败），依赖它的格记 INCONCLUSIVE、不起实例（vdir 审查 3/F-2）。
+    走真的处理器，CLI 换成替身。"""
+    log = R.p("out", "st-vdir-stub.jsonl")
+    stub_dir = R.p("st-vdir-stub"); os.makedirs(stub_dir)
+    stub = os.path.join(stub_dir, "claude")
+    open(stub, "w").write(ST_VDIR_STUB.format(python=sys.executable, log=log)); os.chmod(stub, 0o755)
+    global CLAUDE_CLI
+    saved_cli, saved_vdir, before = CLAUDE_CLI, dict(VDIR), dict(COUNTS)
+    CLAUDE_CLI = stub
+    try:
+        VDIR.update(storage="", checked=True, why="")
+        r2x_vdir_v12()
+        r2x_vdir_v10()
+    finally:
+        CLAUDE_CLI = saved_cli; VDIR.clear(); VDIR.update(saved_vdir)
+    calls = [json.loads(l) for l in open(log)]
+    settings_of = [next((x for x in c if "settings-" in x), "") for c in calls]
+    for cell in ("v12a", "v12b", "v10f", "v10g", "v10h", "v10i", "v10-on"):
+        assert not any(f"settings-vdir-{cell}" in x for x in settings_of), f"前置没成立，{cell} 不该被起"
+    assert any("settings-vdir-v10a" in x for x in settings_of) and any(c[:2] == ["plugin", "disable"] for c in calls), "前面的格照跑"
+    # V12a、V12b、V10f–V10i 六格（另有前面各格因为替身不输出记的 INCONCLUSIVE）；没有格被当成 FAIL
+    assert COUNTS["FAIL"] == before["FAIL"] and COUNTS["INCONCLUSIVE"] >= before["INCONCLUSIVE"] + 6
 
 
 def selftest_vdir_b():
@@ -7101,7 +7233,7 @@ def selftest_vdir_b():
     assert marker_verdict(ok, want=[False]) == "FAIL" and marker_verdict({**ok, "timed_out": True}, want=[True]) == "INCONCLUSIVE"
     assert marker_verdict(ok, need=[False], want=[True]) == "INCONCLUSIVE", "活证没出现：这次没测成"
     assert marker_verdict(ok, want=[False], control="INCONCLUSIVE") == "INCONCLUSIVE" and marker_verdict(ok, want=[True], control="FAIL") == "INCONCLUSIVE"
-    assert marker_verdict(ok, forbid=[True], control="INCONCLUSIVE") == "FAIL", "对照没过也挡不住痕迹"
+    assert marker_verdict(ok, forbid=[True], control="INCONCLUSIVE") == "FAIL", "对照没过也挡不住痕迹（vdir 审查 3/F-2：次序不改）"
     # 标记目录：上一格的挪到旁边、原处是空的新目录
     marks = R.p("st-vdir-b-marks")
     reset_marks(marks); write_new(os.path.join(marks, "a"), "1"); reset_marks(marks); write_new(os.path.join(marks, "b"), "2"); reset_marks(marks)
@@ -7122,14 +7254,44 @@ def selftest_vdir_b():
     assert srv["args"][-2:] == [os.path.join(marks, V10_REPO), "exit"] and not os.path.exists(os.path.join(v10_project("st2", marks), ".mcp.json"))
     # mcp_status 只留本脚本的服务、只留名字与状态
     assert mcp_status_rows({"ok": True, "body": {"mcpServers": [{"name": "t0g-u2", "status": "disabled", "config": {}}, {"name": "other", "status": "x"}]},
-                            "error": None}) == {"t0g-u2": "disabled"}
-    assert mcp_status_rows(None) is None and mcp_status_rows({"ok": True, "body": {}, "error": None}) is None
+                            "has_error": False}) == {"t0g-u2": "disabled"}
+    assert mcp_status_rows(None) is None and mcp_status_rows({"ok": True, "body": {}, "has_error": False}) is None
     # 控制会话：按次序发、按 request_id 收，报错的回复带原文
     fake = R.p("cfg", "st-fake-control.py"); open(fake, "w").write(ST_FAKE_CONTROL)
-    alive_, replies = control_session("st-control", None, [{"subtype": "mcp_toggle", "serverName": "t0g-u2", "enabled": False}, {"subtype": "mcp_status"}],
-                                      argv=[sys.executable, "-I", fake])
-    assert alive_ and replies[0] == {"ok": True, "body": {"current_permission_mode": "dontAsk"}, "error": None}
-    assert replies[1] == {"ok": False, "body": {}, "error": "no such server"} and mcp_status_rows(replies[2]) == {"t0g-u2": "disabled"}
+    toggle_status = [{"subtype": "mcp_toggle", "serverName": "t0g-u2", "enabled": False}, {"subtype": "mcp_status"}]
+    alive_, replies = control_session("st-control", None, toggle_status, argv=[sys.executable, "-I", fake, ST_SECRET])
+    assert alive_ and replies[0]["ok"] and replies[0]["body"]["current_permission_mode"] == "dontAsk"
+    assert replies[1] == {"ok": False, "body": {}, "has_error": True} and mcp_status_rows(replies[2]) == {"t0g-u2": "disabled"}
+    saved = json.load(open(os.path.join(R.out, "st-control-control.json")))
+    assert [x["请求"] for x in saved] == ["initialize", "mcp_toggle", "mcp_status"] and saved[2]["t0g 服务"] == {"t0g-u2": "disabled"}
+    assert saved[0]["current_permission_mode"] == "dontAsk" and saved[1] == {"请求": "mcp_toggle", "ok": False, "有报错": True}
+    assert not os.path.exists(os.path.join(R.out, "st-control-stream.jsonl")), "原始流不进结果包"
+    for root_, _, files in os.walk(R.out):
+        for f_ in files:
+            assert ST_SECRET not in open(os.path.join(root_, f_), errors="replace").read(), f"秘密进了结果包：{f_}"
+    # 会话在 initialize 期间退出、或回完 initialize 就退出：不再往下发，不抛管道错误，没发的记 None（vdir 审查 3/F-3）
+    dies = R.p("cfg", "st-fake-dies.py")
+    open(dies, "w").write("import json, sys\nline = sys.stdin.readline()\nif sys.argv[1] == 'after':\n"
+                          "    rid = json.loads(line)['request_id']\n"
+                          "    print(json.dumps({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': rid, 'response': {}}}), flush=True)\n"
+                          "sys.exit(0)\n")
+    alive_, replies = control_session("st-control-dies", None, toggle_status, argv=[sys.executable, "-I", dies, "now"])
+    assert not alive_ and replies == [None, None, None]
+    alive_, replies = control_session("st-control-dies2", None, toggle_status * 3, argv=[sys.executable, "-I", dies, "after"])
+    assert not alive_ and replies[0] == {"ok": True, "body": {}, "has_error": False} and replies[1:] == [None] * 6
+    # 活着但不回 initialize：等过一条就不再发（不然要再等后面每一条）
+    seen_log = R.p("out", "st-fake-mute.log")
+    mute = R.p("cfg", "st-fake-mute.py")
+    open(mute, "w").write(f"import sys, time\nfor line in sys.stdin: open({seen_log!r}, 'a').write(line)\n")
+    alive_, replies = control_session("st-control-mute", None, toggle_status, argv=[sys.executable, "-I", mute], reply_timeout=1)
+    assert replies == [None, None, None] and len(open(seen_log).readlines()) == 1, "没回 initialize 就不再往下发"
+    # 回完 initialize 就关掉标准输入、进程还活着：往下写撞上管道错误，接住、记 None，不往外抛
+    shut = R.p("cfg", "st-fake-shut.py")
+    open(shut, "w").write("import json, os, sys, time\nline = sys.stdin.readline()\nrid = json.loads(line)['request_id']\n"
+                          "print(json.dumps({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': rid, 'response': {}}}), flush=True)\n"
+                          "sys.stdin.close(); os.close(0); time.sleep(5)\n")
+    alive_, replies = control_session("st-control-shut", None, toggle_status, argv=[sys.executable, "-I", shut], reply_timeout=2)
+    assert replies[0]["ok"] and replies[1:] == [None, None]
     # plugin list --json：认得出名字（带不带 @市场名都行），只留键、布尔值与路径在不在专用目录之下
     inside = os.path.join(d, "plugins", "cache", "x")
     out = json.dumps([{"id": "t0g-a@m", "enabled": False, "installPath": inside, "version": "1"}, {"name": "t0g-b", "enabled": True, "installPath": "/elsewhere"}])
@@ -7137,12 +7299,41 @@ def selftest_vdir_b():
     assert facts["t0g-a"] == {"键": ["enabled", "id", "installPath", "version"], "布尔值": {"enabled": False}, "有专用目录之下的路径": True}
     assert facts["t0g-b"]["有专用目录之下的路径"] is False and facts["t0g-c"] is None and facts["输出是 JSON"]
     assert plugin_list_facts("not json", ("t0g-a",), d) == {"输出是 JSON": False}
+    leak = "Error: Invalid MCP configuration: oauthAccount.emailAddress: Expected x, received 'a@b.c'"
+    bad = mcp_config_stderr_facts("[ERROR] --mcp-config validation failed (2 errors): x\n" + leak)
+    assert bad == {"字数": len("[ERROR] --mcp-config validation failed (2 errors): x\n" + leak), "Invalid MCP configuration": True, "校验报错条数": 2}
+    assert "a@b.c" not in json.dumps(bad) and mcp_config_stderr_facts("") == {"字数": 0, "Invalid MCP configuration": False, "校验报错条数": None}
+    # 走真的 claude()（CLI 换成替身）：给了 stderr_facts 就不存标准错误原文
+    leak_stub = R.p("st-leak-stub"); os.makedirs(leak_stub)
+    stub = os.path.join(leak_stub, "claude")
+    open(stub, "w").write(f"#!{sys.executable}\nimport sys\nsys.stderr.write({leak!r}); sys.exit(1)\n"); os.chmod(stub, 0o755)
+    global CLAUDE_CLI
+    saved_cli = CLAUDE_CLI
+    CLAUDE_CLI = stub
+    try:
+        claude("st-shape3", "x", iso=False, plugin_check=False, stderr_facts=mcp_config_stderr_facts)
+        claude("st-shape1", "x", iso=False, plugin_check=False)
+    finally:
+        CLAUDE_CLI = saved_cli
+    assert not os.path.exists(os.path.join(R.out, "st-shape3-stderr.txt")) and "a@b.c" not in open(os.path.join(R.out, "st-shape3-stderr-facts.json")).read()
+    assert json.load(open(os.path.join(R.out, "st-shape3-stderr-facts.json")))["Invalid MCP configuration"] is True
+    assert "a@b.c" in open(os.path.join(R.out, "st-shape1-stderr.txt")).read(), "对照：不给 stderr_facts 时照旧存原文"
+    # 专用目录里 CLI 自己写的日志（报错原文可能带 .claude.json 里的值）不进结果包：专用目录在本次根目录里、在 out 与观测目录之外；
+    # 结果包只打 out（观测目录另经 pack_obs 按名单挑进 out/obs），收尾时整个根目录随 R.remove() 删掉
+    vd = vdir_dir("st-pack"); write_new(os.path.join(vd, "debug", "latest.log"), "Error: Invalid MCP configuration: x: received 'a@b.c'")
+    for p_ in (vd, vdir_dir("st-pack-nested", parent=R.p("st-pack-data"))):
+        assert p_.startswith(R.root + os.sep) and not p_.startswith(R.out + os.sep) and not p_.startswith(R.obs + os.sep), p_
+    pack_parent = R.p("st-pack-parent"); os.makedirs(pack_parent)
+    with tarfile.open(write_results(pack_parent)) as t:
+        names = t.getnames()
+    assert names and all(n.split("/", 1)[0].startswith("iwork-t0g-results-") for n in names) and not any("vendor-claude" in n for n in names)
 
 
 def selftest():
     selftest_r2x()
     selftest_vdir_a()
     selftest_vdir_b()
+    selftest_vdir_handlers()
     selftest_repo()
     selftest_cfgdir_isolation()
     selftest_recheck_and_p4()
