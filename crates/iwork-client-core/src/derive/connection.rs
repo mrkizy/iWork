@@ -117,7 +117,10 @@ mod tests {
              待你批准的事项都还在。"
         );
         for banned in ["不会因此中断", "不受影响"] {
-            assert!(!message.contains(banned), "版本不一致页不许说「{banned}」：{message}");
+            assert!(
+                !message.contains(banned),
+                "版本不一致页不许说「{banned}」：{message}"
+            );
         }
         s.set_connection(Connection::Environment("M1 暂不支持 Windows".into()));
         let v = connection(&s);
