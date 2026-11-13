@@ -561,12 +561,13 @@ impl Store {
         }
     }
 
-    /// 全局设置换了值（事件带来的、或查询与快照整份替换的，两条路一样）：读设置的视图都失效。加一个读设置的视图
-    /// 就在这里加一行：设置页；助手主页（资料栏的收起偏好）；回合结束行（「轻松元素」决定印章）。
+    /// 全局设置换了值（事件带来的、或查询与快照整份替换的，两条路一样）：读 `store.settings` 的视图都失效。
+    /// 加一个读设置的视图就在这里加一行（`grep "settings" src/derive` 核对）：设置页；助手主页（资料栏的收起偏好）；
+    /// 添加项目（项目位置，新建、克隆的父目录）。行不读设置：「轻松元素」的印章由网页读设置视图画。
     fn settings_changed(&mut self) {
         self.dirty.mark(ViewKey::Settings);
         self.dirty.mark(ViewKey::Assistant);
-        self.mark_rows(|r| matches!(r, Row::TurnEnd(_)));
+        self.dirty.mark(ViewKey::AddProject);
     }
 
     /// 网页翻看到了离窗口边缘不远的一处：以它为中心重取（不跳转）。

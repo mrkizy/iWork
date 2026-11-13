@@ -307,8 +307,8 @@ fn delta_appends_to_its_own_row_only() {
     assert_eq!(d.appended.keys().collect::<Vec<_>>(), ["m2"]);
 }
 
-/// 设置换了值，读设置的视图都要失效，不管新值是事件带来的还是查询 / 快照整份替换的（g3b 1/F-4）：设置页、
-/// 助手主页（资料栏的收起偏好）、回合结束行（「轻松元素」决定印章）。只标设置页，助手主页与印章会停在旧值。
+/// 设置换了值，读设置的视图都要失效，不管新值是事件带来的还是查询 / 快照整份替换的（g3b 1/F-4、2/F-3）：
+/// 设置页、助手主页（资料栏的收起偏好）、添加项目（项目位置）。行不读设置（印章由网页读设置视图画），不重发。
 #[test]
 fn settings_replaced_by_snapshot_marks_every_reader() {
     use iwork_client_core::store::{ScopeKind, ViewKey};
@@ -332,7 +332,8 @@ fn settings_replaced_by_snapshot_marks_every_reader() {
         }],
     ));
     let d = s.take_dirty();
-    for v in [ViewKey::Settings, ViewKey::Assistant] {
+    // 添加项目读 projects_root（新建、克隆的父目录，g3b 2/F-3）
+    for v in [ViewKey::Settings, ViewKey::Assistant, ViewKey::AddProject] {
         assert!(
             d.views.contains(&v),
             "快照换了设置，{v:?} 没失效：{:?}",
@@ -340,8 +341,8 @@ fn settings_replaced_by_snapshot_marks_every_reader() {
         );
     }
     assert!(
-        d.conversation.rows.contains("end:t1"),
-        "回合结束行读「轻松元素」：{:?}",
+        d.conversation.rows.is_empty(),
+        "行不读设置，不重发：{:?}",
         d.conversation.rows
     );
 }
