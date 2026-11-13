@@ -367,12 +367,13 @@ pub const OFFLINE_TRY_LATER: &str = "正在重新连接，连上后再试";
 pub const ATTACH_AFTER_FIRST_MESSAGE: &str = "发出第一条消息后可以添加附件";
 pub const DETAILS: &str = "查看详情";
 
+/// 助手工具开关的标签（画布 13，ui-m1 2a 第 18 条 g ②）。
 pub fn tool_group(g: pb::ToolGroup) -> &'static str {
     match g {
-        pb::ToolGroup::ReadAndSearch => "读取与搜索",
+        pb::ToolGroup::ReadAndSearch => "读文件与搜索",
         pb::ToolGroup::EditFiles => "编辑文件",
-        pb::ToolGroup::RunCommands => "运行命令",
-        pb::ToolGroup::Web => "联网",
+        pb::ToolGroup::RunCommands => "执行命令",
+        pb::ToolGroup::Web => "网页抓取与搜索",
         pb::ToolGroup::Unspecified => "",
     }
 }
@@ -598,6 +599,27 @@ mod badge_tests {
             t(pending_badge(250)),
             Some(("99+".into(), "250 项待你处理".into()))
         );
+    }
+}
+
+#[cfg(test)]
+mod tool_group_tests {
+    use super::tool_group;
+    use iwork_proto::pb::ToolGroup as G;
+
+    /// 助手工具开关的标签照画布 13（ui-m1 2a 第 18 条 g ②）。不用「联网」：那是审批与沙箱里「联网不受控」
+    /// 的说法，这里管的只是 Agent 能不能调网页抓取与搜索两个工具。
+    #[test]
+    fn labels_follow_canvas_13() {
+        let labels: Vec<_> = [G::ReadAndSearch, G::EditFiles, G::RunCommands, G::Web]
+            .into_iter()
+            .map(tool_group)
+            .collect();
+        assert_eq!(
+            labels,
+            ["读文件与搜索", "编辑文件", "执行命令", "网页抓取与搜索"]
+        );
+        assert!(labels.iter().all(|l| !l.contains("联网")), "{labels:?}");
     }
 }
 
