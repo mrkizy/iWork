@@ -116,7 +116,7 @@ impl World {
                 .collect();
             (!found.is_empty()).then(|| found[usize::from(b) % found.len()])
         };
-        match op % 9 {
+        match op % OPS {
             0 => {
                 let n = self.fresh();
                 let text = format!("问题 {n}\n第二行");
@@ -240,7 +240,7 @@ impl World {
                     self.turns[i].approval = None;
                 }
             }
-            _ => {
+            8 => {
                 if let Some(i) = pick(self, |s| s == TurnState::Running) {
                     let t = &self.turns[i];
                     let (to, reason) = if b % 3 == 0 {
@@ -268,9 +268,65 @@ impl World {
                     self.turns[i].state = to;
                 }
             }
+            // 跑着的回合中断（进程丢失）：时间线上出继续卡片，没有结束行
+            9 => {
+                if let Some(i) = pick(self, |s| s == TurnState::Running) {
+                    let to = TurnState::Interrupted {
+                        reason: iwork_domain::turn::InterruptReason::Crash,
+                    };
+                    let e = Self::change(&self.turns[i], to, None);
+                    self.commit(vec![e]);
+                    self.turns[i].state = to;
+                }
+            }
+            // 中断的回合续接，或者放弃（收成已取消，有结束事件）
+            _ => {
+                if let Some(i) = pick(self, |s| matches!(s, TurnState::Interrupted { .. })) {
+                    let t = &self.turns[i];
+                    if b % 2 == 0 {
+                        let e = Self::change(t, TurnState::Running, None);
+                        self.commit(vec![e]);
+                        self.turns[i].state = TurnState::Running;
+                    } else {
+                        let e = vec![
+                            Self::change(t, TurnState::Cancelled, None),
+                            TurnFinished {
+                                conversation_id: Some(cid(t.conv)),
+                                turn_id: tid(t.id),
+                                state: TurnState::Cancelled,
+                                usage: Default::default(),
+                                celebrate: false,
+                                change_summary: None,
+                            }
+                            .into(),
+                        ];
+                        self.commit(e);
+                        self.turns[i].state = TurnState::Cancelled;
+                    }
+                }
+            }
         }
     }
 }
+
+impl World {
+    /// 把还在跑的回合都中断掉（进程丢失）：场景结束时留下停在中断的回合。
+    fn interrupt_running(&mut self) {
+        let to = TurnState::Interrupted {
+            reason: iwork_domain::turn::InterruptReason::Crash,
+        };
+        for i in 0..self.turns.len() {
+            if self.turns[i].state == TurnState::Running {
+                let e = Self::change(&self.turns[i], to, None);
+                self.commit(vec![e]);
+                self.turns[i].state = to;
+            }
+        }
+    }
+}
+
+/// 操作的种类数（`World::step` 的 `match`）。
+const OPS: u8 = 11;
 
 fn read(store: &Store) -> Arc<SqliteReadModel<ProtoEventCodec>> {
     Arc::new(read_model(store))
@@ -297,7 +353,7 @@ fn snapshot_parts_share_one_seq() {
     let env = Env::new();
     let mut w = World::new(&env);
     for i in 0..20u8 {
-        w.step(i % 9, i, i / 3);
+        w.step(i % OPS, i, i / 3);
     }
     let snaps = ReadSnapshots::new(read(&w.store));
     let scopes = [
@@ -518,7 +574,7 @@ proptest! {
     /// S2：任意时刻的会话快照 + 之后路由到会话范围的事件 = 最后直接取的快照。
     #[test]
     fn snapshot_plus_events_equals_later_snapshot(
-        ops in proptest::collection::vec((0u8..9, any::<u8>(), any::<u8>()), 1..40),
+        ops in proptest::collection::vec((0..OPS, any::<u8>(), any::<u8>()), 1..40),
         cut in 0usize..40,
         which in 0usize..2,
     ) {
@@ -554,10 +610,13 @@ proptest! {
 /// 假后台和真后台已登记的差异抹平（回报里逐条说明）：
 /// - 时间戳：假后台全用信封时间造，真后台用各实体自己的时间；
 /// - 列表顺序：假后台按 id，真后台按排序字段；两边都按身份排序后比；
-/// - 还在跑的回合的状态说明：真后台只给停下来的回合取（见 `views.rs` 的 `state_reason`）。
+/// - 还在跑的回合的状态说明：真后台只给停下来的回合取（见 `views.rs` 的 `state_reason`）；
+/// - 未读数：真存储的投影按「发给用户的消息、待处理卡片」两类事件累加（中断进入时计一次，之后续接了也不减），
+///   假后台按现在还待处理的项重算。口径归存储投影，不在这次的查询里改（回报交 supervisor）。
 fn normalize(mut g: pb::GetConversationResult) -> pb::GetConversationResult {
     if let Some(c) = g.conversation.as_mut() {
         c.updated_at = None;
+        c.unread = 0;
     }
     for m in &mut g.messages {
         m.created_at = None;
@@ -616,13 +675,28 @@ fn six_paging_ways_match_fake_daemon() {
     let env = Env::new();
     let mut w = World::new(&env);
     let mut runner = proptest::test_runner::TestRunner::deterministic();
-    let ops = proptest::collection::vec((0u8..9, any::<u8>(), any::<u8>()), 120)
+    let ops = proptest::collection::vec((0..OPS, any::<u8>(), any::<u8>()), 120)
         .new_tree(&mut runner)
         .unwrap()
         .current();
     for (op, a, b) in ops {
         w.step(op, a, b);
     }
+    w.interrupt_running();
+    // 对照：场景里有停在中断的回合（没有结束行、出继续卡片），也有放弃后收成已取消的、失败的
+    let count = |want: fn(TurnState) -> bool| w.turns.iter().filter(|t| want(t.state)).count();
+    assert!(
+        count(|s| matches!(s, TurnState::Interrupted { .. })) > 0,
+        "场景里没有中断的回合"
+    );
+    assert!(
+        count(|s| s == TurnState::Cancelled) > 0,
+        "场景里没有放弃的回合"
+    );
+    assert!(
+        count(|s| s == TurnState::Failed) > 0,
+        "场景里没有失败的回合"
+    );
     let (tables, head) = fake_tables(&w.store);
     let queries = Queries::new(read(&w.store));
     let mut compared = 0;
