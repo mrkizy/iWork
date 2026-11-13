@@ -189,3 +189,33 @@ async fn snapshot_after_reconnect_requeries_rules() {
     })
     .await;
 }
+
+/// 审查 g3 1/F-1：已有一份规则列表时重查失败（后台临时出错）：过期标记放回去，退避过后再查，故障解除就收敛。
+#[tokio::test(flavor = "multi_thread")]
+async fn rules_requery_retries_after_transient_failure() {
+    let (d, app, mut web, _dir) = connect_settings("empty").await;
+    until(&app, &mut web, "规则列表查过了（空）", |s| {
+        s.settings.as_ref().is_some_and(|v| !v.rules_loading)
+    })
+    .await;
+    d.fail_queries(Some(Box::new(|q| {
+        matches!(q.kind, Some(pb::query::Kind::ListRules(_)))
+    })));
+    d.append(f::remembered_rule(
+        "r-new",
+        "执行 `ls` 不再问",
+        pb::scope::Kind::Global(pb::GlobalScope {}),
+    ));
+    until(&app, &mut web, "重查失败、显示提示", |s| {
+        s.connection
+            .as_ref()
+            .is_some_and(|v| v.query_notice.is_some())
+    })
+    .await;
+    assert!(ids(&web.state).is_empty(), "对照：失败时还是旧列表");
+    d.fail_queries(None);
+    until(&app, &mut web, "退避过后重查到新规则", |s| {
+        ids(s) == ["r-new"]
+    })
+    .await;
+}

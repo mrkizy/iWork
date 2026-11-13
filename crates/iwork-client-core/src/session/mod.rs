@@ -1018,6 +1018,10 @@ impl<D: Dialer> Session<D> {
                     if matches!(p, QueryPurpose::OlderPage { .. }) {
                         self.want_older = false;
                     }
+                    // 发出时清掉的过期标记放回去：退避过后再查（审查 g3 1/F-1）
+                    if p == QueryPurpose::Rules {
+                        self.store.rules_stale = true;
+                    }
                     self.query_failed(purpose_kind(&p));
                 }
             }
@@ -1394,6 +1398,10 @@ impl<D: Dialer> Session<D> {
         self.presence_due = None;
         self.open_target_in_flight = false;
         self.incoming = None;
+        // 断线丢掉的规则重查：过期标记放回去，重连后再查（重连没走快照时不会有别的东西替它标）
+        if self.queries.values().any(|p| *p == QueryPurpose::Rules) {
+            self.store.rules_stale = true;
+        }
         self.queries.clear();
         // 查询退避属于出错的那条连接：新连接从头来（审查 2/F-3）。
         self.query_backoff.clear();
