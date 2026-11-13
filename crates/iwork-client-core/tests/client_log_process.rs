@@ -5,7 +5,11 @@
 //! 顺序先 `logging::init()`，再用桌面客户端的真拨号器（`AppDialer<DesktopParts>`，`dev` 构建下是只连不拉的
 //! `DirectDialer`）连当前用户的默认端点。占着端点的是父进程（测试二进制，不在任何安装清单里），客户端判定它不可信。
 //! Tauri 壳本身要开窗口，不在这里起；壳里「先装日志、后拨号」的顺序由 main.rs 第一行保证。
+//!
+//! 另一条（审查 1/F-1）：客户端日志落盘以后，失败路径不许把用户的输入（搜索词）和后台给的说明文字写进 `client.log`。
 #![cfg(unix)]
+
+mod support;
 
 use std::os::unix::net::UnixListener;
 use std::path::Path;
@@ -15,6 +19,14 @@ use iwork_client_core::{AppDialer, DesktopParts, Dialer};
 use iwork_ipc::transport::Endpoint;
 
 const CHILD_ENV: &str = "IWORK_CLIENT_LOG_CHILD";
+const PRIVACY_CHILD_ENV: &str = "IWORK_CLIENT_LOG_PRIVACY_CHILD";
+/// 虚构的搜索词：只会出现在对话列表的筛选里。
+const SEARCH_CANARY: &str = "CANARY-搜索-7c1d93";
+/// 假后台拒绝命令、查询时给的说明文字的开头（`iwork-fake-daemon` 里写死的）：后台的说明文字可能带路径，不许落盘。
+const SERVER_MESSAGE: &str = "假后台：按测试设定";
+/// 两条失败路径真的走过了的日志字样（对照）。
+const QUERY_FAILED_LINE: &str = "视图查询失败";
+const PRESENCE_REJECTED_LINE: &str = "报在看哪";
 
 /// 子进程：装日志、拨一次号、打印结果后退出（日志在退出前排空）。
 #[test]
@@ -119,4 +131,116 @@ fn client_log_records_peer_rejected_by_client() {
     );
     // 对照：IWORK_LOG=off 生效，审计以外一行都没有
     assert_eq!(audits.len(), lines.len(), "{log}");
+}
+
+/// 子进程：装日志（`IWORK_LOG=debug`），连假后台；对话列表用虚构的搜索词筛选、且这条查询必出错；在看哪的命令一律被拒。
+/// 等两条失败都进了日志才退出。
+#[test]
+fn privacy_child() {
+    if std::env::var_os(PRIVACY_CHILD_ENV).is_none() {
+        return;
+    }
+    use iwork_client_core::{App, DirectDialer, Options, ShellEvent};
+    use iwork_fake_daemon::{FakeDaemon, scenario, self_trusting_identity};
+    use iwork_proto::pb;
+    use std::time::{Duration, Instant};
+
+    let _log = iwork_client_core::logging::init();
+    let log_file = std::path::PathBuf::from(std::env::var_os("IWORK_DATA_DIR").unwrap())
+        .join("logs/client.log");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let dir = tempfile::Builder::new()
+            .prefix("iwp-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let d = FakeDaemon::start(dir.path().join("d.sock")).await.unwrap();
+        d.run_scenario("conversation-basic").await.unwrap();
+        d.fail_queries(Some(Box::new(|q: &pb::Query| {
+            matches!(&q.kind, Some(pb::query::Kind::ListConversations(l))
+                if l.title_contains.as_deref() == Some(SEARCH_CANARY))
+        })));
+        d.fail_commands(Some(Box::new(|c: &pb::Command| {
+            matches!(c.kind, Some(pb::command::Kind::ReportPresence(_)))
+        })));
+        let dialer = DirectDialer::new(d.endpoint(), self_trusting_identity().unwrap(), "test");
+        let (app, effects) = App::start(dialer, Options::default());
+        std::mem::forget(effects);
+        let mut web = support::web::Web::new(app.attach().await.unwrap());
+        app.intent(pb::UiIntent {
+            kind: Some(pb::ui_intent::Kind::SetVisible(pb::SetVisible {
+                sidebar: true,
+                conversation_list: Some(pb::ConversationListQuery {
+                    project_id: scenario::PROJECT.into(),
+                    filter: SEARCH_CANARY.into(),
+                }),
+                ..Default::default()
+            })),
+        })
+        .await;
+        app.shell(ShellEvent::Focused(true));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Ok(Ok(c)) =
+                tokio::time::timeout(Duration::from_millis(300), app.next_frame(web.request()))
+                    .await
+            {
+                web.accept(&c);
+            }
+            iwork_client_core::logging::flush_global();
+            let log = std::fs::read_to_string(&log_file).unwrap_or_default();
+            if log.contains(QUERY_FAILED_LINE) && log.contains(PRESENCE_REJECTED_LINE) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "两条失败路径没都进日志：\n{log}");
+        }
+    });
+}
+
+/// 审查 1/F-1：对话列表的搜索词、后台的说明文字不落盘；失败本身照样记（对照）。
+#[test]
+fn client_log_keeps_user_text_out() {
+    let tmp = tempfile::Builder::new()
+        .prefix("iwc-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let data = tmp.path().join("data");
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args(["privacy_child", "--exact", "--nocapture"])
+        .env(PRIVACY_CHILD_ENV, "1")
+        .env("IWORK_DATA_DIR", &data)
+        // 连 debug 一起开：调试级别的日志也会落盘
+        .env("IWORK_LOG", "debug")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = std::fs::read_to_string(data.join("logs/client.log")).unwrap();
+    assert!(
+        log.contains(QUERY_FAILED_LINE),
+        "对照：查询失败记了：\n{log}"
+    );
+    assert!(
+        log.contains(PRESENCE_REJECTED_LINE),
+        "对照：命令被拒记了：\n{log}"
+    );
+    let leaks: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains(SEARCH_CANARY) || l.contains(SERVER_MESSAGE))
+        .collect();
+    assert!(
+        leaks.is_empty(),
+        "client.log 里有用户输入或后台说明文字：\n{}",
+        leaks.join("\n")
+    );
 }

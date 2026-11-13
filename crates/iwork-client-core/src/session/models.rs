@@ -5,7 +5,7 @@ use iwork_ipc::client::ClientError;
 use iwork_proto::pb;
 use tokio::time::Instant;
 
-use super::{Internal, Session};
+use super::{Internal, Session, log_fields};
 use crate::derive::conversation::menu_runtime;
 use crate::session::dial::Dialer;
 
@@ -41,12 +41,19 @@ impl<D: Dialer> Session<D> {
                         kind: Some(pb::query_result::Kind::ListModels(m)),
                         ..
                     })) => Ok(m),
-                    Some(pb::response::Body::Error(e)) => Err(Some(e.message)),
-                    other => Err(Some(format!("ListModels 的回包不对：{other:?}"))),
+                    // 原因进日志：只留错误码与回包种类，不留后台的说明文字和回包内容（log_fields）
+                    Some(pb::response::Body::Error(e)) => Err(Some(format!(
+                        "server:{}",
+                        log_fields::error_code_name(e.code)
+                    ))),
+                    other => Err(Some(format!(
+                        "ListModels 的回包不对：{}",
+                        log_fields::response(other.as_ref())
+                    ))),
                 },
                 // 连接断了：不算失败，重新 Live 后照常再取。
                 Err(ClientError::Closed) => Err(None),
-                Err(e) => Err(Some(e.to_string())),
+                Err(e) => Err(Some(log_fields::client_error(&e))),
             };
             let _ = tx.send(Internal::ModelsLoaded {
                 epoch,

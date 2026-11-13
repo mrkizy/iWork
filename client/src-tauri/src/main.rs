@@ -89,7 +89,8 @@ fn main_window<'a, M: Manager<tauri::Wry>>(m: &'a M) -> WebviewWindowBuilder<'a,
         .on_navigation(|url| {
             let ok = is_app_origin(url);
             if !ok {
-                tracing::warn!(target: "iwork_client", %url, "主窗口导航到别的来源，已拦下");
+                // 只记来源（协议 + 主机 + 端口）：路径与查询串里可能有用户内容
+                tracing::warn!(target: "iwork_client", origin = %url.origin().ascii_serialization(), "主窗口导航到别的来源，已拦下");
             }
             ok
         })

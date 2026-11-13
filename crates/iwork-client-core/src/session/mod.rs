@@ -8,6 +8,7 @@
 
 mod attention;
 pub mod dial;
+pub(crate) mod log_fields;
 mod models;
 mod presence;
 pub mod reconnect;
@@ -773,13 +774,13 @@ impl<D: Dialer> Session<D> {
                 tokio::spawn(async move {
                     let error = match rx.await {
                         Ok(Ok(())) | Ok(Err(ClientError::Closed)) | Err(_) => return,
-                        Ok(Err(e)) => e.to_string(),
+                        Ok(Err(e)) => log_fields::client_error(&e),
                     };
                     let _ = tx.send(Internal::SubscribeFailed { epoch, id, error });
                 });
             }
             Err(e) => {
-                tracing::debug!(target: "iwork_client", id, error = %e, "订阅没写出去，连接已关，重连时一起订");
+                tracing::debug!(target: "iwork_client", id, error = %log_fields::client_error(&e), "订阅没写出去，连接已关，重连时一起订");
             }
         }
     }
@@ -936,7 +937,7 @@ impl<D: Dialer> Session<D> {
                     return;
                 }
                 if let Some(p) = self.queries.remove(&request_id) {
-                    tracing::warn!(target: "iwork_client", request_id, purpose = ?p, "视图查询失败，退避后重发");
+                    tracing::warn!(target: "iwork_client", request_id, purpose = purpose_kind(&p), "视图查询失败，退避后重发");
                     // 属于某一轮摘要重查的查询（四张表与列表页那一条）失败：这一轮作废，标记还在，整轮重发
                     // （审查 2/F-2：列表那一条原来不走这一支，这一轮永远走不完、摘要从此停更）。
                     if matches!(
@@ -993,7 +994,9 @@ impl<D: Dialer> Session<D> {
                     }
                 });
             }
-            Err(e) => tracing::debug!(target: "iwork_client", error = %e, "视图查询没发出去"),
+            Err(e) => {
+                tracing::debug!(target: "iwork_client", error = %log_fields::client_error(&e), "视图查询没发出去")
+            }
         }
     }
 
@@ -1355,7 +1358,7 @@ impl<D: Dialer> Session<D> {
                 self.store.apply(Item::Subscribed(subscribed))
             }
             IncomingItem::ServerError(e) => {
-                tracing::warn!(target: "iwork_client", code = e.code, message = %e.message, "后台服务主动报错");
+                tracing::warn!(target: "iwork_client", code = %log_fields::error_code_name(e.code), "后台服务主动报错");
                 return;
             }
             IncomingItem::Closed(reason) => {
@@ -1463,15 +1466,8 @@ fn response_error(r: &pb::Response) -> Option<pb::IntentError> {
 
 /// 后台的错误原样给网页（R6：后台给的文字原样用）；错误码转成小写名。
 pub fn server_error(e: &pb::Error) -> pb::IntentError {
-    let code = pb::ErrorCode::try_from(e.code)
-        .map(|c| {
-            c.as_str_name()
-                .trim_start_matches("ERROR_CODE_")
-                .to_ascii_lowercase()
-        })
-        .unwrap_or_else(|_| format!("code_{}", e.code));
     pb::IntentError {
-        code,
+        code: log_fields::error_code_name(e.code),
         message: e.message.clone(),
         retryable: e.retryable,
     }
