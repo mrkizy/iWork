@@ -29,6 +29,7 @@ async fn main() {
     }
     // ACP 连接结束（后台没了或关了我们），CLI 已经收拾过：最后对自己的进程组发 SIGKILL，连自己一起，
     // CLI 直接起的、还留在组里的进程也一起结束（5.4a 第 5 条第二种）。不是组长时不发，免得杀到别人的组
+    tracing::debug!("DEBUG-TEMP main: serve returned, killpg");
     if leader {
         // SAFETY: killpg 只读两个整数参数；组号是自己的进程号
         unsafe { libc::killpg(libc::getpid(), libc::SIGKILL) };
@@ -80,6 +81,20 @@ fn init_logging() {
         .as_deref()
         .and_then(|v| v.parse::<tracing::Level>().ok())
         .unwrap_or(tracing::Level::INFO);
+    // DEBUG-TEMP: 文件日志
+    if let Some(dir) = std::env::var_os("IWORK_BRIDGE_DEBUG_DIR") {
+        let path = std::path::Path::new(&dir).join(format!("{}.log", std::process::id()));
+        let f = std::fs::File::create(path).unwrap();
+        tracing_subscriber::fmt()
+            .with_writer(std::sync::Mutex::new(f))
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .init();
+        std::panic::set_hook(Box::new(|info| {
+            tracing::error!(%info, "DEBUG-TEMP panic");
+        }));
+        return;
+    }
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)

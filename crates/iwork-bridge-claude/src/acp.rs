@@ -353,6 +353,7 @@ where
         let _ = stopped.wait_for(|s| *s).await;
         tokio::time::sleep(TEARDOWN_WAIT).await;
     };
+    tracing::debug!("DEBUG-TEMP serve: connection running");
     let ended = tokio::select! {
         r = &mut connection => Some(r),
         () = teardown_due => None,
@@ -369,11 +370,14 @@ where
     };
     // 连接没了：后台没了或者关了我们。会话还在跑就让它收摊、把 CLI 停放好，再自己收拾（尽力而为）
     let running = slot.lock().expect("锁没有中毒").commands.take().is_some();
+    tracing::debug!(running, "DEBUG-TEMP serve: connection ended");
     if running {
         let mut stopped = slot.lock().expect("锁没有中毒").stopped.subscribe();
         let _ = stopped.wait_for(|s| *s).await;
+        tracing::debug!("DEBUG-TEMP serve: stopped");
     }
     terminate_parked(&slot).await;
+    tracing::debug!("DEBUG-TEMP serve: parked terminated");
     result.map_err(|e| format!("ACP 连接出错：{e}"))
 }
 
@@ -478,6 +482,7 @@ async fn open(
         system_prompt,
         start,
     };
+    tracing::debug!("DEBUG-TEMP open: startup begins");
     let mut session = startup::open(OpenRequest {
         data_dir: &config.data_dir,
         setup: &setup,
@@ -491,6 +496,7 @@ async fn open(
         tracing::warn!(code = e.code(), error = %e, "开会话失败");
         SessionFatal::from(e).to_error()
     })?;
+    tracing::debug!("DEBUG-TEMP open: startup done");
     let expect = SessionExpect {
         plugin_dirs: setup.plugin_dirs.clone(),
         memory_dir: session.dir.files().memory,
@@ -519,8 +525,10 @@ async fn open(
     slot.lock().expect("锁没有中毒").commands = Some(tx);
     let owner = Arc::clone(slot);
     // 不挂在连接上（`tokio::spawn`）：连接断了它还要接着跑完收摊，把 CLI 停放好，再由 `serve_with` 收拾
+    tracing::debug!("DEBUG-TEMP open: session task spawning");
     tokio::spawn(async move {
         let (ended, cli) = run_session(worker, session, rx).await;
+        tracing::debug!(fatal = ended.is_some(), "DEBUG-TEMP session task ended");
         let mut slot = owner.lock().expect("锁没有中毒");
         slot.commands = None;
         slot.ended = ended;
