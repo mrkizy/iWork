@@ -473,6 +473,65 @@ mod tests {
         assert_eq!(excerpt(&flag.repeat(201)), flag.repeat(200));
     }
 
+    fn facts(n: u128, title_text: &str) -> ConversationFacts {
+        use iwork_domain::conversation::{Conversation, ConversationKind, ConversationState};
+        use iwork_domain::id::RawUlid;
+        ConversationFacts {
+            conversation: Conversation {
+                id: ConversationId::from_raw(RawUlid::from_u128(n)),
+                kind: ConversationKind::Project {
+                    project_id: ProjectId::from_raw(RawUlid::from_u128(1)),
+                },
+                state: ConversationState::Active,
+                last_read_seq: Seq(0),
+                model_override: None,
+                approval_mode: None,
+                updated_at: iwork_domain::common::Timestamp(0),
+            },
+            unread: 0,
+            dm_assistant_name: None,
+            first_user_message: Some(iwork_ports::read_model::FirstUserMessage {
+                body: inline(title_text),
+                first_attachment_name: None,
+            }),
+            last_turn_state: None,
+            last_message_body: None,
+        }
+    }
+
+    /// G8：标题筛选不区分大小写、在游标之后取 limit 条、`has_more` 照实；游标不在筛过的列表里拒绝。
+    #[test]
+    fn list_conversations_filters_then_pages() {
+        let all: Vec<_> = (1..=5)
+            .map(|n| facts(n, if n % 2 == 1 { "Fix Bug" } else { "写文档" }))
+            .collect();
+        let ids = |r: &pb::ListConversationsResult| -> Vec<String> {
+            r.conversations.iter().map(|c| c.id.clone()).collect()
+        };
+        let id = |n: usize| all[n - 1].conversation.id.to_string();
+        let q = |title: Option<&str>, before: Option<String>, limit| pb::ListConversations {
+            project_id: None,
+            title_contains: title.map(str::to_owned),
+            before,
+            limit,
+        };
+        let r = list_conversations(&all, &q(None, None, 0)).unwrap();
+        assert_eq!(
+            ids(&r),
+            (1..=5).map(id).collect::<Vec<_>>(),
+            "不分页取全部，顺序不变"
+        );
+        assert!(!r.has_more);
+        let r = list_conversations(&all, &q(Some("fix"), None, 2)).unwrap();
+        assert_eq!(ids(&r), [id(1), id(3)]);
+        assert!(r.has_more);
+        let r = list_conversations(&all, &q(Some("FIX"), Some(id(3)), 2)).unwrap();
+        assert_eq!(ids(&r), [id(5)]);
+        assert!(!r.has_more);
+        let e = list_conversations(&all, &q(Some("fix"), Some(id(2)), 2)).unwrap_err();
+        assert_eq!(e.details["field"], "before", "游标对话被筛掉了");
+    }
+
     #[test]
     fn first_line_skips_blank_lines() {
         assert_eq!(first_line(&inline("\n  \n  你好 \n世界")), "你好");

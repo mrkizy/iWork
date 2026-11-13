@@ -434,6 +434,35 @@ fn snapshot_parts_share_one_seq() {
     assert!(checked >= 5);
 }
 
+/// Q1：单条视图查询的 `seq` 是它那个读事务看到的 head；查询不提交（head 不动）。
+#[test]
+fn query_seq_is_transaction_head() {
+    let env = Env::new();
+    let mut w = World::new(&env);
+    for i in 0..12u8 {
+        w.step(i % OPS, i, i);
+    }
+    let head = block(w.store.head_seq()).unwrap().0;
+    let q = Queries::new(read(&w.store));
+    for kind in [
+        get(10, |_| {}),
+        Q::ListPendingItems(pb::ListPendingItems {}),
+        Q::ListConversations(pb::ListConversations::default()),
+        Q::ListAnchors(pb::ListAnchors {
+            conversation_id: cid(10).to_string(),
+            around_seq: 0,
+            before: 5,
+            after: 5,
+        }),
+    ] {
+        assert_eq!(real_answer(&q, kind.clone()).unwrap().seq, head, "{kind:?}");
+    }
+    assert_eq!(block(w.store.head_seq()).unwrap().0, head, "查询不提交");
+    // 没接的查询回「未接入」
+    let e = real_answer(&q, Q::ListModels(pb::ListModels::default())).unwrap_err();
+    assert_eq!(e.code, i32::from(pb::ErrorCode::Unavailable));
+}
+
 // ---------- S2 ----------
 
 /// 时间线上的一行：排序字段与它现在的样子。独立于查询实现，只看协议字段与领域事件。
@@ -612,7 +641,8 @@ proptest! {
 /// - 列表顺序：假后台按 id，真后台按排序字段；两边都按身份排序后比；
 /// - 还在跑的回合的状态说明：真后台只给停下来的回合取（见 `views.rs` 的 `state_reason`）；
 /// - 未读数：真存储的投影按「发给用户的消息、待处理卡片」两类事件累加（中断进入时计一次，之后续接了也不减），
-///   假后台按现在还待处理的项重算。口径归存储投影，不在这次的查询里改（回报交 supervisor）。
+///   假后台按现在还待处理的项重算。技术设计 9.1 的口径是真存储这一种：假后台口径待改，见 STATUS
+///   （supervisor 2026-11-13 定，另排小卡在 T09 组 3 合入后改假后台并重录受影响的录像）。
 fn normalize(mut g: pb::GetConversationResult) -> pb::GetConversationResult {
     if let Some(c) = g.conversation.as_mut() {
         c.updated_at = None;
