@@ -9,7 +9,12 @@
 //! - I4 全部落定后，用户改过的每一项都落到了后台；后台的值是用户最后一次的值，除非别的写入方在用户那一次落地
 //!   之后又改了它（同一字段两边都改时，用户还没落定的改动胜出：它会以「最新配置 + 补丁」重放）；
 //!   用户的非法改动（空名字，后台校验拒）不落地、不重试、不把同一条命令里合法的改动拖下去（闸拆开逐个重放），
-//!   之后没有别的改动时页面拿到错误。
+//!   之后没有别的改动时页面拿到错误；
+//! - I5 页面上挂着「名字不能为空」时，用户最后一次改名字确实是改成空（被新的合法名字替代的旧拒绝不挂错误，
+//!   审查 g3 1/F-3）。
+//!
+//! 「已落定的字段被别的写入方改过、用户之后只改另一项，不把旧值盖回去」随机序列里 I3/I4 合起来证不到（I3 只看
+//! 用户从没碰过的字段，I4 碰到落定后的外部写就跳过），单独固定一条交错（`landed_field_changed_by_other_is_not_reverted`）。
 //!
 //! 对照（证明测试有牙）：不加闸的写法（每次改动立刻拿摘要的版本与整份配置发出去）必须被抓到。
 
@@ -198,6 +203,8 @@ struct World {
     user_edited: Vec<FieldKey>,
     conflicts: usize,
     bad_name_pending: bool,
+    /// 用户最后一次改名字是改成空。
+    name_bad: bool,
 }
 
 impl World {
@@ -227,6 +234,7 @@ impl World {
             user_edited: Vec::new(),
             conflicts: 0,
             bad_name_pending: false,
+            name_bad: false,
         }
     }
 
@@ -315,12 +323,16 @@ fn step(w: &mut World, s: &mut dyn Saver, op: &Op) -> Result<(), TestCaseError> 
             w.user_last.insert(f.key(), (f.clone(), w.time, None));
             // 任何一次合法改动都清掉上一次的错误
             w.bad_name_pending = false;
+            if f.key() == FieldKey::Name {
+                w.name_bad = false;
+            }
             let out = s.edit(f, w.base());
             w.send(out);
         }
         Op::BadName => {
             // 空名字把之前没落定的名字改动也替换掉了：名字这一项不再有期望值
             w.bad_name_pending = true;
+            w.name_bad = true;
             w.user_edited.push(FieldKey::Name);
             w.user_last.remove(&FieldKey::Name);
             let out = s.edit(Field::Name("  ".into()), w.base());
@@ -390,6 +402,10 @@ fn run(s: &mut dyn Saver, ops: &[Op], with_other: bool) -> Result<(), TestCaseEr
     }
     if w.bad_name_pending {
         prop_assert!(s.error(), "空名字被后台拒了，页面却没拿到错误");
+    }
+    // I5
+    if s.error() {
+        prop_assert!(w.name_bad, "空名字已被合法名字替代，页面还挂着旧错误");
     }
     prop_assert!(!w.config.name.trim().is_empty(), "空名字写进了后台");
     Ok(())
@@ -525,5 +541,72 @@ fn idle_step_does_not_mark_assistant_page_dirty() {
     assert!(
         store.dirty.views.contains(&ViewKey::Assistant),
         "落定：标脏"
+    );
+}
+
+/// 审查 g3 1/F-3（复现原样）：空名字在途时改成合法的 B；空名字被拒、B 保存成功后，页面不挂旧错误。
+#[test]
+fn superseded_invalid_name_leaves_no_error() {
+    use Op::*;
+    pinned(vec![BadName, User(0, 1), Process, Reply], false);
+    let mut gate = AssistantEdits::default();
+    let old = pb::AssistantConfig {
+        name: "A".into(),
+        ..Default::default()
+    };
+    let base = Base {
+        version: 1,
+        config: &old,
+    };
+    assert!(gate.edit(ID, Field::Name("".into()), Some(base)).is_some());
+    assert!(gate.edit(ID, Field::Name("B".into()), Some(base)).is_none());
+    let next = gate
+        .rejected(ID, false, "名字不能为空", Some(base))
+        .unwrap();
+    assert_eq!(next.config.name, "B");
+    assert!(gate.accepted(ID, Some(base)).is_none());
+    let saved = Base {
+        version: 2,
+        config: &next.config,
+    };
+    assert!(gate.observed(ID, Some(saved)).is_none());
+    assert_eq!(gate.busy().count(), 0);
+    assert_eq!(gate.error(ID), None, "B 已保存：不挂空名字的错误");
+}
+
+/// 审查 g3 附注：提示词落定后别的写入方改了它；用户随后只改模型（摘要还没追上，发出去版本冲突）。重放用后台最新的
+/// 配置叠模型这一项，别人的提示词留着，不被盖回用户旧的值。
+#[test]
+fn landed_field_changed_by_other_is_not_reverted() {
+    use Op::*;
+    let mut w = World::new();
+    let mut s = Gate(AssistantEdits::default());
+    for op in [
+        User(1, 0),
+        Process,
+        Reply,
+        Refresh,
+        Other(1, 1),
+        User(2, 1),
+        Process,
+        Reply,
+        Refresh,
+        Process,
+        Reply,
+        Refresh,
+    ] {
+        step(&mut w, &mut s, &op).unwrap();
+    }
+    assert_eq!(w.conflicts, 1, "对照：中间确实冲突过一次");
+    assert!(w.unreplied.is_empty() && w.to_backend.is_empty());
+    assert_eq!(
+        read(&w.config, FieldKey::Prompt),
+        field(1, 1),
+        "别人的提示词留着"
+    );
+    assert_eq!(
+        read(&w.config, FieldKey::Model),
+        field(2, 1),
+        "用户的模型落地了"
     );
 }

@@ -158,8 +158,15 @@ impl AssistantEdits {
             // 分不出是哪一项：拆开逐个重放
             slot.one_at_a_time = true;
         } else {
+            // 错误归被拒的那次改动：在途期间用户又改了这一项，被拒的已经不是页面上的值，不挂它的错误（审查 g3 1/F-3）
+            let still_shown = flight
+                .fields
+                .iter()
+                .any(|(k, (n, _))| slot.unsettled.get(k).map(|(m, _)| m) == Some(n));
             settle(&mut slot.unsettled, &flight.fields);
-            slot.error = Some(message.to_owned());
+            if still_shown {
+                slot.error = Some(message.to_owned());
+            }
         }
         self.progress(id, base)
     }
@@ -175,7 +182,7 @@ impl AssistantEdits {
         c
     }
 
-    /// 保存失败的说明（校验类错误）；下一次改动清掉。
+    /// 保存失败的说明（校验类错误）：只挂还显示在页面上的那次改动的；下一次改动清掉。
     pub fn error(&self, id: &str) -> Option<&str> {
         self.slots.get(id)?.error.as_deref()
     }
