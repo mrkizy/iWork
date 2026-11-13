@@ -406,7 +406,22 @@ async fn scan_failure_is_not_empty() {
     let before = tree.scope_copy();
     tree.fail_scans(true);
     assert!(!f.process.kill_tree_and_wait().await, "扫描没做成不报清空");
-    assert_eq!(tree.scope_copy(), before, "范围没变");
+    // clear() 到期时它的最后一遍可能还在阻塞线程里（已让在飞数加一、还没走到失败返回），或者还排着没开始：在飞数这时
+    // 可以是 1。它报错时守卫会减回去，所以在飞数很快回到 0；真漏减的话这里等不到（CI 43363982356 的那次失败就是在
+    // 这一刻比较了整个 Scope）
+    let started = std::time::Instant::now();
+    while tree.in_flight() != 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "在飞数 2 秒内回到 0（没有漏减）"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        tree.scope_copy().evidence(),
+        before.evidence(),
+        "范围（证据）没变"
+    );
     assert!(tree.holds_child(), "没回收");
     assert!(!f.process.tree_is_empty().unwrap(), "答「不空」");
     assert!(alive(f.root()) && alive(member), "一个信号都没发");

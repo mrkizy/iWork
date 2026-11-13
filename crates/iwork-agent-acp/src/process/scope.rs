@@ -178,6 +178,15 @@ impl Scope {
         self.in_flight = self.in_flight.saturating_sub(1);
     }
 
+    /// 测试用：只看证据的一份拷贝（在飞的遍数清零：它随迟到扫描的起落变，不是范围的内容）。
+    #[cfg(test)]
+    pub fn evidence(&self) -> Scope {
+        Scope {
+            in_flight: 0,
+            ..self.clone()
+        }
+    }
+
     /// 在飞的扫描有几遍（测试用）。
     #[cfg(test)]
     pub fn in_flight(&self) -> usize {
