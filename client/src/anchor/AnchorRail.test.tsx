@@ -121,6 +121,15 @@ describe.skipIf(noFixtures)("锚点导轨（宽形态，列表式）", () => {
     expect(a.jumps).toEqual([]);
   });
 
+  it("整个导轨一个 Tab 停点：导轨本身可聚焦，刻度与信息卡不进 Tab 顺序（列表里用方向键）", () => {
+    const { anchors, current } = fromScenario("anchors-unloaded");
+    const a = mount(anchors, current);
+    expect(a.rail.tabIndex).toBe(0);
+    fireEvent.mouseEnter(a.rail);
+    expect(a.ticks().every((t) => t.tabIndex === -1)).toBe(true);
+    expect(a.card()!.tabIndex).toBe(-1);
+  });
+
   it("键盘：↑ / ↓ 换一处预览，Enter 跳过去；⌥↑ / ⌥↓ 不在这里处理", () => {
     const { anchors, current } = fromScenario("anchors-unloaded");
     const a = mount(anchors, current);
@@ -173,6 +182,8 @@ describe.skipIf(noFixtures)("锚点导轨（宽形态，列表式）", () => {
     expect(a.rail.querySelector(".iw-anchor__more")).toBeNull();
     vi.advanceTimersByTime(LOADING_DOT_DELAY_MS);
     expect(a.rail.querySelector(".iw-anchor__more--start"), "300ms 还没到：顶端加载点").not.toBeNull();
+    expect(list.querySelector(".iw-anchor__more"), "加载点不在列表的流里（出现时刻度与信息卡不跳，UI g3b 1/F-1）").toBeNull();
+    expect(list.firstElementChild).toHaveClass("iw-tick");
     // 新列表：前面多了 20 条；原来顶上那一条还在顶上（往下挪了 20 条的距离）
     const extra = anchors.items.slice(0, 20).map((i, n) => ({ ...i, key: `earlier-${n}` }));
     a.setView(create(AnchorsViewSchema, { ...anchors, items: [...extra, ...anchors.items] }));

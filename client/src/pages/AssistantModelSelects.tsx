@@ -33,8 +33,9 @@ export function ModelSelects(props: { menu: ModelMenuView; value: ModelPick; onC
         >
           <For each={props.menu.runtimes}>
             {(r) => (
+              // 原生下拉的弹层里看不到 title：灰掉的选项把说明（如「M2 接入」）写进选项文字，和输入框菜单一样看得见
               <option value={r.value} disabled={!r.enabled} title={r.tip || undefined}>
-                {r.label}
+                {!r.enabled && r.tip ? `${r.label}（${r.tip}）` : r.label}
               </option>
             )}
           </For>

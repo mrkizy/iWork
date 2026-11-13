@@ -68,6 +68,8 @@ pub enum ClientAct {
     ShowAllConversations(&'static str),
     /// 打开添加项目弹窗，在选择框里选了这个文件夹（候选与检查结果进 AddProjectView）。
     PickProjectFolder(&'static str),
+    /// 定位到这一行（JumpToRow：从「待你处理」进来，或直接按行跳）：录下跳过去、高亮之后的样子。
+    JumpToRow(&'static str),
 }
 
 impl Scenario {
@@ -210,6 +212,15 @@ pub const REGISTRY: &[Scenario] = &[
         timeline_cap: None,
     },
     Scenario {
+        name: "anchors-jumped",
+        about: "消息锚点：跳到已载入的一处（第 85 轮），滚过去居中、高亮 1 秒（打开时回放）",
+        focus: Some("c-anchors-long"),
+        build: anchors_unloaded,
+        characters: &[],
+        client: &[ClientAct::JumpToRow("m-al085-u")],
+        timeline_cap: None,
+    },
+    Scenario {
         name: "anchors-short",
         about: "消息锚点：一屏看得完（组件不显示）",
         focus: Some("c-anchors-short"),
@@ -252,6 +263,18 @@ pub const REGISTRY: &[Scenario] = &[
         focus: Some("c-dm-asen"),
         characters: &[],
         client: &[ClientAct::ShowAssistant("as-asen")],
+        timeline_cap: None,
+    },
+    Scenario {
+        name: "pending-dm-old-card",
+        about: "从「待你处理」进助手私聊：阿森私聊里一张等你批准的旧卡片，后面还有 300 条消息；进来定位到卡片（ui-m1 2a 第 18 条 b）",
+        build: pending_dm_old_card,
+        focus: Some("c-dm-asen"),
+        characters: &[],
+        client: &[
+            ClientAct::ShowAssistant("as-asen"),
+            ClientAct::JumpToRow("ap-asen-old"),
+        ],
         timeline_cap: None,
     },
     Scenario {
@@ -1149,6 +1172,31 @@ fn assistant_profile() -> Vec<Step> {
         "原因是重试没有上限，失败会无限排队。我加了指数退避和 5 次上限。",
     )));
     s.push(a(f::turn_finished("t-asen", T::Completed, false, None)));
+    s
+}
+
+/// 阿森的私聊：先有一张等你批准的卡片，后面又发了 300 条（打开时卡片不在最新那一页里；最后 LIVE_TAIL 步在
+/// 定位之后才到，所以卡片之后要多于 LIVE_TAIL 步，录制时卡片才已经在）。
+fn pending_dm_old_card() -> Vec<Step> {
+    let (id, dm) = ("as-asen", "c-dm-asen");
+    let mut s = assistant_profile();
+    s.push(a(f::turn_queued("t-asen-old", dm, id)));
+    s.push(a(f::turn_state("t-asen-old", T::Queued, T::Running, None)));
+    s.push(a(f::approval(
+        "ap-asen-old",
+        dm,
+        "t-asen-old",
+        f::command_action("git push origin main"),
+        pb::ApprovalKind::Ask,
+        &[],
+    )));
+    for i in 0..300 {
+        s.push(a(f::user_message(
+            &format!("m-asen-pad-{i:03}"),
+            dm,
+            &format!("第 {i} 个小问题"),
+        )));
+    }
     s
 }
 

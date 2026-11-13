@@ -220,6 +220,13 @@ export function AnchorList(props: {
     <div class="iw-anchor__open">
       {/* 外框画边框与底色，里面的滚动区才渐隐：渐隐不能把外框也淡掉 */}
       <div class="iw-anchor__frame">
+        {/* 续载加载点画在外框的上下边缘，不占列表的流内高度：出现、消失时刻度与信息卡都不跳 */}
+        <Show when={loadingSide() === "start"}>
+          <i class="iw-anchor__more iw-anchor__more--start" aria-hidden="true" />
+        </Show>
+        <Show when={loadingSide() === "end"}>
+          <i class="iw-anchor__more iw-anchor__more--end" aria-hidden="true" />
+        </Show>
         <div
           ref={mount}
           class="iw-anchor__list"
@@ -231,9 +238,6 @@ export function AnchorList(props: {
           style={{ height: `${LIST_PAD * 2 + items().length * PITCH}px` }}
           onScroll={measure}
         >
-          <Show when={loadingSide() === "start"}>
-            <i class="iw-anchor__more iw-anchor__more--start" aria-hidden="true" />
-          </Show>
           <For each={items()}>
             {(a, i) => (
               <button
@@ -245,15 +249,14 @@ export function AnchorList(props: {
                 }}
                 aria-label={anchorLabel(a)}
                 aria-current={i() === props.browse.index() ? "true" : undefined}
+                // 整个导轨一个 Tab 停点（导轨本身）；列表里用方向键、Home / End、Enter
+                tabIndex={-1}
                 onMouseEnter={() => props.browse.preview(a.key)}
                 onFocus={() => props.browse.preview(a.key)}
                 onClick={() => props.onJump(a.key)}
               />
             )}
           </For>
-          <Show when={loadingSide() === "end"}>
-            <i class="iw-anchor__more iw-anchor__more--end" aria-hidden="true" />
-          </Show>
         </div>
       </div>
       <Show when={props.browse.previewed()}>
@@ -262,6 +265,7 @@ export function AnchorList(props: {
             type="button"
             class="iw-anchor__card"
             style={{ top: `${cardY()}px` }}
+            tabIndex={-1}
             aria-label={anchorLabel(a())}
             onClick={() => props.onJump(a().key)}
           >

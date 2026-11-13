@@ -77,6 +77,7 @@ mod unix {
         }
         let mut index: Vec<Entry> = Vec::new();
         let mut empty: Option<record::Recording> = None;
+        let mut unloaded: Option<record::Recording> = None;
         for s in picked {
             match timeout(SCENARIO_LIMIT, record::record(s, Options::default())).await {
                 Ok(Ok(rec)) => {
@@ -98,6 +99,8 @@ mod unix {
                     });
                     if s.name == "empty" {
                         empty = Some(rec);
+                    } else if s.name == "anchors-unloaded" {
+                        unloaded = Some(rec);
                     }
                 }
                 Ok(Err(e)) => {
@@ -127,6 +130,24 @@ mod unix {
                     opened: rec.opened,
                 });
             }
+        }
+        // 跳到没载入的一处、那一段还在取：假后台跑完就落地了，录不到这一刻，在 anchors-unloaded 后面接一帧
+        if names.is_empty()
+            && let Some(base) = &unloaded
+        {
+            let name = "anchors-jump-loading";
+            let rec = with_anchor_seeking(base);
+            if let Err(e) = write_recording(&out, name, &rec) {
+                eprintln!("合成录像 {name} 写不下来：{e}");
+                return ExitCode::FAILURE;
+            }
+            index.push(Entry {
+                name: name.to_owned(),
+                about: "消息锚点：点了没载入的最旧一处、那一段还在取（被点的刻度流光、顶端进度线、读屏句）；展开导轨看刻度"
+                    .to_owned(),
+                focus: Some("c-anchors-long"),
+                opened: rec.opened,
+            });
         }
         if let Err(e) = std::fs::write(out.join("index.json"), index_json(&index)) {
             eprintln!("写不了 index.json：{e}");
@@ -199,14 +220,56 @@ mod unix {
         ]
     }
 
+    /// 在锚点录像后面接一帧：锚点视图里正在跳第一处（jump_loading 与 jump_loading_key，同 derive::anchors 给的）。
+    fn with_anchor_seeking(base: &record::Recording) -> record::Recording {
+        use prost::Message as _;
+        let full = pb::ViewPatch::decode(base.full.as_slice()).expect("自己写的全量帧解得开");
+        let (conversation_id, mut anchors) = full
+            .changes
+            .iter()
+            .find_map(|c| match &c.change {
+                Some(pb::view_change::Change::Conversation(p)) => {
+                    Some((p.conversation_id.clone(), p.anchors.clone()?))
+                }
+                _ => None,
+            })
+            .expect("anchors-unloaded 的全量帧里有锚点");
+        anchors.jump_loading =
+            Some(iwork_client_core::derive::text::ANCHOR_JUMP_LOADING.to_owned());
+        anchors.jump_loading_key = anchors
+            .items
+            .first()
+            .map(|i| i.key.clone())
+            .unwrap_or_default();
+        append_change(
+            base,
+            pb::ViewChange {
+                change: Some(pb::view_change::Change::Conversation(
+                    pb::ConversationPatch {
+                        conversation_id,
+                        anchors: Some(anchors),
+                        ..Default::default()
+                    },
+                )),
+            },
+        )
+    }
+
     /// 在一份录像后面接一帧连接视图；全量帧里同样追加（网页按顺序应用，后来的盖住前面的）。
     fn with_connection(base: &record::Recording, view: &pb::ConnectionView) -> record::Recording {
+        append_change(
+            base,
+            pb::ViewChange {
+                change: Some(pb::view_change::Change::Connection(pb::ConnectionPatch {
+                    view: Some(view.clone()),
+                })),
+            },
+        )
+    }
+
+    /// 在一份录像后面接一帧（一个变化）；全量帧里同样追加（网页按顺序应用，后来的盖住前面的）。
+    fn append_change(base: &record::Recording, change: pb::ViewChange) -> record::Recording {
         use prost::Message as _;
-        let change = pb::ViewChange {
-            change: Some(pb::view_change::Change::Connection(pb::ConnectionPatch {
-                view: Some(view.clone()),
-            })),
-        };
         let patch = pb::ViewPatch {
             changes: vec![change.clone()],
             ..Default::default()

@@ -240,6 +240,19 @@ async fn client_act(
                 return Err(format!("SetVisible 被拒：{}", e.message));
             }
         }
+        ClientAct::JumpToRow(row) => {
+            let ack = app
+                .intent(pb::UiIntent {
+                    kind: Some(pb::ui_intent::Kind::JumpToRow(pb::JumpToRow {
+                        conversation_id: focus.into(),
+                        row_key: row.into(),
+                    })),
+                })
+                .await;
+            if let Some(e) = ack.error {
+                return Err(format!("JumpToRow 被拒：{}", e.message));
+            }
+        }
         ClientAct::DropOversized => {
             // 稀疏文件：只占目录项，不真写 21MB
             let path = dir.join("超过二十兆.bin");

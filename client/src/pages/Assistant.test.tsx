@@ -46,6 +46,18 @@ describe.skipIf(noFixtures)("助手主页", () => {
     }
   });
 
+  it("运行时下拉：还没接入的置灰，选项文字里看得见「M2 接入」（原生弹层看不到 title，UI g3b 1/F-2）", () => {
+    renderScenario("assistant-profile", route("config"));
+    const upcoming = profile().modelMenu!.runtimes.filter((r) => !r.enabled && r.tip);
+    expect(upcoming.length, "对照：有还没接入的").toBeGreaterThan(0);
+    const select = within(panel()).getByLabelText("运行时") as HTMLSelectElement;
+    for (const r of upcoming) {
+      const opt = [...select.options].find((o) => o.textContent?.startsWith(r.label))!;
+      expect(opt.disabled).toBe(true);
+      expect(opt.textContent).toBe(`${r.label}（${r.tip}）`);
+    }
+  });
+
   it("头像配色：8 个色块来自 patch，选中的标 aria-checked；点没选中的发令牌名，点选中的不发", () => {
     const { acts } = renderScenario("assistant-profile", route("config"));
     const opts = profile().avatarColors;
