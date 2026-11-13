@@ -37,11 +37,17 @@ export interface AnchorSource {
   onBrowseEdge: (latest: boolean) => void;
 }
 
-/** 翻看状态：展开时 `reset` 回到当前位置；`preview` 换预览处；`edge` 是 Home / End。 */
+/** 翻看状态：展开时 `reset` 回到当前位置；`preview` 换预览处（悬停）；按键换预览处并滚进视野。
+ *
+ * 列表滚动位置由谁定（优先级从高到低，见 AnchorList）：用户滚动列表 > 用户按键（↑ / ↓、Home / End，含 Home / End
+ * 等的那一头到了）把预览滚进视野 > 窗口替换按 key 还原 > 展开时居中当前位置。「滚进视野」只由按键触发，
+ * 不挂在「预览处变了」上：窗口替换也会让预览处变（旧的被裁掉），那不是用户换了预览。 */
 export function createAnchorBrowse(props: AnchorSource) {
   const [previewKey, setPreviewKey] = createSignal<string>();
-  // Home / End 请了重取、在等新列表的那一头
-  const [pendingEdge, setPendingEdge] = createSignal<"start" | "end">();
+  // Home / End 请了重取、在等新列表的那一头（普通变量：只在按键与新窗口到达时读写，不驱动渲染）
+  let pendingEdge: "start" | "end" | undefined;
+  // 列表挂上来时给：把第 i 条滚进视野
+  let reveal: ((i: number) => void) | undefined;
 
   const items = () => props.anchors.items;
   const indexOf = (key: string | undefined) => (key === undefined ? -1 : items().findIndex((a) => a.key === key));
@@ -55,41 +61,44 @@ export function createAnchorBrowse(props: AnchorSource) {
   const previewed = () => items()[index()];
 
   const moveTo = (i: number) => {
-    const a = items()[Math.max(0, Math.min(items().length - 1, i))];
-    if (a) setPreviewKey(a.key);
+    const at = Math.max(0, Math.min(items().length - 1, i));
+    const a = items()[at];
+    if (a === undefined) return;
+    setPreviewKey(a.key);
+    reveal?.(at);
   };
   const edge = (which: "start" | "end") => {
     const more = which === "start" ? props.anchors.hasBefore : props.anchors.hasAfter;
     if (!more) {
-      setPendingEdge(undefined);
+      pendingEdge = undefined;
       moveTo(which === "start" ? 0 : items().length - 1);
       return;
     }
-    setPendingEdge(which);
+    pendingEdge = which;
     props.onBrowseEdge(which === "end");
   };
-  // 等的那一头到了（那一侧没有更多了）：预览移到那一头
-  createEffect(
-    on(
-      () => props.anchors,
-      (a) => {
-        const want = pendingEdge();
-        if (want === "start" && !a.hasBefore) moveTo(0);
-        else if (want === "end" && !a.hasAfter) moveTo(a.items.length - 1);
-        else return;
-        setPendingEdge(undefined);
-      },
-    ),
-  );
 
   return {
     items,
     index,
     previewed,
+    previewKey,
+    /** 悬停换预览处（鼠标就在那一条上，不用滚）。 */
     preview: (key: string) => setPreviewKey(key),
+    setReveal: (f: ((i: number) => void) | undefined) => (reveal = f),
+    /** 新窗口到了：Home / End 等的那一头到了（那一侧没有更多了）就把预览移到那一头并滚进视野，返回真；
+     *  这是用户按键的结果，优先于按 key 还原。 */
+    landEdge(): boolean {
+      const a = props.anchors;
+      if (pendingEdge === "start" && !a.hasBefore) moveTo(0);
+      else if (pendingEdge === "end" && !a.hasAfter) moveTo(a.items.length - 1);
+      else return false;
+      pendingEdge = undefined;
+      return true;
+    },
     reset() {
       setPreviewKey(props.currentKey);
-      setPendingEdge(undefined);
+      pendingEdge = undefined;
     },
     /** 展开时的按键：↑ / ↓ 换一处，Home / End 到整个对话的头尾，Enter 跳到预览那一处。处理了返回真。 */
     onKey(e: KeyboardEvent, jump: (key: string) => void): boolean {
@@ -163,42 +172,41 @@ export function AnchorList(props: {
       measure();
     });
   };
-  // 新列表到了：按 key 对回原位，滚动位置不跳；加载点收掉
+  // 新列表到了（窗口替换）：Home / End 等的那一头到了就由它定位置；否则按顶上那条的 key 对回原位，滚动位置不跳。
+  // 旧的预览处被新窗口裁掉时，预览改到还原后顶上那一条（不回落到末项，也不因此居中）。加载点收掉。
   createEffect(
     on(
       () => props.anchors.items,
       (next) => {
         clearTimeout(loadingTimer);
         setLoadingSide(undefined);
-        const top = restoredScrollTop(
-          next.map((a) => a.key),
-          topKey,
-          topOffset,
-        );
+        if (props.browse.landEdge()) {
+          measure();
+          return;
+        }
+        const keys = next.map((a) => a.key);
+        const keptTop = topKey;
+        const top = restoredScrollTop(keys, keptTop, topOffset);
         if (top !== undefined) list.scrollTop = top;
+        const shown = props.browse.previewKey();
+        if (keptTop !== undefined && keys.includes(keptTop) && (shown === undefined || !keys.includes(shown))) {
+          props.browse.preview(keptTop);
+        }
         measure();
       },
       { defer: true },
     ),
   );
-  // 键盘换的预览处滚进视野。按 key 盯（memo 只在值变了时通知）：新列表到了下标会变，但那不是换了预览处，
-  // 不能把对回的位置又滚走
-  const previewedKey = createMemo(() => props.browse.previewed()?.key);
-  createEffect(
-    on(
-      previewedKey,
-      () => {
-        const i = props.browse.index();
-        const s = scroll();
-        const y = LIST_PAD + i * PITCH;
-        if (y < s.top || y + PITCH > s.top + s.client) {
-          list.scrollTop = centeredScrollTop(i, list.clientHeight);
-          measure();
-        }
-      },
-      { defer: true },
-    ),
-  );
+  // 按键换的预览处滚进视野（只由按键触发，见 createAnchorBrowse 的优先级说明）
+  props.browse.setReveal((i) => {
+    const s = scroll();
+    const y = LIST_PAD + i * PITCH;
+    if (y < s.top || y + PITCH > s.top + s.client) {
+      list.scrollTop = centeredScrollTop(i, list.clientHeight);
+      measure();
+    }
+  });
+  onCleanup(() => props.browse.setReveal(undefined));
 
   const fade = () => {
     const s = scroll();

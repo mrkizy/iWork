@@ -4,7 +4,7 @@ import { create } from "@bufbuild/protobuf";
 import { fireEvent, render, screen } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AnchorsViewSchema, type AnchorsView } from "../gen/iwork/v1/view_pb";
+import { AnchorKind, AnchorsViewSchema, type AnchorsView } from "../gen/iwork/v1/view_pb";
 import { loadScenario, noFixtures } from "../test-fixtures";
 import { AnchorRail, CLOSE_DELAY_MS } from "./AnchorRail";
 import { BROWSE_EDGE, LIST_PAD, LOADING_DOT_DELAY_MS, PITCH } from "./list";
@@ -178,6 +178,26 @@ describe.skipIf(noFixtures)("锚点导轨（宽形态，列表式）", () => {
     a.setView(create(AnchorsViewSchema, { ...anchors, items: [...extra, ...anchors.items] }));
     expect(list.scrollTop).toBe(LIST_PAD + 23 * PITCH);
     expect(a.rail.querySelector(".iw-anchor__more"), "到了：加载点收掉").toBeNull();
+  });
+
+  it("整窗替换、旧预览与当前位置都不在新窗口里：按顶上那条的 key 对回原位，不被居中拉走；预览改到那一条（g3b 1/F-1）", async () => {
+    const item = (k: number) => ({ key: String(k), kind: AnchorKind.USER, kindLabel: "你", timeLabel: "10:00", preview: `第 ${k} 处` });
+    const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => item(from + i));
+    const before = create(AnchorsViewSchema, { items: range(100, 219), hasBefore: true, hasAfter: true });
+    const a = mount(before, "200");
+    fireEvent.mouseEnter(a.rail);
+    await settle();
+    const list = a.list()!;
+    sizeList(list, 110, before.items.length);
+    // 用户沿列表往上滚，第 103 处在顶上
+    list.scrollTop = LIST_PAD + 3 * PITCH;
+    fireEvent.scroll(list);
+    expect(a.browses, "对照：近前端，请了重取").toEqual(["103"]);
+    // 续载回来的是整窗替换：44..163，200 与当前位置都被裁掉了
+    sizeList(list, 110, 120);
+    a.setView(create(AnchorsViewSchema, { items: range(44, 163), hasBefore: true, hasAfter: true }));
+    expect(list.scrollTop, "第 103 处还在顶上").toBe(LIST_PAD + (103 - 44) * PITCH);
+    expect(a.previewed()?.getAttribute("aria-label"), "预览落在还原后顶上那一条").toBe(label(item(103)));
   });
 
   it("渐隐：有更多内容的那一侧才渐隐，到头那一侧不渐隐", async () => {
