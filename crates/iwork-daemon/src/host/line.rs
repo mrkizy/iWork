@@ -165,7 +165,7 @@ pub(super) async fn run<P: HostPorts>(
             tokio::select! {
                 biased;
                 _ = async { sealed.wait_for(|s| *s).await.map(|_| ()) } => {
-                    retire(&shared, &mut bound, &mut live).await;
+                    retire(&mut bound, &mut live).await;
                     return;
                 }
                 _ = notified => {}
@@ -175,7 +175,7 @@ pub(super) async fn run<P: HostPorts>(
             biased;
             _ = async { sealed.wait_for(|s| *s).await.map(|_| ()) } => {
                 // 封口：这一趟的 future 已被丢掉，再清树（次序不能反，T04 第 11 节硬约束一）
-                retire(&shared, &mut bound, &mut live).await;
+                retire(&mut bound, &mut live).await;
                 return;
             }
             end = one_run::<P>(&ports, &shared, conversation, job, &mut bound, &read_busy) => end,
@@ -189,7 +189,7 @@ pub(super) async fn run<P: HostPorts>(
 }
 
 /// 封口那一支：清树并核对，结果报给 `abort_all`。不提交任何东西。
-async fn retire<P: HostPorts>(shared: &Shared, bound: &mut Option<Bound<P>>, live: &mut LiveGuard) {
+async fn retire<P: HostPorts>(bound: &mut Option<Bound<P>>, live: &mut LiveGuard) {
     let Some(b) = bound.as_mut() else {
         live.report(false, true);
         return;
@@ -204,7 +204,10 @@ async fn retire<P: HostPorts>(shared: &Shared, bound: &mut Option<Bound<P>>, liv
     };
     live.report(had_session, cleared);
     #[cfg(any(test, feature = "test-hooks"))]
-    shared.counters.at(|h| h.after_abort_report.clone()).await;
+    live.shared
+        .counters
+        .at(|h| h.after_abort_report.clone())
+        .await;
 }
 
 type PortsOf<'a, P> = TurnPorts<

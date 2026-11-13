@@ -881,6 +881,9 @@ async fn assemble_turns(
     let read = raw.read_model(boot::read_defaults());
     let ids = MonotonicIds::new(SystemClock::new());
     let storage = |e: iwork_ports::store::StorageError| boot::read_error(Step::Server, e);
+    // 各段耗时记进一条日志：启动变慢时据此判断是哪一段慢
+    let started = std::time::Instant::now();
+    let ms = |since: std::time::Instant| since.elapsed().as_millis() as u64;
     // 1. 探测运行时，提交运行时那一行（S8 合入之前探测是「什么都找不到」的占位）
     let probe = assembly::NothingFound
         .discover(&iwork_domain::runtime::RuntimeKind(
@@ -891,10 +894,13 @@ async fn assemble_turns(
     assembly::commit_runtime_row(gated, &read, &ids, assembly::runtime_row(&probe, VERSION))
         .await
         .map_err(storage)?;
+    let runtime_row_ms = ms(started);
     // 1a. 登记内置助手 iWork
+    let t = std::time::Instant::now();
     assembly::register_builtin_assistant(gated, &read, &SystemClock::new())
         .await
         .map_err(storage)?;
+    let builtin_ms = ms(t);
     // 2. 运行时
     let data_dir = places.data.root().to_path_buf();
     let agent = RuntimeSlot(
@@ -913,6 +919,7 @@ async fn assemble_turns(
         tmp_dirs: vec![std::env::temp_dir()],
     };
     // 3、4. 引擎折叠到位，恢复计划落盘
+    let t = std::time::Instant::now();
     let keys = assembly::keys_for_pending(&read, &env, &fs)
         .await
         .map_err(storage)?;
@@ -934,7 +941,9 @@ async fn assemble_turns(
         iwork_core::approval::engine::EngineError::Storage(s) => storage(s),
         other => startup_failed(format!("审批引擎起不来：{other}")),
     })?;
+    let engine_ms = ms(t);
     // 5. 回合宿主
+    let t = std::time::Instant::now();
     let host = TurnHost::start(
         Arc::new(Wired {
             store: gated.clone(),
@@ -961,6 +970,14 @@ async fn assemble_turns(
         crate::host::HostStartError::Storage(s) => storage(s),
         other => startup_failed(other.to_string()),
     })?;
+    tracing::info!(
+        runtime_row_ms,
+        builtin_ms,
+        engine_ms,
+        host_ms = ms(t),
+        total_ms = ms(started),
+        "回合宿主与审批引擎组装完"
+    );
     let dispatcher = Dispatcher::new(CommandPorts {
         store: Arc::new(gated.clone()),
         read: Arc::new(read),
