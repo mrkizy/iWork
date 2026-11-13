@@ -139,15 +139,20 @@ if [ -f '{st}/reactive' ]; then
   sleep 300 >/dev/null 2>&1 & echo $! > '{st}/pids/iwork-client'
   client=$(cat '{st}/pids/iwork-client')
   sleep 0.02
+  # 慢机器：客户端要过这么久才连到后台（状态里放了 open_delay 时，内容是秒数）
+  [ -f '{st}/open_delay' ] && sleep "$(cat '{st}/open_delay')"
   ts=$({ms})
   # 形态 A（不签名）的客户端连不上不同版的后台：被拒，后台立刻做一次安装检查；形态 B 先连上
   case "$(cat "$dest")" in *-unsigned) unsigned=1 ;; *) unsigned= ;; esac
-  if [ -n "$unsigned" ] && [ "$(cat '{st}/image')" != "$(cat "$dest")" ]; then
+  image=$(cat '{st}/image') cur=$(cat "$dest")
+  if [ -n "$unsigned" ] && [ "$image" != "$cur" ]; then
     echo '{{"ts":'$ts',"target":"iwork.ipc.audit","fields":{{"event":"peer_rejected","role":"server","pid":'$client'}}}}' >> "$d/logs/daemon.log"
     echo '{{"ts":'$ts',"target":"iwork_daemon::tasks::install_watch","fields":{{"message":"有客户端被拒，立刻做一次安装检查"}}}}' >> "$d/logs/daemon.log"
   else
     echo '{{"ts":'$ts',"target":"iwork_ipc","fields":{{"message":"连接已建立","pid":'$client'}}}}' >> "$d/logs/daemon.log"
   fi
+  # 告诉假后台：客户端已经对着磁盘上的这一版来过了（回退之后它等这个才重启）
+  [ "$image" = "$cur" ] || echo "$cur" > '{st}/follow'
   exit 0
 fi
 sleep 300 >/dev/null 2>&1 & echo $! > '{st}/pids/iwork-client'
@@ -189,7 +194,8 @@ esac
             ),
         );
         // 会看磁盘的假后台（只在 reactive 时由假 open 起）：起来记「就绪」；装上的包变了，过 0.3 秒记「自行重启」、
-        // 换上新映像、记「就绪」，客户端还开着就记它重新连上。每条之间隔 20 毫秒，时刻严格递增
+        // 换上新映像、记「就绪」，客户端还开着就记它重新连上。回退例外：等客户端对着回退后的那一版来过一次再重启
+        // （和真后台一样，回退窗口的判据靠的是这个先后，不靠 0.3 秒赶在客户端之前）。每条之间隔 20 毫秒，时刻严格递增
         write_exe(
             &self.bin.join("fake-daemon"),
             &format!(
@@ -197,6 +203,9 @@ esac
 d=$1
 dest="$HOME/Applications/iWork.app/Contents/MacOS/iwork-daemon"
 log="$d/logs/daemon.log"
+apps="$HOME/Applications"
+# 回退之后的样子：装上的那份挪成了 failed、留底的换了回来（装上一定会留下 prev，只有回退会让它没了）
+rolled_back() {{ [ -e "$apps/iWork.failed.app" ] && [ ! -e "$apps/iWork.prev.app" ]; }}
 line() {{ echo '{{"ts":'$({ms})','"$1"'}}' >> "$log"; sleep 0.02; }}
 unsigned_manifest() {{ case "$(cat '{st}/image')" in *-unsigned) line '"target":"iwork.ipc.audit","fields":{{"event":"manifest_loaded","self_listed":true}}' ;; esac; }}
 line '"target":"iwork_daemon","fields":{{"message":"后台服务就绪"}}'
@@ -204,7 +213,14 @@ unsigned_manifest
 while :; do
   cur=$(cat "$dest" 2>/dev/null || true)
   if [ -n "$cur" ] && [ "$cur" != "$(cat '{st}/image')" ]; then
+    # 回退时不抢在客户端前面重启：真后台先拒掉无证书的旧客户端、被拒才立刻做一次安装检查；有证书的先连上，
+    # 周期检查再重启。所以等假 open 说客户端对着这一版来过了再动。装上照旧过一会儿就跟着磁盘走
+    if rolled_back && [ "$(cat '{st}/follow' 2>/dev/null)" != "$cur" ]; then
+      sleep 0.05
+      continue
+    fi
     sleep 0.3
+    rm -f '{st}/follow'
     line '"target":"iwork_daemon::tasks::install_watch","fields":{{"message":"磁盘上装齐了另一版，自行重启"}}'
     cat "$dest" > '{st}/image'
     line '"target":"iwork_daemon","fields":{{"message":"后台服务就绪"}}'
@@ -563,6 +579,21 @@ fn drill_success_run_has_no_secrets_and_cleans_up() {
         assert!(!apps.join(name).exists(), "{name} 收尾删了");
     }
     assert!(!w.data_root().exists(), "数据根改名留证了");
+}
+
+/// 慢机器上的回退窗口（W1、W2）：回退之后客户端过 0.5 秒才连到后台，判据照样成立。真后台回退后不会抢在客户端
+/// 连上之前重启（无证书的旧客户端先被拒，被拒才立刻做一次安装检查；有证书的先连上），假后台也不能抢先跟着磁盘换映像。
+#[test]
+fn drill_window_cells_hold_when_client_starts_late() {
+    let w = World::new();
+    w.flag("reactive");
+    std::fs::write(w.state.join("open_delay"), "0.5").unwrap();
+    let out = w.drill();
+    let record = w.record();
+    assert!(record.contains("W1 PASS"), "{}\n{record}", text(&out));
+    assert!(record.contains("W2 PASS"), "{}\n{record}", text(&out));
+    assert!(!record.contains("FAIL："), "{record}");
+    assert_eq!(out.status.code(), Some(0), "{}\n{record}", text(&out));
 }
 
 /// 找进程只认本用户（审查后补）：macOS 的 pgrep 不带 -u 会匹配所有用户的进程。别的用户开着同名的 iwork-daemon、
