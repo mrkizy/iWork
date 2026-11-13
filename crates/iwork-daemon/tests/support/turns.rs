@@ -14,7 +14,7 @@ use iwork_daemon::assembly;
 use iwork_daemon::gate::{GatedStore, SealGate};
 use iwork_daemon::handler::dispatch::{CommandPorts, Dispatcher};
 use iwork_daemon::host::changes::{ReadBudget, VcsChanges};
-use iwork_daemon::host::ports::{HostEnv, Wired};
+use iwork_daemon::host::ports::{HostEngine, HostEnv, Wired};
 use iwork_daemon::host::{HostError, TurnHost};
 use iwork_daemon::publish::{PublishObserver, PublishSink, PublishState};
 use iwork_daemon::time::{MonotonicIds, SystemClock, TokioTimer};
@@ -76,6 +76,12 @@ pub struct Ctl {
     pub hang_terminate: std::sync::atomic::AtomicBool,
     /// 为真时收下取消但不理：回合一直跑着，直到 `finish_one`
     pub ignore_cancel: std::sync::atomic::AtomicBool,
+    /// 每次开会话收到的参数（交给运行时的约束看这里）
+    pub specs: Mutex<Vec<SessionSpec>>,
+    /// `ask` 为真时发的那个请求：（工具名，原始输入 JSON）；没设就是 `git push`
+    pub ask_with: Mutex<Option<(String, String)>>,
+    /// 每条 prompt 里把那个请求发几次（0 当 1）：第一次被一次性放行用掉、第二次再去等审批
+    pub asks_per_prompt: AtomicUsize,
 }
 
 type Asker = Arc<
@@ -159,6 +165,7 @@ impl AgentPort for FakeAgent {
             go.await;
         }
         self.0.opened_with.lock().unwrap().push(spec.resume.clone());
+        self.0.specs.lock().unwrap().push(spec.clone());
         if spec.resume.is_some() && self.0.lose_on_resume.load(Ordering::SeqCst) {
             return Err(AgentError::SessionLost {
                 reason: iwork_domain::session::SessionLostReason::NotFound,
@@ -239,23 +246,30 @@ impl UpdateStream for FakeUpdates {
             }),
             2 => {
                 if let Some(ask) = self.asker.take() {
-                    let req = iwork_ports::agent::PermissionRequest {
-                        tool: iwork_domain::action::ToolRef("Bash".into()),
-                        raw_input: iwork_ports::agent::RawToolInput(
-                            r#"{"command":"git push"}"#.into(),
-                        ),
-                        bypass_sandbox: false,
-                        updates_before: 1,
-                        cwd: None,
-                    };
-                    let cancelled = self.cancelled.1.notified();
-                    if self.cancelled.0.load(Ordering::SeqCst) {
-                        return Some(AgentUpdate::Finished(TurnOutcome::Cancelled));
-                    }
-                    tokio::select! {
-                        d = ask(req) => self.ctl.decisions.lock().unwrap().push(d),
-                        _ = cancelled => {
+                    for _ in 0..self.ctl.asks_per_prompt.load(Ordering::SeqCst).max(1) {
+                        let (tool, input) = self
+                            .ctl
+                            .ask_with
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .unwrap_or_else(|| ("Bash".into(), r#"{"command":"git push"}"#.into()));
+                        let req = iwork_ports::agent::PermissionRequest {
+                            tool: iwork_domain::action::ToolRef(tool),
+                            raw_input: iwork_ports::agent::RawToolInput(input),
+                            bypass_sandbox: false,
+                            updates_before: 1,
+                            cwd: None,
+                        };
+                        let cancelled = self.cancelled.1.notified();
+                        if self.cancelled.0.load(Ordering::SeqCst) {
                             return Some(AgentUpdate::Finished(TurnOutcome::Cancelled));
+                        }
+                        tokio::select! {
+                            d = ask(req) => self.ctl.decisions.lock().unwrap().push(d),
+                            _ = cancelled => {
+                                return Some(AgentUpdate::Finished(TurnOutcome::Cancelled));
+                            }
                         }
                     }
                 }
@@ -373,6 +387,70 @@ impl iwork_ports::vcs::VcsProvider for CountingVcs {
     }
 }
 
+// ---------- 引擎外壳 ----------
+
+/// 宿主用的引擎外壳：照原样转给真引擎；`frozen` 装了一份续接名单时，`turns_to_resume` 一直交这份旧的，直到宿主
+/// 调一次 `catch_up`（模拟方案 D7 ① 说的「折叠停在旧的地方」：7.2a 的 K11）。
+#[derive(Clone)]
+pub struct FoldShim {
+    pub inner: Arc<Engine>,
+    pub frozen: Arc<Mutex<Option<std::collections::BTreeMap<TurnId, iwork_domain::id::Seq>>>>,
+}
+
+impl HostEngine for FoldShim {
+    type Decider = <Arc<Engine> as HostEngine>::Decider;
+
+    fn decider_for(&self, keys: iwork_core::approval::engine::SessionKeys) -> Self::Decider {
+        HostEngine::decider_for(&self.inner, keys)
+    }
+
+    fn catch_up(
+        &self,
+    ) -> impl std::future::Future<Output = Result<(), iwork_core::approval::engine::EngineError>> + Send
+    {
+        let (inner, frozen) = (self.inner.clone(), self.frozen.clone());
+        async move {
+            let r = HostEngine::catch_up(&inner).await;
+            if r.is_ok() {
+                *frozen.lock().unwrap() = None;
+            }
+            r
+        }
+    }
+
+    fn turns_to_resume(&self) -> std::collections::BTreeMap<TurnId, iwork_domain::id::Seq> {
+        self.frozen
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| HostEngine::turns_to_resume(&self.inner))
+    }
+
+    fn granted_call(&self, turn: TurnId) -> Option<iwork_daemon::host::ports::GrantedCall> {
+        HostEngine::granted_call(&self.inner, turn)
+    }
+
+    fn commit_with(
+        &self,
+        scope: iwork_core::approval::engine::Scope,
+        req: iwork_ports::store::CommitRequest,
+    ) -> impl std::future::Future<
+        Output = Result<
+            iwork_core::approval::engine::Committed,
+            iwork_core::approval::engine::EngineError,
+        >,
+    > + Send {
+        HostEngine::commit_with(&self.inner, scope, req)
+    }
+
+    fn sync(
+        &self,
+    ) -> impl std::future::Future<Output = Result<(), iwork_core::approval::engine::EngineError>> + Send
+    {
+        HostEngine::sync(&self.inner)
+    }
+}
+
 // ---------- 装配 ----------
 
 pub type Gated = GatedStore<Store>;
@@ -392,7 +470,7 @@ pub type Ports = Wired<
     HStore,
     HRead,
     FakeAgent,
-    Arc<Engine>,
+    FoldShim,
     NoLive,
     SystemClock,
     MonotonicIds<SystemClock>,
@@ -416,6 +494,9 @@ pub struct H {
     pub vcs: Arc<CountingVcs>,
     pub budget: Arc<ReadBudget>,
     pub knobs: Arc<Knobs>,
+    /// 宿主看到的续接名单停在这份上，直到它调 `catch_up`（[`FoldShim`]）
+    pub frozen_resume:
+        Arc<Mutex<Option<std::collections::BTreeMap<TurnId, iwork_domain::id::Seq>>>>,
     pub publishing: PublishState,
     pub host_task: Option<tokio::task::JoinHandle<HostError>>,
     pub sync_task: Option<tokio::task::JoinHandle<()>>,
@@ -430,6 +511,8 @@ pub struct Opts {
     pub extra: Vec<DomainEvent>,
     /// 宿主拿一个没人叫的唤醒（提交观察者叫不到它）：D1–D4 的保底一格
     pub detached_wake: bool,
+    /// 会话的临时目录；没给就是系统临时目录（夹具的数据都在它下面，所以默认情况下夹具里哪儿都算可写）
+    pub tmp_dirs: Option<Vec<PathBuf>>,
 }
 
 /// 夹具里的对话：项目 PROJECT 的项目对话 CONV。内置助手由组装处的第 1a 步登记。
@@ -484,7 +567,10 @@ pub async fn assemble(env: Env, opts: Opts, agent: Arc<Ctl>) -> H {
         platform: HostEnv::platform(),
         home: env.tmp.path().join("home"),
         data_dir: env.dir.root().to_path_buf(),
-        tmp_dirs: vec![std::env::temp_dir()],
+        tmp_dirs: opts
+            .tmp_dirs
+            .clone()
+            .unwrap_or_else(|| vec![std::env::temp_dir()]),
     };
     let keys = assembly::keys_for_pending(&read, &host_env, &fs)
         .await
@@ -506,6 +592,7 @@ pub async fn assemble(env: Env, opts: Opts, agent: Arc<Ctl>) -> H {
     .unwrap();
     let vcs = Arc::new(CountingVcs::default());
     let budget = Arc::new(ReadBudget::default());
+    let frozen_resume = Arc::new(Mutex::new(None));
     let host = TurnHost::start(
         Arc::new(Wired {
             store: hooked.clone(),
@@ -514,7 +601,10 @@ pub async fn assemble(env: Env, opts: Opts, agent: Arc<Ctl>) -> H {
                 knobs: knobs.clone(),
             },
             agent: FakeAgent(agent.clone()),
-            engine: engine.clone(),
+            engine: FoldShim {
+                inner: engine.clone(),
+                frozen: frozen_resume.clone(),
+            },
             live: NoLive,
             clock: SystemClock::new(),
             ids: MonotonicIds::new(SystemClock::new()),
@@ -552,6 +642,7 @@ pub async fn assemble(env: Env, opts: Opts, agent: Arc<Ctl>) -> H {
         vcs,
         budget,
         knobs,
+        frozen_resume,
         publishing,
         host_task: None,
         sync_task: None,
