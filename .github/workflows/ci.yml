@@ -107,6 +107,8 @@ jobs:
           cargo test -p iwork-client-core --features dev --test launcher_process
           # 桌面客户端的拨号器在 dev 构建里只用 DirectDialer（T04p 方案 4.7）
           cargo test -p iwork-client-core --features dev --test app_dialer
+          # 客户端拒绝不可信的后台时 client.log 里有 peer_rejected（ADR-0013）
+          cargo test -p iwork-client-core --features dev --test client_log_process
 
       # T04：M1 不支持 Windows，后台在启动表第 1 步就拒绝（退出码 10）。按名字核对这一条真的跑到且通过
       - name: 后台在 Windows 上启动即拒绝（Windows）

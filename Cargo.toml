@@ -76,6 +76,7 @@ iwork-core = { path = "crates/iwork-core" }
 iwork-shell = { path = "crates/iwork-shell" }
 iwork-app = { path = "crates/iwork-app" }
 iwork-store = { path = "crates/iwork-store" }
+iwork-log = { path = "crates/iwork-log" }
 iwork-agent-acp = { path = "crates/iwork-agent-acp" }
 iwork-vcs-git = { path = "crates/iwork-vcs-git" }
 iwork-rootfs = { path = "crates/iwork-rootfs" }

@@ -17,6 +17,7 @@ iwork-agent-acp.workspace = true
 iwork-vcs-git.workspace = true
 iwork-host.workspace = true
 iwork-ipc.workspace = true
+iwork-log.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tokio-util.workspace = true
 futures.workspace = true

@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 iwork-ipc.workspace = true
+iwork-log.workspace = true
 iwork-proto.workspace = true
 bytes.workspace = true
 prost.workspace = true
@@ -22,6 +23,7 @@ libc.workspace = true
 
 [dev-dependencies]
 iwork-fake-daemon.workspace = true
+serde_json.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "test-util"] }
@@ -34,4 +36,10 @@ dev = ["iwork-ipc/dev"]
 [[test]]
 name = "launcher_process"
 path = "tests/launcher_process.rs"
+required-features = ["dev"]
+
+# 真进程：客户端拒绝不可信的后台时 client.log 里有审计（dev 构建的拨号器只连不拉）
+[[test]]
+name = "client_log_process"
+path = "tests/client_log_process.rs"
 required-features = ["dev"]

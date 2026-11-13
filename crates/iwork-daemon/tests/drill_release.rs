@@ -5,6 +5,8 @@
 //! 默认的假后台只是一个长睡的进程（不会自己重启，跑到第 2 类记录那一步就停）；状态里放了 `reactive` 时换成会看磁盘的
 //! 假后台：装上的包变了就过一会儿记「自行重启」「就绪」、换上新映像，客户端还开着就重新连上；配上假的 `codesign`
 //! 按映像报 CDHash。这样演练能跑完全程（U1–U4、9.6–9.8）到成功收尾（审查 1/F-8）。
+//! 假后台替真后台写的那几行（如 `manifest_loaded self_listed=true`）只证脚本的流程；真后台确实写这一行由
+//! `process::install::startup_manifest_audit_is_in_daemon_log` 守（字段与验收 2 的过滤条件相同）。
 #![cfg(target_os = "macos")]
 
 use std::path::{Path, PathBuf};

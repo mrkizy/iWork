@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use iwork_ipc::peer::StartupAudit;
 use iwork_ipc::rendezvous::{ExeStamp, ExitCode, LockInfo, Phase, StopReason};
 use iwork_ipc::server::{Publisher, Server, ServerConfig};
 use iwork_ipc::{LocalEndpoint, LocalListener};
@@ -54,6 +55,8 @@ pub struct Places {
 
 fn locate() -> Result<Places, BootError> {
     let fail = |m: String| BootError::Endpoint(m);
+    // 测试用：第 1 步已定下身份、日志还没装时停住（证明日志装好后补记的清单审计是第 1 步的快照，没有重读）
+    dev::pause_at(Step::Endpoint.name());
     if dev::fail_at(Step::Endpoint.name()) {
         return Err(fail("开发注入：端点不可用".into()));
     }
@@ -79,6 +82,7 @@ pub fn run_identified(
     args: DaemonArgs,
     raw: Vec<OsString>,
     id: Identity,
+    audit: StartupAudit,
 ) -> std::process::ExitCode {
     let managed = args.service;
     let places = match locate() {
@@ -124,6 +128,8 @@ pub fn run_identified(
         starting(Step::StatusLog),
     );
     let log = logging::init(&places.data.logs());
+    // 第 1 步读清单时还没有日志，那一刻的快照到这里才记（T03 方案 2.12）。没拿到锁的实例不记：日志归持锁者
+    audit.record();
     let exe = id.exe.clone();
     let phase = run_locked(args, raw.clone(), id, places, board.clone(), &log);
     tracing::info!(phase = ?phase, "后台服务退出");
