@@ -480,3 +480,18 @@ fn old_clone_does_not_replace_new_draft() {
         "A 做完了：后台没有在跑的克隆"
     );
 }
+
+/// 当下不能做（还没选文件夹就点确认）：不受理，原因记进弹窗的视图（网页不再另弹提示，UI 审查 F-8）。
+#[tokio::test(flavor = "multi_thread")]
+async fn not_ready_reason_is_shown_in_dialog() {
+    let mut h = start().await;
+    let ack = act(&h, I::ConfirmAddProject(pb::ConfirmAddProject {})).await;
+    let e = ack.error.expect("没有候选：不受理");
+    assert_eq!(e.code, "not_ready");
+    until(&mut h, "原因进了弹窗", |s| {
+        s.add_project
+            .as_ref()
+            .is_some_and(|v| v.error.as_deref() == Some(e.message.as_str()))
+    })
+    .await;
+}

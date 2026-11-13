@@ -33,6 +33,8 @@ pub enum Action {
         assistant_id: String,
         field: crate::store::assistant_edits::Field,
     },
+    /// 新建助手：同一时间只有一条在途（一次点击一个助手，审查 g3 1/F-4；command_id 只去重重发，合不了两次点击）。
+    CreateAssistant(pb::CreateAssistant),
     /// 什么都不用做（如标题没变）。
     Nothing,
 }
@@ -334,9 +336,9 @@ pub fn map(store: &Store, intent: pb::UiIntent) -> Action {
             project_id: x.project_id,
         }),
 
-        I::CreateAssistant(x) => Action::Command(Cmd::CreateAssistant(pb::CreateAssistant {
+        I::CreateAssistant(x) => Action::CreateAssistant(pb::CreateAssistant {
             config: Some(assistant_config(x)),
-        })),
+        }),
         I::UpdateAssistant(x) => {
             let expected_version = store.summary.assistant(&x.assistant_id).map(|a| a.version);
             match expected_version {

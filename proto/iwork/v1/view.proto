@@ -117,6 +117,8 @@ message SidebarView {
   uint32 title_max_chars = 6;
   // 新建助手弹窗的运行时 / 模型 / 思考强度（默认选中内置 iWork 的）。
   ModelMenuView new_assistant_menu = 7;
+  // 新建助手的命令在途：「创建」不可点（Rust 同时拒第二次，审查 g3 1/F-4）。
+  bool creating_assistant = 8;
 }
 
 // 数字徽标（ui-m1.md 第 2 节第 4 条）：超过 99 写「99+」，侧栏徽标、「待你处理」与 Dock 角标同一个规则。

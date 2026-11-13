@@ -619,6 +619,22 @@ impl<D: Dialer> Session<D> {
             Action::Command(kind) => {
                 self.send_command(kind, Some(tx));
             }
+            Action::CreateAssistant(c) => {
+                if self.store.creating_assistant() {
+                    let _ = tx.send(pb::IntentAck {
+                        error: Some(pb::IntentError {
+                            code: "not_ready".into(),
+                            message: "正在创建，等上一次有结果".into(),
+                            retryable: false,
+                        }),
+                    });
+                } else if self
+                    .send_command(pb::command::Kind::CreateAssistant(c), Some(tx))
+                    .is_some()
+                {
+                    self.store.set_creating_assistant(true);
+                }
+            }
             Action::AttachPasted(x) => self.on_attach(attach::Source::Pasted(x), tx),
             Action::Pick(p) => self.open_picker(p, tx),
         }
@@ -970,6 +986,9 @@ impl<D: Dialer> Session<D> {
                     }
                     if let Some(pb::command::Kind::UpdateAssistant(u)) = &f.command.kind {
                         self.assistant_update_done(&u.assistant_id, ack.as_ref());
+                    }
+                    if matches!(f.command.kind, Some(pb::command::Kind::CreateAssistant(_))) {
+                        self.store.set_creating_assistant(false);
                     }
                     if let Some(op) = self.add_project_ops.remove(&command_id) {
                         self.add_project_done(op, &f.command.kind, accepted, ack.as_ref());

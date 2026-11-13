@@ -2,6 +2,7 @@
 // 设计窗口答 U-7d-4 再画（方案 15.8），这次不画、不拿推测占位。
 // 路径只在 Rust：网页只说「选文件夹」「初始化」「确认」，看到的路径是写成 ~ 的显示文字（RD1）。候选的检查结果、
 // 提示框、初始化按钮、AGENTS.md 一行、勾选框、主按钮可不可点与文字，全来自 AddProjectView.candidate。
+// 被拒的原因（后台的、或当下不能做的）都在 AddProjectView.error 里，弹窗留着显示它。
 // 新建项目的名字是网页给的字符串，后台只当它是一个目录名（方案 15.2「从网页来的字符串」），网页不校验。
 // 下面列着待确认的 AGENTS.md 草稿（Q11：添加项目流程与「待你处理」里显示）。
 import { createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
@@ -15,6 +16,9 @@ import { Icon, type IconName } from "../ui/Icon";
 import "./addProject.css";
 
 type Tab = "local" | "new";
+
+/** 发命令的几个操作被拒时，原因由 Rust 记进 AddProjectView.error、显示在弹窗里：宿主不再另弹提示。 */
+const QUIET = { quiet: true } as const;
 
 const TABS: { id: Tab; icon: IconName; title: string; sub: string }[] = [
   { id: "local", icon: "folder", title: "打开本机文件夹", sub: "选择已有的项目目录" },
@@ -118,7 +122,7 @@ function Local(props: { view: AddProjectView; onCancel: () => void }) {
         <Button
           variant="primary"
           disabled={!c()?.canConfirm || props.view.busy}
-          onClick={() => void host.act({ case: "confirmAddProject", value: {} })}
+          onClick={() => void host.act({ case: "confirmAddProject", value: {} }, QUIET)}
         >
           <Show when={props.view.busy}>
             <Spinner />
@@ -148,7 +152,7 @@ function Candidate(props: { c: CandidateView }) {
             {(label) => (
               <Button
                 disabled={c().initializing}
-                onClick={() => void host.act({ case: "initCandidateRepository", value: {} })}
+                onClick={() => void host.act({ case: "initCandidateRepository", value: {} }, QUIET)}
               >
                 <Show when={c().initializing}>
                   <Spinner />
@@ -214,7 +218,7 @@ function NewProject(props: { view: AddProjectView; onCancel: () => void }) {
         <Button
           variant="primary"
           disabled={props.view.busy}
-          onClick={() => void host.act({ case: "createProject", value: { name: name() } })}
+          onClick={() => void host.act({ case: "createProject", value: { name: name() } }, QUIET)}
         >
           创建并开始对话
         </Button>

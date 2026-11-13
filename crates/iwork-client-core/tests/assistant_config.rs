@@ -299,3 +299,47 @@ async fn create_and_delete_assistant() {
         .clone();
     assert!(!builtin.can_delete);
 }
+
+/// 审查 g3 1/F-4：「创建」连点两次（第一次的回包还没到）：只建一个助手，第二次被拒；在途期间侧栏视图说「正在创建」，
+/// 回包到了就收掉，可以再建。
+#[tokio::test(flavor = "multi_thread")]
+async fn create_assistant_twice_creates_one() {
+    let (d, app, mut web, _dir) = start().await;
+    ready(&app, &mut web).await;
+    let count = |d: &FakeDaemon| {
+        let mut n = 0;
+        d.mutate_tables(|t| {
+            n = t
+                .assistants
+                .values()
+                .filter(|a| a.config.as_ref().is_some_and(|c| c.name == "小林"))
+                .count()
+        });
+        n
+    };
+    let create = || {
+        act(
+            &app,
+            I::CreateAssistant(pb::AssistantEditIntent {
+                name: "小林".into(),
+                ..Default::default()
+            }),
+        )
+    };
+    // 两次一起交给会话：第二次在第一次的回包到之前处理
+    let (a, b) = tokio::join!(create(), create());
+    let errors: Vec<_> = [a, b].into_iter().filter_map(|x| x.error).collect();
+    assert_eq!(errors.len(), 1, "恰好一次被拒：{errors:?}");
+    assert_eq!(errors[0].code, "not_ready");
+    until(
+        &app,
+        &mut web,
+        "回包到了：不再「正在创建」",
+        |s| s.sidebar.as_ref().is_some_and(|b| !b.creating_assistant),
+    )
+    .await;
+    assert_eq!(count(&d), 1, "只建了一个");
+    let again = create().await;
+    assert_eq!(again.error, None, "对照：上一次有结果后可以再建");
+    assert_eq!(count(&d), 2);
+}

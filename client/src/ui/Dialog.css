@@ -20,6 +20,20 @@
   font-size: var(--fs-title);
   font-weight: 600;
 }
+.iw-dialog__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.iw-dialog__head .iw-dialog__title {
+  margin: 0;
+}
+.iw-dialog__error {
+  margin: 12px 0 0;
+  color: var(--acc);
+  font-size: var(--fs-sm2);
+}
 .iw-dialog__body {
   color: var(--tx2);
   font-size: var(--fs-md);

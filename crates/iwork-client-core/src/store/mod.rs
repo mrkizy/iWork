@@ -278,6 +278,8 @@ pub struct Store {
     /// 记住的规则过期了（来了 rule 流的事件，或设置范围走了一次快照）：会话层重查 ListRules，期间照旧显示
     /// 旧列表。照方案 2.2「失效后重查，不推演」。
     pub rules_stale: bool,
+    /// 本客户端的 CreateAssistant 在途（会话层发出时设、回包时清）：不受理第二次，弹窗的「创建」不可点。
+    creating_assistant: bool,
     pub local_config: BTreeMap<String, Vec<pb::LocalConfigItem>>,
     pub clone_job: Option<CloneJob>,
     pub open: Option<Timeline>,
@@ -336,6 +338,18 @@ pub struct Store {
 impl Store {
     pub fn new() -> Self {
         Self::with_timeline_cap(timeline::TIMELINE_CAP)
+    }
+
+    pub fn creating_assistant(&self) -> bool {
+        self.creating_assistant
+    }
+
+    /// 新建助手的命令发出了 / 有了回包。
+    pub fn set_creating_assistant(&mut self, on: bool) {
+        if self.creating_assistant != on {
+            self.creating_assistant = on;
+            self.dirty.mark(ViewKey::Sidebar);
+        }
     }
 
     /// 按摘要里这个助手此刻的样子推一步自动保存闸（`step` 是闸的某个方法），配置页随之重算。

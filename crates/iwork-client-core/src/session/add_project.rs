@@ -24,7 +24,8 @@ fn not_ready(message: &str) -> pb::IntentError {
 }
 
 impl<D: Dialer> Session<D> {
-    /// 添加项目一组的操作。要发命令的，受理结果（含后台的拒绝原因）回到 `tx`，网页照常弹提示。
+    /// 添加项目一组的操作。要发命令的，受理结果（含后台的拒绝原因）回到 `tx`；不受理的原因同时记进草稿（弹窗里
+    /// 显示，网页不再另弹提示）。
     pub(super) fn add_project_act(
         &mut self,
         act: AddProjectAct,
@@ -42,7 +43,7 @@ impl<D: Dialer> Session<D> {
                 | AddProjectAct::RetryClone
         );
         if needs_backend && !self.live() {
-            return reply(tx, Some(offline_error()));
+            return self.add_project_reject(tx, offline_error());
         }
         match act {
             AddProjectAct::SetProposeDraft(on) => {
@@ -59,7 +60,7 @@ impl<D: Dialer> Session<D> {
                     pb::command::Kind::InitRepository(pb::InitRepository { path }),
                     tx,
                 ),
-                Err(e) => reply(tx, Some(not_ready(e))),
+                Err(e) => self.add_project_reject(tx, not_ready(e)),
             },
             AddProjectAct::Confirm => match self.store.edit_add_project(|d| d.confirm()) {
                 Ok(Confirm::Add {
@@ -78,7 +79,7 @@ impl<D: Dialer> Session<D> {
                     self.store.navigate_project(project_id);
                     reply(tx, None);
                 }
-                Err(e) => reply(tx, Some(not_ready(e))),
+                Err(e) => self.add_project_reject(tx, not_ready(e)),
             },
             AddProjectAct::Create { name } => match self
                 .store
@@ -92,7 +93,7 @@ impl<D: Dialer> Session<D> {
                         tx,
                     );
                 }
-                Err(e) => reply(tx, Some(not_ready(e))),
+                Err(e) => self.add_project_reject(tx, not_ready(e)),
             },
             AddProjectAct::StartClone { url, name } => {
                 let parent_dir = self.store.add_project.parent_dir.clone();
@@ -107,7 +108,7 @@ impl<D: Dialer> Session<D> {
             }
             AddProjectAct::RetryClone => match self.last_clone.clone() {
                 Some(c) => self.start_clone(c, tx),
-                None => reply(tx, Some(not_ready("还没有克隆过"))),
+                None => self.add_project_reject(tx, not_ready("还没有克隆过")),
             },
         }
     }
@@ -115,16 +116,18 @@ impl<D: Dialer> Session<D> {
     fn start_clone(&mut self, c: pb::CloneRepository, tx: oneshot::Sender<pb::IntentAck>) {
         let op = match self.store.edit_add_project(|d| d.begin_clone()) {
             Ok(op) => op,
-            Err(e) => {
-                let _ = tx.send(pb::IntentAck {
-                    error: Some(not_ready(e)),
-                });
-                return;
-            }
+            Err(e) => return self.add_project_reject(tx, not_ready(e)),
         };
         // 参数记在会话层，「重试」不让网页重传
         self.last_clone = Some(c.clone());
         self.send_draft_command(op, pb::command::Kind::CloneRepository(c), tx);
+    }
+
+    /// 不受理：原因记进草稿（弹窗里显示），也回给这次操作。
+    fn add_project_reject(&mut self, tx: oneshot::Sender<pb::IntentAck>, e: pb::IntentError) {
+        let why = e.message.clone();
+        self.store.edit_add_project(|d| d.error = Some(why));
+        let _ = tx.send(pb::IntentAck { error: Some(e) });
     }
 
     /// 发草稿操作 `op` 的命令，记下 command_id → 编号，回包按编号交回草稿。
