@@ -658,7 +658,7 @@ struct Opened {
 
 /// 打开仓库做读操作（`baseline`、`status`、`diff`、读子模块的 `HEAD` 都经这里，配置只有这一份）。
 ///
-/// 交给 gix 之前先查布局、打开时不跟 include、打开后删掉仓库自己配置里指向文件的键并核对工作区（[`layout`]，
+/// 交给 gix 之前先查布局，只让 gix 打开查过的 git 目录、仓库来源的配置不过信任闸，开完再核对（[`layout`]，
 /// T10a 方案 2.4a）：不让 gix 顺着仓库里的东西读到仓库外面去。布局不对时返回点名原因的错误。
 ///
 /// 后台读操作绝不启动外部程序：仓库配置（含 `.git/config`，Agent 的脚本可能写过它）里的 `filter.<name>.clean`
@@ -692,26 +692,23 @@ fn open_as(
             path: repo_root.0.clone(),
         }));
     }
-    layout::check_before_open(&repo_root.0, opening).map_err(layout_error)?;
-    let mut repo = gix::open_opts(&repo_root.0, layout::open_options())
+    let checked = layout::check_before_open(&repo_root.0, opening).map_err(layout_error)?;
+    let mut repo = gix::open_opts(layout::dot_git(&repo_root.0), layout::open_options())
         .map_err(|e| OpenError::Failed(failed(op, format!("{}：{e}", repo_root.0.display()))))?;
-    layout::check_after_open(&repo, &repo_root.0).map_err(layout_error)?;
-    let external_filters = strip_outward_config(&mut repo, op).map_err(OpenError::Failed)?;
+    layout::check_after_open(&repo, &repo_root.0, &checked).map_err(layout_error)?;
+    let external_filters = remove_external_filters(&mut repo, op).map_err(OpenError::Failed)?;
     Ok(Opened {
         repo,
         external_filters,
     })
 }
 
-/// 从内存配置里去掉会让后台运行外部程序或读别处文件的设置：全部 `filter.*` 节（返回它们的名字），仓库来源的
-/// `core.excludesFile`、`core.attributesFile`（[`layout::drop_repo_file_keys`]）。
-fn strip_outward_config(
+fn remove_external_filters(
     repo: &mut Repository,
     op: &'static str,
 ) -> Result<BTreeSet<BString>, VcsError> {
     let mut names = BTreeSet::new();
     let mut config = repo.config_snapshot_mut();
-    layout::drop_repo_file_keys(&mut config);
     let ids: Vec<_> = config
         .sections_and_ids_by_name("filter")
         .into_iter()
