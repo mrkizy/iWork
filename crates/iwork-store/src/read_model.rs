@@ -20,8 +20,8 @@ use iwork_domain::turn::{Turn, TurnKind, TurnState};
 use iwork_domain::user_action::{UserActionStateKind, UserActionTriggerKind, next_kind};
 use iwork_ports::read_model::{
     AgentsMdDraftCard, ConversationSummary, ConversationView, MessagePage, PendingItem,
-    ProjectSummary, ReadModelPort, ResumeCard, RuntimeQuota, SummaryLine, SummarySource,
-    SummaryText, SummaryWho, Unsettled,
+    ProjectSummary, QuitCounts, ReadModelPort, ResumeCard, RuntimeQuota, SnapshotInputs,
+    SummaryLine, SummarySource, SummaryText, SummaryWho, TurnWork, Unsettled,
 };
 use iwork_ports::store::{EventCodec, StorageError};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
@@ -70,7 +70,7 @@ impl<C: EventCodec + 'static> SqliteReadModel<C> {
 }
 
 /// 跑一条查询、把每行映射出来。
-fn rows<T>(
+pub(crate) fn rows<T>(
     conn: &Connection,
     sql: &str,
     params: impl rusqlite::Params,
@@ -85,13 +85,17 @@ fn rows<T>(
     Ok(out)
 }
 
-fn blobs(
+pub(crate) fn blobs(
     conn: &Connection,
     sql: &str,
     params: impl rusqlite::Params,
 ) -> Result<Vec<Vec<u8>>, StorageError> {
     rows(conn, sql, params, |r| r.get(0))
 }
+
+/// 三张安全清单的全部条目。
+pub(crate) const SECURITY_LISTS: &str = "SELECT snapshot FROM approval_rules WHERE layer IN \
+     ('credential_commands', 'sensitive_dirs', 'writable_dirs') ORDER BY id";
 
 /// 最新一页（无游标）。
 const PAGE_LATEST: &str =
@@ -138,7 +142,7 @@ fn fill_streaming_body(conn: &Connection, m: &mut Message) -> Result<(), Storage
 }
 
 /// 列值 `IN (…)` 的占位符与参数：从登记表里挑出满足领域谓词的变体，不在 SQL 里手写状态名。
-fn kinds_where<K: ColumnText>(keep: impl Fn(K) -> bool) -> (String, Vec<&'static str>) {
+pub(crate) fn kinds_where<K: ColumnText>(keep: impl Fn(K) -> bool) -> (String, Vec<&'static str>) {
     let texts: Vec<&'static str> = K::ALL
         .iter()
         .copied()
@@ -472,15 +476,10 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
 
     fn security_lists(&self) -> impl Future<Output = Result<Vec<RuleEntry>, StorageError>> + Send {
         self.query(|conn, codec| {
-            blobs(
-                conn,
-                "SELECT snapshot FROM approval_rules WHERE layer IN \
-                 ('credential_commands', 'sensitive_dirs', 'writable_dirs') ORDER BY id",
-                [],
-            )?
-            .iter()
-            .map(|s| decode_rule(codec, s))
-            .collect()
+            blobs(conn, SECURITY_LISTS, [])?
+                .iter()
+                .map(|s| decode_rule(codec, s))
+                .collect()
         })
     }
 
@@ -512,6 +511,41 @@ impl<C: EventCodec + 'static> ReadModelPort for SqliteReadModel<C> {
         recent_limit: u32,
     ) -> impl Future<Output = Result<SummarySource, StorageError>> + Send {
         self.query(move |conn, codec| summary_source(conn, codec, turn, line, recent_limit))
+    }
+
+    fn turn_work(&self) -> impl Future<Output = Result<TurnWork, StorageError>> + Send {
+        self.query(|conn, codec| crate::host_queries::turn_work(conn, codec))
+    }
+
+    fn last_session_binding(
+        &self,
+        conversation: ConversationId,
+    ) -> impl Future<Output = Result<Option<String>, StorageError>> + Send {
+        self.query(move |conn, codec| {
+            crate::host_queries::last_session_binding(conn, codec, conversation)
+        })
+    }
+
+    fn session_ids_of(
+        &self,
+        conversation: ConversationId,
+    ) -> impl Future<Output = Result<Vec<String>, StorageError>> + Send {
+        self.query(move |conn, codec| {
+            crate::host_queries::session_ids_of(conn, codec, conversation)
+        })
+    }
+
+    fn quit_counts(&self) -> impl Future<Output = Result<QuitCounts, StorageError>> + Send {
+        self.query(|conn, _codec| crate::host_queries::quit_counts(conn))
+    }
+
+    fn snapshot_inputs(
+        &self,
+        conversation: ConversationId,
+    ) -> impl Future<Output = Result<SnapshotInputs, StorageError>> + Send {
+        self.query(move |conn, codec| {
+            crate::host_queries::snapshot_inputs(conn, codec, conversation)
+        })
     }
 
     fn artifact_is_referenced(

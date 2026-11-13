@@ -53,6 +53,7 @@ fn logs_never_contain_payload() {
             1,
             vec![
                 ProjectAdded { project: project(1) }.into(),
+                AssistantCreated { assistant: assistant(1, false) }.into(),
                 ConversationCreated { conversation: project_conversation(10, 1) }.into(),
                 TurnQueued { turn: turn(20, 10) }.into(),
                 MessageAppended { message: m }.into(),

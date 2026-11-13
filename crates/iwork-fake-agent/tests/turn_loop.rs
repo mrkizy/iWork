@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use history::FakeHistory;
 use iwork_agent_acp::AcpRuntime;
 use iwork_core::turn::{
-    STUB_DENY_MESSAGE, SessionLine, StubDecider, TurnEntry, TurnPlan, TurnPorts,
+    RunTag, STUB_DENY_MESSAGE, SessionLine, StubDecider, TurnEntry, TurnPlan, TurnPorts,
 };
 use iwork_domain::turn::TurnState;
 use serde_json::json;
@@ -76,6 +76,8 @@ impl Harness {
 
     fn plan(&self, cwd: &std::path::Path, prompt: &str) -> TurnPlan {
         TurnPlan {
+            changes: None,
+            run: RunTag(1),
             entry: TurnEntry::New,
             turn: queued_turn(&self.ids),
             assistant_name: "小助手".into(),
@@ -253,7 +255,7 @@ async fn cancel_kills_whole_process_tree_when_runtime_ignores_it() {
     assert!(process_exists(child), "对照：取消前子进程活着");
 
     let cancelled_at = Instant::now();
-    canceller.cancel(turn_id);
+    canceller.cancel(turn_id, RunTag(1));
     let (state, line) = task.await.unwrap();
     let turn_ended = cancelled_at.elapsed();
 
@@ -318,7 +320,7 @@ async fn cooperative_cancel_still_clears_children_and_next_turn_resumes() {
             .find_map(|r| r["spawned_child"].as_u64())
             .expect("假运行时启动了子进程") as u32;
         let cancelled_at = Instant::now();
-        canceller.cancel(turn_id);
+        canceller.cancel(turn_id, RunTag(1));
         let (state, mut line) = task.await.unwrap();
 
         assert_eq!(state, TurnState::Cancelled);

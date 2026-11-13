@@ -7,7 +7,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use iwork_domain::common::{Actor, Timestamp};
-use iwork_domain::id::{MessageId, Seq};
+use iwork_domain::id::{CommandId, MessageId, Seq};
 use iwork_ports::clock::Clock;
 use iwork_ports::store::{
     CommitReceipt, CommitRequest, DeliveryState, EventCodec, EventFilter, OutboxId, OutboxItem,
@@ -92,6 +92,8 @@ pub struct SqliteStore<C: EventCodec> {
     pub(crate) delivery_started: Arc<AtomicBool>,
     failure: Arc<FailureSignal>,
     join: Mutex<Option<JoinHandle<()>>>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) hooks: Arc<crate::test_hooks::TestHooks>,
 }
 
 impl<C: EventCodec + 'static> SqliteStore<C> {
@@ -174,6 +176,8 @@ impl<C: EventCodec + 'static> SqliteStore<C> {
             delivery_started: Arc::new(AtomicBool::new(false)),
             failure,
             join: Mutex::new(Some(join)),
+            #[cfg(any(test, feature = "test-hooks"))]
+            hooks: Arc::default(),
         })
     }
 
@@ -340,6 +344,20 @@ impl<C: EventCodec + 'static> StoragePort for SqliteStore<C> {
         req: CommitRequest,
     ) -> impl Future<Output = Result<CommitReceipt, StorageError>> + Send {
         self.writer.request(|reply| WriteOp::Commit(req, reply))
+    }
+
+    fn command_receipt(
+        &self,
+        command_id: CommandId,
+    ) -> impl Future<Output = Result<Option<CommitReceipt>, StorageError>> + Send {
+        // 走写线程（排在先入队的提交后面），不走读连接：方案 A2
+        self.writer.sql_then(
+            move |conn, _now| writer::recorded_receipt(conn, command_id),
+            || {
+                #[cfg(any(test, feature = "test-hooks"))]
+                self.hooks.receipt_enqueued(command_id);
+            },
+        )
     }
 
     fn head_seq(&self) -> impl Future<Output = Result<Seq, StorageError>> + Send {

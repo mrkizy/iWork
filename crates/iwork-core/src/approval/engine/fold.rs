@@ -533,6 +533,8 @@ impl Folded {
                         .collect(),
                 );
             }
+            // 回合意图在回合流上，引擎追平时读得到；续不续接由回合宿主从库里推，折叠不管它（T10a 方案 2.1）
+            E::TurnIntentRecorded(_) => {}
             _ => {}
         }
         Ok(effects)

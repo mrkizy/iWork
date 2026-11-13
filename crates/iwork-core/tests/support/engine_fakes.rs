@@ -37,6 +37,8 @@ pub struct MemStore {
     pub events: Arc<Mutex<Vec<StoredEvent>>>,
     pub projection: Arc<Mutex<ReferenceProjection>>,
     pub fail_next: Arc<AtomicBool>,
+    /// 为真期间每一笔提交都回 Busy（持续阻住，不是只回一次）
+    pub fail_all: Arc<AtomicBool>,
     /// 下一次读事件报 `Io`
     pub fail_read: Arc<AtomicBool>,
     /// 处理过的提交笔数（含空提交、含被拒的）
@@ -73,7 +75,8 @@ impl MemStore {
         if req.events.is_empty() {
             self.empty_commits.fetch_add(1, Ordering::SeqCst);
         }
-        if self.fail_next.swap(false, Ordering::SeqCst)
+        if self.fail_all.load(Ordering::SeqCst)
+            || self.fail_next.swap(false, Ordering::SeqCst)
             || self.fail_commit_at.load(Ordering::SeqCst) == self.commits.load(Ordering::SeqCst)
         {
             return Err(StorageError::Busy);
@@ -190,6 +193,12 @@ impl StoragePort for MemStore {
             gate.notified().await;
         }
         Ok(receipt)
+    }
+    async fn command_receipt(
+        &self,
+        _id: iwork_domain::id::CommandId,
+    ) -> Result<Option<iwork_ports::store::CommitReceipt>, iwork_ports::store::StorageError> {
+        unimplemented!("这个假存储的使用者不查回执")
     }
     async fn head_seq(&self) -> Result<Seq, StorageError> {
         Ok(Seq(self.events.lock().unwrap().len() as u64))

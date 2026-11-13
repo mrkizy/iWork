@@ -30,6 +30,7 @@ use iwork_domain::runtime::{
 };
 use iwork_domain::security_list::SecurityList;
 use iwork_domain::session::SessionLostReason;
+use iwork_domain::turn::TurnIntentKind;
 use iwork_domain::turn::{InterruptReason, Turn, TurnKind, TurnState};
 use iwork_domain::user_action::{ExitStatus, Proposal, UserActionCard, UserActionState};
 use iwork_proto::pb;
@@ -68,6 +69,10 @@ enum_pair!(session_lost_reason_to_proto, session_lost_reason_from_proto, Session
     SessionLostReason::NotFound => pb::SessionLostReason::NotFound,
     SessionLostReason::Corrupt => pb::SessionLostReason::Corrupt,
     SessionLostReason::Incompatible => pb::SessionLostReason::Incompatible,
+});
+enum_pair!(turn_intent_to_proto, turn_intent_from_proto, TurnIntentKind, pb::TurnIntentKind, {
+    TurnIntentKind::Cancel => pb::TurnIntentKind::Cancel,
+    TurnIntentKind::Resume => pb::TurnIntentKind::Resume,
 });
 enum_pair!(decider_to_proto, decider_from_proto, Decider, pb::ApprovalDecider, {
     Decider::User => pb::ApprovalDecider::User,

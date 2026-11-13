@@ -94,6 +94,7 @@ impl Tables {
             E::TurnModelReported(e) => by_turn(&e.turn_id),
             E::TurnSessionBound(e) => by_turn(&e.turn_id),
             E::ApprovalDelivered(e) => by_turn(&e.turn_id),
+            E::TurnIntentRecorded(e) => by_turn(&e.turn_id),
             E::ToolCallStarted(e) => by_turn(&e.turn_id),
             E::ToolCallFinished(e) => by_turn(&e.turn_id),
             E::ApprovalRequested(e) => e.approval.as_ref().map(|a| a.conversation_id.clone()),
@@ -122,6 +123,7 @@ impl Tables {
             | E::AssistantDeleted(_)
             | E::AssistantReset(_)
             | E::ApprovalEvaluated(_)
+            | E::RuntimeSessionForgetFailed(_)
             | E::RuleRemembered(_)
             | E::RuleRevoked(_)
             | E::RulesDeleted(_)
@@ -384,6 +386,8 @@ impl Tables {
             E::ApprovalEvaluated(_) | E::ApprovalStaleResultDropped(_) => {}
             // 交付记录只给编排用（T07），不改任何视图。
             E::ApprovalDelivered(_) => {}
+            // 回合意图：真后台用它推派发与续接，界面不画它（T10a 第 12 节给 T09 的交接）
+            E::TurnIntentRecorded(_) => {}
             E::TurnSessionBound(e) => {
                 if let Some(t) = self.turns.get_mut(&e.turn_id) {
                     t.runtime_session_id = Some(e.runtime_session_id.clone());
@@ -459,7 +463,10 @@ impl Tables {
                     },
                 );
             }
-            E::UsageReported(_) | E::LocalImportPrompted(_) | E::McpSecretSet(_) => {}
+            E::UsageReported(_)
+            | E::RuntimeSessionForgetFailed(_)
+            | E::LocalImportPrompted(_)
+            | E::McpSecretSet(_) => {}
             E::LocalConfigImported(e) => {
                 let items = self.local_config.entry(e.runtime_id.clone()).or_default();
                 for imported in &e.items {

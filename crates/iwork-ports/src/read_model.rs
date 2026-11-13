@@ -2,11 +2,14 @@
 
 use std::future::Future;
 
-use iwork_domain::approval::Approval;
+use iwork_domain::approval::{Approval, OwnerFacts};
+use iwork_domain::approval_mode::ApprovalMode;
 use iwork_domain::assistant::Assistant;
 use iwork_domain::common::{ArtifactRef, Timestamp};
 use iwork_domain::conversation::Conversation;
-use iwork_domain::id::{ConversationId, JobId, MessageId, ProjectId, RuntimeId, TurnId};
+use iwork_domain::id::{
+    AssistantId, ConversationId, JobId, MessageId, ProjectId, RuntimeId, Seq, TurnId,
+};
 use iwork_domain::message::Message;
 use iwork_domain::project::Project;
 use iwork_domain::rule::RuleEntry;
@@ -131,6 +134,66 @@ pub enum SummaryText {
     Stored,
 }
 
+/// 回合宿主对账要读的全部事实（T10a 方案 2.2），一个读事务。`head` 是这个事务看到的最新 seq。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnWork {
+    pub head: Seq,
+    /// 有没到终态的回合的对话，加上在删的对话（删除要接着做），按对话 id 升序
+    pub conversations: Vec<ConversationWork>,
+}
+
+/// 一个有活干的对话。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationWork {
+    /// 含状态（`Active` / `Deleting`）
+    pub conversation: Conversation,
+    /// 没到终态的回合，按排进来的先后（`TurnQueued` 的 seq）升序：第一个就是「最老的没到终态的回合」
+    pub open_turns: Vec<OpenTurn>,
+    /// 名下还有没到终态的卡片（结果未知的也算没到）：删除在等它
+    pub cards_open: bool,
+}
+
+/// 一个没到终态的回合，连同宿主判断要用的几个 seq。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenTurn {
+    pub turn: Turn,
+    /// 这个回合的归属事实（对话在不在删、它的助手在不在）。项目对话里各回合的助手可以不同，所以按回合给
+    pub owner: OwnerFacts,
+    /// 一趟编排的起点：最近一次从 `Queued` 或已中断进到 `Running` 的那笔提交
+    pub run_started_seq: Option<Seq>,
+    /// 进入现在这次中断的 seq；不在中断为 `None`
+    pub interrupted_seq: Option<Seq>,
+    /// 最近一条取消意图
+    pub cancel_intent_seq: Option<Seq>,
+    /// 这次中断之后最近一条继续意图（进入中断时清空）
+    pub resume_intent_seq: Option<Seq>,
+}
+
+/// 退出前要问的两个数（E1）。卡片那个数由 T10e 加。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct QuitCounts {
+    /// 占着运行时进程的回合（`TurnState::holds_process`）
+    pub running_turns: u32,
+    /// 排着的回合
+    pub queued_turns: u32,
+}
+
+/// 算一个对话的会话快照要的已提交输入（D8），一个读事务。路径的解析不在这里（要读磁盘），由调用方做。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotInputs {
+    pub conversation: Conversation,
+    /// 这个对话里各成员单独设置的档位
+    pub member_modes: Vec<(AssistantId, ApprovalMode)>,
+    /// 全部项目：本对话的项目（或私聊所选项目）在里面，别的项目的根目录进快照的临时敏感目录
+    pub projects: Vec<Project>,
+    /// 全部助手：成员的工具配置在里面，别的助手的私聊目录进快照的临时敏感目录
+    pub assistants: Vec<Assistant>,
+    /// 三张安全清单的全部条目（同 `security_lists`）
+    pub security_lists: Vec<RuleEntry>,
+    /// 读清单时 `rule` 流的最新 seq（审计的 `snapshot_lists_seq`）
+    pub lists_seq: Seq,
+}
+
 /// 查询模型。
 pub trait ReadModelPort: Send + Sync {
     fn conversation(
@@ -167,6 +230,27 @@ pub trait ReadModelPort: Send + Sync {
         line: Option<ProjectId>,
         recent_limit: u32,
     ) -> impl Future<Output = Result<SummarySource, StorageError>> + Send;
+    /// 回合宿主对账（T10a D1、D5–D7、X2–X4）。
+    fn turn_work(&self) -> impl Future<Output = Result<TurnWork, StorageError>> + Send;
+    /// 这个对话全部 `TurnSessionBound` 里 seq 最大的那一条的会话编号（D3a）；一条都没有为 `None`。
+    /// 读事件，不读投影：投影上只有每个回合最后一个值。
+    fn last_session_binding(
+        &self,
+        conversation: ConversationId,
+    ) -> impl Future<Output = Result<Option<String>, StorageError>> + Send;
+    /// 这个对话全部 `TurnSessionBound` 里出现过的会话编号（含 `replaced` 里的旧编号），去重，按第一次出现的
+    /// 先后（X4）。读事件。
+    fn session_ids_of(
+        &self,
+        conversation: ConversationId,
+    ) -> impl Future<Output = Result<Vec<String>, StorageError>> + Send;
+    /// 退出前要问的数（E1）。
+    fn quit_counts(&self) -> impl Future<Output = Result<QuitCounts, StorageError>> + Send;
+    /// 算会话快照的已提交输入（D8）。对话不存在时报 `NotFound`。
+    fn snapshot_inputs(
+        &self,
+        conversation: ConversationId,
+    ) -> impl Future<Output = Result<SnapshotInputs, StorageError>> + Send;
     /// `ReadArtifact` 的范围校验：引用是否被某条消息、工具调用、附件或卡片引用。
     fn artifact_is_referenced(
         &self,

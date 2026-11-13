@@ -172,6 +172,10 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
             approval_id: e.approval_id.to_string(),
             turn_id: e.turn_id.to_string(),
         }),
+        DomainEvent::TurnIntentRecorded(e) => P::TurnIntentRecorded(pb::TurnIntentRecorded {
+            turn_id: e.turn_id.to_string(),
+            intent: turn_intent_to_proto(e.intent),
+        }),
         DomainEvent::ToolCallStarted(e) => P::ToolCallStarted(pb::ToolCallStarted {
             turn_id: e.turn_id.to_string(),
             tool_call_id: e.tool_call_id.0.clone(),
@@ -303,6 +307,21 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
             turn_id: e.turn_id.to_string(),
             usage: Some(usage_to_proto(&e.usage)),
         }),
+        DomainEvent::RuntimeSessionForgetFailed(e) => {
+            use pb::runtime_session_forget_failed::Outcome;
+            P::RuntimeSessionForgetFailed(pb::RuntimeSessionForgetFailed {
+                conversation_id: e.conversation_id.to_string(),
+                runtime_session_id: e.runtime_session_id.clone(),
+                outcome: Some(match &e.outcome {
+                    ev::ForgetFailure::Refused { why } => {
+                        Outcome::Refused(pb::ForgetRefused { why: why.clone() })
+                    }
+                    ev::ForgetFailure::Failed { message } => Outcome::Failed(pb::ForgetFailed {
+                        message: message.clone(),
+                    }),
+                }),
+            })
+        }
         DomainEvent::LocalImportPrompted(e) => P::LocalImportPrompted(pb::LocalImportPrompted {
             runtime_id: e.runtime_id.to_string(),
         }),
@@ -707,6 +726,11 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
             turn_id: parse_id("ApprovalDelivered", "turn_id", &e.turn_id)?,
         }
         .into(),
+        P::TurnIntentRecorded(e) => ev::TurnIntentRecorded {
+            turn_id: parse_id("TurnIntentRecorded", "turn_id", &e.turn_id)?,
+            intent: turn_intent_from_proto("TurnIntentRecorded", "intent", e.intent)?,
+        }
+        .into(),
         P::ToolCallStarted(e) => ev::ToolCallStarted {
             turn_id: parse_id("ToolCallStarted", "turn_id", &e.turn_id)?,
             tool_call_id: ToolCallId(e.tool_call_id),
@@ -905,6 +929,19 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
             usage: usage_from_proto(required("UsageReported", "usage", e.usage.as_ref())?),
         }
         .into(),
+        P::RuntimeSessionForgetFailed(e) => {
+            use pb::runtime_session_forget_failed::Outcome;
+            const KIND: &str = "RuntimeSessionForgetFailed";
+            ev::RuntimeSessionForgetFailed {
+                conversation_id: parse_id(KIND, "conversation_id", &e.conversation_id)?,
+                runtime_session_id: e.runtime_session_id,
+                outcome: match required(KIND, "outcome", e.outcome)? {
+                    Outcome::Refused(r) => ev::ForgetFailure::Refused { why: r.why },
+                    Outcome::Failed(f) => ev::ForgetFailure::Failed { message: f.message },
+                },
+            }
+            .into()
+        }
         P::LocalImportPrompted(e) => ev::LocalImportPrompted {
             runtime_id: parse_id("LocalImportPrompted", "runtime_id", &e.runtime_id)?,
         }

@@ -1,0 +1,7 @@
+runtime_session_forget_failed {
+  conversation_id: "01JC0C0000000000000000CNV1"
+  runtime_session_id: "sess-1"
+  refused {
+    why: "\344\270\215\346\230\257\346\231\256\351\200\232\346\226\207\344\273\266"
+  }
+}

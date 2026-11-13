@@ -203,3 +203,60 @@ impl Turn {
         Ok(to)
     }
 }
+
+finite_enum! {
+    /// 用户对一个回合的要求（T10a 方案 0a.1 第 9 条）：取消在跑的、继续已中断的。它是落盘的事实，
+    /// 回合宿主从库里推出要不要给编排发取消、要不要续接。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum TurnIntentKind {
+        Cancel,
+        Resume,
+    }
+}
+
+// ---------- 提交时校验（T10a 方案 0a.3 第 A4 行）----------
+//
+// 回合状态有两类写者（编排、受理函数或宿主），写线程按库里现在的状态裁决谁先落盘。真存储与假存储都调这里。
+
+/// `TurnStateChanged` 的状态前提：库里现在的状态 `current` 等于事件的 `from`，并且 `from → to`
+/// 是 [`TURN_TRANSITIONS`] 里某个触发给出的边。
+pub fn check_turn_committed(
+    current: TurnState,
+    e: &crate::event::TurnStateChanged,
+) -> Result<(), crate::approval::PreconditionFailed> {
+    use crate::approval::PreconditionFailed;
+    if current != e.from {
+        return Err(PreconditionFailed::new(format!(
+            "回合状态变化要求现在是 {:?}，库里是 {current:?}",
+            e.from
+        )));
+    }
+    if !TURN_TRANSITIONS
+        .iter()
+        .any(|(from, _, to)| *from == e.from && *to == e.to)
+    {
+        return Err(PreconditionFailed::new(format!(
+            "回合 {:?} → {:?} 不是 TURN_TRANSITIONS 里的边",
+            e.from, e.to
+        )));
+    }
+    Ok(())
+}
+
+/// 回合意图的状态前提：取消只落在 `Running` / `WaitingApproval` 的回合上，继续只落在已中断的回合上。
+pub fn check_intent_committed(
+    current: TurnState,
+    intent: TurnIntentKind,
+) -> Result<(), crate::approval::PreconditionFailed> {
+    let fits = match intent {
+        TurnIntentKind::Cancel => matches!(current, S::Running | S::WaitingApproval),
+        TurnIntentKind::Resume => matches!(current, S::Interrupted { .. }),
+    };
+    if fits {
+        Ok(())
+    } else {
+        Err(crate::approval::PreconditionFailed::new(format!(
+            "{intent:?} 意图不能落在 {current:?} 的回合上"
+        )))
+    }
+}

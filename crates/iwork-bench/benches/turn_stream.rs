@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use iwork_core::turn::{SessionLine, StubDecider, TurnEntry, TurnPlan, TurnPorts};
+use iwork_core::turn::{RunTag, SessionLine, StubDecider, TurnEntry, TurnPlan, TurnPorts};
 use iwork_domain::common::{ModelId, ModelSelection, Timestamp, ToolGroups};
 use iwork_domain::id::{AssistantId, ConversationId, MessageId, RawUlid, RuntimeId, Seq, TurnId};
 use iwork_domain::session::{AllowWrite, NetworkPolicy, SessionConstraints, SessionToolSet};
@@ -100,6 +100,12 @@ impl StoragePort for Store {
             replayed: false,
         })
     }
+    async fn command_receipt(
+        &self,
+        _id: iwork_domain::id::CommandId,
+    ) -> Result<Option<iwork_ports::store::CommitReceipt>, iwork_ports::store::StorageError> {
+        unimplemented!("这个假存储的使用者不查回执")
+    }
     async fn head_seq(&self) -> Result<Seq, StorageError> {
         unimplemented!()
     }
@@ -188,6 +194,8 @@ fn plan(n: u128) -> TurnPlan {
         effort: None,
     };
     TurnPlan {
+        changes: None,
+        run: RunTag(1),
         entry: TurnEntry::New,
         turn: Turn {
             id: TurnId::from_raw(id),

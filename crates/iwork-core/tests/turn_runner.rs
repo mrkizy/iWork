@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use iwork_core::turn::{
-    Decided, PermissionDecider, SessionLine, TURN_GONE_MESSAGE, TurnCanceller, TurnEntry, TurnPlan,
-    TurnPorts, TurnRunError, VoidPlanError,
+    Decided, PermissionDecider, RunTag, SessionLine, TURN_GONE_MESSAGE, TurnCanceller, TurnEntry,
+    TurnPlan, TurnPorts, TurnRunError, VoidPlanError,
 };
 use iwork_domain::action::ToolRef;
 use iwork_domain::approval::VoidReason;
@@ -413,6 +413,12 @@ impl StoragePort for Store {
             replayed: false,
         })
     }
+    async fn command_receipt(
+        &self,
+        _id: iwork_domain::id::CommandId,
+    ) -> Result<Option<iwork_ports::store::CommitReceipt>, iwork_ports::store::StorageError> {
+        unimplemented!("这个假存储的使用者不查回执")
+    }
     async fn head_seq(&self) -> Result<Seq, StorageError> {
         unimplemented!()
     }
@@ -536,6 +542,8 @@ impl Bench {
     fn plan(&self) -> TurnPlan {
         let id = |n| RawUlid::from_u128(self.ids.0.fetch_add(1, Ordering::SeqCst) as u128 + n);
         TurnPlan {
+            changes: None,
+            run: RunTag(1),
             entry: TurnEntry::New,
             turn: Turn {
                 id: TurnId::from_raw(id(1)),
@@ -690,7 +698,7 @@ async fn answer_arriving_while_cancelling_is_rejected() {
     b.wait_prompts(1).await;
     let ask = b.ctl.ask();
     b.wait_state(t, TurnState::WaitingApproval).await;
-    canceller.cancel(t);
+    canceller.cancel(t, RunTag(1));
     b.wait_state(t, TurnState::Cancelling).await;
 
     b.decider.answer(PermissionDecision::Allow);
@@ -748,7 +756,7 @@ async fn tool_start_precedes_waiting_even_behind_a_large_backlog() {
         "积压的文字都在受理审批之前处理完"
     );
 
-    canceller.cancel(t);
+    canceller.cancel(t, RunTag(1));
     b.ctl.send(AgentUpdate::Finished(TurnOutcome::Cancelled));
     assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Cancelled);
     b.decider.answer(PermissionDecision::Allow);
@@ -767,7 +775,7 @@ async fn cancel_is_handled_while_updates_keep_flowing() {
     let t = plan.turn.id;
     let task = b.spawn(line, plan);
     wait_until(|| b.live.0.load(Ordering::SeqCst) > 1000).await;
-    canceller.cancel(t);
+    canceller.cancel(t, RunTag(1));
     let (result, _) = tokio::time::timeout(Duration::from_secs(5), task)
         .await
         .expect("持续输出时取消也要在 5 秒内生效")
@@ -786,7 +794,7 @@ async fn cancel_ready_together_with_finish_wins() {
     b.wait_state(t, TurnState::Running).await;
     // 单线程运行时：两件事都在编排下一次被调度前就绪
     b.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
-    canceller.cancel(t);
+    canceller.cancel(t, RunTag(1));
     assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Cancelled);
     assert_eq!(b.ctl.cancels.load(Ordering::SeqCst), 1);
 }
@@ -898,7 +906,7 @@ async fn trailing_text_is_checkpointed_without_further_updates() {
         sent.elapsed()
     );
 
-    canceller.cancel(t);
+    canceller.cancel(t, RunTag(1));
     b.ctl.send(AgentUpdate::Finished(TurnOutcome::Cancelled));
     assert_eq!(task.await.unwrap().0.unwrap(), TurnState::Cancelled);
     // 判定方此时才答复：回合已结束，运行时拿到拒绝
@@ -946,7 +954,7 @@ async fn runner_replans_void_on_projection_error() {
     *b.decider.void_mode.lock().unwrap() = VoidMode::Plan(vec![void_event()]);
     b.store.reject_voids.store(2, Ordering::SeqCst);
     let (t, task, canceller) = running(&b).await;
-    canceller.cancel(t);
+    canceller.cancel(t, RunTag(1));
     b.wait_state(t, TurnState::Cancelling).await;
     // 状态看得见时提交可能还没返回给编排（见 cancel_reaches_session_only_after_the_commit_returns）：
     // 等到 `cancel()` 真的被调过，第三个句柄这时一定已经丢了
@@ -970,7 +978,7 @@ async fn cancel_reaches_session_only_after_the_commit_returns() {
     let gate = Arc::new(tokio::sync::Notify::new());
     *b.store.after_append_gate.lock().unwrap() = Some(gate.clone());
     let (t, task, canceller) = running(&b).await;
-    canceller.cancel(t);
+    canceller.cancel(t, RunTag(1));
     wait_until(|| b.store.at_after_append_gate.load(Ordering::SeqCst)).await;
     // 窗口里：状态已经是 Cancelling，第三个句柄没丢，会话还没被取消
     assert_eq!(b.store.state_of(t), Some(TurnState::Cancelling));
@@ -991,7 +999,7 @@ async fn runner_gives_up_after_three() {
     *b.decider.void_mode.lock().unwrap() = VoidMode::Plan(vec![void_event()]);
     b.store.reject_voids.store(3, Ordering::SeqCst);
     let (t, task, canceller) = running(&b).await;
-    canceller.cancel(t);
+    canceller.cancel(t, RunTag(1));
     let (result, _) = task.await.unwrap();
     assert!(matches!(
         result,
@@ -1018,7 +1026,7 @@ async fn cancel_closes_session_when_void_plan_fails() {
         let (t, task, canceller) = running(&b).await;
         let ask = b.ctl.ask();
         b.wait_state(t, TurnState::WaitingApproval).await;
-        canceller.cancel(t);
+        canceller.cancel(t, RunTag(1));
         let (result, _) = task.await.unwrap();
         assert!(
             matches!(result, Err(TurnRunError::VoidPlan(_))),
@@ -1038,7 +1046,7 @@ async fn cancel_closes_session_when_token_never_frees() {
     let b = Bench::new();
     *b.decider.void_mode.lock().unwrap() = VoidMode::Hang;
     let (t, task, canceller) = running(&b).await;
-    canceller.cancel(t);
+    canceller.cancel(t, RunTag(1));
     let (result, _) = task.await.unwrap();
     assert!(matches!(
         result,
@@ -1054,7 +1062,7 @@ async fn cancel_closes_session_when_void_commit_never_returns() {
     *b.decider.void_mode.lock().unwrap() = VoidMode::Plan(vec![void_event()]);
     b.store.hang_voids.store(true, Ordering::SeqCst);
     let (t, task, canceller) = running(&b).await;
-    canceller.cancel(t);
+    canceller.cancel(t, RunTag(1));
     let (result, _) = task.await.unwrap();
     assert!(matches!(
         result,
@@ -1078,7 +1086,7 @@ async fn cancel_stops_runtime_when_committed_never_returns() {
     *b.decider.ctl.lock().unwrap() = Some(b.ctl.clone());
     let (t, task, canceller) = running(&b).await;
     b.decider.committed_hangs.store(true, Ordering::SeqCst);
-    canceller.cancel(t);
+    canceller.cancel(t, RunTag(1));
     b.wait_state(t, TurnState::Cancelling).await;
     wait_until(|| b.ctl.cancels.load(Ordering::SeqCst) == 1).await;
     assert_eq!(
@@ -1111,7 +1119,7 @@ async fn nudge_timeout_does_not_stall_turn() {
         started.elapsed() >= Duration::from_secs(1),
         "等满了提醒的期限才发票"
     );
-    canceller.cancel(t);
+    canceller.cancel(t, RunTag(1));
     b.wait_state(t, TurnState::Cancelling).await;
     // 票已清：判定方迟到的结论被拒
     b.decider.answer(PermissionDecision::Allow);
@@ -1128,8 +1136,8 @@ async fn cancel_all_is_not_blocked_by_one_stuck_conversation() {
     let fine = Bench::new();
     let (t1, task1, c1) = running(&stuck).await;
     let (t2, task2, c2) = running(&fine).await;
-    c1.cancel(t1);
-    c2.cancel(t2);
+    c1.cancel(t1, RunTag(1));
+    c2.cancel(t2, RunTag(1));
     fine.wait_state(t2, TurnState::Cancelling).await;
     // 同上：状态先看得见，`cancel()` 在提交返回之后才调
     wait_until(|| fine.ctl.cancels.load(Ordering::SeqCst) == 1).await;
@@ -1330,13 +1338,29 @@ mod delivery_gate {
             "没有别的票在等：和回到 Running 同一笔"
         );
         assert!(events.iter().any(|e| matches!(e, DomainEvent::ApprovalDecided(d) if d.approval_id == id && matches!(d.state, ApprovalState::Approved { .. }))));
-        // 随后回合中断（扮演等待上限）
-        w.store.seed(vec![interrupted(t, TurnState::Running)]);
+        // 随后回合中断（扮演等待上限）：等待上限只从等审批出发（转换表，存储在提交时校验），
+        // 所以先扮演又一次权限请求让回合进等审批
+        w.store.seed(vec![
+            TurnStateChanged {
+                turn_id: t,
+                from: TurnState::Running,
+                to: TurnState::WaitingApproval,
+                reason: None,
+            }
+            .into(),
+            interrupted(t, TurnState::WaitingApproval),
+        ]);
         w.engine.sync().await.unwrap();
         assert!(w.engine.grant(id).is_none(), "交付过的批准不留一次性放行");
         assert!(w.engine.turns_to_resume().is_empty());
+        // 回合在编排背后被记成中断了：编排随后那笔 `Running → Completed` 过不了提交时校验（T10a A4），
+        // 以存储错误收场（宿主按 D5 补账）
         w.b.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
-        task.await.unwrap().unwrap();
+        let ended = task.await.unwrap();
+        assert!(
+            format!("{ended:?}").contains("Projection"),
+            "迟到的一笔被拒：{ended:?}"
+        );
     }
 
     /// 对照：批准落盘了、编排的交付那笔还没入队，回合就中断了 → 一次性放行，并要求续接。
@@ -1469,3 +1493,7 @@ async fn second_prompt_failure_after_reopen_fails_running_turn() {
     assert!(line.session().is_none());
     assert_eq!(line.resume_id(), Some("fake"));
 }
+
+/// 改动摘要与「搞定」章，编排那一半（T10a 方案 D10）。
+#[path = "turn_runner/change_probe.rs"]
+mod change_probe;

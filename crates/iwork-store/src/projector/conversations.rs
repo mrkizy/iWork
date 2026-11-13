@@ -113,10 +113,12 @@ pub(super) fn deleted<C: EventCodec + ?Sized>(
     cx: &Cx<'_, C>,
     id: ConversationId,
 ) -> Result<(), StorageError> {
-    delete_cascade(cx, &id.to_string())
+    let id = id.to_string();
+    super::owner::require_cascade(cx, std::slice::from_ref(&id))?;
+    delete_cascade(cx, &id)
 }
 
-/// 删对话及挂在它下面的一切（方案 2.6「级联」）：消息、回合、用量、工具调用、审批、亲手执行卡片、
+/// 删对话及挂在它下面的一切（方案 2.6「级联」）。调用方先过 `owner::require_cascade`（名下回合都到终态）：消息、回合、用量、工具调用、审批、亲手执行卡片、
 /// 附件、成员档位、流式检查点，以及这些行贡献的制品引用。规则由 `RulesDeleted` 单独删。
 pub(super) fn delete_cascade<C: EventCodec + ?Sized>(
     cx: &Cx<'_, C>,
@@ -135,7 +137,7 @@ pub(super) fn delete_cascade<C: EventCodec + ?Sized>(
          (SELECT id FROM attachments WHERE conversation_id = ?1)",
         "DELETE FROM message_checkpoints WHERE message_id IN \
          (SELECT id FROM messages WHERE conversation_id = ?1)",
-        "DELETE FROM tool_calls WHERE turn_id IN (SELECT id FROM turns WHERE conversation_id = ?1)",
+        "DELETE FROM tool_calls WHERE conversation_id = ?1",
         "DELETE FROM turn_usage WHERE conversation_id = ?1",
         "DELETE FROM turns WHERE conversation_id = ?1",
         "DELETE FROM messages WHERE conversation_id = ?1",

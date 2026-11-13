@@ -1,0 +1,9 @@
+{
+  "runtimeSessionForgetFailed": {
+    "conversationId": "01JC0C0000000000000000CNV1",
+    "runtimeSessionId": "sess-1",
+    "refused": {
+      "why": "不是普通文件"
+    }
+  }
+}
