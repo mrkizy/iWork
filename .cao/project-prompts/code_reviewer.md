@@ -13,4 +13,5 @@ iWork：本机运行的 ADE（Agent Development Environment），Rust daemon + T
 - **blocking**：违反 `AGENTS.md` “安全不变量”任意一条；审批可被绕过的任何路径（含超时、异常、进程崩溃时的默认放行）；凭据或个人信息落盘、进日志；事件被修改或丢失；命令重放不幂等。
 - **important**：crate 依赖方向违规（`domain`/`ports` 引入 I/O 或框架，`core` 引用存储、git、ACP 实现）；核心中出现厂商或 git 特例（审批规则登记表里按命令文字识别 git 等程序子命令不算，见 `AGENTS.md` 架构约定）；状态变化绕过事件直接改客户端状态；网页层做业务判断；热路径改动没有基准对比；厂商行为假设没有 `t0-findings.md` 依据。
 - 审查时对照任务卡“验收标准”逐条核对证据；缺证据的条目按 important 报。
+- 改动声称某项能力或代码「不进发布构建」（测试、开发用的 feature、dev-dependencies、构建 target）时，追到正式打包入口（`AGENTS.md` 命令一节），核对同一次 cargo 调用里的全部 target，用那次构建实际的 feature 或产物作证。`cargo tree -e normal,build` 单独证明不了：同一次调用里只要编了 example 或 test，dev-dependencies 打开的 feature 会统一到发布目标上。
 - 复审（方案和代码都算）时判断这次修订改的是根因还是症状：同一类问题换了入口又出现，或者修订只是为点名的反例加了一条更窄的规则、同类写法照样能绕过，按 `important` 报「根因未修」，写明是哪条规则或机制要换、还有哪些同类入口；原场景本身没修好的照原严重度报。
