@@ -192,8 +192,8 @@ async fn stdout_full_still_self_cleans() {
 
 // ---------- 后台没了 ----------
 
-/// 后台死在冻结中途（CLI 停着）：系统给桥接的组发 SIGHUP、SIGCONT。桥接没被 SIGHUP 杀掉，读到 stdin 结束后
-/// 给 CLI 发 SIGTERM、对自己的组发 SIGKILL，整个组没了。CLI 对 SIGHUP 分两格：默认动作（被 SIGHUP 结束）与忽略。
+/// 后台死在冻结中途（CLI 停着）：系统给桥接的组发 SIGHUP、SIGCONT。桥接没被 SIGHUP 杀掉，发现后台没了（父进程
+/// 变了，或读到 stdin 结束，先到的算）就给 CLI 发 SIGTERM、对自己的组发 SIGKILL，整个组没了。CLI 对 SIGHUP 分两格：默认动作（被 SIGHUP 结束）与忽略。
 async fn daemon_dies_with_cli(ignore_hup: bool) {
     let marker_dir = tempfile::tempdir().unwrap();
     let rig = Rig::new(fatal_script(
@@ -214,17 +214,20 @@ async fn daemon_dies_with_cli(ignore_hup: bool) {
     .await;
     b.daemon_dies();
     let stderr = || b.stderr();
+    // 桥接没被 SIGHUP 杀掉：「收到 SIGHUP」是桥接自己的处理函数记的，默认动作会在处理函数跑之前就结束进程，
+    // 记得出来就是证据。不在这之后看桥接活不活：收尾线程每 PARENT_POLL 比一次父进程，发现后台没了就自己收尾、
+    // 连组杀掉（方案 5.4a 第 5 条第二种），什么时候轮到它没有定数
     wait_until("桥接收到 SIGHUP", Duration::from_secs(5), || {
         stderr().contains("收到 SIGHUP")
     })
     .await;
-    assert!(alive(b.bridge), "桥接没被 SIGHUP 杀掉");
     if ignore_hup {
+        // 忽略 SIGHUP 的 CLI 没被它结束：看它之后还记下了桥接收尾发的 SIGTERM（最后断言），不在这里看活不活，
+        // 理由同上
         wait_until("CLI 记下 SIGHUP", Duration::from_secs(5), || {
             signals(&rig).contains(&"SIGHUP".into())
         })
         .await;
-        assert!(alive(cli), "忽略 SIGHUP 的 CLI 还活着");
     } else {
         wait_until("CLI 被 SIGHUP 结束", Duration::from_secs(5), || {
             !alive(cli)
@@ -239,10 +242,12 @@ async fn daemon_dies_with_cli(ignore_hup: bool) {
     )
     .await;
     if ignore_hup {
+        let got = signals(&rig);
+        let hup = got.iter().position(|s| s == "SIGHUP");
+        let term = got.iter().position(|s| s == "SIGTERM");
         assert!(
-            signals(&rig).contains(&"SIGTERM".into()),
-            "桥接给 CLI 发了 SIGTERM：{:?}",
-            signals(&rig)
+            hup.is_some() && term > hup,
+            "CLI 先记下 SIGHUP、之后还活着收到桥接发的 SIGTERM：{got:?}"
         );
     }
 }
