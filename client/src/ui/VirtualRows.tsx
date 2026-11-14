@@ -105,7 +105,11 @@ export function VirtualRows(props: VirtualRowsProps) {
 
   const onUserInput = () => {
     userInput = true;
-    followHeld = false;
+    if (followHeld) {
+      // 解除暂停时当场按当前位置重算：已经在底部、再往下滚位置不变时没有 scroll 事件（g3b 3/F-2）
+      followHeld = false;
+      stick = isAtBottom(box.scrollTop, box.clientHeight, box.scrollHeight);
+    }
   };
   const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
   const onKey = (e: KeyboardEvent) => {

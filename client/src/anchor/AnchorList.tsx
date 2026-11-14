@@ -18,6 +18,12 @@ import {
 
 /** 列表外框的边框宽，与 AnchorRail.css 的 .iw-anchor__frame 一致。 */
 const FRAME_BORDER = 1;
+/** 连续型输入（滚轮、触摸、滚动）一个手势只报第一下：同一种输入这么久之内的再报就跳过（作废是幂等的）。
+ *  按键每次都报。 */
+const LIST_INPUT_GAP_MS = 100;
+
+/** 列表里的用户输入：连续型按种类节流，按键不节流。 */
+export type ListInput = "wheel" | "touch" | "scroll" | "key";
 
 export const KIND_CLASS: Record<AnchorKind, string> = {
   [AnchorKind.UNSPECIFIED]: "",
@@ -36,7 +42,8 @@ export interface AnchorSource {
   /** Home / End 要的那一头不在已载入的窗口里：请 Rust 以整个对话最早（假）/ 最新（真）的一头为中心重取。
    *  这个意图由 Rust 持有：那一头到了，AnchorsView 带 edgeLanding（token）回来，网页只执行一次。 */
   onBrowseEdge: (latest: boolean) => void;
-  /** Rust 还在等 Home / End 的那一头（edgePending）时，用户在列表里滚动或按方向键：请 Rust 作废它。 */
+  /** 用户在列表里有输入（滚轮、触摸、方向键、本窗内直接落地的 Home / End、不是程序写的滚动）：一律告诉 Rust，
+   *  由它判断有没有头尾意图可作废（没有就是空操作）。不看 edgePending：它是异步回来的，有往返空窗（g3b 3/F-1）。 */
   onListInput: () => void;
 }
 
@@ -71,17 +78,26 @@ export function createAnchorBrowse(props: AnchorSource) {
     setPreviewKey(a.key);
     reveal?.(at);
   };
+  // 连续型输入一个手势里只报第一下：作废是幂等的，滚轮一秒几十次不必次次都发
+  const lastReport = new Map<ListInput, number>();
+  /** 用户在列表里有输入：一律告诉 Rust（见 AnchorSource.onListInput）。 */
+  const userMoved = (kind: ListInput) => {
+    if (kind !== "key") {
+      const now = performance.now();
+      if (now - (lastReport.get(kind) ?? -Infinity) < LIST_INPUT_GAP_MS) return;
+      lastReport.set(kind, now);
+    }
+    props.onListInput();
+  };
   const edge = (which: "start" | "end") => {
     const more = which === "start" ? props.anchors.hasBefore : props.anchors.hasAfter;
     if (!more) {
+      // 那一头就在本窗：直接落地。这也是一次覆盖头尾意图的用户输入，旧的（反方向的）要作废
+      userMoved("key");
       moveTo(which === "start" ? 0 : items().length - 1);
       return;
     }
     props.onBrowseEdge(which === "end");
-  };
-  /** 用户在列表里滚动或按方向键：Rust 还在等头尾就请它作废。 */
-  const userMoved = () => {
-    if (props.anchors.edgePending) props.onListInput();
   };
 
   return {
@@ -111,7 +127,7 @@ export function createAnchorBrowse(props: AnchorSource) {
         case "ArrowDown":
           if (e.altKey) return false;
           e.preventDefault();
-          userMoved();
+          userMoved("key");
           moveTo(index() + (e.key === "ArrowUp" ? -1 : 1));
           return true;
         case "Home":
@@ -151,6 +167,18 @@ export function AnchorList(props: {
   // 顶上那一条与它往下偏了多少：新列表到了按它对回原位
   let topKey: string | undefined;
   let topOffset = 0;
+  // 最近一次知道的滚动位置：程序写的、或上一次 scroll 事件看到的。scroll 事件里对不上就是用户造成的
+  // （拖滚动条、键盘翻页），要上报（g3b 3/F-1）；程序写的那一次对得上，不算
+  let knownTop = 0;
+  const setTop = (v: number) => {
+    list.scrollTop = v;
+    knownTop = list.scrollTop;
+  };
+  const onScroll = () => {
+    if (Math.abs(list.scrollTop - knownTop) > 0.5) props.browse.userMoved("scroll");
+    knownTop = list.scrollTop;
+    measure();
+  };
   onCleanup(() => clearTimeout(loadingTimer));
 
   const items = () => props.browse.items();
@@ -173,7 +201,7 @@ export function AnchorList(props: {
   const mount = (el: HTMLDivElement) => {
     list = el;
     queueMicrotask(() => {
-      list.scrollTop = centeredScrollTop(props.browse.index(), list.clientHeight);
+      setTop(centeredScrollTop(props.browse.index(), list.clientHeight));
       measure();
     });
   };
@@ -196,7 +224,7 @@ export function AnchorList(props: {
         const keys = next.map((a) => a.key);
         const keptTop = topKey;
         const top = restoredScrollTop(keys, keptTop, topOffset);
-        if (top !== undefined) list.scrollTop = top;
+        if (top !== undefined) setTop(top);
         const shown = props.browse.previewKey();
         if (keptTop !== undefined && keys.includes(keptTop) && (shown === undefined || !keys.includes(shown))) {
           props.browse.preview(keptTop);
@@ -211,7 +239,7 @@ export function AnchorList(props: {
     const s = scroll();
     const y = LIST_PAD + i * PITCH;
     if (y < s.top || y + PITCH > s.top + s.client) {
-      list.scrollTop = centeredScrollTop(i, list.clientHeight);
+      setTop(centeredScrollTop(i, list.clientHeight));
       measure();
     }
   });
@@ -245,9 +273,9 @@ export function AnchorList(props: {
             "iw-anchor__list--seeking": seekingKey() !== "",
           }}
           style={{ height: `${LIST_PAD * 2 + items().length * PITCH}px` }}
-          onScroll={measure}
-          onWheel={() => props.browse.userMoved()}
-          onTouchMove={() => props.browse.userMoved()}
+          onScroll={onScroll}
+          onWheel={() => props.browse.userMoved("wheel")}
+          onTouchMove={() => props.browse.userMoved("touch")}
         >
           <For each={items()}>
             {(a, i) => (

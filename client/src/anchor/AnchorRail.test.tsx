@@ -181,6 +181,27 @@ describe.skipIf(noFixtures)("锚点导轨（宽形态，列表式）", () => {
     expect(a.previewed()?.getAttribute("aria-label")).toBe(label(anchors.items.at(-1)!));
   });
 
+  it("列表里的用户输入一律上报，由 Rust 判断有没有意图可作废，不看 edgePending（g3b 3/F-1）", async () => {
+    const { anchors, current } = fromScenario("anchors-unloaded");
+    expect(anchors.hasBefore && !anchors.hasAfter, "对照：最新一头已在本窗").toBe(true);
+    const a = mount(anchors, current);
+    fireEvent.mouseEnter(a.rail);
+    await settle();
+    const list = a.list()!;
+    sizeList(list, 10 * PITCH, anchors.items.length);
+    // Home 在等（edgePending 还没回来），按 End：最新一头在本窗，直接落地，也要报
+    fireEvent.keyDown(document, { key: "Home" });
+    fireEvent.keyDown(document, { key: "End" });
+    expect(a.inputs, "End 在本窗直接落地").toBe(1);
+    // edgePending 帧还没到就滚轮
+    fireEvent.wheel(list, { deltaY: 40 });
+    expect(a.inputs, "滚轮").toBe(2);
+    // 不是程序写的滚动（拖滚动条、键盘翻页）
+    list.scrollTop = list.scrollTop - 5 * PITCH;
+    fireEvent.scroll(list);
+    expect(a.inputs, "用户造成的滚动").toBe(3);
+  });
+
   it("在等 Home / End 的那一头时用户滚列表或按方向键：请 Rust 作废；迟到的窗口按 key 还原，不把用户拉回顶（g3b 2/F-1）", async () => {
     const { anchors, current } = fromScenario("anchors-unloaded");
     const a = mount(create(AnchorsViewSchema, { ...anchors, edgePending: true }), current);
@@ -193,7 +214,7 @@ describe.skipIf(noFixtures)("锚点导轨（宽形态，列表式）", () => {
     list.scrollTop = LIST_PAD + 30 * PITCH;
     fireEvent.scroll(list);
     fireEvent.keyDown(document, { key: "ArrowDown" });
-    expect(a.inputs).toBe(2);
+    expect(a.inputs, "滚轮、用户滚动、方向键各报一次").toBe(3);
     // Rust 作废了：迟到的窗口没有落点，前面多了 10 条；用户看着的那一段原样留着（往下挪 10 条的距离），不回顶
     const before = list.scrollTop;
     expect(before, "对照：不在顶上").toBeGreaterThan(0);

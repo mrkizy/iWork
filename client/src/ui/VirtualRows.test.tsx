@@ -249,6 +249,37 @@ describe("挂载时就有跳转指令", () => {
     expect(box.scrollTop, "用户滚到底以后照常贴底").toBe(10 * ROW_GAP);
   });
 
+  it("跳转被夹到真实底部后，用户继续往下滚（位置不变、没有 scroll 事件）：解除暂停时就按当前位置重算，新行照常跟随（g3b 3/F-2）", async () => {
+    // 这一格要真实的上下界：内容高随行数变，scrollTop 夹在 [0, 内容高 - 视口高]
+    const tops = new WeakMap<HTMLElement, number>();
+    const count = (el: HTMLElement) => el.querySelectorAll("[data-vrow]").length;
+    stub(HTMLElement.prototype, "scrollHeight", function () {
+      return this.classList.contains("iw-vrows") ? count(this) * ROW_GAP : 0;
+    });
+    const old = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop");
+    Object.defineProperty(Element.prototype, "scrollTop", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return tops.get(this) ?? 0;
+      },
+      set(this: HTMLElement, v: number) {
+        const max = Math.max(0, this.scrollHeight - this.clientHeight);
+        tops.set(this, Math.min(max, Math.max(0, v)));
+      },
+    });
+    restores.push(() => (old ? Object.defineProperty(Element.prototype, "scrollTop", old) : undefined));
+    const keys = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
+    const { box, setKeys } = mountWith(keys);
+    await frame();
+    setJumpTo(box, { rowKey: "j", token: 21n, highlightMs: 1000 });
+    await frame();
+    expect(box.scrollTop, "对照：夹在真实底部").toBe(10 * ROW_GAP - VIEW_HEIGHT);
+    box.dispatchEvent(new WheelEvent("wheel", { deltaY: 300 }));
+    setKeys([...keys, "k"]);
+    await frame();
+    expect(box.scrollTop, "新行到了跟随到新的底部").toBe(11 * ROW_GAP - VIEW_HEIGHT);
+  });
+
   it("同一批里 reset 与跳转都到：先回底再跳，结果与写入次序无关（g3b 2/F-4）", async () => {
     for (const order of ["jumpFirst", "resetFirst"] as const) {
       const [reset, setReset] = createSignal(0);

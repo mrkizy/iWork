@@ -32,7 +32,8 @@
   gap: 4px;
   min-height: 36px;
   margin-left: 4px;
-  padding: 0 8px 0 10px;
+  /* 上下留 3px：焦点环往里收 2px，不压第一条短线与状态点（UI g3b 3/F-1） */
+  padding: 3px 8px 3px 10px;
   width: fit-content;
 }
 .iw-anchor__rest span {
