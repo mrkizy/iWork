@@ -747,7 +747,7 @@ fn bounded_fails_when_the_body_hangs() {
     bounded(
         Duration::from_millis(300),
         || "（对照）".into(),
-        || std::future::pending::<()>(),
+        std::future::pending::<()>,
     );
 }
 
