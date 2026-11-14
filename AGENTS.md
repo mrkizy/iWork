@@ -82,7 +82,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 
 阈值见需求文档第 14 章，只统计 iWork 自身进程。基准进 CI，超阈值记为回归并在审查中标出，不阻止合入。动到热路径（事件推送、帧合并、存储写入、hook）必须附基准前后对比。本机负载高时（loadavg 明显高于核数，或杀毒软件在扫编译产物）基准绝对值不可信：前后两个版本在同一时段交替跑多轮、取中位数，只报相对值并写明负载。正式性能验收在 mac120 的夜间空闲时段测（见 `docs/tasks/M1/T11.md`）。
 
-改了存储或审批引擎「接受什么」（提交前提、状态转换表、事件校验）的，要把用到这些写入路径的基准真跑一遍（缩小负载的冒烟就行）：`cargo test` 不跑基准的函数体，基准布景走的老捷径会被新校验悄悄拒掉（T10a 1b 实测，approval_engine 因此起不来）。冒烟命令里的规模上限要核一遍，别把改动到的组过滤掉（如 approval_engine 的 `IWORK_BENCH_FOLD_MAX` 小于 10000 时折叠组一档都不跑）。
+每个 bench 的函数体由 CI 的基准冒烟用缩小负载真跑一遍（`scripts/bench-smoke.sh`，Linux 的 test job，调试构建；起不来、panic 就红，包括后台线程、tokio 任务以及 lifecycle 拉起的后台进程里的 panic，输出采集失败也算红；不比数字，`--selftest` 自测判红规则）。改了存储或审批引擎「接受什么」（提交前提、状态转换表、事件校验）的，本地也先跑一次 `scripts/bench-smoke.sh <基准名>`（本机套重测试锁，或经 `scripts/remote-heavy.sh`）：`cargo test` 不跑基准的函数体，基准布景走的老捷径会被新校验悄悄拒掉（T10a 1b 实测，approval_engine 因此起不来）。新加 bench 要在脚本的登记表里加一行（漏登记冒烟退出 2），规模开关缩到每一组都还会跑（如 approval_engine 的 `IWORK_BENCH_FOLD_MAX` 不能小于 10000）；基准要拉起子进程时，子进程的 stderr 写进 `IWORK_BENCH_CHILD_STDERR_DIR`，冒烟才看得到它的 panic。冒烟只在 Linux 跑，macOS 专属分支（如 write_commit 的 fullfsync 开关）CI 走不到。
 
 ## 不要擅自推翻的决定
 
