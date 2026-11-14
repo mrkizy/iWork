@@ -143,7 +143,7 @@ pub fn spawn_in(home: &Path, exe: &Path, args: &[&str], env: &[(&str, &str)]) ->
     let lines = Arc::new(Mutex::new(Vec::new()));
     let stderr = child.stderr.take().unwrap();
     let sink = lines.clone();
-    std::thread::spawn(move || {
+    let reader = std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             sink.lock().unwrap().push(line);
         }
@@ -151,6 +151,7 @@ pub fn spawn_in(home: &Path, exe: &Path, args: &[&str], env: &[(&str, &str)]) ->
     Daemon {
         child: Some(child),
         stderr: lines,
+        reader: Some(reader),
     }
 }
 
@@ -342,7 +343,13 @@ pub fn signal(pid: u32, sig: i32) {
 pub struct Daemon {
     child: Option<Child>,
     stderr: Arc<Mutex<Vec<String>>>,
+    /// 读 stderr 的线程：进程退出之后先等它读到结束，再看攒下的输出（不然最后几行可能还没读进来）
+    reader: Option<std::thread::JoinHandle<()>>,
 }
+
+/// 进程退出后等读线程读到 stderr 结束最多多久。正常一退出管道就到头；有别的进程继承了这个 stderr 时到不了头，
+/// 不在这里无限等。
+const STDERR_DRAIN_LIMIT: Duration = Duration::from_secs(10);
 
 impl Daemon {
     pub fn pid(&self) -> u32 {
@@ -366,8 +373,25 @@ impl Daemon {
         }
     }
 
+    /// 退出了就返回退出状态；返回之前先等 stderr 读完，之后 [`Self::stderr`] 拿到的是全部输出。
     pub fn try_exit(&mut self) -> Option<ExitStatus> {
-        self.child.as_mut().unwrap().try_wait().unwrap()
+        let status = self.child.as_mut().unwrap().try_wait().unwrap()?;
+        self.drain_stderr();
+        Some(status)
+    }
+
+    /// 等读 stderr 的线程读到结束（最多 [`STDERR_DRAIN_LIMIT`]），然后收掉它。
+    fn drain_stderr(&mut self) {
+        let Some(reader) = self.reader.take() else {
+            return;
+        };
+        let deadline = Instant::now() + STDERR_DRAIN_LIMIT;
+        while !reader.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if reader.is_finished() {
+            let _ = reader.join();
+        }
     }
 
     pub fn wait_exit(&mut self, limit: Duration) -> ExitStatus {
