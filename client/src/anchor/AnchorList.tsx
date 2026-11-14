@@ -18,12 +18,7 @@ import {
 
 /** 列表外框的边框宽，与 AnchorRail.css 的 .iw-anchor__frame 一致。 */
 const FRAME_BORDER = 1;
-/** 连续型输入（滚轮、触摸、滚动）一个手势只报第一下：同一种输入这么久之内的再报就跳过（作废是幂等的）。
- *  按键每次都报。 */
-const LIST_INPUT_GAP_MS = 100;
 
-/** 列表里的用户输入：连续型按种类节流，按键不节流。 */
-export type ListInput = "wheel" | "touch" | "scroll" | "key";
 
 export const KIND_CLASS: Record<AnchorKind, string> = {
   [AnchorKind.UNSPECIFIED]: "",
@@ -42,8 +37,9 @@ export interface AnchorSource {
   /** Home / End 要的那一头不在已载入的窗口里：请 Rust 以整个对话最早（假）/ 最新（真）的一头为中心重取。
    *  这个意图由 Rust 持有：那一头到了，AnchorsView 带 edgeLanding（token）回来，网页只执行一次。 */
   onBrowseEdge: (latest: boolean) => void;
-  /** 用户在列表里有输入（滚轮、触摸、方向键、本窗内直接落地的 Home / End、不是程序写的滚动）：一律告诉 Rust，
-   *  由它判断有没有头尾意图可作废（没有就是空操作）。不看 edgePending：它是异步回来的，有往返空窗（g3b 3/F-1）。 */
+  /** 用户在列表里有输入：在事件发生那一刻一律告诉 Rust，由它判断有没有头尾意图可作废（没有就是空操作，不推
+   *  帧）。源头：滚轮、触摸开始与移动、指针按下（点刻度也算）、↑ / ↓、本窗内直接落地的 Home / End。不看
+   *  edgePending（异步回来，有往返空窗），也不从滚动坐标推断（程序写位置前的用户位移会丢，g3b 4/F-2）。 */
   onListInput: () => void;
 }
 
@@ -57,6 +53,9 @@ export function createAnchorBrowse(props: AnchorSource) {
   const [previewKey, setPreviewKey] = createSignal<string>();
   // 已经执行过的头尾落点：建这份状态时已有的落点算用过（收起再展开不重放）
   let seenLanding = props.anchors.edgeLanding?.token;
+  // 上次发 Edge 请求之后用户有没有输入过：有就不执行那次的落点（作废还在去 Rust 的路上、落点已经先到时也不拉人）。
+  // 每次新的 Edge 请求清零
+  let inputSinceEdge = false;
   // 列表挂上来时给：把第 i 条滚进视野
   let reveal: ((i: number) => void) | undefined;
 
@@ -78,25 +77,21 @@ export function createAnchorBrowse(props: AnchorSource) {
     setPreviewKey(a.key);
     reveal?.(at);
   };
-  // 连续型输入一个手势里只报第一下：作废是幂等的，滚轮一秒几十次不必次次都发
-  const lastReport = new Map<ListInput, number>();
-  /** 用户在列表里有输入：一律告诉 Rust（见 AnchorSource.onListInput）。 */
-  const userMoved = (kind: ListInput) => {
-    if (kind !== "key") {
-      const now = performance.now();
-      if (now - (lastReport.get(kind) ?? -Infinity) < LIST_INPUT_GAP_MS) return;
-      lastReport.set(kind, now);
-    }
+  /** 用户在列表里有输入（事件发生那一刻调）：告诉 Rust，并记下「请求之后动过」。每次都报，不节流：Rust 那边作废
+   *  是 O(1) 的，没有意图时是空操作、不推帧。 */
+  const userMoved = () => {
+    inputSinceEdge = true;
     props.onListInput();
   };
   const edge = (which: "start" | "end") => {
     const more = which === "start" ? props.anchors.hasBefore : props.anchors.hasAfter;
     if (!more) {
       // 那一头就在本窗：直接落地。这也是一次覆盖头尾意图的用户输入，旧的（反方向的）要作废
-      userMoved("key");
+      userMoved();
       moveTo(which === "start" ? 0 : items().length - 1);
       return;
     }
+    inputSinceEdge = false;
     props.onBrowseEdge(which === "end");
   };
 
@@ -109,11 +104,13 @@ export function createAnchorBrowse(props: AnchorSource) {
     preview: (key: string) => setPreviewKey(key),
     setReveal: (f: ((i: number) => void) | undefined) => (reveal = f),
     userMoved,
-    /** Rust 给的头尾落点：没执行过就把预览移到那一头并滚进视野，返回真（优先于按 key 还原）。 */
+    /** Rust 给的头尾落点：没执行过、请求之后用户也没动过，就把预览移到那一头并滚进视野，返回真（优先于按 key
+     *  还原）。用户动过：记成用过、不执行（让位给用户）。 */
     landEdge(): boolean {
       const l = props.anchors.edgeLanding;
       if (l === undefined || l.token === seenLanding) return false;
       seenLanding = l.token;
+      if (inputSinceEdge) return false;
       moveTo(l.latest ? items().length - 1 : 0);
       return true;
     },
@@ -127,7 +124,7 @@ export function createAnchorBrowse(props: AnchorSource) {
         case "ArrowDown":
           if (e.altKey) return false;
           e.preventDefault();
-          userMoved("key");
+          userMoved();
           moveTo(index() + (e.key === "ArrowUp" ? -1 : 1));
           return true;
         case "Home":
@@ -164,29 +161,30 @@ export function AnchorList(props: {
   const [loadingSide, setLoadingSide] = createSignal<"start" | "end">();
   let loadingTimer: ReturnType<typeof setTimeout> | undefined;
   let lastBrowsed: string | undefined;
-  // 顶上那一条与它往下偏了多少：新列表到了按它对回原位
-  let topKey: string | undefined;
-  let topOffset = 0;
-  // 最近一次知道的滚动位置：程序写的、或上一次 scroll 事件看到的。scroll 事件里对不上就是用户造成的
-  // （拖滚动条、键盘翻页），要上报（g3b 3/F-1）；程序写的那一次对得上，不算
-  let knownTop = 0;
+  // 用户正按着指针 / 正在触摸：位置归用户，程序不写（窗口替换的还原让位）
+  let pointerHeld = false;
+  let touching = false;
+  const userControls = () => pointerHeld || touching;
+  // 上一份画着的列表（窗口替换时用它和此刻的位置现算顶上那一条）
+  let shownItems = props.anchors.items;
   const setTop = (v: number) => {
     list.scrollTop = v;
-    knownTop = list.scrollTop;
   };
-  const onScroll = () => {
-    if (Math.abs(list.scrollTop - knownTop) > 0.5) props.browse.userMoved("scroll");
-    knownTop = list.scrollTop;
-    measure();
+  const releasePointer = () => {
+    pointerHeld = false;
   };
+  window.addEventListener("pointerup", releasePointer, true);
+  window.addEventListener("pointercancel", releasePointer, true);
+  onCleanup(() => {
+    window.removeEventListener("pointerup", releasePointer, true);
+    window.removeEventListener("pointercancel", releasePointer, true);
+  });
   onCleanup(() => clearTimeout(loadingTimer));
 
   const items = () => props.browse.items();
   const measure = () => {
     setScroll({ top: list.scrollTop, client: list.clientHeight, height: list.scrollHeight });
     const r = visibleRange(list.scrollTop, list.clientHeight, items().length);
-    topKey = items()[r.first]?.key;
-    topOffset = list.scrollTop - (LIST_PAD + r.first * PITCH);
     const t = browseTarget(r, items().length, props.anchors.hasBefore, props.anchors.hasAfter);
     const key = t && items()[t.index]?.key;
     if (t && key !== undefined && key !== lastBrowsed) {
@@ -205,12 +203,16 @@ export function AnchorList(props: {
       measure();
     });
   };
-  // 新列表到了（窗口替换）：Home / End 等的那一头到了就由它定位置；否则按顶上那条的 key 对回原位，滚动位置不跳。
-  // 旧的预览处被新窗口裁掉时，预览改到还原后顶上那一条（不回落到末项，也不因此居中）。加载点收掉。
+  // 新列表到了（窗口替换）：Home / End 等的那一头到了（且请求之后用户没动过）就由它定位置；否则按顶上那条的 key
+  // 对回原位，滚动位置不跳。顶上那一条用「替换前那份列表 + 此刻的位置」现算，不用之前存的（用户在这之前的位移
+  // 不会丢）；新旧 key 序列相同不写；用户正按着指针或在触摸时不写（位置归用户）。旧的预览处被新窗口裁掉时，预览
+  // 改到还原后顶上那一条。加载点收掉。
   createEffect(
     on(
       () => props.anchors,
-      (view, prev) => {
+      (view) => {
+        const prevItems = shownItems;
+        shownItems = view.items;
         if (props.browse.landEdge()) {
           clearTimeout(loadingTimer);
           setLoadingSide(undefined);
@@ -218,13 +220,18 @@ export function AnchorList(props: {
           return;
         }
         const next = view.items;
-        if (prev !== undefined && next === prev.items) return;
+        if (next === prevItems) return;
         clearTimeout(loadingTimer);
         setLoadingSide(undefined);
         const keys = next.map((a) => a.key);
-        const keptTop = topKey;
-        const top = restoredScrollTop(keys, keptTop, topOffset);
-        if (top !== undefined) setTop(top);
+        const prevKeys = prevItems.map((a) => a.key);
+        const was = visibleRange(list.scrollTop, list.clientHeight, prevKeys.length);
+        const keptTop = prevKeys[was.first];
+        const sameKeys = keys.length === prevKeys.length && keys.every((k, i) => k === prevKeys[i]);
+        if (!sameKeys && !userControls()) {
+          const top = restoredScrollTop(keys, keptTop, list.scrollTop - (LIST_PAD + was.first * PITCH));
+          if (top !== undefined) setTop(top);
+        }
         const shown = props.browse.previewKey();
         if (keptTop !== undefined && keys.includes(keptTop) && (shown === undefined || !keys.includes(shown))) {
           props.browse.preview(keptTop);
@@ -273,9 +280,19 @@ export function AnchorList(props: {
             "iw-anchor__list--seeking": seekingKey() !== "",
           }}
           style={{ height: `${LIST_PAD * 2 + items().length * PITCH}px` }}
-          onScroll={onScroll}
-          onWheel={() => props.browse.userMoved("wheel")}
-          onTouchMove={() => props.browse.userMoved("touch")}
+          onScroll={measure}
+          onWheel={() => props.browse.userMoved()}
+          onTouchStart={() => {
+            touching = true;
+            props.browse.userMoved();
+          }}
+          onTouchMove={() => props.browse.userMoved()}
+          onTouchEnd={() => (touching = false)}
+          onTouchCancel={() => (touching = false)}
+          onPointerDown={() => {
+            pointerHeld = true;
+            props.browse.userMoved();
+          }}
         >
           <For each={items()}>
             {(a, i) => (

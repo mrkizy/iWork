@@ -401,3 +401,25 @@ fn user_scroll_cancels_an_unsent_scroll() {
     p.drain(&mut s);
     assert_eq!(p.sent_rows(), Vec::<&str>::new());
 }
+
+/// 列表输入只作废头尾，不碰跳行（点刻度时先报输入、再发跳转，跳转照常发出）；没有头尾意图时是空操作：
+/// 触控板惯性连发上百下也不推帧（g3b 第 5 轮）。
+#[test]
+fn list_input_cancels_only_the_edge_and_is_free_when_idle() {
+    let mut s = opened_without_base();
+    let mut p = Page::attach(&mut s);
+    first_snapshot(&mut s, vec![user_msg("u3", 3), user_msg("u5", 5)]);
+    p.drain(&mut s);
+    s.anchor_browse_edge(CID, false);
+    s.anchor_list_input(CID);
+    s.jump_to_anchor(CID, "3");
+    p.drain(&mut s);
+    assert_eq!(p.sent_rows(), ["u3"], "输入之后的跳转照常发出");
+    assert_eq!(landing(&s), (false, None), "头尾作废了");
+    let frames = p.web.frames;
+    for _ in 0..100 {
+        s.anchor_list_input(CID);
+    }
+    p.drain(&mut s);
+    assert_eq!(p.web.frames, frames, "没有意图时连发也不推帧");
+}

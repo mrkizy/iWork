@@ -189,6 +189,19 @@ const CASES: Record<string, Case> = {
       return f;
     },
   },
+  anchor_list: {
+    scenario: "anchors-unloaded",
+    script: "anchor_list.js",
+    timeoutS: 90,
+    check(r) {
+      const d = done(r) as { scrollbarPx?: number; overflow?: boolean };
+      const f: string[] = [];
+      expect(f, d.overflow === true, "对照：列表超出、滚得动");
+      expect(f, d.scrollbarPx === 0, `列表有原生滚动条占位 ${d.scrollbarPx}px（按设计不显示，也就没有拖滚动条的输入路径）`);
+      expect(f, (r.counters?.intents?.AnchorListInput ?? 0) >= 1, `列表上的滚轮没送到 Rust：${JSON.stringify(r.counters?.intents)}`);
+      return f;
+    },
+  },
   once: {
     scenario: "empty",
     script: "once.js",

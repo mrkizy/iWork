@@ -168,9 +168,10 @@ describe.skipIf(noFixtures)("锚点导轨（宽形态，列表式）", () => {
     const earliest = anchors.items.slice(0, 5).map((i, n) => ({ ...i, key: `first-${n}` }));
     const first = create(AnchorsViewSchema, { ...anchors, items: [...earliest, ...anchors.items.slice(0, 20)], hasBefore: false, hasAfter: true });
     a.setView(first);
-    expect(a.previewed()?.getAttribute("aria-label"), "窗口到了但没有落点：不落到最早一处").not.toBe(label(earliest[0]));
+    // 造出来的「更早的几处」是复制原条目改 key，文字会重复：按元素比，不按文字
+    expect(a.previewed(), "窗口到了但没有落点：不落到最早一处").not.toBe(a.ticks()[0]);
     a.setView(create(AnchorsViewSchema, { ...first, edgeLanding: create(EdgeLandingSchema, { token: 41n, latest: false }) }));
-    expect(a.previewed()?.getAttribute("aria-label")).toBe(label(earliest[0]));
+    expect(a.previewed()).toBe(a.ticks()[0]);
     fireEvent.mouseEnter(a.ticks()[3]);
     a.setView(create(AnchorsViewSchema, { ...first, edgeLanding: create(EdgeLandingSchema, { token: 41n, latest: false }) }));
     expect(a.previewed()?.getAttribute("aria-label"), "同一个 token 不再用").toBe(label(first.items[3]));
@@ -196,10 +197,109 @@ describe.skipIf(noFixtures)("锚点导轨（宽形态，列表式）", () => {
     // edgePending 帧还没到就滚轮
     fireEvent.wheel(list, { deltaY: 40 });
     expect(a.inputs, "滚轮").toBe(2);
-    // 不是程序写的滚动（拖滚动条、键盘翻页）
-    list.scrollTop = list.scrollTop - 5 * PITCH;
+    // 指针按下（点刻度、中键等）：按下那一刻就报（g3b 4/F-2：不再从滚动坐标推断）
+    fireEvent.pointerDown(list);
+    expect(a.inputs, "指针按下").toBe(3);
+    fireEvent.pointerUp(window);
+  });
+
+  // ---------- 第 5 轮：用户输入在事件发生那一刻上报；程序写位置先让位（g3b 4/F-1、4/F-2） ----------
+
+  /** anchors-unloaded：前面还有（Home 要请 Rust）。打开列表、给定几何。 */
+  async function openUnloaded() {
+    const { anchors, current } = fromScenario("anchors-unloaded");
+    expect(anchors.hasBefore, "对照：Home 要请 Rust").toBe(true);
+    const a = mount(anchors, current);
+    fireEvent.mouseEnter(a.rail);
+    await settle();
+    const list = a.list()!;
+    sizeList(list, 10 * PITCH, anchors.items.length);
+    return { a, list, anchors };
+  }
+  const landing = (anchors: AnchorsView, token: bigint) =>
+    create(AnchorsViewSchema, { ...anchors, items: [...anchors.items], edgeLanding: create(EdgeLandingSchema, { token, latest: false }) });
+
+  it("A1：滚轮、Home、再滚轮：每一下都报（不节流）；Home 之后有输入，这次 Home 的落点不执行", async () => {
+    const { a, anchors } = await openUnloaded();
+    const list = a.list()!;
+    fireEvent.wheel(list, { deltaY: 40 });
+    fireEvent.keyDown(document, { key: "Home" });
+    fireEvent.wheel(list, { deltaY: 40 });
+    expect(a.inputs, "两下滚轮都报").toBe(2);
+    const before = a.previewed()?.getAttribute("aria-label");
+    a.setView(landing(anchors, 51n));
+    expect(a.previewed()?.getAttribute("aria-label"), "Home 之后用户动过：不落到最早一处").toBe(before);
+  });
+
+  it("A2：同 A1，换成触摸", async () => {
+    const { a, anchors } = await openUnloaded();
+    const list = a.list()!;
+    fireEvent.touchStart(list);
+    fireEvent.touchMove(list);
+    fireEvent.touchEnd(list);
+    fireEvent.keyDown(document, { key: "Home" });
+    fireEvent.touchStart(list);
+    fireEvent.touchMove(list);
+    fireEvent.touchEnd(list);
+    expect(a.inputs, "Home 之后的触摸也报到").toBeGreaterThanOrEqual(3);
+    const before = a.previewed()?.getAttribute("aria-label");
+    a.setView(landing(anchors, 52n));
+    expect(a.previewed()?.getAttribute("aria-label")).toBe(before);
+  });
+
+  it("A3（对照）：滚轮 → Home → 之后没有输入 → 落点照常执行（新的 Edge 请求把「有过输入」清零）", async () => {
+    const { a, anchors } = await openUnloaded();
+    fireEvent.wheel(a.list()!, { deltaY: 40 });
+    fireEvent.keyDown(document, { key: "Home" });
+    a.setView(landing(anchors, 53n));
+    expect(a.previewed()?.getAttribute("aria-label")).toBe(label(anchors.items[0]));
+  });
+
+  it("B1：Home → 指针按下 → 位置被拖到 261 → 内容不变的新窗口 → scroll：停在 261，按下那一刻就报了", async () => {
+    const { a, list, anchors } = await openUnloaded();
+    fireEvent.keyDown(document, { key: "Home" });
+    fireEvent.pointerDown(list);
+    list.scrollTop = 261;
+    a.setView(create(AnchorsViewSchema, { ...anchors, items: [...anchors.items], edgePending: true }));
     fireEvent.scroll(list);
-    expect(a.inputs, "用户造成的滚动").toBe(3);
+    expect(list.scrollTop).toBe(261);
+    expect(a.inputs).toBeGreaterThanOrEqual(1);
+    fireEvent.pointerUp(window);
+  });
+
+  it("B2：Home → 指针按下 → 位置被拖到 261 → 落点先于 scroll 到：不落地，停在 261，报过输入", async () => {
+    const { a, list, anchors } = await openUnloaded();
+    fireEvent.keyDown(document, { key: "Home" });
+    fireEvent.pointerDown(list);
+    list.scrollTop = 261;
+    a.setView(landing(anchors, 54n));
+    fireEvent.scroll(list);
+    expect(list.scrollTop).toBe(261);
+    expect(a.inputs).toBeGreaterThanOrEqual(1);
+    fireEvent.pointerUp(window);
+  });
+
+  it("拖动中来了内容变化的窗口替换：不写位置（用户在控制）；松手以后不补写", async () => {
+    const { a, list, anchors } = await openUnloaded();
+    fireEvent.pointerDown(list);
+    list.scrollTop = 300;
+    const extra = anchors.items.slice(0, 10).map((i, n) => ({ ...i, key: `drag-${n}` }));
+    a.setView(create(AnchorsViewSchema, { ...anchors, items: [...extra, ...anchors.items] }));
+    expect(list.scrollTop, "拖动中不写").toBe(300);
+    fireEvent.pointerUp(window);
+    expect(list.scrollTop).toBe(300);
+  });
+
+  it("点一条刻度去跳：先报输入（只作废头尾），再发跳转；跳转不被这次作废吃掉", async () => {
+    const { a } = await openUnloaded();
+    const order: string[] = [];
+    const tick = a.ticks()[3];
+    const was = a.inputs;
+    fireEvent.pointerDown(tick);
+    order.push(a.inputs > was ? "input" : "-");
+    fireEvent.click(tick);
+    order.push(a.jumps.length === 1 ? "jump" : "-");
+    expect(order).toEqual(["input", "jump"]);
   });
 
   it("在等 Home / End 的那一头时用户滚列表或按方向键：请 Rust 作废；迟到的窗口按 key 还原，不把用户拉回顶（g3b 2/F-1）", async () => {
@@ -214,7 +314,7 @@ describe.skipIf(noFixtures)("锚点导轨（宽形态，列表式）", () => {
     list.scrollTop = LIST_PAD + 30 * PITCH;
     fireEvent.scroll(list);
     fireEvent.keyDown(document, { key: "ArrowDown" });
-    expect(a.inputs, "滚轮、用户滚动、方向键各报一次").toBe(3);
+    expect(a.inputs, "滚轮、方向键各报一次（scroll 事件不认输入）").toBe(2);
     // Rust 作废了：迟到的窗口没有落点，前面多了 10 条；用户看着的那一段原样留着（往下挪 10 条的距离），不回顶
     const before = list.scrollTop;
     expect(before, "对照：不在顶上").toBeGreaterThan(0);
