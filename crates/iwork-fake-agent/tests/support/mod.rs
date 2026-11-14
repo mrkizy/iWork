@@ -49,6 +49,11 @@ impl Fake {
             ],
             env: Vec::new(),
         };
+        lock(&RECORDS).push(RecordSlot {
+            created: Instant::now(),
+            path: record.clone(),
+            kept: None,
+        });
         Self {
             dir,
             launch,
@@ -77,6 +82,30 @@ impl Fake {
             .map(|r| r["params"].clone())
             .collect()
     }
+}
+
+/// 丢掉时把记录留一份快照：临时目录随它删掉，可用例本体结束之后、运行时收尾卡住时，诊断还要看记录（审查 1/F-2）。
+impl Drop for Fake {
+    fn drop(&mut self) {
+        let text =
+            std::fs::read_to_string(&self.record).unwrap_or_else(|e| format!("读不了记录：{e}"));
+        if let Some(slot) = lock(&RECORDS).iter_mut().find(|s| s.path == self.record) {
+            slot.kept = Some(text);
+        }
+    }
+}
+
+/// 建过的每个 [`Fake`] 的记录：还活着的读文件，丢掉了的读快照。诊断按建的时间挑。
+struct RecordSlot {
+    created: Instant,
+    path: PathBuf,
+    kept: Option<String>,
+}
+
+static RECORDS: Mutex<Vec<RecordSlot>> = Mutex::new(Vec::new());
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// 记录文件里写完的行。假运行时可能正在写最后一行：结尾没有换行的末行还没写完，跳过，下次再读。
@@ -439,6 +468,13 @@ pub fn bounded<F, Fut>(
 
 /// 卡住时的现场：假运行时进程还在不在（按程序名精确匹配），和它的记录文件。
 pub fn fake_diag(record: &Path) -> String {
+    let procs = fake_procs();
+    let record = std::fs::read_to_string(record).unwrap_or_else(|e| format!("读不了记录：{e}"));
+    format!("假运行时进程：\n{procs}\n记录：\n{record}")
+}
+
+/// 还在的假运行时进程（按程序名精确匹配）。
+pub fn fake_procs() -> String {
     #[cfg(windows)]
     let procs = std::process::Command::new("tasklist")
         .args([
@@ -462,9 +498,7 @@ pub fn fake_diag(record: &Path) -> String {
                 .collect::<Vec<_>>()
                 .join("\n")
         });
-    let procs = procs.unwrap_or_else(|e| format!("列不出进程：{e}"));
-    let record = std::fs::read_to_string(record).unwrap_or_else(|e| format!("读不了记录：{e}"));
-    format!("假运行时进程：\n{procs}\n记录：\n{record}")
+    procs.unwrap_or_else(|e| format!("列不出进程：{e}"))
 }
 
 /// 假运行时的程序名。
@@ -503,4 +537,35 @@ fn exe_name(pid: u32) -> Option<String> {
         .file_name()?
         .to_str()
         .map(str::to_owned)
+}
+
+/// acp_port 的每条异步用例的统一包装（Windows CI 上 acp_port 见过两条不同的用例无限挂起）：有界地跑，卡住时失败并
+/// 打印这条用例开始之后建过的假运行时的记录，和当时还在的假运行时进程。
+pub fn acp<F, Fut>(body: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let since = Instant::now();
+    bounded(ACP_LIMIT, move || fakes_diag(since), body);
+}
+
+/// acp_port 每条用例的时限。本机和 CI 上每条都在几秒内跑完（最慢的一条约 6 秒）。
+pub const ACP_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 现场：还在的假运行时进程，和 `since` 之后建过的每个假运行时的记录（并行的别的用例建的也在里面，按路径分开）。
+pub fn fakes_diag(since: Instant) -> String {
+    let records: Vec<(PathBuf, Option<String>)> = lock(&RECORDS)
+        .iter()
+        .filter(|s| s.created >= since)
+        .map(|s| (s.path.clone(), s.kept.clone()))
+        .collect();
+    let mut out = format!("假运行时进程：\n{}\n", fake_procs());
+    for (path, kept) in records {
+        let text = kept.unwrap_or_else(|| {
+            std::fs::read_to_string(&path).unwrap_or_else(|e| format!("读不了记录：{e}"))
+        });
+        out.push_str(&format!("记录 {}：\n{text}\n", path.display()));
+    }
+    out
 }
