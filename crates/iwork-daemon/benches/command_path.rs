@@ -10,7 +10,7 @@
 //! - `turn_start_read`（步 4）：会话线在每个回合开始前做的那次准备——三次读（回合、这一轮的请求、算快照的已提交
 //!   输入）与路径解析加快照重算（`prepare`）——各自的中位耗时。收尾那次读是改动探针的读，探针按 7/F-2 关着，不量。
 //!
-//! 都关 fullfsync（只比相对值，两边一样）。
+//! 都关 fullfsync（只比相对值，两边一样）。缩小规模（CI 冒烟用）：`IWORK_BENCH_COMMAND_N=<每轮次数>`。
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -38,7 +38,14 @@ type Store = SqliteStore<ProtoEventCodec>;
 #[path = "../../iwork-store/tests/support/fixtures.rs"]
 mod fixtures;
 
-const N: usize = 2000;
+/// 每轮的次数，默认 2000；`IWORK_BENCH_COMMAND_N` 改它（CI 的基准冒烟用它缩小规模，三组照跑）。
+fn n() -> usize {
+    std::env::var("IWORK_BENCH_COMMAND_N")
+        .ok()
+        .map_or(2000, |v| {
+            v.parse().expect("IWORK_BENCH_COMMAND_N 要是正整数")
+        })
+}
 const ROUNDS: usize = 5;
 
 fn median(mut v: Vec<f64>) -> f64 {
@@ -98,8 +105,8 @@ where
     F: FnMut(usize) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let mut us = Vec::with_capacity(N);
-    for i in 0..N {
+    let mut us = Vec::with_capacity(n());
+    for i in 0..n() {
         let t = Instant::now();
         f(i).await;
         us.push(t.elapsed().as_secs_f64() * 1e6);
@@ -143,7 +150,7 @@ fn gate_commit(rt: &tokio::runtime::Runtime) {
         "gate_commit",
         serde_json::json!({
             "rounds": ROUNDS,
-            "commits_per_round": N,
+            "commits_per_round": n(),
             "raw_median_us": median(raw.clone()),
             "gated_median_us": median(gated.clone()),
             "raw_rounds_us": raw,
@@ -271,7 +278,7 @@ fn command_roundtrip(rt: &tokio::runtime::Runtime) {
         "command_roundtrip",
         serde_json::json!({
             "rounds": ROUNDS,
-            "commands_per_round": N,
+            "commands_per_round": n(),
             "direct_commit_median_us": median(direct.clone()),
             "dispatched_median_us": median(dispatched.clone()),
             "direct_rounds_us": direct,
@@ -357,9 +364,9 @@ fn turn_start_read(rt: &tokio::runtime::Runtime) {
         tmp_dirs: vec![std::env::temp_dir()],
     };
     let fs = OsPathResolver::new(env.home.clone(), false);
-    let (mut reads, mut prepares) = (Vec::with_capacity(N), Vec::with_capacity(N));
+    let (mut reads, mut prepares) = (Vec::with_capacity(n()), Vec::with_capacity(n()));
     rt.block_on(async {
-        for _ in 0..N {
+        for _ in 0..n() {
             let t = Instant::now();
             let (turn, c) = read.turn_with_conversation(turn_id).await.unwrap().unwrap();
             let _request = read.turn_request(turn.id).await.unwrap();
@@ -374,7 +381,7 @@ fn turn_start_read(rt: &tokio::runtime::Runtime) {
     emit(
         "turn_start_read",
         serde_json::json!({
-            "samples": N,
+            "samples": n(),
             "reads_median_us": median(reads),
             "prepare_median_us": median(prepares),
         }),

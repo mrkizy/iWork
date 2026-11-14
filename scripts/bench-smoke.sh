@@ -169,6 +169,7 @@ iwork-store write_commit - IWORK_BENCH_COMMIT_PER=20
 iwork-store write_commit - IWORK_BENCH_COMMIT_PER=20 IWORK_BENCH_OBSERVER=1
 iwork-store view_queries - IWORK_BENCH_VIEW_TURNS=5 IWORK_BENCH_VIEW_TOOLS=3 IWORK_BENCH_VIEW_REPS=3
 iwork-daemon publish_live - IWORK_BENCH_LIVE_MESSAGES=5 IWORK_BENCH_LIVE_DELTAS=3
+iwork-daemon command_path - IWORK_BENCH_COMMAND_N=20
 iwork-daemon lifecycle dev IWORK_BENCH_COLD_EVENTS_MAX=10000 IWORK_BENCH_IDLE_SECS=1
 iwork-claude-hook cold_start -
 '
