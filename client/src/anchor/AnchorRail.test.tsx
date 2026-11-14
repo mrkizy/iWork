@@ -336,6 +336,36 @@ describe.skipIf(noFixtures)("锚点导轨（宽形态，列表式）", () => {
     expect(list.scrollTop).toBe(LIST_PAD + (90 - 60) * PITCH + 2);
   });
 
+  it("6/F-1：窗口变短、浏览器自己夹紧 scrollTop 引起的 scroll 也是程序侧的，不报；等着的 Home 照常落地", async () => {
+    // 120 条、在 1000：先按 End 再按 Home；旧 End 的最新窗口（60 条、不含原来顶上那条）先到，没有落点
+    const before = create(AnchorsViewSchema, { items: userKeys(0, 120), hasBefore: true, hasAfter: true });
+    const a = mount(before, "k90");
+    fireEvent.mouseEnter(a.rail);
+    await settle();
+    const list = a.list()!;
+    browserBounds(list, 110);
+    list.scrollTop = 1000;
+    await new Promise((r) => requestAnimationFrame(() => r(undefined)));
+    fireEvent.keyDown(document, { key: "End" });
+    fireEvent.keyDown(document, { key: "Home" });
+    expect(a.edges, "对照：两头都请了").toEqual([true, false]);
+    const was = a.inputs;
+    a.setView(create(AnchorsViewSchema, { items: userKeys(200, 260), hasBefore: true, hasAfter: false }));
+    expect(list.scrollTop, "对照：浏览器夹紧了").toBe(LIST_PAD * 2 + 60 * PITCH - 110);
+    fireEvent.scroll(list);
+    expect(a.inputs, "夹紧引起的 scroll 不报").toBe(was);
+    // Home 的窗口回来、带落点：落到第一条
+    a.setView(
+      create(AnchorsViewSchema, {
+        items: userKeys(0, 60),
+        hasBefore: false,
+        hasAfter: true,
+        edgeLanding: create(EdgeLandingSchema, { token: 71n, latest: false }),
+      }),
+    );
+    expect(a.previewed(), "Home 落到第一条").toBe(a.ticks()[0]);
+  });
+
   it("5/F-2：焦点在列表里时会让列表滚动的键都报：PageUp、PageDown、Space、Shift+Space、↑↓、本窗内的 Home / End", async () => {
     const { anchors, current } = fromScenario("anchors-unloaded");
     const a = mount(create(AnchorsViewSchema, { ...anchors, hasBefore: false }), current);

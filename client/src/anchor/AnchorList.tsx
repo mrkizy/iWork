@@ -172,6 +172,29 @@ export function AnchorList(props: {
   let pointerHeld = false;
   let touching = false;
   const userControls = () => pointerHeld || touching;
+  // 「这一下是程序引起的」：程序侧每次会让列表滚动的变化之前置上，它触发的那次 scroll 消费掉；没有触发 scroll
+  // （位置没变）就在下一帧清掉。不带这个标记的 scroll 一律当用户输入上报（g3b 5/F-2）。程序侧的变化不只是写
+  // scrollTop：替换列表、改变内容高度（窗口变短时浏览器自己夹紧 scrollTop，也会派 scroll，g3b 6/F-1）同样要置。
+  // 以后加新的程序侧 DOM 或布局变化，记得在变化之前调 markSelf。程序写和用户的只产生 scroll 的滚动
+  // 落在同一帧时，浏览器只派一次 scroll，分不开：这一次按程序的算，用户手势后面几帧的 scroll 照常上报。最坏是
+  // 这一下没作废掉一个等着的头尾，被它迟到的落点拉回一次（取舍已认可，g3b 第 6 轮）
+  let selfWrite = false;
+  let selfWriteFrame = 0;
+  const markSelf = () => {
+    selfWrite = true;
+    cancelAnimationFrame(selfWriteFrame);
+    selfWriteFrame = requestAnimationFrame(() => (selfWrite = false));
+  };
+  const setTop = (v: number) => {
+    markSelf();
+    list.scrollTop = v;
+  };
+  const onScroll = () => {
+    if (selfWrite) selfWrite = false;
+    else props.browse.userMoved();
+    measure();
+  };
+  onCleanup(() => cancelAnimationFrame(selfWriteFrame));
   // 上一份画着的列表
   let shownItems = props.anchors.items;
   // 窗口替换前取到的顶上那一条（g3b 5/F-1）：在 DOM 换成新列表之前取（createComputed 先于 DOM 更新跑），
@@ -183,6 +206,9 @@ export function AnchorList(props: {
       () => props.anchors.items,
       (next) => {
         if (!mounted || next === shownItems) return;
+        // 列表要换了（内容高度可能变、浏览器可能夹紧 scrollTop）：这次更新引起的 scroll 是程序侧的。还原找不到
+        // key、不再调 setTop 的那一支也靠它
+        markSelf();
         const keys = shownItems.map((a) => a.key);
         const r = visibleRange(list.scrollTop, list.clientHeight, keys.length);
         before = { keys, top: keys[r.first], offset: list.scrollTop - (LIST_PAD + r.first * PITCH) };
@@ -190,24 +216,6 @@ export function AnchorList(props: {
       { defer: true },
     ),
   );
-  // 「这一下是我自己写的」：程序每次写 scrollTop 前置上，它触发的那次 scroll 消费掉；没有触发 scroll（位置没变）
-  // 就在下一帧清掉。不带这个标记的 scroll 一律当用户输入上报（g3b 5/F-2）。程序写和用户的只产生 scroll 的滚动
-  // 落在同一帧时，浏览器只派一次 scroll，分不开：这一次按程序的算，用户手势后面几帧的 scroll 照常上报。最坏是
-  // 这一下没作废掉一个等着的头尾，被它迟到的落点拉回一次（取舍已认可，g3b 第 6 轮）
-  let selfWrite = false;
-  let selfWriteFrame = 0;
-  const setTop = (v: number) => {
-    selfWrite = true;
-    cancelAnimationFrame(selfWriteFrame);
-    selfWriteFrame = requestAnimationFrame(() => (selfWrite = false));
-    list.scrollTop = v;
-  };
-  const onScroll = () => {
-    if (selfWrite) selfWrite = false;
-    else props.browse.userMoved();
-    measure();
-  };
-  onCleanup(() => cancelAnimationFrame(selfWriteFrame));
   const releasePointer = () => {
     pointerHeld = false;
   };
