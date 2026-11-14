@@ -15,7 +15,7 @@ use iwork_ipc::peer::SelfIdentity;
 use iwork_proto::pb;
 use pb::ui_intent::Kind as I;
 use support::web::{Web, WebState};
-use tokio::time::{sleep, timeout};
+use tokio::time::{Instant, sleep, timeout, timeout_at};
 
 const WAIT: Duration = Duration::from_secs(20);
 
@@ -107,7 +107,18 @@ async fn start(w: &World) -> (App, Web) {
 }
 
 async fn until(app: &App, web: &mut Web, what: &str, pred: impl Fn(&WebState) -> bool) {
-    let r = timeout(WAIT, async {
+    until_by(Instant::now() + WAIT, app, web, what, pred).await;
+}
+
+/// 同 [`until`]，等到 `deadline` 为止（几步共用一个截止时间时用）。
+async fn until_by(
+    deadline: Instant,
+    app: &App,
+    web: &mut Web,
+    what: &str,
+    pred: impl Fn(&WebState) -> bool,
+) {
+    let r = timeout_at(deadline, async {
         while !pred(&web.state) {
             if let Ok(Ok(c)) =
                 timeout(Duration::from_millis(300), app.next_frame(web.request())).await
@@ -119,7 +130,7 @@ async fn until(app: &App, web: &mut Web, what: &str, pred: impl Fn(&WebState) ->
     .await;
     assert!(
         r.is_ok(),
-        "{WAIT:?} 内没等到：{what}；连接状态 {:?}",
+        "到截止时间也没等到：{what}；连接状态 {:?}",
         web.state.connection
     );
 }
@@ -164,22 +175,39 @@ async fn environment_error_then_fix_then_retry_connects() {
     until(&app, &mut web, "修好后重试连上", live).await;
 }
 
+/// 这条用例的全部步骤共用的截止时间。它守的是「多次重连之后身份和拨号器仍只建一次」，不测重连快慢：每次建连两端
+/// 都要全量校验对端映像（调试版测试程序很大），CI 的慢机器上一次重连要好几秒，每步固定等 20 秒会偶发超时。按慢机器
+/// 定一个总上限；建连卡住出不来由 iwork-ipc 的 `peer_identity_timeout` 守（每次建连最多一个握手时限）。
+const BUILT_ONCE_TOTAL: Duration = Duration::from_secs(180);
+
 /// 连上之后断线重拨三次、再手动重试一次：取身份 1 次、建拨号器 1 次。
 #[tokio::test(flavor = "multi_thread")]
 async fn identity_and_launcher_are_built_once() {
     let w = World::new().await;
     let (app, mut web) = start(&w).await;
-    until(&app, &mut web, "连上", live).await;
+    let deadline = Instant::now() + BUILT_ONCE_TOTAL;
+    until_by(deadline, &app, &mut web, "连上", live).await;
     for round in 0..3 {
         w.daemon.disconnect_all().await;
-        until(&app, &mut web, &format!("第 {round} 次断线"), |s| {
-            !live(s)
-        })
+        until_by(
+            deadline,
+            &app,
+            &mut web,
+            &format!("第 {round} 次断线"),
+            |s| !live(s),
+        )
         .await;
-        until(&app, &mut web, &format!("第 {round} 次重连"), live).await;
+        until_by(
+            deadline,
+            &app,
+            &mut web,
+            &format!("第 {round} 次重连"),
+            live,
+        )
+        .await;
     }
     retry(&app).await;
-    until(&app, &mut web, "手动重试后在线", live).await;
+    until_by(deadline, &app, &mut web, "手动重试后在线", live).await;
     assert_eq!(w.identities.load(Ordering::SeqCst), 1, "身份只取一次");
     assert_eq!(w.builds.load(Ordering::SeqCst), 1, "拨号器只建一次");
 }
