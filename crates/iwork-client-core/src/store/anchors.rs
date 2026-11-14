@@ -7,8 +7,8 @@
 //! ## 一次性滚动意图（只在这里持有，网页只执行带 token 的指令）
 //!
 //! 两类，各最多一个，新的替换旧的：
-//! - 跳到某一行（[`Anchors::pending_jump`] / [`Anchors::pending_relative`] 在等，[`Anchors::scroll`] 已发出）：点锚点、
-//!   ⌥↑ / ⌥↓、从「待你处理」进来。
+//! - 跳到某一行（[`Anchors::row`]，一个 [`RowIntent`]）：点锚点、⌥↑ / ⌥↓、从「待你处理」进来。所有入口都经
+//!   `set_row` 替换或作废它（跳转、相对跳转、回到最新、用户滚动、快照、换代），没有平行的字段。
 //! - 锚点列表的头尾（[`Anchors::edge`]）：Home / End。
 //!
 //! | 阶段 | 等什么 | 到了做什么 |
@@ -58,10 +58,46 @@ fn covers(w: &pb::ListAnchorsResult, reading: u64) -> bool {
     }
 }
 
-/// 等着跳的那一处（目标不在时间线里，正在取以它为中心的一段）。
-#[derive(Debug, Clone, PartialEq)]
-pub struct PendingJump {
-    pub anchor: pb::Anchor,
+/// 跳行意图（同一时刻最多一个）。未发出的滚动指令也挂在这里（[`RowIntent::Issued`]）：被替换或作废时一并丢掉，
+/// 不会再随下一帧发出去。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum RowIntent {
+    #[default]
+    None,
+    /// 等底：对话的首份快照还没到。
+    WaitBase(pb::Anchor),
+    /// 等以目标为中心的那一段（AroundPage，`created_seq` 为中心）。
+    WaitSegment(pb::Anchor),
+    /// 相对跳转（⌥↑ / ⌥↓）等以 `center` 为中心的锚点窗口，到了再按 `delta` 落。
+    WaitWindow { delta: i32, center: u64 },
+    /// 已产生滚动指令；网页按 token 只用一次，全量帧不重发。
+    Issued(ScrollTo),
+}
+
+impl RowIntent {
+    /// 正在跳的那一处（等底、等那一段时；网页据此画流光与进度线）。
+    pub fn loading(&self) -> Option<&pb::Anchor> {
+        match self {
+            RowIntent::WaitBase(a) | RowIntent::WaitSegment(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    /// 在等以哪个 seq 为中心的那一段（会话层据此发 AroundPage）。
+    pub fn segment_seq(&self) -> Option<u64> {
+        match self {
+            RowIntent::WaitSegment(a) => Some(a.created_seq),
+            _ => None,
+        }
+    }
+
+    /// 已产生的滚动指令。
+    pub fn scroll(&self) -> Option<&ScrollTo> {
+        match self {
+            RowIntent::Issued(s) => Some(s),
+            _ => None,
+        }
+    }
 }
 
 /// 一次跳转的滚动指令：发出去一次，网页按 token 去重。
@@ -109,10 +145,8 @@ pub struct Anchors {
     /// 当前位置（锚点的 key）：阅读位置之上最近的一处。只在窗口覆盖得到阅读位置时算；翻看换来的窗口
     /// 覆盖不到时保留原值，不拿浏览中心附近的某一处顶替。
     pub current: Option<String>,
-    pub pending_jump: Option<PendingJump>,
-    /// 相对跳转等窗口重取后再落（目标越过了窗口而那一侧还有）。
-    pub pending_relative: Option<i32>,
-    pub scroll: Option<ScrollTo>,
+    /// 跳行意图：只经 `set_row` 改。
+    pub row: RowIntent,
     /// 对话的首份快照到了没有。没到之前的跳转只记下（「等底」），到了再定：首份快照是这次打开的底，不作废；
     /// 之后的快照（重连、Q9）才作废。
     pub base_loaded: bool,
@@ -252,22 +286,21 @@ impl Anchors {
     /// 在就发滚动；不在就留着等以它为中心的那一段（会话层这时才发 AroundPage）。
     pub fn base_arrived(&mut self, row: Option<String>) -> AnchorEffect {
         self.base_loaded = true;
-        match (self.pending_jump.is_some(), row) {
-            (true, Some(row)) => {
-                self.pending_jump = None;
-                let mut e = self.emit_scroll(row);
-                e.anchors_dirty = true;
-                e
+        let RowIntent::WaitBase(a) = &self.row else {
+            return AnchorEffect::default();
+        };
+        match row {
+            Some(row) => self.issue(row),
+            None => {
+                let a = a.clone();
+                self.set_row(RowIntent::WaitSegment(a))
             }
-            _ => AnchorEffect::default(),
         }
     }
 
     /// 网页重新 attach（换代次，如重载）：一次性意图全部作废。没发出的滚动指令不再发，迟到的结果只进时间线。
     pub fn on_attach(&mut self) {
-        self.pending_jump = None;
-        self.pending_relative = None;
-        self.scroll = None;
+        self.set_row(RowIntent::None);
         self.edge = None;
     }
 
@@ -281,33 +314,13 @@ impl Anchors {
     /// 跳到某一处。`row` 是它在时间线里对应的行（调用方查好，见 `Timeline::anchor_row`）：在 → 发滚动指令；
     /// 不在 → 记下等着，返回真表示要取以它为中心的一段。
     pub fn jump(&mut self, a: pb::Anchor, row: Option<String>) -> (AnchorEffect, bool) {
-        self.pending_relative = None;
         if !self.base_loaded {
             // 等底：首份快照还没到，先记下，到了由 base_arrived 定
-            self.pending_jump = Some(PendingJump { anchor: a });
-            return (
-                AnchorEffect {
-                    anchors_dirty: true,
-                    ..Default::default()
-                },
-                false,
-            );
+            return (self.set_row(RowIntent::WaitBase(a)), false);
         }
         match row {
-            Some(row) => {
-                self.pending_jump = None;
-                (self.emit_scroll(row), false)
-            }
-            None => {
-                self.pending_jump = Some(PendingJump { anchor: a });
-                (
-                    AnchorEffect {
-                        anchors_dirty: true,
-                        ..Default::default()
-                    },
-                    true,
-                )
-            }
+            Some(row) => (self.issue(row), false),
+            None => (self.set_row(RowIntent::WaitSegment(a)), true),
         }
     }
 
@@ -323,7 +336,10 @@ impl Anchors {
             .and_then(|c| items.iter().position(|a| key_of(a) == c))
         else {
             if let Some(reading) = self.reading {
-                self.pending_relative = Some(delta);
+                self.set_row(RowIntent::WaitWindow {
+                    delta,
+                    center: reading,
+                });
                 self.want_center = Some(reading);
             }
             return None;
@@ -333,67 +349,69 @@ impl Anchors {
             return Some(key_of(a));
         }
         let more = if delta < 0 { w.has_before } else { w.has_after };
-        if more {
-            self.pending_relative = Some(delta);
-            self.want_center = items.get(at).map(|a| a.created_seq);
+        if more && let Some(center) = items.get(at).map(|a| a.created_seq) {
+            self.set_row(RowIntent::WaitWindow { delta, center });
+            self.want_center = Some(center);
         }
         None
+    }
+
+    /// 以 `center` 为中心的锚点窗口到了：等着它的相对跳转现在落，交回 `delta`（调用方照 ⌥↑ / ⌥↓ 再算一次）。
+    /// 别的中心的窗口不消费它。
+    pub fn take_relative(&mut self, center: u64) -> Option<i32> {
+        match self.row {
+            RowIntent::WaitWindow { delta, center: c } if c == center => {
+                self.set_row(RowIntent::None);
+                Some(delta)
+            }
+            _ => None,
+        }
     }
 
     /// 以 `center` 为中心的那一段到了、时间线已经重建：等着的正是它，就落到目标行（`row` 是那一处现在对应的行），
     /// 或者（目标已经不在）只显示这一段、不高亮。等着的是别的（或没有在等），什么都不做（审查 4/F-5）。
     pub fn landed(&mut self, center: u64, row: Option<String>) -> AnchorEffect {
-        if self
-            .pending_jump
-            .as_ref()
-            .is_none_or(|j| j.anchor.created_seq != center)
-        {
+        if self.row.segment_seq() != Some(center) {
             return AnchorEffect::default();
         }
-        self.pending_jump = None;
-        let mut e = match row {
-            Some(row) => self.emit_scroll(row),
-            None => AnchorEffect::default(),
-        };
-        e.anchors_dirty = true;
-        e
+        match row {
+            Some(row) => self.issue(row),
+            None => self.set_row(RowIntent::None),
+        }
     }
 
-    /// 用户自己滚动了：等着的跳转（居中加载、等窗口的相对跳转）都作废（审查 4/F-6）。
-    pub fn cancel_waiting(&mut self) -> AnchorEffect {
-        let had_jump = self.pending_jump.take().is_some();
-        self.pending_relative = None;
-        AnchorEffect {
-            // 加载提示（AnchorsView.jump_loading）随之收掉
-            anchors_dirty: had_jump,
-            ..Default::default()
-        }
+    /// 跳行意图作废（不管在哪个阶段，含已产生还没发出的指令）：用户自己滚动（审查 4/F-6）、回到最新。
+    pub fn cancel_row(&mut self) -> AnchorEffect {
+        self.set_row(RowIntent::None)
     }
 
     /// 首份快照之后又走了快照（重连、Q9），时间线回到最新页：一次性意图全部作废，锚点按最新位置重取。
     /// 首份快照不走这里（见 [`Anchors::base_arrived`]）。
     pub fn reset_to_latest(&mut self) -> AnchorEffect {
-        let had_jump = self.pending_jump.take().is_some();
-        let had_edge = self.edge.take().is_some();
-        self.pending_relative = None;
-        self.scroll = None;
+        let mut e = self.set_row(RowIntent::None);
+        e.anchors_dirty |= self.edge.take().is_some();
         self.want_center = Some(LATEST_CENTER);
+        e
+    }
+
+    /// 跳行意图的唯一写入口：换成 `next`（新的替换旧的，或作废成 None）。正在跳的那一处变了，锚点视图要重发
+    /// （流光与进度线）；产生了指令就要发滚动。旧的未发出指令随之丢掉：下一帧按当前状态派生，没有就不发。
+    fn set_row(&mut self, next: RowIntent) -> AnchorEffect {
+        let loading_before = self.row.loading().map(key_of);
+        self.row = next;
         AnchorEffect {
-            anchors_dirty: had_jump || had_edge,
+            anchors_dirty: loading_before != self.row.loading().map(key_of),
+            scroll_dirty: matches!(self.row, RowIntent::Issued(_)),
             ..Default::default()
         }
     }
 
     /// 滚动指令的唯一产生处（Rust 侧没有第二处构造 ScrollTo）。
-    fn emit_scroll(&mut self, row_key: String) -> AnchorEffect {
-        self.scroll = Some(ScrollTo {
+    fn issue(&mut self, row_key: String) -> AnchorEffect {
+        self.set_row(RowIntent::Issued(ScrollTo {
             row_key,
             token: next_token(),
-        });
-        AnchorEffect {
-            scroll_dirty: true,
-            ..Default::default()
-        }
+        }))
     }
 }
 
@@ -484,19 +502,16 @@ mod tests {
         s.replace_window(0, window(&[10, 20], false, false));
         let (e, fetch) = s.jump(a(20), Some("m20".into()));
         assert!(e.scroll_dirty && !fetch);
-        let first = s.scroll.clone().unwrap();
+        let first = s.row.scroll().cloned().unwrap();
         s.jump(a(20), Some("m20".into()));
         assert_ne!(
-            s.scroll.clone().unwrap().token,
+            s.row.scroll().unwrap().token,
             first.token,
             "每次跳转换一个 token"
         );
         let (_, fetch) = s.jump(a(10), None);
         assert!(fetch, "目标不在时间线里：要取以它为中心的一段");
-        assert_eq!(
-            s.pending_jump.as_ref().map(|p| p.anchor.created_seq),
-            Some(10)
-        );
+        assert_eq!(s.row.segment_seq(), Some(10));
     }
 
     #[test]
@@ -506,13 +521,19 @@ mod tests {
         s.on_visible(10);
         assert_eq!(s.relative_target(1).as_deref(), Some("20"));
         assert_eq!(s.relative_target(-1), None, "越过窗口前端");
-        assert_eq!(s.pending_relative, Some(-1));
+        assert_eq!(
+            s.row,
+            RowIntent::WaitWindow {
+                delta: -1,
+                center: 10
+            }
+        );
         assert_eq!(s.want_center, Some(10), "以当前位置为中心重取");
         let mut t = based();
         t.replace_window(0, window(&[10, 20], false, false));
         t.on_visible(20);
         assert_eq!(t.relative_target(1), None, "到头了");
-        assert_eq!(t.pending_relative, None, "对照：那一侧没有就不重取");
+        assert_eq!(t.row, RowIntent::None, "对照：那一侧没有就不重取");
     }
 
     #[test]
@@ -525,10 +546,10 @@ mod tests {
             AnchorEffect::default(),
             "别的跳转的结果不消费这一次"
         );
-        assert!(s.pending_jump.is_some());
+        assert_eq!(s.row.segment_seq(), Some(10));
         let e = s.landed(10, None);
         assert!(!e.scroll_dirty, "目标不在：不滚动、不高亮");
-        assert_eq!(s.pending_jump, None);
+        assert_eq!(s.row, RowIntent::None);
         s.jump(a(10), None);
         assert!(s.landed(10, Some("m10".into())).scroll_dirty);
     }
@@ -539,7 +560,7 @@ mod tests {
         s.replace_window(0, window(&[10], false, false));
         s.jump(a(10), None);
         s.reset_to_latest();
-        assert_eq!(s.pending_jump, None);
+        assert_eq!(s.row, RowIntent::None);
         assert_eq!(s.want_center, Some(0));
     }
 }

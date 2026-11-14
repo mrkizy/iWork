@@ -448,7 +448,7 @@ fn jump_dropped_when_snapshot_resets() {
     with_window(&mut s);
     s.jump_to_anchor(CID, "3");
     assert!(
-        s.open.as_ref().unwrap().anchors.pending_jump.is_some(),
+        s.open.as_ref().unwrap().anchors.row.segment_seq().is_some(),
         "对照：u0 没加载，等着取以它为中心的一段"
     );
     s.apply(support::snapshot(
@@ -457,7 +457,7 @@ fn jump_dropped_when_snapshot_resets() {
         vec![support::page(20, vec![], false)],
     ));
     let a = &s.open.as_ref().unwrap().anchors;
-    assert!(a.pending_jump.is_none());
+    assert!(a.row.loading().is_none());
     assert_eq!(a.want_center, Some(0));
 }
 
@@ -736,20 +736,15 @@ fn around_arrives(s: &mut iwork_client_core::store::Store, seq: u64) {
 }
 
 fn pending_seq(s: &iwork_client_core::store::Store) -> Option<u64> {
-    s.open
-        .as_ref()?
-        .anchors
-        .pending_jump
-        .as_ref()
-        .map(|j| j.anchor.created_seq)
+    s.open.as_ref()?.anchors.row.segment_seq()
 }
 
 fn scroll_row(s: &iwork_client_core::store::Store) -> Option<String> {
     s.open
         .as_ref()?
         .anchors
-        .scroll
-        .as_ref()
+        .row
+        .scroll()
         .map(|x| x.row_key.clone())
 }
 
@@ -795,12 +790,12 @@ fn user_scroll_cancels_pending_relative() {
     anchors_arrive(&mut s, 0, &[10], (true, false));
     s.jump_relative(CID, -1);
     assert_eq!(
-        s.open.as_ref().unwrap().anchors.pending_relative,
+        waiting_delta(&s.open.as_ref().unwrap().anchors),
         Some(-1),
         "对照：越过窗口前端，等重取"
     );
     s.set_window(CID, 21, 21, true);
-    assert_eq!(s.open.as_ref().unwrap().anchors.pending_relative, None);
+    assert_eq!(waiting_delta(&s.open.as_ref().unwrap().anchors), None);
 }
 
 /// 翻看换来的窗口不改真实阅读位置：当前位置还是用户正在看的那一处，⌥↑ 按真实位置跳（4/F-7）。
@@ -832,7 +827,7 @@ fn browse_window_must_not_move_actual_current_anchor() {
     // ⌥↑：前一处是 10，不在这份窗口里 → 围绕真实位置重取，窗口到了再落
     s.jump_relative(CID, -1);
     let a = &s.open.as_ref().unwrap().anchors;
-    assert_eq!(a.pending_relative, Some(-1));
+    assert_eq!(waiting_delta(a), Some(-1));
     assert_eq!(a.want_center, Some(20), "围绕真实位置重取，不围绕浏览中心");
     anchors_arrive(&mut s, 20, &[10, 20, 30], (true, false));
     assert_eq!(
@@ -939,7 +934,7 @@ fn stale_anchor_window_must_not_consume_pending_relative() {
     assert_eq!(want, Some(20), "对照：以当前位置为中心重取");
     anchors_arrive(&mut s, 0, &[20], (true, false));
     assert_eq!(
-        s.open.as_ref().unwrap().anchors.pending_relative,
+        waiting_delta(&s.open.as_ref().unwrap().anchors),
         Some(-1),
         "中心不对的窗口判断不了，接着等"
     );
@@ -1142,4 +1137,12 @@ async fn jump_to_row_right_after_set_visible() {
         s.rows.contains_key("ap-old") && s.scroll_to.as_ref().is_some_and(|x| x.row_key == "ap-old")
     })
     .await;
+}
+
+/// 在等锚点窗口的相对跳转（⌥↑ / ⌥↓）的 delta。
+fn waiting_delta(a: &iwork_client_core::store::anchors::Anchors) -> Option<i32> {
+    match a.row {
+        iwork_client_core::store::anchors::RowIntent::WaitWindow { delta, .. } => Some(delta),
+        _ => None,
+    }
 }

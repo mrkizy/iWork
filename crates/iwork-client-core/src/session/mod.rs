@@ -732,15 +732,8 @@ impl<D: Dialer> Session<D> {
             }
             Local::LoadOlder(_) => self.want_older = true,
             Local::JumpToLatest(cid) => {
-                // 跳到最新：等着的锚点跳转作废（方案 2.9 第 3 条）
-                if let Some(t) = self
-                    .store
-                    .open
-                    .as_mut()
-                    .filter(|t| t.conversation_id == cid)
-                {
-                    t.anchors.pending_jump = None;
-                }
+                // 跳到最新：跳行意图作废（方案 2.9 第 3 条；经锚点状态的同一个写入口）
+                self.store.cancel_row(&cid);
                 self.want_tail = true;
             }
             Local::AnchorBrowse {
@@ -1170,11 +1163,12 @@ impl<D: Dialer> Session<D> {
             // 跳到没加载的锚点：取以它为中心的一段（有了底才取：首份快照没到时先等底，见锚点模块头的表）
             if ready
                 && tl.anchors.base_loaded
-                && let Some(j) = &tl.anchors.pending_jump
+                && let Some(seq) = tl.anchors.row.segment_seq()
                 && !self.backed_off("around", now)
-                && !self.in_flight(|p| matches!(p, QueryPurpose::AroundPage { seq, .. } if *seq == j.anchor.created_seq))
+                && !self.in_flight(
+                    |p| matches!(p, QueryPurpose::AroundPage { seq: s, .. } if *s == seq),
+                )
             {
-                let seq = j.anchor.created_seq;
                 want.push((
                     pb::Query {
                         kind: Some(Q::GetConversation(pb::GetConversation {

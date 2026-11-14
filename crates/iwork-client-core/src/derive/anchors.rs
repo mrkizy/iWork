@@ -26,15 +26,10 @@ pub fn anchors(store: &Store, tl: &Timeline, ctx: Ctx) -> Option<pb::AnchorsView
         // Q18：跳到没加载的地方时原地不动；被点的刻度流光、顶端进度线，读屏读一句
         jump_loading: tl
             .anchors
-            .pending_jump
-            .as_ref()
+            .row
+            .loading()
             .map(|_| text::ANCHOR_JUMP_LOADING.to_owned()),
-        jump_loading_key: tl
-            .anchors
-            .pending_jump
-            .as_ref()
-            .map(|j| key_of(&j.anchor))
-            .unwrap_or_default(),
+        jump_loading_key: tl.anchors.row.loading().map(key_of).unwrap_or_default(),
         edge_landing: match tl.anchors.edge {
             Some(Edge::Landed { latest, token }) => Some(pb::EdgeLanding { token, latest }),
             _ => None,
@@ -50,7 +45,7 @@ pub fn cursor(tl: &Timeline) -> pb::AnchorCursor {
 }
 
 pub fn scroll_to(tl: &Timeline) -> Option<pb::ScrollTo> {
-    tl.anchors.scroll.as_ref().map(|s| pb::ScrollTo {
+    tl.anchors.row.scroll().map(|s| pb::ScrollTo {
         row_key: s.row_key.clone(),
         highlight_ms: HIGHLIGHT_MS,
         token: s.token,

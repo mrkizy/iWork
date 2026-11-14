@@ -493,7 +493,7 @@ impl Store {
             return;
         };
         if by_user {
-            let e = t.anchors.cancel_waiting();
+            let e = t.anchors.cancel_row();
             self.dirty.conversation(TimelineChange::from_anchor(e));
         }
         self.window = Some((first.min(last), first.max(last)));
@@ -668,8 +668,13 @@ impl Store {
         else {
             return;
         };
-        if let Some(key) = t.anchors.relative_target(delta) {
-            self.jump_to_anchor(conversation_id, &key);
+        match t.anchors.relative_target(delta) {
+            Some(key) => self.jump_to_anchor(conversation_id, &key),
+            // 要先重取窗口：等着的跳行换成了等窗口（旧的流光收掉）
+            None => self.dirty.conversation(TimelineChange {
+                anchors: true,
+                ..Default::default()
+            }),
         }
     }
 
@@ -1192,11 +1197,10 @@ impl Store {
         else {
             return;
         };
-        let row = t
-            .anchors
-            .pending_jump
-            .as_ref()
-            .and_then(|j| t.anchor_row(&j.anchor));
+        let row = match &t.anchors.row {
+            crate::store::anchors::RowIntent::WaitBase(a) => t.anchor_row(a),
+            _ => None,
+        };
         // 行在时间线里：窗口先放到它上面，帧才带上它（同 jump_to）
         if let Some(k) = row.as_deref().and_then(|r| t.key_of(r)) {
             self.window = Some((k.ordinal(), k.ordinal()));
@@ -1212,6 +1216,18 @@ impl Store {
             t.anchors.on_attach();
         }
         self.dirty.conversation.scroll = false;
+    }
+
+    /// 跳行意图作废（回到最新）。用户滚动的作废在 set_window 里。
+    pub fn cancel_row(&mut self, conversation_id: &str) {
+        if let Some(t) = self
+            .open
+            .as_mut()
+            .filter(|t| t.conversation_id == conversation_id)
+        {
+            let e = t.anchors.cancel_row();
+            self.dirty.conversation(TimelineChange::from_anchor(e));
+        }
     }
 
     /// 用户在锚点列表里滚动或按键：等着的头尾作废。
@@ -1341,8 +1357,8 @@ impl Store {
                     && self
                         .open
                         .as_ref()
-                        .and_then(|t| t.anchors.pending_jump.as_ref())
-                        .is_none_or(|j| j.anchor.created_seq != *seq)
+                        .and_then(|t| t.anchors.row.segment_seq())
+                        .is_none_or(|center| center != *seq)
                 {
                     // 等的跳转换了或取消了：这一段照常进时间线（它是一段合法的连续消息），但不再滚动。
                     tracing::debug!(target: "iwork_client", seq, "居中加载的结果到达时已不再等它");
@@ -1417,13 +1433,10 @@ impl Store {
                         // 只有等着的正是这一次跳转时才落点（审查 4/F-5）：过时的结果（先跳 A 再跳 B 时 A 的、
                         // 用户滚动作废了的）照常进时间线，但不消费当前的等待、不发滚动、不挪窗口
                         PageMode::Around { center } => {
-                            if let Some(j) = t
-                                .anchors
-                                .pending_jump
-                                .as_ref()
-                                .filter(|j| j.anchor.created_seq == center)
+                            if t.anchors.row.segment_seq() == Some(center)
+                                && let Some(target) = t.anchors.row.loading().cloned()
                             {
-                                let row = t.anchor_row(&j.anchor);
+                                let row = t.anchor_row(&target);
                                 // 旧窗口指着重建前的位置。落到目标行：窗口先放在它上面，帧才带上它前后的行
                                 // （网页要先有这一行才滚得过去）；网页滚到以后会报新的窗口。目标不在就从这一段的末尾看
                                 self.window = row
@@ -1496,8 +1509,8 @@ impl Store {
                     return;
                 };
                 let c = TimelineChange::from_anchor(t.anchors.window_arrived(*center, w, seq));
-                // 相对跳转在等这份窗口：现在落
-                let relative = t.anchors.pending_relative.take();
+                // 相对跳转在等这份窗口：现在落（别的中心的窗口不消费它）
+                let relative = t.anchors.take_relative(*center);
                 self.dirty.conversation(c);
                 if let Some(delta) = relative {
                     let cid = conversation_id.clone();

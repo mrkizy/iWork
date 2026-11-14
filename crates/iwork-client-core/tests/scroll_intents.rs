@@ -199,7 +199,7 @@ fn a_later_snapshot_cancels() {
     s.jump_to_anchor(CID, "3");
     p.drain(&mut s);
     assert!(
-        s.open.as_ref().unwrap().anchors.pending_jump.is_some(),
+        s.open.as_ref().unwrap().anchors.row.segment_seq().is_some(),
         "对照：在等那一段"
     );
     first_snapshot(&mut s, vec![user_msg("u5", 5)]);
@@ -329,4 +329,75 @@ fn edge_is_cancelled_by_reattach_and_by_a_later_snapshot() {
     assert!(landing(&s).1.is_some(), "对照：落了点");
     first_snapshot(&mut s, vec![user_msg("u5", 5)]);
     assert_eq!(landing(&s), (false, None), "之后的快照");
+}
+
+// ---------- 跳行最多一个：新的替换旧的（g3b 3/F-3） ----------
+
+/// 有底（首份快照只有 u5），锚点窗口 3、5 两处、后面还有。
+fn based_with_more_after() -> Store {
+    let mut s = opened_without_base();
+    first_snapshot(&mut s, vec![user_msg("u5", 5)]);
+    s.apply(support::view_result(
+        QueryPurpose::Anchors {
+            conversation_id: CID.into(),
+            center: 0,
+            round: None,
+        },
+        pb::QueryResult {
+            seq: 700,
+            kind: Some(pb::query_result::Kind::ListAnchors(pb::ListAnchorsResult {
+                anchors: vec![user_anchor(3), user_anchor(5)],
+                has_after: true,
+                ..Default::default()
+            })),
+        },
+    ));
+    s
+}
+
+/// 旧的跳转在等 u3 那一段，新的相对跳转要等锚点窗口：旧的被替换，u3 那一段迟到也不滚。
+#[test]
+fn a_relative_jump_replaces_a_waiting_jump() {
+    let mut s = based_with_more_after();
+    let mut p = Page::attach(&mut s);
+    s.jump_to_anchor(CID, "3");
+    // 阅读位置在 u5（不是用户滚动的回报），⌥↓：后面那一处在窗口外、后面还有，要先重取窗口
+    let ord = s.open.as_ref().unwrap().key_of("u5").unwrap().ordinal();
+    s.set_window(CID, ord, ord, false);
+    s.jump_relative(CID, 1);
+    around_arrives(&mut s, 3);
+    p.drain(&mut s);
+    assert_eq!(p.sent_rows(), Vec::<&str>::new());
+}
+
+/// 已经产生、还没取走的 u5，改跳没载入的 u3：u5 不再发。
+#[test]
+fn a_new_jump_replaces_an_unsent_scroll() {
+    let mut s = based_with_more_after();
+    let mut p = Page::attach(&mut s);
+    p.drain(&mut s);
+    s.jump_to_anchor(CID, "5");
+    s.jump_to_anchor(CID, "3");
+    p.drain(&mut s);
+    assert_eq!(
+        p.sent_rows(),
+        Vec::<&str>::new(),
+        "u3 还在等那一段，u5 已被替换"
+    );
+    around_arrives(&mut s, 3);
+    p.drain(&mut s);
+    assert_eq!(p.sent_rows(), ["u3"]);
+}
+
+/// 已经产生、还没取走的滚动指令，用户自己滚动了：不再发。
+#[test]
+fn user_scroll_cancels_an_unsent_scroll() {
+    let mut s = opened_without_base();
+    let mut p = Page::attach(&mut s);
+    first_snapshot(&mut s, vec![user_msg("u3", 3), user_msg("u5", 5)]);
+    p.drain(&mut s);
+    s.jump_to_anchor(CID, "3");
+    s.set_window(CID, 0, 10, true);
+    p.drain(&mut s);
+    assert_eq!(p.sent_rows(), Vec::<&str>::new());
 }
