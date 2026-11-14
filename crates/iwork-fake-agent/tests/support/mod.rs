@@ -360,3 +360,84 @@ pub fn process_exists(pid: u32) -> bool {
     assert!(out.status.success(), "tasklist 失败：{out:?}");
     String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
 }
+
+/// 有界地跑一条异步用例（Windows CI 上见过一次无限挂起，任务 fix-fake-agent-windows-hang）：用例本体和运行时收尾都在
+/// 单独的线程里跑，外面最多等 `limit`。卡住时让测试失败，并打印卡在哪一步（用例本体，还是运行时收尾：tokio 的运行时
+/// 被丢掉时会无限等还在跑的阻塞任务）和 `diag()` 给的现场。
+pub fn bounded<F, Fut>(limit: std::time::Duration, diag: impl Fn() -> String, body: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    use std::sync::atomic::AtomicU8;
+    use std::sync::mpsc::RecvTimeoutError;
+    const PHASES: [&str; 3] = [
+        "用例本体还没跑完",
+        "用例本体跑完了，运行时收尾还没完成",
+        "已完成",
+    ];
+    let phase = std::sync::Arc::new(AtomicU8::new(0));
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let p = phase.clone();
+    let worker = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("建运行时");
+        rt.block_on(body());
+        p.store(1, Ordering::SeqCst);
+        let started = Instant::now();
+        // 不直接丢掉运行时：丢掉会无限等卡住的阻塞任务
+        rt.shutdown_timeout(limit / 2);
+        let outcome = if started.elapsed() >= limit / 2 {
+            Err(format!(
+                "运行时收尾 {:?} 内没完成（有阻塞任务卡住）",
+                limit / 2
+            ))
+        } else {
+            Ok(())
+        };
+        p.store(2, Ordering::SeqCst);
+        let _ = tx.send(outcome);
+    });
+    match rx.recv_timeout(limit) {
+        Ok(Ok(())) => {
+            let _ = worker.join();
+        }
+        Ok(Err(stuck)) => panic!("{stuck}\n现场：\n{}", diag()),
+        // 用例本体 panic：线程带着 panic 结束，把它原样抛出来
+        Err(RecvTimeoutError::Disconnected) => {
+            if let Err(panic) = worker.join() {
+                std::panic::resume_unwind(panic);
+            }
+            panic!("用例线程没报结果就结束了");
+        }
+        Err(RecvTimeoutError::Timeout) => panic!(
+            "用例 {limit:?} 内没结束：{}\n现场：\n{}",
+            PHASES[usize::from(phase.load(Ordering::SeqCst))],
+            diag()
+        ),
+    }
+}
+
+/// 卡住时的现场：假运行时进程还在不在（按程序名列出），和它的记录文件。
+pub fn fake_diag(record: &Path) -> String {
+    #[cfg(windows)]
+    let procs = std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq iwork-fake-agent.exe", "/FO", "CSV"])
+        .output();
+    #[cfg(unix)]
+    let procs = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,stat=,command="])
+        .output();
+    let procs = match procs {
+        Ok(out) => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.contains("iwork-fake-agent"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(e) => format!("列不出进程：{e}"),
+    };
+    let record = std::fs::read_to_string(record).unwrap_or_else(|e| format!("读不了记录：{e}"));
+    format!("假运行时进程：\n{procs}\n记录：\n{record}")
+}

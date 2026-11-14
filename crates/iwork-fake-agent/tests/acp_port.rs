@@ -183,14 +183,22 @@ async fn mcp_is_rejected_until_local_import_lands() {
     assert!(fake.params_of("session/new").is_empty());
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn system_prompt_requires_capability() {
+/// Windows CI 上见过一次在这里挂了 40 多分钟（run 43537915924）：有界地跑，卡住时失败并打印现场。
+#[test]
+fn system_prompt_requires_capability() {
     let fake = Fake::new(&one_text_turn(json!({ "system_prompt": false })));
-    let err = AcpRuntime::new(fake.launch.clone())
-        .open_session(spec(fake.dir.path()), AllowAll)
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("不支持会话系统提示"), "{err}");
+    let record = fake.record.clone();
+    bounded(
+        Duration::from_secs(60),
+        move || fake_diag(&record),
+        move || async move {
+            let err = AcpRuntime::new(fake.launch.clone())
+                .open_session(spec(fake.dir.path()), AllowAll)
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("不支持会话系统提示"), "{err}");
+        },
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -729,5 +737,29 @@ async fn cancel_waits_for_permission_responses() {
         pos("permission_response t1 reject-once") < pos("session/cancel")
             && pos("session/cancel") != usize::MAX,
         "{arrivals:?}"
+    );
+}
+
+/// 有界外壳自己的对照：用例本体永远不结束，时限到了就失败，并说清卡在用例本体。
+#[test]
+#[should_panic(expected = "用例本体还没跑完")]
+fn bounded_fails_when_the_body_hangs() {
+    bounded(
+        Duration::from_millis(300),
+        || "（对照）".into(),
+        || std::future::pending::<()>(),
+    );
+}
+
+/// 有界外壳自己的对照：用例本体跑完了，但有阻塞任务卡住、运行时收尾不完，同样在时限内失败。
+#[test]
+#[should_panic(expected = "运行时收尾")]
+fn bounded_fails_when_runtime_teardown_hangs() {
+    bounded(
+        Duration::from_millis(600),
+        || "（对照）".into(),
+        || async {
+            tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_secs(5)));
+        },
     );
 }
