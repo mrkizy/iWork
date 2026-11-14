@@ -150,15 +150,9 @@ fn pid_of(rig: &Rig, kind: &str) -> i32 {
     v["pid"].as_i64().unwrap() as i32
 }
 
-/// 进程还活着（僵尸不算）。
+/// 进程在跑（僵尸不算；读取出错让测试红）。
 fn alive(pid: i32) -> bool {
-    let out = std::process::Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-        .unwrap();
-    let stat = String::from_utf8_lossy(&out.stdout);
-    let stat = stat.trim();
-    !stat.is_empty() && !stat.starts_with('Z')
+    support::procs::alive(pid)
 }
 
 /// stderr 写满、没人读的时候会话任务 panic（审查 S6-5b 2/F-3）：panic 的处理不先同步写 stderr，桥接照样立刻结束。

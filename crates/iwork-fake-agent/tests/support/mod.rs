@@ -342,17 +342,12 @@ impl LivePublisher for Deltas {
     }
 }
 
-/// 进程还在跑。僵尸算不在：它已经结束，只等父进程（或收养它的 init）回收；进程树的清理按同一条规则判空
-/// （T06 方案 5.4a），而 `kill(pid, 0)` 对僵尸照样成功，不能拿来判「结束了没有」。
+/// 进程还在跑：和清树判空同一条规则（`iwork_agent_acp::process::running`，僵尸算不在）。读不了进程状态就让测试红，
+/// 不当成「不在」。
 #[cfg(unix)]
 pub fn process_exists(pid: u32) -> bool {
-    let out = std::process::Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-        .expect("运行 ps");
-    let stat = String::from_utf8_lossy(&out.stdout);
-    let stat = stat.trim();
-    !stat.is_empty() && !stat.starts_with('Z')
+    iwork_agent_acp::process::running(pid as i32)
+        .unwrap_or_else(|e| panic!("读不了进程 {pid} 的状态：{e}"))
 }
 
 #[cfg(windows)]
@@ -361,5 +356,7 @@ pub fn process_exists(pid: u32) -> bool {
         .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
         .output()
         .expect("运行 tasklist");
+    // 没有匹配时 tasklist 也以 0 退出、打一行提示；非 0 是它自己出了错，不能当成「不在」
+    assert!(out.status.success(), "tasklist 失败：{out:?}");
     String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
 }
