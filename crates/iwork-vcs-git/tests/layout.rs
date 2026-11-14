@@ -1318,3 +1318,111 @@ async fn tracked_dir_with_dot_git_still_lists_new_files_like_git() {
         }
     }
 }
+
+/// `git status --porcelain --untracked-files=all [extra…]` 换成和 [`changed`] 一样的写法。
+fn git_changed(f: &Fixture, repo: &Path, extra: &[&str]) -> Vec<String> {
+    // 非 ASCII 的路径原样输出，不转义成 \303\251
+    let mut args = vec![
+        "-c",
+        "core.quotePath=false",
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+    ];
+    args.extend_from_slice(extra);
+    let porcelain = f.git(repo, &args);
+    let mut out: Vec<String> = porcelain
+        .lines()
+        .map(|l| {
+            // f.git 去掉了整段输出首尾的空白，第一行开头的空格可能没了，按第一个空格切
+            let (code, path) = l.trim_start().split_once(' ').unwrap();
+            let kind = match code {
+                "M" => "Modified",
+                "D" => "Deleted",
+                "??" => "Untracked",
+                other => panic!("没料到的 git 状态 {other}：{l}"),
+            };
+            format!(
+                "{}:{kind}",
+                path.trim().trim_matches('"').trim_end_matches('/')
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// 第 4 轮 F-1：大小写不敏感的仓库里，暂存区是 `t/a`、磁盘上的目录只改了大小写成 `T`，`T/` 里又有 `.git`。
+/// 「暂存区有没有条目落在这个目录下面」要用 gix 自己的查找（和 dirwalk 判断已跟踪同一套规则），按字节比会把
+/// `T` 当成没跟踪、收成一行。和 git 对拍；precomposeUnicode（NFD/NFC 目录名）同理。只在大小写不敏感的
+/// 文件系统上有意义，别处打印一句说明后跳过。
+#[tokio::test]
+async fn case_and_unicode_variant_of_tracked_dir_is_not_folded() {
+    let probe = Fixture::new();
+    std::fs::create_dir_all(probe.root().join("casetest")).unwrap();
+    if !probe.root().join("CASETEST").exists() {
+        println!("文件系统大小写敏感，这一格不适用，跳过");
+        return;
+    }
+    for (variant, dot_git) in [
+        ("case", "empty-file"),
+        ("case", "git-init"),
+        ("nfd", "empty-file"),
+        ("nfd", "git-init"),
+    ] {
+        let f = Fixture::new();
+        let (tracked, renamed) = match variant {
+            "case" => ("t", "T".to_owned()),
+            // 暂存区里是 NFC 的 é，磁盘上改成 NFD（e + U+0301）
+            _ => ("\u{e9}", "e\u{301}".to_owned()),
+        };
+        let repo = f.repo_with_commit("proj", &[(&format!("{tracked}/a"), "1\n")]);
+        // 先挪到别的名字再挪回来，大小写不敏感的文件系统上直接改大小写不一定生效
+        std::fs::rename(repo.join(tracked), repo.join("tmp-rename")).unwrap();
+        std::fs::rename(repo.join("tmp-rename"), repo.join(&renamed)).unwrap();
+        let dir = repo.join(&renamed);
+        match dot_git {
+            "empty-file" => write(&dir.join(".git"), ""),
+            _ => {
+                f.git(&dir, &["init", "--quiet"]);
+            }
+        }
+        write(&dir.join("new"), "n\n");
+
+        let status = f.vcs().status(&RepoRoot(repo.clone())).await.unwrap();
+        let git = git_changed(&f, &repo, &[]);
+        assert_eq!(
+            changed(&status),
+            git,
+            "{variant} {dot_git}：和 git status 不一致"
+        );
+        assert!(
+            git.iter().any(|l| l.ends_with("/new:Untracked")),
+            "{variant} {dot_git}：git 应当列出新文件：{git:?}"
+        );
+    }
+}
+
+/// 第 4 轮 F-1 的同类：子模块目录在磁盘上只改了大小写（暂存区是 `deps/lib`，磁盘上 `Deps/Lib`），「落在子模块下面」
+/// 也要用 gix 的查找，否则子模块里的文件会被列成未跟踪。和 git 对拍；只在大小写不敏感的文件系统上有意义。
+#[tokio::test]
+async fn case_variant_of_submodule_dir_is_still_a_submodule() {
+    let probe = Fixture::new();
+    std::fs::create_dir_all(probe.root().join("casetest")).unwrap();
+    if !probe.root().join("CASETEST").exists() {
+        println!("文件系统大小写敏感，这一格不适用，跳过");
+        return;
+    }
+    let f = Fixture::new();
+    let sup = super_with_submodule(&f);
+    std::fs::rename(sup.join("deps"), sup.join("tmp-rename")).unwrap();
+    std::fs::rename(sup.join("tmp-rename"), sup.join("Deps")).unwrap();
+    std::fs::rename(sup.join("Deps/lib"), sup.join("Deps/tmp-rename")).unwrap();
+    std::fs::rename(sup.join("Deps/tmp-rename"), sup.join("Deps/Lib")).unwrap();
+    write(&sup.join("Deps/Lib/dirty"), "x\n");
+
+    let status = f.vcs().status(&RepoRoot(sup.clone())).await.unwrap();
+    // 子模块只比检出的提交、不看里面的脏文件（T08 的既定做法，相当于 --ignore-submodules=dirty）
+    let git = git_changed(&f, &sup, &["--ignore-submodules=dirty"]);
+    assert_eq!(changed(&status), git, "和 git status 不一致");
+}

@@ -650,22 +650,16 @@ fn status_items(
         .map_err(|e| failed(op, e.to_string()))?
         .map(|item| item.map_err(|e| failed(op, e.to_string())))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(crate::nested::fold_nested_repositories(
-        items,
-        &index_shape(repo, op)?,
-    ))
-}
-
-/// 暂存区的样子：子模块路径与有条目落在下面的目录。
-fn index_shape(repo: &Repository, op: &'static str) -> Result<crate::nested::IndexShape, VcsError> {
     let index = repo
         .index_or_empty()
         .map_err(|e| failed(op, format!("读暂存区失败：{e}")))?;
-    Ok(crate::nested::IndexShape::from_entries(
-        index
-            .entries()
-            .iter()
-            .map(|e| (e.path(&index), e.mode == gix::index::entry::Mode::COMMIT)),
+    let ignore_case = repo
+        .filesystem_options()
+        .map_err(|e| failed(op, format!("读文件系统配置失败：{e}")))?
+        .ignore_case;
+    Ok(crate::nested::fold_nested_repositories(
+        items,
+        &crate::nested::GixIndex::new(&index, ignore_case),
     ))
 }
 
