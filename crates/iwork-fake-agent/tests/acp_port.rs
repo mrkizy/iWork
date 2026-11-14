@@ -183,22 +183,28 @@ async fn mcp_is_rejected_until_local_import_lands() {
     assert!(fake.params_of("session/new").is_empty());
 }
 
-/// Windows CI 上见过一次在这里挂了 40 多分钟（run 43537915924）：有界地跑，卡住时失败并打印现场。
+/// Windows CI 上见过一次在这里挂了 40 多分钟（run 43537915924）：有界地跑，卡住时失败并打印现场。`fake` 留在这里活到
+/// 诊断结束，用例本体只拿路径的副本（审查 1/F-2）。
 #[test]
 fn system_prompt_requires_capability() {
     let fake = Fake::new(&one_text_turn(json!({ "system_prompt": false })));
-    let record = fake.record.clone();
+    let (launch, cwd, record) = (
+        fake.launch.clone(),
+        fake.dir.path().to_path_buf(),
+        fake.record.clone(),
+    );
     bounded(
         Duration::from_secs(60),
         move || fake_diag(&record),
         move || async move {
-            let err = AcpRuntime::new(fake.launch.clone())
-                .open_session(spec(fake.dir.path()), AllowAll)
+            let err = AcpRuntime::new(launch)
+                .open_session(spec(&cwd), AllowAll)
                 .await
                 .unwrap_err();
             assert!(err.to_string().contains("不支持会话系统提示"), "{err}");
         },
     );
+    drop(fake);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -758,8 +764,68 @@ fn bounded_fails_when_runtime_teardown_hangs() {
     bounded(
         Duration::from_millis(600),
         || "（对照）".into(),
-        || async {
-            tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_secs(5)));
+        || async { stuck_blocking_task(5).await },
+    );
+}
+
+/// 有界外壳自己的对照（审查 1/F-1）：诊断自身卡住时，外壳也在总时限内失败，并说明诊断没完成。
+#[test]
+fn bounded_fails_in_time_when_diag_hangs() {
+    let limit = Duration::from_millis(400);
+    let started = std::time::Instant::now();
+    let failed = std::panic::catch_unwind(|| {
+        bounded(
+            limit,
+            || {
+                std::thread::sleep(Duration::from_secs(3));
+                "（对照）".into()
+            },
+            std::future::pending::<()>,
+        );
+    });
+    let took = started.elapsed();
+    let message = failed
+        .expect_err("本体卡住要失败")
+        .downcast::<String>()
+        .map(|s| *s)
+        .unwrap_or_default();
+    assert!(message.contains("诊断在"), "{message}");
+    assert!(
+        took < limit + Duration::from_millis(300),
+        "总时限内失败：{took:?}"
+    );
+}
+
+/// 有界外壳自己的对照（审查 1/F-2）：运行时收尾卡住时，诊断仍读得到假运行时的记录（临时目录活到诊断结束）。
+#[test]
+#[should_panic(expected = "initialize")]
+fn diag_still_reads_the_record_when_teardown_hangs() {
+    let fake = Fake::new(&one_text_turn(json!({ "system_prompt": false })));
+    let (launch, cwd, record) = (
+        fake.launch.clone(),
+        fake.dir.path().to_path_buf(),
+        fake.record.clone(),
+    );
+    bounded(
+        Duration::from_secs(4),
+        move || fake_diag(&record),
+        move || async move {
+            let _ = AcpRuntime::new(launch)
+                .open_session(spec(&cwd), AllowAll)
+                .await;
+            // 收尾卡住：留一个跑很久的阻塞任务
+            stuck_blocking_task(10).await;
         },
     );
+    drop(fake);
+}
+
+/// 起一个睡 `secs` 秒的阻塞任务，等它真的开始跑了才返回：还没开始的阻塞任务在运行时收尾时会被直接取消，卡不住收尾。
+async fn stuck_blocking_task(secs: u64) {
+    let (started, wait) = tokio::sync::oneshot::channel();
+    tokio::task::spawn_blocking(move || {
+        let _ = started.send(());
+        std::thread::sleep(Duration::from_secs(secs));
+    });
+    let _ = wait.await;
 }

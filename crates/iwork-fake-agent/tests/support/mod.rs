@@ -362,10 +362,17 @@ pub fn process_exists(pid: u32) -> bool {
 }
 
 /// 有界地跑一条异步用例（Windows CI 上见过一次无限挂起，任务 fix-fake-agent-windows-hang）：用例本体和运行时收尾都在
-/// 单独的线程里跑，外面最多等 `limit`。卡住时让测试失败，并打印卡在哪一步（用例本体，还是运行时收尾：tokio 的运行时
-/// 被丢掉时会无限等还在跑的阻塞任务）和 `diag()` 给的现场。
-pub fn bounded<F, Fut>(limit: std::time::Duration, diag: impl Fn() -> String, body: F)
-where
+/// 单独的线程里跑。卡住时让测试失败，并打印卡在哪一步（用例本体，还是运行时收尾：tokio 的运行时被丢掉时会无限等
+/// 还在跑的阻塞任务）和 `diag()` 给的现场。
+///
+/// 总时限是 `limit`：前四分之三给用例本体和运行时收尾，最后四分之一给诊断。诊断也在单独的线程里跑，它自己卡住
+/// （比如列进程的命令不返回）时照样按时失败，只说「诊断没完成」（审查 1/F-1）。`diag` 读的东西（比如假运行时的
+/// 记录文件）要活到诊断结束：别把它们 move 进用例本体（审查 1/F-2）。
+pub fn bounded<F, Fut>(
+    limit: std::time::Duration,
+    diag: impl FnOnce() -> String + Send + 'static,
+    body: F,
+) where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()>,
 {
@@ -376,6 +383,9 @@ where
         "用例本体跑完了，运行时收尾还没完成",
         "已完成",
     ];
+    let started = Instant::now();
+    let diag_budget = limit / 4;
+    let run_limit = limit - diag_budget;
     let phase = std::sync::Arc::new(AtomicU8::new(0));
     let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
     let p = phase.clone();
@@ -386,25 +396,24 @@ where
             .expect("建运行时");
         rt.block_on(body());
         p.store(1, Ordering::SeqCst);
-        let started = Instant::now();
-        // 不直接丢掉运行时：丢掉会无限等卡住的阻塞任务
-        rt.shutdown_timeout(limit / 2);
-        let outcome = if started.elapsed() >= limit / 2 {
-            Err(format!(
-                "运行时收尾 {:?} 内没完成（有阻塞任务卡住）",
-                limit / 2
-            ))
+        // 不直接丢掉运行时：丢掉会无限等卡住的阻塞任务。收尾只能用到总时限里剩给它的部分
+        let budget = run_limit.saturating_sub(started.elapsed());
+        let teardown = Instant::now();
+        rt.shutdown_timeout(budget);
+        let outcome = if teardown.elapsed() >= budget {
+            Err(format!("运行时收尾 {budget:?} 内没完成（有阻塞任务卡住）"))
         } else {
             Ok(())
         };
         p.store(2, Ordering::SeqCst);
         let _ = tx.send(outcome);
     });
-    match rx.recv_timeout(limit) {
+    let stuck = match rx.recv_timeout(run_limit) {
         Ok(Ok(())) => {
             let _ = worker.join();
+            return;
         }
-        Ok(Err(stuck)) => panic!("{stuck}\n现场：\n{}", diag()),
+        Ok(Err(stuck)) => stuck,
         // 用例本体 panic：线程带着 panic 结束，把它原样抛出来
         Err(RecvTimeoutError::Disconnected) => {
             if let Err(panic) = worker.join() {
@@ -412,32 +421,54 @@ where
             }
             panic!("用例线程没报结果就结束了");
         }
-        Err(RecvTimeoutError::Timeout) => panic!(
-            "用例 {limit:?} 内没结束：{}\n现场：\n{}",
-            PHASES[usize::from(phase.load(Ordering::SeqCst))],
-            diag()
+        Err(RecvTimeoutError::Timeout) => format!(
+            "用例 {run_limit:?} 内没结束：{}",
+            PHASES[usize::from(phase.load(Ordering::SeqCst))]
         ),
-    }
+    };
+    let (dtx, drx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = dtx.send(diag());
+    });
+    let left = limit.saturating_sub(started.elapsed());
+    let scene = drx
+        .recv_timeout(left)
+        .unwrap_or_else(|_| format!("诊断在 {left:?} 内没完成"));
+    panic!("{stuck}\n现场：\n{scene}");
 }
 
-/// 卡住时的现场：假运行时进程还在不在（按程序名列出），和它的记录文件。
+/// 卡住时的现场：假运行时进程还在不在（按程序名精确匹配），和它的记录文件。
 pub fn fake_diag(record: &Path) -> String {
     #[cfg(windows)]
     let procs = std::process::Command::new("tasklist")
-        .args(["/FI", "IMAGENAME eq iwork-fake-agent.exe", "/FO", "CSV"])
-        .output();
+        .args([
+            "/FI",
+            "IMAGENAME eq iwork-fake-agent.exe",
+            "/FO",
+            "CSV",
+            "/NH",
+        ])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned());
     #[cfg(unix)]
     let procs = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,stat=,command="])
-        .output();
-    let procs = match procs {
-        Ok(out) => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter(|l| l.contains("iwork-fake-agent"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Err(e) => format!("列不出进程：{e}"),
-    };
+        .args(["-A", "-o", "pid=,ppid=,stat=,comm="])
+        .output()
+        .map(|out| {
+            // comm 是程序名（macOS 上是程序的完整路径）：按文件名精确比，不按命令行子串
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| {
+                    // 前三列是进程号、父进程号、状态，之后整段是程序名（路径里可能有空格）
+                    let comm = l.split_whitespace().skip(3).collect::<Vec<_>>().join(" ");
+                    Path::new(&comm)
+                        .file_name()
+                        .is_some_and(|n| n == "iwork-fake-agent")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+    let procs = procs.unwrap_or_else(|e| format!("列不出进程：{e}"));
     let record = std::fs::read_to_string(record).unwrap_or_else(|e| format!("读不了记录：{e}"));
     format!("假运行时进程：\n{procs}\n记录：\n{record}")
 }
