@@ -355,9 +355,19 @@ impl Client {
             .connect(endpoint)
             .await
             .map_err(ConnectError::Io)?;
-        let peer = match conn.peer().await {
-            Ok(p) => p,
-            Err(e) => {
+        // 识别对端和读 Welcome 共用一个截止时间：识别（macOS 上是全量校验对端映像）本身没有上限，慢机器上卡住时
+        // 会话会一直停在建连里。超时算失败、不放行（`Timeout` → 诊断页、退避重拨）。
+        let deadline = tokio::time::Instant::now() + cfg.handshake_timeout;
+        let peer = match tokio::time::timeout_at(deadline, conn.peer()).await {
+            Err(_) => {
+                audit::peer_identity_failed(
+                    Role::Client,
+                    &format_args!("识别对端超时（{:?}）", cfg.handshake_timeout),
+                );
+                return Err(ConnectError::Timeout);
+            }
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
                 audit::peer_identity_failed(Role::Client, &e);
                 return Err(ConnectError::PeerRejected(RejectReason::Unavailable {
                     reason: e.to_string(),
@@ -394,7 +404,7 @@ impl Client {
             return Err(ConnectError::ClosedBeforeWelcome);
         }
         let mut reader = FramedRead::new(rd, FrameCodec::new(Direction::ToClient, MAX_FRAME_LEN));
-        let first = tokio::time::timeout(cfg.handshake_timeout, next_frame(&mut reader))
+        let first = tokio::time::timeout_at(deadline, next_frame(&mut reader))
             .await
             .map_err(|_| ConnectError::Timeout)?;
         let welcome = match first {
