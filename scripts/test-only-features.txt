@@ -1,0 +1,29 @@
+# 只给测试或开发构建用的 feature，以及发布出去的程序从哪个包、哪个 bin 编出来。唯一的一份：
+#   - scripts/check-no-dev-trust.sh --graph-only 从每个发布根算 normal + build 依赖图，图里不许出现下面任何一个 feature；
+#     并且每个工作区 crate 声明的每个 feature（default 除外）都必须登记在这里（test-feature 或 release-feature），
+#     新加 feature 不登记就红。
+#   - 打包（client/scripts/release-build.ts）编进包程序的那次 cargo 调用里，任何本地 crate 的产物带了下面的 feature
+#     就拒绝出包。
+#
+# 格式：一行一条，字段用空格分隔；# 开头是注释，空行忽略。
+#   test-feature    <crate> <feature>   只该在测试、开发构建里出现
+#   release-feature <crate> <feature>   发布构建里可以出现（现在没有）
+#   release-root    <crate> <bin>       发布出去的程序
+
+test-feature iwork-bridge-claude fake-cli
+test-feature iwork-bridge-claude fault-injection
+test-feature iwork-client dev
+test-feature iwork-client e2e
+test-feature iwork-client-core dev
+test-feature iwork-core test-hooks
+test-feature iwork-daemon dev
+test-feature iwork-daemon test-hooks
+test-feature iwork-fake-daemon dev
+test-feature iwork-ipc dev
+test-feature iwork-ipc test-hooks
+test-feature iwork-store test-hooks
+
+release-root iwork-client iwork-client
+release-root iwork-daemon iwork-daemon
+release-root iwork-bridge-claude iwork-bridge-claude
+release-root iwork-claude-hook iwork-claude-hook

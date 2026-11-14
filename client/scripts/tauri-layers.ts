@@ -155,7 +155,10 @@ export function tauriBuildArgs(
   return withConfigLayers(["build", ...bundling, ...args.slice(1)], env);
 }
 
-/** 第 4 步：编后台与核对程序，让 cargo 用 JSON 报出产物位置。 */
+/**
+ * 第 4 步：编进包的后台，让 cargo 用 JSON 报出产物位置。只编这一个 bin：一次 cargo 调用里 feature 是统一的，
+ * 同时编 example、测试会打开 dev 依赖，把只给测试用的 feature（如自引用打开的 test-hooks）带进后台。
+ */
 export const DAEMON_BUILD_ARGS = [
   "build",
   "--release",
@@ -163,6 +166,16 @@ export const DAEMON_BUILD_ARGS = [
   "-p",
   "iwork-daemon",
   "--bin",
+  "iwork-daemon",
+  "--message-format=json",
+];
+
+/** 第 4 步之二：另一次调用编核对程序（只在装配时运行、不进包，带 dev 依赖打开的 feature 不碍事）。 */
+export const CHECK_INSTALL_BUILD_ARGS = [
+  "build",
+  "--release",
+  "--locked",
+  "-p",
   "iwork-daemon",
   "--example",
   "check-install",
@@ -175,14 +188,9 @@ export interface BuiltPrograms {
   checkInstall: string;
 }
 
-/**
- * 从 cargo 的 JSON 输出里取后台与核对程序的位置，并核对后台恰好在 `<输出根>/release/iwork-daemon`：
- * 不是（构建目标被环境变量或 cargo 配置改了）就抛错——发布包只出本机默认目标。
- */
-export function builtPrograms(cargoJson: string, targetDir: string, platform: Platform): BuiltPrograms {
-  const exe = platform === "windows" ? ".exe" : "";
-  let daemon: string | undefined;
-  let checkInstall: string | undefined;
+/** cargo JSON 里某个产物的可执行文件位置；没报出来是 undefined。 */
+function executableOf(cargoJson: string, name: string, kind: string): string | undefined {
+  let found: string | undefined;
   for (const line of cargoJson.split("\n")) {
     if (!line.startsWith("{")) continue;
     const msg = JSON.parse(line) as {
@@ -191,9 +199,25 @@ export function builtPrograms(cargoJson: string, targetDir: string, platform: Pl
       executable?: string | null;
     };
     if (msg.reason !== "compiler-artifact" || !msg.executable) continue;
-    if (msg.target?.name === "iwork-daemon" && msg.target.kind?.includes("bin")) daemon = msg.executable;
-    if (msg.target?.name === "check-install" && msg.target.kind?.includes("example")) checkInstall = msg.executable;
+    if (msg.target?.name === name && msg.target.kind?.includes(kind)) found = msg.executable;
   }
+  return found;
+}
+
+/**
+ * 从两次 cargo 构建的 JSON 输出里各取各的：后台只认 [`DAEMON_BUILD_ARGS`] 那次报的，核对程序只认
+ * [`CHECK_INSTALL_BUILD_ARGS`] 那次报的（另一次就算也报出同名产物，也不拿来进包）。并核对后台恰好在
+ * `<输出根>/release/iwork-daemon`：不是（构建目标被环境变量或 cargo 配置改了）就抛错——发布包只出本机默认目标。
+ */
+export function builtPrograms(
+  daemonJson: string,
+  checkJson: string,
+  targetDir: string,
+  platform: Platform,
+): BuiltPrograms {
+  const exe = platform === "windows" ? ".exe" : "";
+  const daemon = executableOf(daemonJson, "iwork-daemon", "bin");
+  const checkInstall = executableOf(checkJson, "check-install", "example");
   if (daemon === undefined || checkInstall === undefined) {
     throw new Error("cargo 的输出里没有报出 iwork-daemon 或 check-install 的位置");
   }

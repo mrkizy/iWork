@@ -86,27 +86,35 @@ function cargoTarget(cwd: string, env: Readonly<Record<string, string | undefine
 }
 
 /** 一个假的外界：文件是内存里的一张表；`tauriHonorsEnv` 为 false 时 tauri 不照交给它的环境走（对照）。 */
-function world(files: Map<string, string>, tauriHonorsEnv = true) {
+function world(files: Map<string, string>, tauriHonorsEnv = true, daemonFeatures: string[] = []) {
   const assembled: string[][] = [];
+  const captured: string[][] = [];
   const deps: ReleaseDeps = {
     capture(command, args, env) {
       expect(command).toBe("cargo");
+      captured.push([...args]);
       const target = cargoTarget(REPO, env);
       if (args[0] === "metadata") return JSON.stringify({ target_directory: target });
-      files.set(`${target}/release/iwork-daemon`, "FRESH_DAEMON");
+      if (args.includes("--bin")) {
+        files.set(`${target}/release/iwork-daemon`, "FRESH_DAEMON");
+        return [
+          JSON.stringify({
+            reason: "compiler-artifact",
+            package_id: `path+file://${REPO}/crates/iwork-daemon#0.1.0`,
+            target: { name: "iwork-daemon", kind: ["bin"] },
+            features: daemonFeatures,
+            executable: `${target}/release/iwork-daemon`,
+          }),
+        ].join("\n");
+      }
       files.set(`${target}/release/examples/check-install`, "CHECK");
-      return [
-        JSON.stringify({
-          reason: "compiler-artifact",
-          target: { name: "iwork-daemon", kind: ["bin"] },
-          executable: `${target}/release/iwork-daemon`,
-        }),
-        JSON.stringify({
-          reason: "compiler-artifact",
-          target: { name: "check-install", kind: ["example"] },
-          executable: `${target}/release/examples/check-install`,
-        }),
-      ].join("\n");
+      return JSON.stringify({
+        reason: "compiler-artifact",
+        package_id: `path+file://${REPO}/crates/iwork-daemon#0.1.0`,
+        target: { name: "check-install", kind: ["example"] },
+        features: ["test-hooks"],
+        executable: `${target}/release/examples/check-install`,
+      });
     },
     remove(path) {
       for (const key of [...files.keys()]) {
@@ -123,7 +131,7 @@ function world(files: Map<string, string>, tauriHonorsEnv = true) {
       assembled.push(args);
     },
   };
-  return { deps, assembled };
+  return { deps, assembled, captured };
 }
 
 function argAfter(args: string[], flag: string): string {
@@ -164,5 +172,25 @@ describe("六步共用 cargo 报的绝对输出根（审查 1/F-3）", () => {
     expect(targetDir).toBe("/repo/target");
     expect(argAfter(assembled[0], "--app")).toBe("/repo/target/release/bundle/macos/iWork.app");
     expect(argAfter(assembled[0], "--client")).toBe("/repo/target/release/iwork-client");
+  });
+});
+
+describe("进包的后台不带只给测试用的 feature（scripts/test-only-features.txt）", () => {
+  it("进包那次构建报出后台带了 test-hooks → 不出包、不装配", async () => {
+    const { deps, assembled } = world(new Map(), true, ["test-hooks"]);
+    await expect(releaseBuild(["build"], {}, "linux", deps)).rejects.toThrow(/iwork-daemon（bin iwork-daemon）：test-hooks/);
+    expect(assembled).toEqual([]);
+  });
+
+  it("对照：后台干净时照常装配；核对程序那次带 test-hooks 不碍事（它不进包）", async () => {
+    const { deps, assembled, captured } = world(new Map());
+    await releaseBuild(["build"], {}, "linux", deps);
+    expect(assembled).toHaveLength(1);
+    const builds = captured.filter((a) => a[0] === "build");
+    expect(builds, "后台与核对程序分两次编").toHaveLength(2);
+    const daemonBuild = builds.find((a) => a.includes("--bin"))!;
+    for (const flag of ["--example", "--examples", "--tests", "--test", "--benches", "--bench", "--all-targets"]) {
+      expect(daemonBuild, `进包的那次不带 ${flag}（会打开 dev 依赖）`).not.toContain(flag);
+    }
   });
 });

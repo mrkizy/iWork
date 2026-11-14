@@ -32,9 +32,12 @@ jobs:
         run: scripts/check-no-tcp.sh
       - name: 源码检查自测（注入 TcpListener::bind 必须失败）
         run: scripts/check-no-tcp.sh --selftest
-      # T03：dev feature（--dev-trust）没有被任何工作区 crate 默认打开
-      - name: feature 图里没有 dev
+      # 发布根的依赖图里没有只给测试用的 feature（清单 scripts/test-only-features.txt：dev、test-hooks、fault-injection、
+      #   fake-cli、e2e），工作区声明的 feature 都已登记；自测在仓库副本里注入违规，必须判红
+      - name: 发布依赖图里没有测试 feature
         run: scripts/check-no-dev-trust.sh --graph-only
+      - name: 发布依赖图检查自测（注入 test-hooks、未登记的 feature 必须失败）
+        run: scripts/check-no-dev-trust.sh --selftest
 
   test:
     # 只放 Rust 的编译、clippy、测试与真进程用例；发布构建检查拆到 release-check，前端拆到 frontend，三个 job 并行。

@@ -117,11 +117,18 @@ describe("发布构建 build 多拒的参数与环境变量", () => {
   });
 });
 
-/** cargo `--message-format=json` 的两行产物记录。 */
-function cargoArtifacts(daemon: string, check: string): string {
+/** 进包那次构建的 cargo `--message-format=json` 输出：后台，外加一个库（不是可执行文件）。 */
+function daemonArtifacts(daemon: string): string {
   return [
     JSON.stringify({ reason: "compiler-artifact", target: { name: "iwork-daemon", kind: ["bin"] }, executable: daemon }),
     JSON.stringify({ reason: "compiler-artifact", target: { name: "iwork-ipc", kind: ["lib"] }, executable: null }),
+    JSON.stringify({ reason: "build-finished", success: true }),
+  ].join("\n");
+}
+
+/** 核对程序那次构建的输出。 */
+function checkArtifacts(check: string): string {
+  return [
     JSON.stringify({
       reason: "compiler-artifact",
       target: { name: "check-install", kind: ["example"] },
@@ -138,7 +145,8 @@ describe("发布构建的路径全取自 cargo（R9）", () => {
     const fresh = "/work/fresh-target";
     const stale = "/repo/target";
     const programs = builtPrograms(
-      cargoArtifacts(`${fresh}/release/iwork-daemon`, `${fresh}/release/examples/check-install`),
+      daemonArtifacts(`${fresh}/release/iwork-daemon`),
+      checkArtifacts(`${fresh}/release/examples/check-install`),
       fresh,
       "macos",
     );
@@ -164,7 +172,8 @@ describe("发布构建的路径全取自 cargo（R9）", () => {
     const t = "/repo/target";
     expect(() =>
       builtPrograms(
-        cargoArtifacts(`${t}/aarch64-apple-darwin/release/iwork-daemon`, `${t}/release/examples/check-install`),
+        daemonArtifacts(`${t}/aarch64-apple-darwin/release/iwork-daemon`),
+        checkArtifacts(`${t}/release/examples/check-install`),
         t,
         "macos",
       ),
@@ -172,7 +181,13 @@ describe("发布构建的路径全取自 cargo（R9）", () => {
   });
 
   it("cargo 没报出两个程序 → 停", () => {
-    expect(() => builtPrograms("", "/t", "linux")).toThrow(/没有报出/);
+    expect(() => builtPrograms("", "", "/t", "linux")).toThrow(/没有报出/);
+  });
+
+  it("后台只认进包那次构建报的：核对程序那次也报出后台，也不拿来进包", () => {
+    expect(() =>
+      builtPrograms(checkArtifacts("/t/release/examples/check-install"), daemonArtifacts("/t/release/iwork-daemon"), "/t", "linux"),
+    ).toThrow(/没有报出/);
   });
 
   it("Linux 没有 --app；Windows 不装配", () => {
@@ -183,7 +198,8 @@ describe("发布构建的路径全取自 cargo（R9）", () => {
 
   it("Windows 上 cargo 报的反斜杠路径照样认得", () => {
     const programs = builtPrograms(
-      cargoArtifacts("C:\\t\\release\\iwork-daemon.exe", "C:\\t\\release\\examples\\check-install.exe"),
+      daemonArtifacts("C:\\t\\release\\iwork-daemon.exe"),
+      checkArtifacts("C:\\t\\release\\examples\\check-install.exe"),
       "C:\\t",
       "windows",
     );

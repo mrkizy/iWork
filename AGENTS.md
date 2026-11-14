@@ -45,7 +45,7 @@ iWork 是本机运行的 ADE（Agent Development Environment）：用户以项�
 - 客户端重开 1s（需求 14，T10a 组 B）只对优化构建量：`cargo build --profile perf-test -p iwork-daemon --features dev` 后跑 `cargo test --profile perf-test -p iwork-client-core --features dev --test launcher_process -- --ignored --exact reconnect_within_1s`（release 构建，套重测试锁；CI 在 release-check 跑）。调试版只验功能（`reconnect_reuses_running_daemon`）：每次建连客户端都对后台程序文件全量验签，耗时随体积涨，调试版在 macOS CI 上光这一步就超过 1s。`perf-test` 带 dev feature，产物只在 `target/perf-test/`，不许拿去打包或放进 `target/release`。
 - 本机通信（T03）：
   - 不开 TCP/UDP：`scripts/check-no-tcp.sh`（源码层面；`--selftest` 证明检查会红；运行时监听检查归 T11）
-  - 发布构建没有 `--dev-trust`：`scripts/check-no-dev-trust.sh`（feature 图 + release 产物 grep 含阳性对照 + 发布进程拒绝该参数；`--graph-only` 只查 feature 图，`--artifacts F...` 追加检查打包产物）
+  - 发布构建没有 `--dev-trust`：`scripts/check-no-dev-trust.sh`（feature 图 + release 产物 grep 含阳性对照 + 发布进程拒绝该参数；`--graph-only` 只查 feature 图，`--artifacts F...` 追加检查打包产物，`--selftest` 证明 feature 图检查会红）。只给测试用的 feature 与发布根只登记在 `scripts/test-only-features.txt`：脚本的 feature 图检查与打包命令出包时的检查都读它；工作区新加 feature 必须在这里登记（`test-feature` 或 `release-feature`），不登记 `--graph-only` 就红。打包编进包的后台时只编这一个 bin（`client/scripts/tauri-layers.ts` 的 `DAEMON_BUILD_ARGS`），不能跟 example、测试放进同一次 cargo 调用：feature 按整次调用统一，example 会打开 dev 依赖，把 test-hooks 带进发布的后台（T10a 组 B 合入后实测）
   - 安装清单：`scripts/write-install-manifest.sh <目录>`（无证书构建的打包步骤调用，写 `iwork-manifest.json`）
   - fuzz（nightly + cargo-fuzz，在 `crates/iwork-ipc` 下）：`cargo +nightly fuzz run frame_decode -- -max_total_time=60`，另两个目标 `connection_prehello`、`connection_established`
   - 续传性质测试完整一轮：`PROPTEST_CASES=2000 cargo test -p iwork-ipc --test stream_proptest`

@@ -3,6 +3,7 @@
 import {
   type BuiltPrograms,
   type Platform,
+  CHECK_INSTALL_BUILD_ARGS,
   DAEMON_BUILD_ARGS,
   assembleArgs,
   builtPrograms,
@@ -13,6 +14,7 @@ import {
   tauriBuildArgs,
   withConfigLayers,
 } from "./tauri-layers.ts";
+import { loadTestOnlyFeatures, testFeaturesInBuild } from "./test-only-features.ts";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -80,7 +82,15 @@ export async function releaseBuild(
   deps.remove(staleBundleDir(targetDir));
   const client = clientProduct(targetDir, platform);
   deps.remove(client);
-  const programs = builtPrograms(deps.capture("cargo", DAEMON_BUILD_ARGS, pinned), targetDir, platform);
+  const daemonBuild = deps.capture("cargo", DAEMON_BUILD_ARGS, pinned);
+  // 进包的程序不许带只给测试用的 feature：一次 cargo 调用里 feature 是统一的，同时编 example、测试就会把 dev 依赖
+  // 打开的 feature 带进 bin（T10a 组 B 合入后实测：test-hooks 进了发布的后台）
+  const tainted = testFeaturesInBuild(daemonBuild, loadTestOnlyFeatures());
+  if (tainted.length > 0) {
+    throw new Error(`进包的程序带了只给测试用的 feature，不出包：\n${tainted.join("\n")}`);
+  }
+  const checkBuild = deps.capture("cargo", CHECK_INSTALL_BUILD_ARGS, pinned);
+  const programs = builtPrograms(daemonBuild, checkBuild, targetDir, platform);
   await deps.runTauri(tauriBuildArgs(args, platform, pinned), pinned);
   if (!deps.exists(client)) {
     throw new Error(`tauri 没有把客户端编到 ${client}（输出根被改到了别处），不装配`);
