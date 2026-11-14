@@ -100,3 +100,8 @@ opt-level = 3
 # 真进程测试的启动余量会被它吃掉（T10a 组 B，install::cooldown）。代价是调试器里看不到依赖的局部变量。
 [profile.dev.package."*"]
 debug = "line-tables-only"
+
+# 只给性能判据用的优化构建（需求 14 的「客户端重开 1s」，`launcher_process::reconnect_within_1s`）：带 dev feature，
+# 所以单独一个目录 target/perf-test/，不进 target/release——发布检查（check-no-dev-trust.sh）与打包只认 target/release。
+[profile.perf-test]
+inherits = "release"

@@ -1,4 +1,5 @@
-//! 卡验收 2（真进程）：客户端退出后后台服务继续运行；客户端重开 1s 内连上。
+//! 卡验收 2（真进程）：客户端退出后后台服务继续运行；客户端重开 1s 内连上（1s 那格只对优化构建量，见
+//! [`reconnect_within_1s`]）。
 //!
 //! 用真的后台程序：`target/<profile>/iwork-daemon`，要求是 `dev` feature 构建的（后台要认 `--dev-trust`：
 //! 测试进程不是受信映像）。先跑 `cargo build -p iwork-daemon --features dev`；也可以用环境变量
@@ -176,24 +177,67 @@ fn daemon_survives_launcher_exit() {
     assert_eq!(s.phase, Phase::Ready);
 }
 
-/// 卡验收 2：后台在跑时，客户端重开（新的 Launcher）1s 内连上，且不拉起新的后台。
-#[test]
-fn reconnect_within_1s() {
-    let mut sb = sandbox();
-    let pid = launch_via_child(&mut sb);
+/// 后台在跑时，客户端重开（新的 Launcher）：拉起它的客户端已经退出，新 Launcher 连同一个后台，返回连接耗时，并核
+/// 连上的还是那个后台（没有拉起新的）。
+///
+/// `patient` 为假时只调一次 `connect_or_launch`：它以 `launcher::BUDGET`（1s）为限，超了就报错。为真时照
+/// [`launcher_child`] 与 T09 的做法接着调同一个 Launcher（没完成的连接尝试留着接着等，不另起），最多 60s。
+fn reconnect_to_running(sb: &mut Sandbox, patient: bool) -> Duration {
+    let pid = launch_via_child(sb);
     let home = sb.dir.path().to_path_buf();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let elapsed = rt.block_on(async {
         let mut l = launcher_for(&home);
         let t = Instant::now();
-        l.connect_or_launch().await.expect("后台在跑，应直接连上");
+        let deadline = t + Duration::from_secs(60);
+        loop {
+            match l.connect_or_launch().await {
+                Ok(_) => break,
+                Err(e) if patient && Instant::now() < deadline => eprintln!("还没连上：{e:?}"),
+                Err(e) => panic!("后台在跑，应直接连上：{e:?}"),
+            }
+        }
         t.elapsed()
     });
     eprintln!("后台在跑时重连耗时 {elapsed:?}");
-    assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
     assert_eq!(
         rendezvous::read_lock_info(&run_dir(&home)).unwrap().pid,
         pid,
         "没有拉起新的后台"
     );
+    elapsed
+}
+
+/// 卡验收 2 的功能一半：后台在跑时，客户端重开直接连上同一个后台，不拉起新的。
+///
+/// 调试构建里不量快慢：每次建连客户端都对后台的程序文件做全量静态验签（`peer/macos.rs` 的 `check_image_file`），
+/// 耗时和程序体积成正比，调试版后台在 CI 的 macOS 上光这一步就要 1.4–3.1s（T10a 组 B 实测），量的是调试信息的体积，
+/// 不是需求 14 的口径。1s 由 [`reconnect_within_1s`] 对优化构建量。
+#[test]
+fn reconnect_reuses_running_daemon() {
+    let mut sb = sandbox();
+    reconnect_to_running(&mut sb, true);
+}
+
+/// 卡验收 2 的性能一半（需求 14：客户端重开 1s 内恢复）：后台在跑时，客户端重开 1s 内连上。
+///
+/// 只对优化构建量（见 [`reconnect_reuses_running_daemon`]）：测试与后台都用 `--profile perf-test` 编，CI 在
+/// release-check 里跑（`--ignored --exact`），命令见 AGENTS.md。两样都核：测试自己不是调试构建，后台程序落在
+/// `perf-test` 目录下，任何一样不满足就报错，不拿调试版的数充数。
+#[test]
+#[ignore = "性能判据：只对 perf-test 构建量，见 AGENTS.md"]
+fn reconnect_within_1s() {
+    if cfg!(debug_assertions) {
+        panic!("这一格只对优化构建量：用 cargo test --profile perf-test 跑");
+    }
+    let daemon = daemon_exe().canonicalize().unwrap();
+    assert_eq!(
+        daemon.parent().and_then(Path::file_name),
+        Some(std::ffi::OsStr::new("perf-test")),
+        "后台要是 perf-test 构建（cargo build --profile perf-test -p iwork-daemon --features dev）：{}",
+        daemon.display()
+    );
+    let mut sb = sandbox();
+    let elapsed = reconnect_to_running(&mut sb, false);
+    assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
 }

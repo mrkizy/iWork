@@ -242,6 +242,19 @@ jobs:
           IWORK_SIGN_IDENTITY="$identity" IWORK_SIGN_KEYCHAIN="$kc" pnpm -C client tauri build
           bin=target/release/dist/signed/iWork.app/Contents/MacOS
           scripts/check-no-dev-trust.sh --artifacts "$bin/iwork-client" "$bin/iwork-daemon"
+      # 需求 14「客户端重开 1s 内恢复」对优化构建量（launcher_process::reconnect_within_1s）。调试版不量：每次建连都对
+      #   后台程序文件全量验签，耗时随体积涨，量的是调试信息（T10a 组 B 在 macOS CI 实测）。测试与后台都用 perf-test
+      #   编，带 dev feature，产物只在 target/perf-test/；放在发布检查之后，打包与 check-no-dev-trust.sh 只认 target/release。
+      #   过滤后 0 个测试也算成功，所以核「恰好 1 个 passed」。
+      - name: 重连 1s（需求 14，优化构建，macOS、Linux）
+        if: ${{ !cancelled() && runner.os != 'Windows' }}
+        run: |
+          cargo build --profile perf-test -p iwork-daemon --features dev
+          out=$(cargo test --profile perf-test -p iwork-client-core --features dev --test launcher_process \
+            -- --ignored --exact reconnect_within_1s --nocapture 2>&1) || { printf '%s\n' "$out"; exit 1; }
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -q '^test result: ok\. 1 passed; 0 failed' \
+            || { echo "reconnect_within_1s 没有恰好跑过 1 个" >&2; exit 1; }
 
   # 前端：类型检查与 vitest。从 test 拆出来单独跑，和 Rust 测试并行，各有各的时限。
   #   pnpm test 先 gen、再编译假后台录场景（fixtures）、再跑 vitest，所以这里要 rust-cache。
