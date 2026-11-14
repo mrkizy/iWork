@@ -307,7 +307,11 @@ exit 1
             .env("IWORK_DATA_DIR", &self.outer)
             .env("ANTHROPIC_API_KEY", SECRET)
             .env("IWORK_DRILL_SETTLE_SECS", "0")
-            .env("IWORK_DRILL_WAIT_SECS", "2")
+            // 等一条记录、一个进程的上限（也是回退窗口 t1→t4 的上限）。假系统自己的耗时是固定的几百毫秒，加上慢机器
+            // 用例注入的 0.5 秒，CI 的 macOS 上量到过 2.01 秒（run 43542715987、43552310580），2 秒太紧。放到 5 秒：
+            // 「回退后再也连不上」照样在上限内判出来；超上限判 FAIL 那条判据由 drill_window.rs 直接喂时刻守着，
+            // 不靠这里的墙钟。真包演练用的是脚本默认的 75 秒，不受影响
+            .env("IWORK_DRILL_WAIT_SECS", "5")
             .env("IWORK_DRILL_STOP_SECS", "2")
             .env("IWORK_DRILL_COOLDOWN_SECS", "0")
             .stdin(Stdio::piped())
@@ -661,7 +665,8 @@ fn drill_ignores_other_users_processes() {
     w.flag("reactive");
     let mut foreign = Vec::new();
     for name in ["iwork-daemon", "iwork-client"] {
-        let child = Command::new("sleep").arg("120").spawn().unwrap();
+        // 要活过整场演练（慢机器上两分钟多）：它自己先结束会被当成「被演练杀了」。测完下面会收掉
+        let child = Command::new("sleep").arg("600").spawn().unwrap();
         std::fs::write(w.state.join("foreign").join(name), child.id().to_string()).unwrap();
         foreign.push(child);
     }
