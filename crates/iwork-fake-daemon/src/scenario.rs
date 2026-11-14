@@ -221,6 +221,15 @@ pub const REGISTRY: &[Scenario] = &[
         timeline_cap: None,
     },
     Scenario {
+        name: "anchors-jumped-then-new",
+        about: "消息锚点：跳到已载入的第 110 轮之后，又来了 3 轮新消息；视口停在第 110 轮，不被新消息拉到底（用 frame= 停在跳转那一帧，等高亮结束再逐帧放）",
+        focus: Some("c-anchors-long"),
+        build: anchors_jumped_then_new,
+        characters: &[],
+        client: &[ClientAct::JumpToRow("m-al110-u")],
+        timeline_cap: None,
+    },
+    Scenario {
         name: "anchors-short",
         about: "消息锚点：一屏看得完（组件不显示）",
         focus: Some("c-anchors-short"),
@@ -1001,6 +1010,22 @@ fn anchors_unloaded() -> Vec<Step> {
             &format!("al{i:03}"),
             &format!("第 {i} 轮：把第 {i} 个模块的日志改成结构化的"),
             "改好了。",
+        ));
+    }
+    s
+}
+
+/// anchors-unloaded 打开之后（跳转之后）再来 3 轮新的问答：切点放在新消息之前，跳转发生在这之前。
+fn anchors_jumped_then_new() -> Vec<Step> {
+    let c = "c-anchors-long";
+    let mut s = anchors_unloaded();
+    s.push(Step::OpenHere);
+    for i in 0..3 {
+        s.extend(finished_exchange(
+            c,
+            &format!("an{i:02}"),
+            &format!("新的第 {i} 个问题：跳转之后才到"),
+            "好的。",
         ));
     }
     s
