@@ -176,10 +176,12 @@ impl Connection for LocalConn {
     async fn peer(&self) -> Result<PeerIdentity, PeerError> {
         let pid = self.pipe.peer_pid().map_err(PeerError::Credentials)?;
         // 验签、算映像哈希要读文件，放到阻塞线程池。
-        tokio::task::spawn_blocking(move || peer::identify_process(pid))
-            .await
-            .map_err(|e| PeerError::Credentials(io::Error::other(e)))?
+        super::identify::run_blocking(move || peer::identify_process(pid)).await
     }
+
+    /// 不用额外动作：阻塞识别按 pid 做（`identify_process`），不持有管道句柄；超时后连接被丢掉，句柄随之关闭，对端
+    /// 读到断开。
+    fn abort(&self) {}
 
     fn into_split(self) -> (Self::Read, Self::Write) {
         tokio::io::split(self.pipe)

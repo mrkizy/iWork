@@ -81,9 +81,16 @@ impl Connection for LocalConn {
             .as_fd()
             .try_clone_to_owned()
             .map_err(PeerError::Credentials)?;
-        tokio::task::spawn_blocking(move || peer::identify_socket_peer(fd.as_fd()))
-            .await
-            .map_err(|e| PeerError::Credentials(io::Error::other(e)))?
+        super::identify::run_blocking(move || peer::identify_socket_peer(fd.as_fd())).await
+    }
+
+    /// `shutdown(SHUT_RDWR)` 作用在 socket 上，不只是这一个 fd：阻塞识别手里那份复制的 fd 还开着，对端也照样读到 EOF。
+    fn abort(&self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY：fd 由 self.stream 持有，调用期间有效；shutdown 不释放 fd。已断开（ENOTCONN）时失败无害，不用管
+        unsafe {
+            libc::shutdown(self.stream.as_raw_fd(), libc::SHUT_RDWR);
+        }
     }
 
     fn into_split(self) -> (Self::Read, Self::Write) {
