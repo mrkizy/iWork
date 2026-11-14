@@ -194,12 +194,22 @@ fn kill9_recovers_seeded_state() {
     a.kill9();
     let mut b = sb.spawn(&[], &[]);
     sb.wait_ready(b.pid(), START);
-    // 投递任务：T04 的去向登记表是空的。没人认领的条目都原样留着（方案 2.11，1/F-4）：`queued` 的三条只报 error，
-    // 停在 `dispatched` 的那条对账时也不动，交给认识这个去向的版本收尾。
-    // 恢复提交本身不碰 outbox（见 unknown_event_kind_with_unsettled_objects_writes_nothing）
+    // 投递任务：种下的四条去向（`test:*`）没有登记，没人认领的条目都原样留着（方案 2.11，1/F-4）：`queued` 的三条
+    // 只报 error，停在 `dispatched` 的那条对账时也不动，交给认识这个去向的版本收尾。
+    // 恢复提交本身不碰 outbox（见 unknown_event_kind_with_unsettled_objects_writes_nothing）。
+    // 系统通知（T10a 步 8b）：`notify` 任务给待处理的每一项排一条 `notify:*`，各自投完（被 kill -9 时停在
+    // `dispatched` 的，重启按「结果不确定标失败」收尾）；重启后不再排第二条。
     let want = ["dispatched", "queued", "queued", "queued"];
+    let settled = |rows: &[(String, String)]| {
+        !rows.is_empty()
+            && rows
+                .iter()
+                .all(|(_, state)| state == "accepted_by_runtime" || state == "failed")
+    };
     let deadline = std::time::Instant::now() + START;
-    while outbox_states(&sb) != want || !crate::support::log_text(&sb).contains("没有登记去向")
+    while seeded_states(&sb) != want
+        || !settled(&notify_rows(&sb))
+        || !crate::support::log_text(&sb).contains("没有登记去向")
     {
         assert!(
             std::time::Instant::now() < deadline,
@@ -212,7 +222,46 @@ fn kill9_recovers_seeded_state() {
     assert_eq!(code(b.wait_exit(START)), Some(0), "{}", b.stderr());
 
     assert_recovered(&sb, seeded);
-    assert_eq!(outbox_states(&sb), want);
+    assert_eq!(seeded_states(&sb), want);
+    // 每一项待处理恰好一条通知
+    let targets: Vec<String> = notify_rows(&sb).into_iter().map(|(t, _)| t).collect();
+    let unique: BTreeSet<String> = targets.iter().cloned().collect();
+    assert_eq!(unique.len(), targets.len(), "同一项排了两次：{targets:?}");
+    let store = seed::open(&sb);
+    let pending: BTreeSet<String> = block(read_model(&store).pending_items())
+        .unwrap()
+        .iter()
+        .map(|p| format!("notify:{}", p.item_ref().key()))
+        .collect();
+    store.close().unwrap();
+    assert_eq!(unique, pending, "待处理的每一项各一条");
+}
+
+/// outbox 里系统通知（`notify:*`）以外那些行的状态，按 id 升序。
+fn seeded_states(sb: &Sandbox) -> Vec<String> {
+    outbox_rows(sb)
+        .into_iter()
+        .filter(|(t, _)| !t.starts_with("notify:"))
+        .map(|(_, s)| s)
+        .collect()
+}
+
+fn notify_rows(sb: &Sandbox) -> Vec<(String, String)> {
+    outbox_rows(sb)
+        .into_iter()
+        .filter(|(t, _)| t.starts_with("notify:"))
+        .collect()
+}
+
+fn outbox_rows(sb: &Sandbox) -> Vec<(String, String)> {
+    let conn = rusqlite::Connection::open(sb.db()).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT target, state FROM outbox ORDER BY id")
+        .unwrap();
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
 }
 
 /// S4：恢复提交前被杀 → 什么都没变；提交后被杀 → 恰好一次；再起不重复。
