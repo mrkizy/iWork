@@ -9,6 +9,7 @@ mod command;
 mod detect;
 mod init;
 mod layout;
+mod nested;
 mod patch;
 mod progress;
 mod workspace;

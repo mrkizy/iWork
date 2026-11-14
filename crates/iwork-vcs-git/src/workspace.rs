@@ -634,7 +634,10 @@ fn status_items(
         .index_worktree_rewrites(None)
         // 不扫描子模块内部：gix 会用子模块自己未清理的配置跑 status（可能运行外部过滤器）。子模块指向的
         // 提交变化由 Worktree::changes_gix_cannot_judge 自己比较
-        .index_worktree_submodules(None);
+        .index_worktree_submodules(None)
+        // 不认嵌套仓库：否则 gix 对每个未跟踪目录探 `<目录>/.git`，跟着链接与 gitfile 读到仓库外。名叫 `.git`
+        // 的条目只按名字交出来，结果由 nested::fold_nested_repositories 整理回 git 的样子
+        .dirwalk_options(|o| o.recurse_repositories(true).emit_pruned(true));
     if renames == Renames::Off {
         platform =
             platform.tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled);
@@ -642,11 +645,28 @@ fn status_items(
     if let Some(tree) = head_tree {
         platform = platform.head_tree(tree);
     }
-    platform
+    let items = platform
         .into_iter(None)
         .map_err(|e| failed(op, e.to_string()))?
         .map(|item| item.map_err(|e| failed(op, e.to_string())))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(crate::nested::fold_nested_repositories(
+        items,
+        &gitlink_paths(repo, op)?,
+    ))
+}
+
+/// 暂存区里的子模块路径。
+fn gitlink_paths(repo: &Repository, op: &'static str) -> Result<BTreeSet<BString>, VcsError> {
+    let index = repo
+        .index_or_empty()
+        .map_err(|e| failed(op, format!("读暂存区失败：{e}")))?;
+    Ok(index
+        .entries()
+        .iter()
+        .filter(|e| e.mode == gix::index::entry::Mode::COMMIT)
+        .map(|e| e.path(&index).to_owned())
+        .collect())
 }
 
 /// 为后台读操作打开的仓库。

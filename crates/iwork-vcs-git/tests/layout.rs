@@ -1071,3 +1071,192 @@ async fn submodule_dot_git_dir_is_refused() {
         assert_no_marker(&status, &marked);
     }
 }
+
+fn changed(status: &iwork_ports::vcs::WorkspaceStatus) -> Vec<String> {
+    let mut out: Vec<String> = status
+        .changed
+        .iter()
+        .map(|c| format!("{}:{:?}", c.path.display(), c.change))
+        .collect();
+    out.sort();
+    out
+}
+
+/// 第 2 轮 F-3：status 列未跟踪文件时，gix 不再对未跟踪目录探 `<目录>/.git`（它跟着链接与 gitfile 读到仓库外）。
+/// 四种摆法：真目录里的 HEAD 链到仓库外；`.git` 链到仓库外的目录；gitfile 指到仓库外；`.git` 链到仓库外的文件。
+/// 下面有名叫 `.git` 的目录一律收成一行 `x`，结果不随仓库外读不读得到而变。
+#[tokio::test]
+async fn untracked_dir_dot_git_is_not_probed() {
+    let mut wrong = Vec::new();
+    for layout in [
+        "dir-head-link",
+        "dotgit-link-to-dir",
+        "gitfile",
+        "dotgit-link-to-file",
+    ] {
+        for outside_kind in BOTH {
+            let f = Fixture::new();
+            let repo = f.repo_with_commit("proj", &[("a", "1\n")]);
+            let x = repo.join("x");
+            write(&x.join("f"), "f\n");
+            let mark = marker("probe");
+            let outside = f.root().join(format!("outside-{mark}"));
+            let outside_file = outside.join("file");
+            write(&outside_file, "ref: refs/heads/main\n");
+            let outside_gitdir = outside.join("gitdir");
+            std::fs::create_dir_all(outside_gitdir.join("objects")).unwrap();
+            std::fs::create_dir_all(outside_gitdir.join("refs")).unwrap();
+            write(&outside_gitdir.join("HEAD"), "ref: refs/heads/main\n");
+            let probed = match layout {
+                "dir-head-link" => {
+                    std::fs::create_dir_all(x.join(".git/objects")).unwrap();
+                    std::fs::create_dir_all(x.join(".git/refs")).unwrap();
+                    symlink(&outside_file, x.join(".git/HEAD")).unwrap();
+                    outside_file.clone()
+                }
+                "dotgit-link-to-dir" => {
+                    symlink(&outside_gitdir, x.join(".git")).unwrap();
+                    outside_gitdir.join("HEAD")
+                }
+                "gitfile" => {
+                    write(
+                        &x.join(".git"),
+                        &format!("gitdir: {}\n", outside_gitdir.display()),
+                    );
+                    outside_gitdir.join("HEAD")
+                }
+                _ => {
+                    write(
+                        &outside_file,
+                        &format!("gitdir: {}\n", outside_gitdir.display()),
+                    );
+                    symlink(&outside_file, x.join(".git")).unwrap();
+                    outside_file.clone()
+                }
+            };
+            let _hidden = hide_if(outside_kind, &probed);
+
+            match f.vcs().status(&RepoRoot(repo)).await {
+                Ok(status) => {
+                    let got = changed(&status);
+                    if got != ["x:Untracked"] || format!("{status:?}").contains(&mark) {
+                        wrong.push(format!("{layout} {outside_kind:?}：{got:?}"));
+                    }
+                }
+                Err(e) => wrong.push(format!("{layout} {outside_kind:?}：{e}")),
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "结果随仓库外变了，或没收成一行：{wrong:#?}"
+    );
+}
+
+/// 对照：子模块（暂存区里是 gitlink）里的文件不列成未跟踪；检出的提交变了照常报改动。
+#[tokio::test]
+async fn submodule_contents_are_not_listed_as_untracked() {
+    let f = Fixture::new();
+    let sup = super_with_submodule(&f);
+    let sub = sup.join("deps/lib");
+    f.git(
+        &sub,
+        &[
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "bump",
+        ],
+    );
+    write(&sub.join("dirty"), "x\n");
+
+    let status = f.vcs().status(&RepoRoot(sup)).await.unwrap();
+    assert_eq!(changed(&status), ["deps/lib:Modified"]);
+}
+
+/// 对照：工作区里未跟踪的嵌套仓库收成一行，和 `git status` 的 `?? vendor/dep/` 一致。
+#[tokio::test]
+async fn nested_untracked_repository_is_one_entry() {
+    let f = Fixture::new();
+    let repo = f.repo_with_commit("proj", &[("a", "1\n")]);
+    let nested = repo.join("vendor/dep");
+    std::fs::create_dir_all(&nested).unwrap();
+    f.git(&nested, &["init", "--quiet"]);
+    write(&nested.join("n1"), "x\n");
+    write(&nested.join("sub/n2"), "x\n");
+    write(&repo.join("plain/p"), "x\n");
+
+    let status = f.vcs().status(&RepoRoot(repo.clone())).await.unwrap();
+    assert_eq!(
+        changed(&status),
+        ["plain/p:Untracked", "vendor/dep:Untracked"]
+    );
+    let git = f.git(&repo, &["status", "--porcelain", "--untracked-files=all"]);
+    assert!(git.contains("?? vendor/dep/"), "git 自己也只列一行：{git}");
+}
+
+/// 上一格只看结果：收成一行之后，探没探结果都一样，抓不到「还在探」。这一格把 gix 探的时候会打开的那个文件换成
+/// 命名管道：一打开就卡住。status 在时限内回来，就说明没去开它。
+#[tokio::test]
+async fn untracked_dir_dot_git_is_not_opened() {
+    let mut wrong = Vec::new();
+    for layout in ["dir-head-link", "dotgit-link-to-dir", "gitfile"] {
+        let f = Fixture::new();
+        let repo = f.repo_with_commit("proj", &[("a", "1\n")]);
+        let x = repo.join("x");
+        write(&x.join("f"), "f\n");
+        let outside = f.root().join("outside");
+        let outside_gitdir = outside.join("gitdir");
+        std::fs::create_dir_all(outside_gitdir.join("objects")).unwrap();
+        std::fs::create_dir_all(outside_gitdir.join("refs")).unwrap();
+        let fifo = match layout {
+            "dir-head-link" => {
+                std::fs::create_dir_all(x.join(".git/objects")).unwrap();
+                std::fs::create_dir_all(x.join(".git/refs")).unwrap();
+                let fifo = outside.join("head-fifo");
+                symlink(&fifo, x.join(".git/HEAD")).unwrap();
+                fifo
+            }
+            "dotgit-link-to-dir" => {
+                symlink(&outside_gitdir, x.join(".git")).unwrap();
+                outside_gitdir.join("HEAD")
+            }
+            _ => {
+                write(
+                    &x.join(".git"),
+                    &format!("gitdir: {}\n", outside_gitdir.display()),
+                );
+                outside_gitdir.join("HEAD")
+            }
+        };
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+
+        let got = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            f.vcs().status(&RepoRoot(repo)),
+        )
+        .await;
+        match got {
+            Ok(Ok(status)) if changed(&status) == ["x:Untracked"] => {}
+            Ok(other) => wrong.push(format!("{layout}：{other:?}")),
+            Err(_) => {
+                wrong.push(format!("{layout}：卡在仓库外的管道上，说明去开了它"));
+                // 让卡在读端的阻塞线程拿到 EOF 退出，测试进程才收得了尾
+                let fifo = fifo.clone();
+                std::thread::spawn(move || {
+                    drop(std::fs::OpenOptions::new().write(true).open(fifo))
+                });
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
