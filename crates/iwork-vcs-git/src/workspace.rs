@@ -652,21 +652,21 @@ fn status_items(
         .collect::<Result<Vec<_>, _>>()?;
     Ok(crate::nested::fold_nested_repositories(
         items,
-        &gitlink_paths(repo, op)?,
+        &index_shape(repo, op)?,
     ))
 }
 
-/// 暂存区里的子模块路径。
-fn gitlink_paths(repo: &Repository, op: &'static str) -> Result<BTreeSet<BString>, VcsError> {
+/// 暂存区的样子：子模块路径与有条目落在下面的目录。
+fn index_shape(repo: &Repository, op: &'static str) -> Result<crate::nested::IndexShape, VcsError> {
     let index = repo
         .index_or_empty()
         .map_err(|e| failed(op, format!("读暂存区失败：{e}")))?;
-    Ok(index
-        .entries()
-        .iter()
-        .filter(|e| e.mode == gix::index::entry::Mode::COMMIT)
-        .map(|e| e.path(&index).to_owned())
-        .collect())
+    Ok(crate::nested::IndexShape::from_entries(
+        index
+            .entries()
+            .iter()
+            .map(|e| (e.path(&index), e.mode == gix::index::entry::Mode::COMMIT)),
+    ))
 }
 
 /// 为后台读操作打开的仓库。

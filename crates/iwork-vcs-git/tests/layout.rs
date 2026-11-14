@@ -1260,3 +1260,61 @@ async fn untracked_dir_dot_git_is_not_opened() {
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+/// 第 3 轮 F-1：已跟踪目录 `t/`（暂存区里有 `t/a`）里出现名叫 `.git` 的东西（空文件、空目录、`git init`），
+/// 下面新加的未跟踪文件照常列出，和 `git status` 对拍；diff 里也有它们。
+#[tokio::test]
+async fn tracked_dir_with_dot_git_still_lists_new_files_like_git() {
+    for dot_git in ["empty-file", "empty-dir", "git-init"] {
+        let f = Fixture::new();
+        let repo = f.repo_with_commit("proj", &[("t/a", "1\n")]);
+        let t = repo.join("t");
+        match dot_git {
+            "empty-file" => write(&t.join(".git"), ""),
+            "empty-dir" => std::fs::create_dir_all(t.join(".git")).unwrap(),
+            _ => {
+                f.git(&t, &["init", "--quiet"]);
+            }
+        }
+        let root = RepoRoot(repo.clone());
+        let base = f.vcs().baseline(&root).await.unwrap();
+        write(&t.join("a"), "2\n");
+        write(&t.join("new"), "n\n");
+        write(&t.join("sub/new2"), "n\n");
+
+        let status = f.vcs().status(&root).await.unwrap();
+        let porcelain = f.git(&repo, &["status", "--porcelain", "--untracked-files=all"]);
+        let mut git: Vec<String> = porcelain
+            .lines()
+            .map(|l| {
+                // f.git 去掉了整段输出首尾的空白，第一行开头的空格可能没了，按第一个空格切
+                let (code, path) = l.trim_start().split_once(' ').unwrap();
+                let kind = match code {
+                    "M" => "Modified",
+                    "??" => "Untracked",
+                    other => panic!("没料到的 git 状态 {other}"),
+                };
+                format!("{}:{kind}", path.trim().trim_end_matches('/'))
+            })
+            .collect();
+        git.sort();
+        assert_eq!(changed(&status), git, "{dot_git}：和 git status 不一致");
+        assert!(
+            git.contains(&"t/new:Untracked".to_owned()),
+            "{dot_git}：{git:?}"
+        );
+
+        let diff = f
+            .vcs()
+            .diff(&root, DiffRange::WorkspaceSince(base))
+            .await
+            .unwrap();
+        let diffed: Vec<_> = diff.files.iter().map(|d| d.path.clone()).collect();
+        for p in ["t/a", "t/new", "t/sub/new2"] {
+            assert!(
+                diffed.contains(&PathBuf::from(p)),
+                "{dot_git}：diff 里没有 {p}：{diffed:?}"
+            );
+        }
+    }
+}
