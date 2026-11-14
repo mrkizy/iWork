@@ -1,7 +1,8 @@
 //! 请求入口（T04 方案 2.4 第 9 步、2.8 第 1 步、2.14）：每个请求开 `command` span；停机期间关门；
 //! 生命周期命令自己受理，其余交给注入的内层 handler。
 //!
-//! T04 注入的内层是 [`NotWired`]：一律回 `ERROR_CODE_UNAVAILABLE`「未接入」。真实的命令与查询受理归 T10。
+//! 内层是 [`dispatch::Dispatcher`]（T10a 方案 2.6：在途表、查回执、分发表；每条命令的外壳在 `turn`、
+//! `conversation`、`approval`、`settings`）。没装配时注入 [`NotWired`]：一律回 `ERROR_CODE_UNAVAILABLE`「未接入」。
 
 use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex};
@@ -14,8 +15,14 @@ use crate::logging;
 use crate::stop::StopSwitch;
 use crate::work::RunningWork;
 
+mod approval;
+mod conversation;
+pub mod dispatch;
+pub mod engine;
 pub mod lifecycle;
 pub mod query;
+mod settings;
+mod turn;
 
 /// 关门与在途计数。停机第 1 步：关门后新请求一律回「不可用、可重试」，再等已经进门的回完。
 #[derive(Default)]
@@ -148,6 +155,42 @@ impl RequestHandler for NotWired {
     async fn connection_closed(&self, _ctx: &ConnectionContext) {}
 }
 
+/// 在 `bind` 之前才填好的内层：ipc 的 `Server` 要先拿到请求入口才给出发布方，而受理要用的引擎与回合宿主又要用发布方，
+/// 所以先交一个空的、组装完再填。`bind` 之前没有连接，填好之前到不了请求；万一到了回「不可用、可重试」。
+pub struct Late<H>(pub std::sync::Arc<std::sync::OnceLock<H>>);
+
+impl<H: RequestHandler> RequestHandler for Late<H> {
+    async fn handle(&self, ctx: &ConnectionContext, req: pb::Request) -> pb::Response {
+        match self.0.get() {
+            Some(h) => h.handle(ctx, req).await,
+            None => error_response(
+                req.request_id,
+                pb::ErrorCode::Unavailable,
+                "后台服务还在启动",
+                true,
+            ),
+        }
+    }
+
+    async fn chunk(&self, ctx: &ConnectionContext, chunk: pb::Chunk) -> Result<(), ChunkRefused> {
+        match self.0.get() {
+            Some(h) => h.chunk(ctx, chunk).await,
+            None => Err(ChunkRefused(pb::Error {
+                code: pb::ErrorCode::Unavailable as i32,
+                message: "后台服务还在启动".into(),
+                retryable: true,
+                details: Default::default(),
+            })),
+        }
+    }
+
+    async fn connection_closed(&self, ctx: &ConnectionContext) {
+        if let Some(h) = self.0.get() {
+            h.connection_closed(ctx).await;
+        }
+    }
+}
+
 /// 后台的请求入口。
 pub struct DaemonHandler<I, W> {
     gate: Arc<Gate>,
@@ -201,8 +244,8 @@ impl<I: RequestHandler, W: RunningWork> RequestHandler for DaemonHandler<I, W> {
             ..
         })) = &req.body
         {
-            let _e = span.enter();
-            return lifecycle::shutdown(ctx, request_id, cmd, self.work.as_ref(), &self.stop);
+            let fut = lifecycle::shutdown(ctx, request_id, cmd, self.work.as_ref(), &self.stop);
+            return tracing::Instrument::instrument(fut, span).await;
         }
         if let (
             Some(pb::request::Body::Command(pb::Command {
@@ -265,18 +308,30 @@ mod tests {
         assert_eq!(drain.await.unwrap(), 0);
     }
 
-    use crate::work::{AbortReport, RunningCount};
+    use crate::work::{AbortReport, QuitCounts, ShutdownDecision};
     use iwork_ipc::peer::UserId;
     use iwork_ipc::rendezvous::StopReason;
     use iwork_ipc::server::PeerSummary;
 
-    struct Busy(RunningCount);
+    /// 只有读出来的数、没有过了边界的线（L = 0）。
+    struct Busy(QuitCounts);
     impl RunningWork for Busy {
-        fn running(&self) -> RunningCount {
-            self.0
+        async fn quit_counts(&self) -> Option<QuitCounts> {
+            Some(self.0)
+        }
+        fn try_quit(
+            &self,
+            confirmed: bool,
+            counts: Option<QuitCounts>,
+            trigger: impl FnOnce(),
+        ) -> ShutdownDecision {
+            crate::work::NoWork.try_quit(confirmed, counts, trigger)
         }
         async fn cancel_all(&self) {}
         async fn abort_all(&self) -> AbortReport {
+            AbortReport::default()
+        }
+        fn abort_snapshot(&self) -> AbortReport {
             AbortReport::default()
         }
     }
@@ -306,7 +361,7 @@ mod tests {
         }
     }
 
-    fn handler(running: RunningCount) -> (DaemonHandler<NotWired, Busy>, StopSwitch, Arc<Gate>) {
+    fn handler(running: QuitCounts) -> (DaemonHandler<NotWired, Busy>, StopSwitch, Arc<Gate>) {
         let stop = StopSwitch::new();
         let gate = Arc::new(Gate::default());
         (
@@ -330,7 +385,11 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_needs_confirmation_when_running() {
-        let (h, stop, _) = handler(RunningCount { turns: 2, cards: 1 });
+        let (h, stop, _) = handler(QuitCounts {
+            running_turns: 2,
+            queued_turns: 3,
+            executing_cards: 1,
+        });
         let r = h
             .handle(&ctx(pb::ClientKind::Desktop), shutdown_req(false))
             .await;
@@ -338,6 +397,8 @@ mod tests {
         assert_eq!(e.code, pb::ErrorCode::PreconditionFailed as i32);
         assert_eq!(e.details[iwork_app::details::RUNNING_TURNS], "2");
         assert_eq!(e.details[iwork_app::details::EXECUTING_CARDS], "1");
+        assert_eq!(e.details[iwork_app::details::QUEUED_TURNS], "3");
+        assert_eq!(e.details[iwork_app::details::COUNTS_UNKNOWN], "false");
         assert_eq!(stop.requested(), None, "没确认就不停");
 
         let r = h
@@ -357,7 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_refused_from_non_desktop_client() {
-        let (h, stop, _) = handler(RunningCount::default());
+        let (h, stop, _) = handler(QuitCounts::default());
         let mut refused = vec![pb::ClientKind::Unspecified];
         if !cfg!(feature = "dev") {
             refused.push(pb::ClientKind::DevTool);
@@ -380,7 +441,7 @@ mod tests {
 
     #[tokio::test]
     async fn commands_rejected_while_stopping() {
-        let (h, _stop, gate) = handler(RunningCount::default());
+        let (h, _stop, gate) = handler(QuitCounts::default());
         gate.close_and_drain(Duration::from_millis(10)).await;
         for req in [
             shutdown_req(true),

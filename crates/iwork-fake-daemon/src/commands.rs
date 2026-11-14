@@ -84,6 +84,7 @@ pub fn decide(
                     target: m.target.clone(),
                     mode: Some(m.mode),
                     cause: pb::ApprovalModeChangeCause::User.into(),
+                    released_approvals: None,
                 })));
         }
         C::DecideApproval(a) => {

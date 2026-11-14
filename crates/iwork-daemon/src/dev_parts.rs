@@ -24,7 +24,7 @@ use iwork_ports::store::OutboxItem;
 
 use crate::stop::StopSwitch;
 use crate::tasks::outbox::{DispatchFuture, OnUncertain, OutboxDispatch, OutboxRoute};
-use crate::work::{AbortReport, RunningCount, RunningWork};
+use crate::work::{AbortReport, QuitCounts, RunningWork, ShutdownDecision};
 
 pub const WORK_ENV: &str = "IWORK_DEV_WORK";
 pub const RECEIVER_ENV: &str = "IWORK_DEV_OUTBOX_RECEIVER";
@@ -41,6 +41,9 @@ pub struct DevWork {
     cards: AtomicU32,
     uncleared: bool,
     sealed: AtomicBool,
+    /// 封口时要关的会话数、其中还没确认清空的（`abort_snapshot` 读）
+    aborting: AtomicU32,
+    unconfirmed: AtomicU32,
 }
 
 impl DevWork {
@@ -67,6 +70,8 @@ impl DevWork {
             cards: AtomicU32::new(cards),
             uncleared,
             sealed: AtomicBool::new(false),
+            aborting: AtomicU32::new(0),
+            unconfirmed: AtomicU32::new(0),
         };
         for _ in 0..turns {
             work.open_session().expect("起假会话");
@@ -99,11 +104,21 @@ impl DevWork {
 }
 
 impl RunningWork for DevWork {
-    fn running(&self) -> RunningCount {
-        RunningCount {
-            turns: self.turns.load(Ordering::SeqCst),
-            cards: self.cards.load(Ordering::SeqCst),
-        }
+    async fn quit_counts(&self) -> Option<QuitCounts> {
+        Some(QuitCounts {
+            running_turns: self.turns.load(Ordering::SeqCst),
+            queued_turns: 0,
+            executing_cards: self.cards.load(Ordering::SeqCst),
+        })
+    }
+
+    fn try_quit(
+        &self,
+        confirmed: bool,
+        counts: Option<QuitCounts>,
+        trigger: impl FnOnce(),
+    ) -> ShutdownDecision {
+        crate::work::NoWork.try_quit(confirmed, counts, trigger)
     }
 
     async fn cancel_all(&self) {
@@ -120,20 +135,29 @@ impl RunningWork for DevWork {
         // 先封口，再关会话
         self.sealed.store(true, Ordering::SeqCst);
         let procs: Vec<_> = std::mem::take(&mut *self.procs.lock().unwrap());
-        let mut not_cleared = 0;
+        self.aborting.store(procs.len() as u32, Ordering::SeqCst);
+        self.unconfirmed.store(
+            procs.len() as u32 + u32::from(self.uncleared),
+            Ordering::SeqCst,
+        );
         for (p, _) in &procs {
             let cleared = p.kill_tree_and_wait().await && matches!(p.tree_is_empty(), Ok(true));
-            if !cleared {
-                not_cleared += 1;
+            if cleared {
+                self.unconfirmed.fetch_sub(1, Ordering::SeqCst);
             }
         }
-        if self.uncleared {
-            not_cleared += 1;
-        }
+        let not_cleared = self.unconfirmed.load(Ordering::SeqCst);
         tracing::info!(sessions = procs.len(), not_cleared, "dev work：abort_all");
         AbortReport {
             sessions: procs.len() as u32,
             not_cleared,
+        }
+    }
+
+    fn abort_snapshot(&self) -> AbortReport {
+        AbortReport {
+            sessions: self.aborting.load(Ordering::SeqCst),
+            not_cleared: self.unconfirmed.load(Ordering::SeqCst),
         }
     }
 }
@@ -207,8 +231,12 @@ pub fn break_writer_trigger() -> Option<PathBuf> {
     std::env::var(BREAK_WRITER_ENV).ok().map(PathBuf::from)
 }
 
-/// 任务体：等文件出现，删掉，提交一条触发器事件（这次提交会因写线程退出而失败）。
-pub async fn break_writer_on(file: PathBuf, store: std::sync::Arc<crate::boot::Store>) {
+/// 任务体：等文件出现，删掉，提交一条触发器事件（这次提交会因写线程退出而失败）。只收带封口闸的存储（E4）：
+/// 封口之后触发器的提交和别的任务一样入不了队。
+pub async fn break_writer_on(
+    file: PathBuf,
+    store: std::sync::Arc<crate::gate::GatedStore<crate::boot::Store>>,
+) {
     use iwork_ports::clock::IdGenerator;
     use iwork_ports::store::StoragePort;
     loop {
@@ -280,6 +308,8 @@ mod tests {
             cards: AtomicU32::new(0),
             uncleared: false,
             sealed: AtomicBool::new(false),
+            aborting: AtomicU32::new(0),
+            unconfirmed: AtomicU32::new(0),
         };
         for _ in 0..turns {
             w.open_session().unwrap();

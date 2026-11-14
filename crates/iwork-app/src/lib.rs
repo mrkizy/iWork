@@ -6,13 +6,20 @@
 //! - [`details`]：对外错误 `Error.details` 的键。
 //! - [`admission`]：对话删除期间放行的收尾命令登记表 `DELETING_ALLOWED`。
 //! - [`lifecycle`]：完全退出的判定（T04）。
+//! - [`turn_command`]、[`conversation_command`]、[`settings_command`]：命令受理的计划（纯函数，T10a 方案 2.6），
+//!   拒绝与错误码在 [`refusal`]。
 //! - [`subscription`]：订阅范围 → 路由键与快照查询、事件 → 路由键（T03 方案 2.8）。
 
 pub mod admission;
 pub mod codec;
+pub mod conversation_command;
 pub mod convert;
 pub mod details;
 pub mod lifecycle;
+pub mod message_blocks;
 pub mod notify;
+pub mod refusal;
+pub mod settings_command;
 pub mod subscription;
+pub mod turn_command;
 pub mod views;

@@ -414,7 +414,12 @@ async fn ask_then_user_allow_and_audit_every_call() {
     assert!(a.call.is_some());
     let out = b
         .engine
-        .decide(id, allow(RememberScope::Once), user())
+        .decide(
+            id,
+            allow(RememberScope::Once),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     assert_eq!(out.resume_turn, None);
@@ -436,7 +441,9 @@ async fn ask_then_user_allow_and_audit_every_call() {
     assert!(audits[1].call_shape.is_some());
     // 已决定的不能再决定
     assert_eq!(
-        b.engine.decide(id, UserDecision::Deny, user()).await,
+        b.engine
+            .decide(id, UserDecision::Deny, user(), crate::support::command())
+            .await,
         Err(DecideError::NotPending(id))
     );
 }
@@ -449,7 +456,7 @@ async fn denial_memory_cross_turn_and_tool() {
     let h = b.ask(&d, turn(1), write_req(&format!("{WS}/a.txt")));
     let id = b.approval(0).await;
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     assert!(is_deny(&settle(h).await, MSG_USER_DENIED));
@@ -475,7 +482,12 @@ async fn denial_memory_cross_turn_and_tool() {
         "强制询问只能允许一次"
     );
     b.engine
-        .decide(id2, allow(RememberScope::Once), user())
+        .decide(
+            id2,
+            allow(RememberScope::Once),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     assert_eq!(settle(h).await, PermissionDecision::Allow);
@@ -485,6 +497,7 @@ async fn denial_memory_cross_turn_and_tool() {
             ApprovalModeTarget::Conversation(conversation()),
             Some(Auto),
             user(),
+            crate::support::command(),
         )
         .await
         .unwrap();
@@ -502,7 +515,7 @@ async fn denied_compound_blocks_each_part() {
     let h = b.ask(&d, turn(1), bash_req("touch x.txt && rm y.txt"));
     let id = b.approval(0).await;
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h).await;
@@ -565,7 +578,7 @@ async fn ai_review_four_outcomes() {
             assert_eq!(reason, "与任务无关");
         }
         b.engine
-            .decide(id, UserDecision::Deny, user())
+            .decide(id, UserDecision::Deny, user(), crate::support::command())
             .await
             .unwrap();
         assert!(is_deny(&settle(h).await, MSG_USER_DENIED));
@@ -591,7 +604,7 @@ async fn review_recheck_fail_keeps_pending() {
     let bid = b.approval(1).await;
     // 用户拒绝 A（审查进行中也可以直接决定）
     b.engine
-        .decide(a, UserDecision::Deny, user())
+        .decide(a, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     assert!(is_deny(&settle(ha).await, MSG_USER_DENIED));
@@ -615,7 +628,7 @@ async fn review_recheck_fail_keeps_pending() {
         0
     );
     b.engine
-        .decide(bid, UserDecision::Deny, user())
+        .decide(bid, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(hb).await;
@@ -638,7 +651,7 @@ async fn late_review_pass_after_user_message_asks_user() {
     let hb = b.ask(&d, turn(1), req());
     let bid = b.approval(1).await;
     b.engine
-        .decide(a, UserDecision::Deny, user())
+        .decide(a, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(ha).await;
@@ -657,7 +670,12 @@ async fn late_review_pass_after_user_message_asks_user() {
         pb.review
     );
     b.engine
-        .decide(bid, allow(RememberScope::Once), user())
+        .decide(
+            bid,
+            allow(RememberScope::Once),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     assert_eq!(settle(hb).await, PermissionDecision::Allow);
@@ -684,6 +702,7 @@ async fn mode_switch_release_cases() {
             ApprovalModeTarget::Conversation(conversation()),
             Some(Auto),
             user(),
+            crate::support::command(),
         )
         .await
         .unwrap();
@@ -695,6 +714,7 @@ async fn mode_switch_release_cases() {
             ApprovalModeTarget::Conversation(conversation()),
             Some(FullAccess),
             user(),
+            crate::support::command(),
         )
         .await
         .unwrap();
@@ -709,23 +729,88 @@ async fn mode_switch_release_cases() {
             .switch_mode(
                 ApprovalModeTarget::Project(project()),
                 Some(FullAccess),
-                user()
+                user(),
+                crate::support::command()
             )
             .await,
         Err(ModeError::FullAccessNotAllowedAsDefault)
     ));
     // 收尾
     b.engine
-        .decide(push_id, UserDecision::Deny, user())
+        .decide(
+            push_id,
+            UserDecision::Deny,
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     b.engine
-        .decide(combo_id, UserDecision::Deny, user())
+        .decide(
+            combo_id,
+            UserDecision::Deny,
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     settle(push).await;
     settle(combo).await;
     card.abort();
+}
+
+/// T10a 方案 2.3（产品负责人 2026-11-13）：切档那一笔的 `ApprovalModeChanged` 带上这一笔由切档放行的条数。
+/// 手动 → 自动放行两条边界内的；自动 → 全开放行一条越界的（push 保留）；切回手动（更严）是 0。期望值按场景手数。
+#[tokio::test]
+async fn switch_mode_reports_released_count() {
+    let b = Bench::new(None).await;
+    let d = b.decider();
+    let in_a = b.ask(&d, turn(1), write_req("src/a.rs"));
+    let _ = b.approval(0).await;
+    let in_b = b.ask(&d, turn(1), write_req("src/b.rs"));
+    let _ = b.approval(1).await;
+    let oob = b.ask(&d, turn(1), write_req("/opt/x"));
+    let _ = b.approval(2).await;
+    let push = b.ask(&d, turn(1), bash_req("git push"));
+    let push_id = b.approval(3).await;
+    let mut released = Vec::new();
+    for mode in [Auto, FullAccess, Manual] {
+        let s = b
+            .engine
+            .switch_mode(
+                ApprovalModeTarget::Conversation(conversation()),
+                Some(mode),
+                user(),
+                crate::support::command(),
+            )
+            .await
+            .unwrap();
+        let DomainEvent::ApprovalModeChanged(c) = &s.events[0] else {
+            panic!("{:?}", s.events)
+        };
+        released.push(c.released_approvals);
+    }
+    assert_eq!(released, vec![Some(2), Some(1), Some(0)]);
+    // 落盘的事件里也是这几个数
+    assert_eq!(
+        b.count(
+            |e| matches!(e, DomainEvent::ApprovalModeChanged(c) if c.released_approvals == Some(2))
+        ),
+        1
+    );
+    for h in [in_a, in_b, oob] {
+        assert_eq!(settle(h).await, PermissionDecision::Allow);
+    }
+    b.engine
+        .decide(
+            push_id,
+            UserDecision::Deny,
+            user(),
+            crate::support::command(),
+        )
+        .await
+        .unwrap();
+    settle(push).await;
 }
 
 #[tokio::test]
@@ -739,6 +824,7 @@ async fn member_override_unaffected_by_supervisor_switch() {
             },
             Some(Manual),
             user(),
+            crate::support::command(),
         )
         .await
         .unwrap();
@@ -747,6 +833,7 @@ async fn member_override_unaffected_by_supervisor_switch() {
             ApprovalModeTarget::Conversation(conversation()),
             Some(FullAccess),
             user(),
+            crate::support::command(),
         )
         .await
         .unwrap();
@@ -762,6 +849,7 @@ async fn member_override_unaffected_by_supervisor_switch() {
             },
             None,
             user(),
+            crate::support::command(),
         )
         .await
         .unwrap();
@@ -789,6 +877,7 @@ async fn to_manual_abandons_review() {
             ApprovalModeTarget::Conversation(conversation()),
             Some(Manual),
             user(),
+            crate::support::command(),
         )
         .await
         .unwrap();
@@ -802,7 +891,7 @@ async fn to_manual_abandons_review() {
     ));
     assert!(a.awaits_user());
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h).await;
@@ -830,7 +919,12 @@ async fn void_and_wait_limit() {
         assert!(is_deny(&settle(h).await, MSG_TURN_CANCELLED));
         assert_eq!(
             b.engine
-                .decide(id, allow(RememberScope::Once), user())
+                .decide(
+                    id,
+                    allow(RememberScope::Once),
+                    user(),
+                    crate::support::command()
+                )
                 .await,
             Err(DecideError::NotPending(id))
         );
@@ -865,7 +959,7 @@ async fn void_and_wait_limit() {
         settle(h).await;
         assert!(
             b.engine
-                .decide(id, UserDecision::Deny, user())
+                .decide(id, UserDecision::Deny, user(), crate::support::command())
                 .await
                 .is_err()
         );
@@ -881,7 +975,12 @@ async fn void_and_wait_limit() {
     assert_eq!(b.pending(id).await.unwrap().state, ApprovalState::Pending);
     let out = b
         .engine
-        .decide(id, allow(RememberScope::Once), user())
+        .decide(
+            id,
+            allow(RememberScope::Once),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     assert_eq!(out.resume_turn, Some(turn(1)));
@@ -898,7 +997,12 @@ async fn void_and_wait_limit() {
         let other = b.approval(n).await;
         assert_ne!(other, id, "{changed}");
         b.engine
-            .decide(other, allow(RememberScope::Once), user())
+            .decide(
+                other,
+                allow(RememberScope::Once),
+                user(),
+                crate::support::command(),
+            )
             .await
             .unwrap();
         assert_eq!(settle(h2).await, PermissionDecision::Allow);
@@ -909,7 +1013,7 @@ async fn void_and_wait_limit() {
     let hx = b.ask(&d, turn(1), bash_req("rm a.txt"));
     let x = b.approval(n).await;
     b.engine
-        .decide(x, UserDecision::Deny, user())
+        .decide(x, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(hx).await;
@@ -919,7 +1023,7 @@ async fn void_and_wait_limit() {
     let again = b.approval(n).await;
     assert_ne!(again, id, "ForceAskOnce 不被一次性放行跳过");
     b.engine
-        .decide(again, UserDecision::Deny, user())
+        .decide(again, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h3).await;
@@ -936,14 +1040,24 @@ async fn grant_once_exact_call_only() {
     let _ = h.await;
     b.interrupt(turn(1)).await;
     b.engine
-        .decide(id, allow(RememberScope::Once), user())
+        .decide(
+            id,
+            allow(RememberScope::Once),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     // 别的回合不命中
     let other_turn = b.ask(&d, turn(2), bash_req("rm a.txt && touch a.txt"));
     let o = b.approval(1).await;
     b.engine
-        .decide(o, allow(RememberScope::Once), user())
+        .decide(
+            o,
+            allow(RememberScope::Once),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     settle(other_turn).await;
@@ -958,7 +1072,7 @@ async fn grant_once_exact_call_only() {
     let h = b.ask(&d, turn(1), bash_req("rm a.txt && touch a.txt"));
     let again = b.approval(2).await;
     b.engine
-        .decide(again, UserDecision::Deny, user())
+        .decide(again, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h).await;
@@ -1026,7 +1140,12 @@ async fn remember_creates_rule() {
     let h = b.ask(&d, turn(1), write_req("src/a.rs"));
     let id = b.approval(0).await;
     b.engine
-        .decide(id, allow(RememberScope::Project), user())
+        .decide(
+            id,
+            allow(RememberScope::Project),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     settle(h).await;
@@ -1040,12 +1159,17 @@ async fn remember_creates_rule() {
     let id = b.approval(1).await;
     assert!(matches!(
         b.engine
-            .decide(id, allow(RememberScope::Project), user())
+            .decide(
+                id,
+                allow(RememberScope::Project),
+                user(),
+                crate::support::command()
+            )
             .await,
         Err(DecideError::RememberNotOffered { .. })
     ));
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h).await;
@@ -1099,7 +1223,12 @@ async fn engine_recovers_pending_from_events() {
     assert_eq!(p.call, original.call, "调用记录无损");
     let out = fresh
         .engine
-        .decide(plain, allow(RememberScope::Once), user())
+        .decide(
+            plain,
+            allow(RememberScope::Once),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     assert_eq!(out.resume_turn, Some(turn(1)));
@@ -1154,7 +1283,7 @@ async fn snapshot_pins_excluded_commands() {
         ApprovalKind::OutsideSandbox
     );
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h).await;
@@ -1164,7 +1293,7 @@ async fn snapshot_pins_excluded_commands() {
     let id = b.approval(1).await;
     assert_eq!(b.pending(id).await.unwrap().kind, ApprovalKind::Ask);
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h).await;
@@ -1183,7 +1312,12 @@ async fn audit_snapshot_reconstructible() {
     let h = b.ask(&d, turn(1), write_req("src/a.rs"));
     let id = b.approval(0).await;
     b.engine
-        .decide(id, allow(RememberScope::Project), user())
+        .decide(
+            id,
+            allow(RememberScope::Project),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     settle(h).await;
@@ -1218,7 +1352,7 @@ async fn audit_snapshot_reconstructible() {
     let h = b.ask(&d, turn(3), write_req("src/c.rs"));
     let id = b.approval(1).await;
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h).await;

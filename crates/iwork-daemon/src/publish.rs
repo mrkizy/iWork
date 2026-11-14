@@ -84,6 +84,10 @@ pub struct PublishState {
     pub outbox: watch::Sender<u64>,
     /// 提交了自启设置（`GlobalSettingsChanged{autostart: Some(_)}`）就叫醒对齐任务。
     pub autostart: Arc<tokio::sync::Notify>,
+    /// 引擎流里有新事件就叫醒 `engine-sync`（T07 6.10.8：观察者里只叫醒，`sync()` 在独立任务里跑）。
+    pub engine: Arc<tokio::sync::Notify>,
+    /// 回合宿主关心的事件（[`crate::host::TURN_HOST_WAKE_KINDS`]）落盘就叫醒它（T10a 0a.6）。
+    pub host: Arc<tokio::sync::Notify>,
 }
 
 impl PublishState {
@@ -94,6 +98,8 @@ impl PublishState {
             routes: Arc::new(MessageRoutes::default()),
             outbox: watch::Sender::new(0),
             autostart: Arc::new(tokio::sync::Notify::new()),
+            engine: Arc::new(tokio::sync::Notify::new()),
+            host: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -147,6 +153,21 @@ impl<S: PublishSink> CommitObserver for PublishObserver<S> {
             }
             self.sink.publish(Published::Persisted(Arc::new(r)));
             self.state.last_published.store(e.seq.0, Ordering::SeqCst);
+        }
+        // 只置位：不读写存储、不碰引擎的锁（不变量 6）。一批里有一条就够
+        if batch
+            .events
+            .iter()
+            .any(|e| iwork_core::approval::engine::fold::in_engine_streams(&e.event))
+        {
+            self.state.engine.notify_one();
+        }
+        if batch
+            .events
+            .iter()
+            .any(|e| crate::host::TURN_HOST_WAKE_KINDS.contains(&e.event.kind()))
+        {
+            self.state.host.notify_one();
         }
         if batch.outbox_added > 0 {
             self.state.outbox.send_modify(|n| *n = n.wrapping_add(1));

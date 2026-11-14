@@ -463,6 +463,7 @@ fn switch_notes_render_like_their_rebuilt_rows() {
             }),
             mode: Some(pb::ApprovalMode::Auto as i32),
             cause: pb::ApprovalModeChangeCause::User as i32,
+            released_approvals: None,
         }),
     ));
     assert!(matches!(view(&s, "note:15"), V::ModelSwitch(_)), "切了模型");
@@ -494,6 +495,7 @@ fn full_access_note_is_marked() {
                 }),
                 mode: mode.map(|m| m as i32),
                 cause: pb::ApprovalModeChangeCause::User as i32,
+                released_approvals: None,
             }),
         ));
     }

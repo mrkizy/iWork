@@ -2,7 +2,7 @@
 //! 这里只接线、把结果变成响应。
 
 use iwork_app::details;
-use iwork_app::lifecycle::{ShutdownDecision, decide_shutdown};
+use iwork_app::lifecycle::ShutdownDecision;
 use iwork_ipc::rendezvous::StopReason;
 use iwork_ipc::server::ConnectionContext;
 use iwork_proto::pb;
@@ -21,9 +21,10 @@ fn may_shut_down(kind: pb::ClientKind) -> bool {
     }
 }
 
-/// 受理 `ShutdownDaemon`：有成员在跑且没说要取消 → `PRECONDITION_FAILED` 带两个数；否则先回 `CommandAccepted`
-/// （不产生事件，两个 seq 都是 0），再触发停机（停机第 1 步会等这条回复送出）。
-pub fn shutdown(
+/// 受理 `ShutdownDaemon`（E1）：带了确认不读库；没带确认读 N（限时 2 秒，读不出来记成不知道）。然后 `try_quit`
+/// 一口气判：要确认 → `PRECONDITION_FAILED` 带各个数与 `counts_unknown`，宿主不关；否则宿主置成完全退出并触发
+/// 停机，回 `CommandAccepted`（不产生事件，两个 seq 都是 0；停机第 1 步会等这条回复送出）。
+pub async fn shutdown(
     ctx: &ConnectionContext,
     request_id: u64,
     cmd: &pb::ShutdownDaemon,
@@ -38,36 +39,45 @@ pub fn shutdown(
             false,
         );
     }
-    match decide_shutdown(work.running(), cmd.cancel_running) {
+    let confirmed = cmd.cancel_running;
+    let counts = if confirmed {
+        None
+    } else {
+        work.quit_counts().await
+    };
+    match work.try_quit(confirmed, counts, || {
+        stop.request(StopReason::UserQuit);
+    }) {
         ShutdownDecision::NeedsConfirmation {
-            running_turns,
-            executing_cards,
+            counts,
+            counts_unknown,
         } => {
             let mut resp = error_response(
                 request_id,
                 pb::ErrorCode::PreconditionFailed,
-                "还有成员在运行，确认后以 cancel_running 重发",
+                "还有回合在运行或排着，确认后以 cancel_running 重发",
                 false,
             );
             if let Some(pb::response::Body::Error(e)) = &mut resp.body {
-                e.details
-                    .insert(details::RUNNING_TURNS.into(), running_turns.to_string());
-                e.details
-                    .insert(details::EXECUTING_CARDS.into(), executing_cards.to_string());
+                for (k, v) in [
+                    (details::RUNNING_TURNS, counts.running_turns.to_string()),
+                    (details::QUEUED_TURNS, counts.queued_turns.to_string()),
+                    (details::EXECUTING_CARDS, counts.executing_cards.to_string()),
+                    (details::COUNTS_UNKNOWN, counts_unknown.to_string()),
+                ] {
+                    e.details.insert(k.into(), v);
+                }
             }
             resp
         }
-        ShutdownDecision::Proceed => {
-            stop.request(StopReason::UserQuit);
-            pb::Response {
-                request_id,
-                body: Some(pb::response::Body::Accepted(pb::CommandAccepted {
-                    first_seq: 0,
-                    last_seq: 0,
-                    replayed: false,
-                })),
-            }
-        }
+        ShutdownDecision::Proceed => pb::Response {
+            request_id,
+            body: Some(pb::response::Body::Accepted(pb::CommandAccepted {
+                first_seq: 0,
+                last_seq: 0,
+                replayed: false,
+            })),
+        },
     }
 }
 

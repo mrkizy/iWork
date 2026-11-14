@@ -45,8 +45,24 @@ fn expected_recovery_kinds() -> BTreeMap<&'static str, usize> {
     ])
 }
 
+/// 启动表第 9 步（T10a 方案 2.8 第 1、1a 步）在新库第一次起来时登记的运行时那一行与内置助手：不是恢复的一部分。
+fn is_bootstrap(e: &iwork_ports::store::StoredEvent) -> bool {
+    matches!(
+        e.event,
+        DomainEvent::RuntimeUpdated(_) | DomainEvent::AssistantCreated(_)
+    )
+}
+
+/// 第 `from` 条之后的事件，去掉第 9 步的登记。
+fn recovery_events_after(sb: &Sandbox, from: u64) -> Vec<iwork_ports::store::StoredEvent> {
+    events_after(sb, from)
+        .into_iter()
+        .filter(|e| !is_bootstrap(e))
+        .collect()
+}
+
 fn assert_recovered(sb: &Sandbox, seeded_head: u64) {
-    let new = events_after(sb, seeded_head);
+    let new = recovery_events_after(sb, seeded_head);
     assert_eq!(kinds(&new), expected_recovery_kinds(), "{new:#?}");
     let completed = new
         .iter()
@@ -213,7 +229,10 @@ fn kill_during_recovery_is_idempotent() {
     let mut after = sb.spawn(&[], &[("IWORK_DEV_PAUSE_AT", "recovery-after-commit")]);
     after.wait_stderr("IWORK-PAUSED recovery-after-commit", START);
     after.kill9();
-    assert_eq!(kinds(&events_after(&sb, seeded)), expected_recovery_kinds());
+    assert_eq!(
+        kinds(&recovery_events_after(&sb, seeded)),
+        expected_recovery_kinds()
+    );
 
     run_once(&sb);
     run_once(&sb);
@@ -265,12 +284,12 @@ fn recovery_events_are_in_baseline_not_republished() {
         kind: Some(pb::subscription_scope::Kind::Settings(pb::SettingsScope {})),
     };
     let new = events_after(&sb, seeded);
-    // 恢复 10 条 + 假参与方 1 条
-    assert_eq!(new.len(), 11);
-    assert!(matches!(
-        new.last().unwrap().event,
-        DomainEvent::GlobalSettingsChanged(_)
-    ));
+    // 恢复 10 条 + 假参与方 1 条 + 第 9 步登记的运行时那一行与内置助手 2 条
+    assert_eq!(new.len(), 13);
+    assert!(
+        new.iter()
+            .any(|e| matches!(e.event, DomainEvent::GlobalSettingsChanged(_)))
+    );
     let rt = crate::support::rt();
     let mut covered = 0;
     for scope in [conv, settings] {
@@ -286,7 +305,7 @@ fn recovery_events_are_in_baseline_not_republished() {
         assert!(!expected.is_empty(), "对照：范围里确实有新事件");
         covered += expected.len();
         let (head, seqs) = rt.block_on(collect(&sb, scope, seeded));
-        assert_eq!(head, seeded + 11);
+        assert_eq!(head, seeded + 13);
         let unique: BTreeSet<_> = seqs.iter().copied().collect();
         assert_eq!(unique.len(), seqs.len(), "没有重复：{seqs:?}");
         assert_eq!(unique, expected, "每条恰好收到一次");
@@ -354,6 +373,9 @@ fn unknown_event_kind_with_unsettled_objects_writes_nothing() {
     run_once(&sb);
     assert!(!leftover.exists(), "对照：残留被清理了");
     assert_eq!(turn_state(&sb, RUNNING_WITH_SESSION), "interrupted_crash");
-    assert_eq!(kinds(&events_after(&sb, seeded)), expected_recovery_kinds());
+    assert_eq!(
+        kinds(&recovery_events_after(&sb, seeded)),
+        expected_recovery_kinds()
+    );
     let _ = ExitCode::StoreRefused;
 }

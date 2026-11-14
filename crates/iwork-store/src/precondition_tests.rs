@@ -288,6 +288,29 @@ fn precondition_failure_rolls_back_whole_command() {
     assert_eq!(next, Seq(head.0 + 1));
 }
 
+/// 绕过 commit 直接往事件表塞一条事件（仿「校验上线之前写下的」历史）。
+fn smuggle(env: &Env, seq: Seq, event: &DomainEvent) {
+    let conn = Connection::open(env.db()).unwrap();
+    let encoded = ProtoEventCodec.encode(event).unwrap();
+    let (kind, id) = event.stream();
+    conn.execute(
+        "INSERT INTO events(seq, stream_kind, stream_id, type, payload, command_id, actor, at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'test', 0)",
+        rusqlite::params![
+            seq.0 as i64,
+            crate::sql::ColumnText::to_text(kind),
+            id.map(|s| s.0),
+            encoded.kind,
+            encoded.payload,
+            iwork_domain::id::CommandId::from_raw(iwork_domain::id::RawUlid::from_u128(
+                0xBAD + u128::from(seq.0)
+            ))
+            .to_string(),
+        ],
+    )
+    .unwrap();
+}
+
 /// 绕过 commit 往事件表塞「作废之后又批准」：重建报 Projection 并点名 seq，旧投影不变。
 #[test]
 fn rebuild_rejects_illegal_history() {
@@ -298,25 +321,7 @@ fn rebuild_rejects_illegal_history() {
     feed.ok(vec![requested(1)]);
     let head = feed.ok(vec![voided(1)]);
     let illegal = Seq(head.0 + 1);
-    {
-        let conn = Connection::open(env.db()).unwrap();
-        let encoded = ProtoEventCodec.encode(&decided(1, APPROVED)).unwrap();
-        let (kind, id) = decided(1, APPROVED).stream();
-        conn.execute(
-            "INSERT INTO events(seq, stream_kind, stream_id, type, payload, command_id, actor, at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'test', 0)",
-            rusqlite::params![
-                illegal.0 as i64,
-                crate::sql::ColumnText::to_text(kind),
-                id.map(|s| s.0),
-                encoded.kind,
-                encoded.payload,
-                iwork_domain::id::CommandId::from_raw(iwork_domain::id::RawUlid::from_u128(0xBAD))
-                    .to_string(),
-            ],
-        )
-        .unwrap();
-    }
+    smuggle(&env, illegal, &decided(1, APPROVED));
     let state = |env: &Env| -> String {
         Connection::open(env.db())
             .unwrap()
@@ -333,6 +338,54 @@ fn rebuild_rejects_illegal_history() {
         other => panic!("应报 Projection，实际 {other:?}"),
     }
     assert_eq!(state(&env), before, "旧投影不变");
+}
+
+/// 已读位置「只往前」上线（T10a 1/F-2）之前的开发构建能写出倒退（2 → 1）与相等（2 → 2）两种序列。
+/// 按 T02 方案 2.6 与 T07 PD5，重建照现行前提重放：报 Projection 并点名那一条的 seq，旧投影（已读位置、
+/// 未读数）不变；处理办法是备份后删库。对照：同一库在塞进旧序列之前重建成功。
+#[test]
+fn rebuild_rejects_regressing_read_history() {
+    for (case, stale) in [("倒退", 1), ("相等", 2)] {
+        let env = Env::new();
+        let store = env.open();
+        let feed = Feed::new(&store);
+        owned_base(&feed);
+        let head = feed.ok(vec![
+            ConversationRead {
+                conversation_id: cid(10),
+                last_read_seq: Seq(2),
+            }
+            .into(),
+        ]);
+        block(store.rebuild_projections()).unwrap_or_else(|e| panic!("{case}：对照应能重建：{e}"));
+        let read_state = |env: &Env| -> (i64, i64) {
+            Connection::open(env.db())
+                .unwrap()
+                .query_row(
+                    "SELECT last_read_seq, unread FROM conversations WHERE id = ?1",
+                    [cid(10).to_string()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        let before = read_state(&env);
+        assert_eq!(before.0, 2, "{case}：对照，已读位置是 2");
+        let old = Seq(head.0 + 1);
+        smuggle(
+            &env,
+            old,
+            &ConversationRead {
+                conversation_id: cid(10),
+                last_read_seq: Seq(stale),
+            }
+            .into(),
+        );
+        match block(store.rebuild_projections()) {
+            Err(StorageError::Projection { seq, .. }) => assert_eq!(seq, old, "{case}"),
+            other => panic!("{case}：应报 Projection，实际 {other:?}"),
+        }
+        assert_eq!(read_state(&env), before, "{case}：旧投影不变");
+    }
 }
 
 /// 对话的状态事件照旧不校验：进删除中两次也照写（回合的状态前提见 `turn_preconditions_on_writer`）。

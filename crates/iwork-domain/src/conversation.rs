@@ -193,3 +193,21 @@ pub fn check_cascade(
         ))),
     }
 }
+
+/// `ConversationRead` 的状态前提（T10a 1/F-2）：已读位置只往前走，事件的位置要比库里现在的 `current` 大。
+/// 受理函数在读到的位置上判「是不是往前」；两条连接交错时，读得早的那一笔可能在更大的位置落盘之后才到，
+/// 直接写就把已读位置拨回去、未读数按小的位置重算。写线程拒掉它，事件流里的已读位置因此单调，
+/// 投影与客户端照事件写都不会倒退。
+pub fn check_read_committed(
+    current: Seq,
+    e: &crate::event::ConversationRead,
+) -> Result<(), crate::approval::PreconditionFailed> {
+    if e.last_read_seq > current {
+        Ok(())
+    } else {
+        Err(crate::approval::PreconditionFailed::new(format!(
+            "对话 {} 的已读位置只能往前：事件是 {}，库里已经是 {}",
+            e.conversation_id, e.last_read_seq.0, current.0
+        )))
+    }
+}

@@ -9,7 +9,8 @@ async fn failed_mode_commit_keeps_previous_mode() {
             .switch_mode(
                 ApprovalModeTarget::Conversation(conversation()),
                 Some(FullAccess),
-                user()
+                user(),
+                crate::support::command()
             )
             .await
             .is_err()
@@ -25,14 +26,14 @@ async fn failed_denial_can_be_retried_and_is_recorded() {
     b.store.fail_next.store(true, Ordering::SeqCst);
     assert!(
         b.engine
-            .decide(id, UserDecision::Deny, user())
+            .decide(id, UserDecision::Deny, user(), crate::support::command())
             .await
             .is_err()
     );
     assert_eq!(b.pending(id).await.unwrap().state, ApprovalState::Pending);
     assert!(!h.is_finished());
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     assert_eq!(
@@ -69,13 +70,22 @@ async fn legacy_approval_neither_grants_nor_resumes() {
                 remember: RememberScope::Once,
             },
             user(),
+            crate::support::command(),
         )
         .await
         .unwrap();
     // 没有调用记录就发不出一次性放行；续接以「有放行可用」为准（方案 6.10.6 第 2 条），所以也不续接
     assert_eq!(result.resume_turn, None);
     assert!(recovered.grant(id).await.is_none());
-    assert!(recovered.engine.turns_to_resume().is_empty());
+    assert!(
+        recovered
+            .engine
+            .turns_to_resume()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -101,7 +111,12 @@ async fn remembered_rule_receipt_race_keeps_deny_rules() {
     let engine = b.engine.clone();
     let decision = tokio::spawn(async move {
         engine
-            .decide(id, allow(RememberScope::Conversation), user())
+            .decide(
+                id,
+                allow(RememberScope::Conversation),
+                user(),
+                crate::support::command(),
+            )
             .await
     });
     let stored = loop {
@@ -126,6 +141,7 @@ async fn remembered_rule_receipt_race_keeps_deny_rules() {
             ApprovalModeTarget::Conversation(conversation()),
             Some(Auto),
             user(),
+            crate::support::command(),
         )
         .await
         .unwrap();
@@ -329,7 +345,12 @@ async fn recovery_resolves_each_original_turn_line() {
     for id in [a, c] {
         fresh
             .engine
-            .decide(id, allow(RememberScope::Forever), user())
+            .decide(
+                id,
+                allow(RememberScope::Forever),
+                user(),
+                crate::support::command(),
+            )
             .await
             .unwrap();
     }
@@ -397,7 +418,7 @@ async fn review_deadline_covers_open_cancel_and_close() {
         .await
         .expect("审查全生命周期到期后必须转问用户");
         b.engine
-            .decide(id, UserDecision::Deny, user())
+            .decide(id, UserDecision::Deny, user(), crate::support::command())
             .await
             .unwrap();
         settle(h).await;
@@ -422,7 +443,7 @@ async fn leaving_auto_abandons_review_blocked_by_denial_memory() {
     );
     let c = b.approval(1).await;
     b.engine
-        .decide(a, UserDecision::Deny, user())
+        .decide(a, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h1).await;
@@ -431,6 +452,7 @@ async fn leaving_auto_abandons_review_blocked_by_denial_memory() {
             ApprovalModeTarget::Conversation(conversation()),
             Some(FullAccess),
             user(),
+            crate::support::command(),
         )
         .await
         .unwrap();
@@ -438,7 +460,7 @@ async fn leaving_auto_abandons_review_blocked_by_denial_memory() {
     assert!(pending.awaits_user(), "{pending:?}");
     assert!(matches!(pending.review, ReviewState::Abandoned { .. }));
     b.engine
-        .decide(c, UserDecision::Deny, user())
+        .decide(c, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h2).await;
@@ -560,7 +582,7 @@ async fn review_context_is_bounded_isolated_and_replayed() {
         assert_eq!(context.chars().count(), 2000);
         bench
             .engine
-            .decide(id, UserDecision::Deny, user())
+            .decide(id, UserDecision::Deny, user(), crate::support::command())
             .await
             .unwrap();
         settle(h).await;
@@ -645,7 +667,12 @@ async fn failed_project_default_commit_keeps_old_default() {
     b.store.fail_next.store(true, Ordering::SeqCst);
     assert!(
         b.engine
-            .switch_mode(ApprovalModeTarget::Project(project()), Some(Auto), user())
+            .switch_mode(
+                ApprovalModeTarget::Project(project()),
+                Some(Auto),
+                user(),
+                crate::support::command()
+            )
             .await
             .is_err()
     );
@@ -672,6 +699,7 @@ async fn cancelled_mode_commit_does_not_publish_uncommitted_mode() {
                 ApprovalModeTarget::Conversation(conversation()),
                 Some(FullAccess),
                 user(),
+                crate::support::command(),
             )
             .await
     });
@@ -816,7 +844,7 @@ async fn artifact_messages_are_skipped_without_polluting_review_context() {
         assert!(!input.contains("09090909"));
         bench
             .engine
-            .decide(id, UserDecision::Deny, user())
+            .decide(id, UserDecision::Deny, user(), crate::support::command())
             .await
             .unwrap();
         settle(h).await;
@@ -862,7 +890,7 @@ async fn dm_project_switch_out_of_auto_abandons_review_immediately() {
     );
     assert!(matches!(pending.review, ReviewState::Abandoned { .. }));
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h).await;

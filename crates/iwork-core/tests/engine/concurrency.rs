@@ -86,7 +86,11 @@ fn spawn_decide(
     decision: UserDecision,
 ) -> tokio::task::JoinHandle<Result<iwork_core::approval::engine::DecideOutcome, DecideError>> {
     let engine = b.engine.clone();
-    tokio::spawn(async move { engine.decide(id, decision, user()).await })
+    tokio::spawn(async move {
+        engine
+            .decide(id, decision, user(), crate::support::command())
+            .await
+    })
 }
 
 /// 等第 `n` 张卡片。
@@ -121,7 +125,8 @@ async fn t_failed_commit_leaves_fold_unchanged() {
             .switch_mode(
                 ApprovalModeTarget::Conversation(conversation()),
                 Some(FullAccess),
-                user()
+                user(),
+                crate::support::command()
             )
             .await
             .is_err()
@@ -133,7 +138,7 @@ async fn t_failed_commit_leaves_fold_unchanged() {
     b.store.fail_next.store(true, Ordering::SeqCst);
     assert!(
         b.engine
-            .decide(id, UserDecision::Deny, user())
+            .decide(id, UserDecision::Deny, user(), crate::support::command())
             .await
             .is_err()
     );
@@ -145,7 +150,7 @@ async fn t_failed_commit_leaves_fold_unchanged() {
         );
     }
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     assert_eq!(b.count(|e| matches!(e, DomainEvent::ApprovalDecided(_))), 1);
@@ -280,6 +285,7 @@ async fn t_committed_denial_survives_cancelled_receipt() {
             ApprovalModeTarget::Conversation(conversation()),
             Some(Auto),
             user(),
+            crate::support::command(),
         )
         .await
         .unwrap();
@@ -327,6 +333,7 @@ async fn t_mode_switch_after_cancelled_denial() {
                     ApprovalModeTarget::Conversation(conversation()),
                     Some(Auto),
                     user(),
+                    crate::support::command(),
                 )
                 .await
         });
@@ -345,7 +352,7 @@ async fn t_mode_switch_after_cancelled_denial() {
         );
         settle(ha).await;
         b.engine
-            .decide(bid, UserDecision::Deny, user())
+            .decide(bid, UserDecision::Deny, user(), crate::support::command())
             .await
             .unwrap();
         settle(hb).await;
@@ -358,11 +365,12 @@ async fn t_fold_never_goes_backwards() {
     let b = Bench::new(Some(Manual)).await;
     let target = ApprovalModeTarget::Conversation(conversation());
     b.engine
-        .switch_mode(target, Some(Auto), user())
+        .switch_mode(target, Some(Auto), user(), crate::support::command())
         .await
         .unwrap();
     let (x, y, z) = tokio::join!(
-        b.engine.switch_mode(target, Some(Manual), user()),
+        b.engine
+            .switch_mode(target, Some(Manual), user(), crate::support::command()),
         b.engine.sync(),
         b.engine.catch_up()
     );
@@ -485,7 +493,7 @@ async fn t_deleted_assistant_blocks_new_requests() {
     let h = b.ask(&other, turn(2), write_req("src/a.rs"));
     let id = b.approval(0).await;
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h).await;
@@ -658,7 +666,7 @@ async fn t_cancelled_committed_request_is_pending_detached() {
     let _ = h.await;
     assert_eq!(b.pending(id).await.unwrap().state, ApprovalState::Pending);
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     assert!(b.pending(id).await.is_none());
@@ -674,7 +682,12 @@ async fn r1_crash_before_delivery_grants_after_restart() {
     let id = b.approval(0).await;
     let record = b.pending(id).await.unwrap().call.unwrap();
     b.engine
-        .decide(id, allow(RememberScope::Once), user())
+        .decide(
+            id,
+            allow(RememberScope::Once),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     assert_eq!(settle(h).await, PermissionDecision::Allow);
@@ -690,7 +703,15 @@ async fn r1_crash_before_delivery_grants_after_restart() {
         )])
         .await;
     assert_eq!(fresh.grant(id).await.unwrap().record, *record);
-    assert_eq!(fresh.engine.turns_to_resume(), vec![turn(1)]);
+    assert_eq!(
+        fresh
+            .engine
+            .turns_to_resume()
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect::<Vec<_>>(),
+        vec![turn(1)]
+    );
 }
 
 /// W1 留下放行 A 并续接回到等审批。返回 A。
@@ -699,7 +720,12 @@ async fn w1_grant(b: &Bench, d: &Arc<Decider_>, t: TurnId, cmd: &str) -> Approva
     let h = b.ask(d, t, bash_req(cmd));
     let id = b.approval(n).await;
     b.engine
-        .decide(id, allow(RememberScope::Once), user())
+        .decide(
+            id,
+            allow(RememberScope::Once),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     assert_eq!(settle(h).await, PermissionDecision::Allow);
@@ -731,7 +757,7 @@ async fn r3_grant_hit_returns_approval_and_is_single_use() {
     b.external(vec![delivered(a, turn(1))]).await;
     assert!(b.grant(a).await.is_none());
     b.engine
-        .decide(again, UserDecision::Deny, user())
+        .decide(again, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h).await;
@@ -791,7 +817,10 @@ async fn decided_carries_approval_id() {
                 .await
         });
         let id = b.approval(n).await;
-        b.engine.decide(id, decision, user()).await.unwrap();
+        b.engine
+            .decide(id, decision, user(), crate::support::command())
+            .await
+            .unwrap();
         assert_eq!(h.await.unwrap().approval, Some(id));
     }
     let engine = b.engine.clone();
@@ -858,7 +887,14 @@ async fn f1_interrupt_before_grant_audit_keeps_grant() {
         assert!(audit.0 > interrupted_at, "审计落在中断之后");
         assert!(audit.1.live_rules_seq < interrupted_at, "求值在中断之前");
         assert!(b.grant(a).await.is_some(), "过期的消费不挪动放行");
-        assert_eq!(b.engine.turns_to_resume(), vec![turn(1)]);
+        assert_eq!(
+            b.engine
+                .turns_to_resume()
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect::<Vec<_>>(),
+            vec![turn(1)]
+        );
         // 再续接：同一调用命中一次并交付，之后没有放行
         b.waiting(turn(1), assistant());
         assert_eq!(
@@ -1073,12 +1109,17 @@ async fn f2_orphan_cannot_be_approved_before_sweep() {
     let (id, h) = orphan(&b).await;
     assert_eq!(
         b.engine
-            .decide(id, allow(RememberScope::Project), user())
+            .decide(
+                id,
+                allow(RememberScope::Project),
+                user(),
+                crate::support::command()
+            )
             .await,
         Err(DecideError::OwnerGone(id))
     );
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h).await;
@@ -1102,7 +1143,7 @@ async fn f2_orphan_cannot_be_approved_before_sweep() {
     }
     assert_eq!(rules_remembered(&b), 0);
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h).await;
@@ -1274,11 +1315,21 @@ async fn f5_two_snapshots_same_turn_each_approval_uses_its_own() {
     assert!(Arc::ptr_eq(&b.engine.binding_keys(p1).unwrap(), d1.keys()));
     assert!(Arc::ptr_eq(&b.engine.binding_keys(p2).unwrap(), d2.keys()));
     b.engine
-        .decide(p1, allow(RememberScope::Once), user())
+        .decide(
+            p1,
+            allow(RememberScope::Once),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     b.engine
-        .decide(p2, allow(RememberScope::Once), user())
+        .decide(
+            p2,
+            allow(RememberScope::Once),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
 }
@@ -1290,13 +1341,23 @@ async fn f5_wrong_binding_is_caught() {
     b.engine.swap_bindings_for_test(p1, p2);
     assert_eq!(
         b.engine
-            .decide(p1, allow(RememberScope::Once), user())
+            .decide(
+                p1,
+                allow(RememberScope::Once),
+                user(),
+                crate::support::command()
+            )
             .await,
         Err(DecideError::NoLongerAllowed(p1))
     );
     assert_eq!(
         b.engine
-            .decide(p2, allow(RememberScope::Once), user())
+            .decide(
+                p2,
+                allow(RememberScope::Once),
+                user(),
+                crate::support::command()
+            )
             .await,
         Err(DecideError::NoLongerAllowed(p2))
     );
@@ -1347,7 +1408,7 @@ async fn t_barrier_only_when_unsettled() {
     let h = b.ask(&d, turn(1), write_req("src/a.rs"));
     let id = b.approval(0).await;
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h).await;
@@ -1378,11 +1439,13 @@ async fn t_barrier_busy_keeps_flag() {
         .0;
     b.store.fail_next.store(true, Ordering::SeqCst);
     assert_eq!(
-        b.engine.decide(id, UserDecision::Deny, user()).await,
+        b.engine
+            .decide(id, UserDecision::Deny, user(), crate::support::command())
+            .await,
         Err(DecideError::Storage(iwork_ports::store::StorageError::Busy))
     );
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     assert_eq!(
@@ -1412,6 +1475,7 @@ async fn t_replan_gives_up_after_three() {
                 ApprovalModeTarget::Conversation(conversation()),
                 Some(FullAccess),
                 user(),
+                crate::support::command(),
             )
             .await
     });
@@ -1576,7 +1640,7 @@ async fn t_review_start_is_one_commit() {
     // 布景 1 笔（等审批）+ 请求 1 笔；审查回合自己的启动另算
     assert!(b.store.commits.load(Ordering::SeqCst) >= commits + 2);
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h).await;
@@ -1603,6 +1667,7 @@ async fn commit_with_never_hands_out_token() {
             ApprovalModeTarget::Conversation(conversation()),
             Some(Auto),
             user(),
+            crate::support::command(),
         ),
     )
     .await
@@ -1760,7 +1825,12 @@ async fn everyday_approval_flows_commit() {
     let h = b.ask(&d, turn(1), write_req("src/a.rs"));
     let id = b.approval(0).await;
     b.engine
-        .decide(id, allow(RememberScope::Project), user())
+        .decide(
+            id,
+            allow(RememberScope::Project),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     assert_eq!(settle(h).await, PermissionDecision::Allow);
@@ -1768,7 +1838,7 @@ async fn everyday_approval_flows_commit() {
     let h = b.ask(&d, turn(1), bash_req("npm test"));
     let id = b.approval(1).await;
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     assert!(is_deny(&settle(h).await, MSG_USER_DENIED));
@@ -1785,7 +1855,12 @@ async fn everyday_approval_flows_commit() {
     b.interrupt(turn(3)).await;
     let out = b
         .engine
-        .decide(a, allow(RememberScope::Once), user())
+        .decide(
+            a,
+            allow(RememberScope::Once),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     assert_eq!(out.resume_turn, Some(turn(3)));

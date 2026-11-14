@@ -350,3 +350,12 @@ pub fn edit_req(path: &str) -> PermissionRequest {
         serde_json::json!({ "file_path": path, "old_string": "a", "new_string": "b" }),
     )
 }
+
+/// 一条新命令的 `command_id`（`decide`、`switch_mode` 要客户端那条命令的编号）。时间戳取 48 位的最大值，
+/// 不会和测试里 ID 生成器给的编号撞上；计数保证每次都不一样，不会被当成重发。
+pub fn command() -> iwork_domain::id::CommandId {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    iwork_domain::id::CommandId::from_raw(RawUlid::from_parts((1 << 48) - 1, u128::from(n)))
+}

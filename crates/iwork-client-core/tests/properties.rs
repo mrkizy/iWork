@@ -379,6 +379,7 @@ mod live {
             }),
             mode: Some(pb::ApprovalMode::Auto as i32),
             cause: pb::ApprovalModeChangeCause::User as i32,
+            released_approvals: None,
         }));
         d.append(ev);
         d.append(f::user_message("k-1", conv, "第一条"));
@@ -403,6 +404,7 @@ mod live {
             }),
             mode: Some(pb::ApprovalMode::Auto as i32),
             cause: pb::ApprovalModeChangeCause::User as i32,
+            released_approvals: None,
         })));
     }
 

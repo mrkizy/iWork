@@ -46,7 +46,12 @@ async fn round2_void_committed_before_callback_cannot_be_approved() {
     commit_raw(&b, 1, with_turn).await;
     assert_eq!(
         b.engine
-            .decide(id, allow(RememberScope::Project), user())
+            .decide(
+                id,
+                allow(RememberScope::Project),
+                user(),
+                crate::support::command()
+            )
             .await,
         Err(DecideError::NotPending(id))
     );
@@ -83,7 +88,12 @@ async fn round2_void_committed_before_callback_cannot_be_approved() {
     assert!(!plan.is_empty());
     let commits = b.store.commits.load(Ordering::SeqCst);
     b.engine
-        .decide(id, allow(RememberScope::Once), user())
+        .decide(
+            id,
+            allow(RememberScope::Once),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -116,7 +126,12 @@ async fn round2_void_for_event_blocks_decide_until_confirmed() {
     assert!(!plan.is_empty());
     assert_eq!(
         b.engine
-            .decide(id, allow(RememberScope::Project), user())
+            .decide(
+                id,
+                allow(RememberScope::Project),
+                user(),
+                crate::support::command()
+            )
             .await,
         Err(DecideError::NotPending(id))
     );
@@ -138,7 +153,11 @@ async fn round2_committed_denial_survives_cancelled_receipt() {
     let gate = Arc::new(tokio::sync::Notify::new());
     *b.store.receipt_gate.lock().unwrap() = Some(gate.clone());
     let engine = b.engine.clone();
-    let decision = tokio::spawn(async move { engine.decide(id, UserDecision::Deny, user()).await });
+    let decision = tokio::spawn(async move {
+        engine
+            .decide(id, UserDecision::Deny, user(), crate::support::command())
+            .await
+    });
     let stored = loop {
         if let Some(e) = b
             .store
@@ -162,6 +181,7 @@ async fn round2_committed_denial_survives_cancelled_receipt() {
             ApprovalModeTarget::Conversation(conversation()),
             Some(Auto),
             user(),
+            crate::support::command(),
         )
         .await
         .unwrap();
@@ -191,6 +211,7 @@ async fn round2_committed_mode_switch_survives_cancelled_receipt() {
                 ApprovalModeTarget::Conversation(conversation()),
                 Some(Auto),
                 user(),
+                crate::support::command(),
             )
             .await
     });
@@ -228,7 +249,12 @@ async fn round2_live_cursor_must_describe_contiguous_rule_history() {
     let h = b.ask(&d, turn(210), write_req("src/a.rs"));
     let id = b.approval(0).await;
     b.engine
-        .decide(id, allow(RememberScope::Project), user())
+        .decide(
+            id,
+            allow(RememberScope::Project),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     settle(h).await;
@@ -257,7 +283,12 @@ async fn round2_live_cursor_must_describe_contiguous_rule_history() {
     let h = b.ask(&d, turn(212), write_req("docs/other.md"));
     let id = b.approval(1).await;
     b.engine
-        .decide(id, allow(RememberScope::Project), user())
+        .decide(
+            id,
+            allow(RememberScope::Project),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     settle(h).await;
@@ -265,7 +296,7 @@ async fn round2_live_cursor_must_describe_contiguous_rule_history() {
     let h = b.ask(&d, turn(213), write_req("src/a.rs"));
     let id = b.approval(2).await;
     b.engine
-        .decide(id, UserDecision::Deny, user())
+        .decide(id, UserDecision::Deny, user(), crate::support::command())
         .await
         .unwrap();
     settle(h).await;
@@ -338,7 +369,12 @@ async fn round2_failed_audit_must_not_consume_grant_once() {
     let _ = h.await;
     b.interrupt(turn(220)).await;
     b.engine
-        .decide(id, allow(RememberScope::Once), user())
+        .decide(
+            id,
+            allow(RememberScope::Once),
+            user(),
+            crate::support::command(),
+        )
         .await
         .unwrap();
     assert!(b.grant(id).await.is_some());

@@ -154,7 +154,7 @@ impl Judge for RealEngine {
             UserDecision::Deny
         };
         self.engine
-            .decide(id, decision, Actor("user".into()))
+            .decide(id, decision, Actor("user".into()), super::command())
             .await
             .expect("用户决定被接受");
     }

@@ -94,3 +94,14 @@ opt-level = "s"
 # 不优化时算一次约 7s（优化后约 0.5s），并行的真进程测试会一起超时（T04 组 3，CI 实测）。
 [profile.dev.package.sha2]
 opt-level = 3
+
+# 依赖只留行号级调试信息，自家 crate 照常完整：启动时取自身身份要对整个映像算哈希（Linux）或静态验签（macOS），
+# 耗时和程序体积成正比；Linux 调试构建把 DWARF 打进程序文件，体积大头是依赖的调试信息，
+# 真进程测试的启动余量会被它吃掉（T10a 组 B，install::cooldown）。代价是调试器里看不到依赖的局部变量。
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
+# 只给性能判据用的优化构建（需求 14 的「客户端重开 1s」，`launcher_process::reconnect_within_1s`）：带 dev feature，
+# 所以单独一个目录 target/perf-test/，不进 target/release——发布检查（check-no-dev-trust.sh）与打包只认 target/release。
+[profile.perf-test]
+inherits = "release"

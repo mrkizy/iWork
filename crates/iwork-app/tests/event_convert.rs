@@ -200,6 +200,11 @@ fn malformed_proto_is_rejected_with_names() {
             pb::ProjectSettingsUpdated {
                 project_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
                 settings: Some(s),
+                previous: Some(pb::ProjectSettings {
+                    default_approval_mode: pb::ApprovalMode::Manual as i32,
+                    default_model: None,
+                    ai_review: Some(pb::AiReviewSettings::default()),
+                }),
             },
         )),
     };

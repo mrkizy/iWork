@@ -1327,7 +1327,12 @@ mod delivery_gate {
         let ask = w.b.ctl.ask_bash(r#"{"command":"npm test"}"#);
         let id = requested(&w.store).await;
         w.engine
-            .decide(id, allow_once(), Actor("user".into()))
+            .decide(
+                id,
+                allow_once(),
+                Actor("user".into()),
+                crate::support::command(),
+            )
             .await
             .unwrap();
         assert_eq!(ask.await.unwrap(), PermissionDecision::Allow);
@@ -1356,7 +1361,14 @@ mod delivery_gate {
         ]);
         w.engine.sync().await.unwrap();
         assert!(w.engine.grant(id).is_none(), "交付过的批准不留一次性放行");
-        assert!(w.engine.turns_to_resume().is_empty());
+        assert!(
+            w.engine
+                .turns_to_resume()
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect::<Vec<_>>()
+                .is_empty()
+        );
         // 回合在编排背后被记成中断了：编排随后那笔 `Running → Completed` 过不了提交时校验（T10a A4），
         // 以存储错误收场（宿主按 D5 补账）
         w.b.ctl.send(AgentUpdate::Finished(TurnOutcome::Completed));
@@ -1374,7 +1386,12 @@ mod delivery_gate {
         let ask = w.b.ctl.ask_bash(r#"{"command":"npm test"}"#);
         let id = requested(&w.store).await;
         w.engine
-            .decide(id, allow_once(), Actor("user".into()))
+            .decide(
+                id,
+                allow_once(),
+                Actor("user".into()),
+                crate::support::command(),
+            )
             .await
             .unwrap();
         // 单线程运行时：编排要等测试让出才动，交付那笔会停在入队门口
@@ -1396,7 +1413,14 @@ mod delivery_gate {
             Some(t),
             "没交付的批准在中断时变成一次性放行"
         );
-        assert_eq!(w.engine.turns_to_resume(), vec![t]);
+        assert_eq!(
+            w.engine
+                .turns_to_resume()
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect::<Vec<_>>(),
+            vec![t]
+        );
         task.abort();
         ask.abort();
     }

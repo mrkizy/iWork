@@ -4,12 +4,14 @@
 //! 回合中断后的「继续」卡片。AGENTS.md 草稿属于项目不属于对话，不计入。
 //! [`counted_in`] 就是这张登记表；`ConversationRead` 时按同样的四个来源重算。
 
+use iwork_domain::conversation::check_read_committed;
 use iwork_domain::event::{ConversationRead, DomainEvent};
 use iwork_domain::message::Author;
 use iwork_domain::turn::TurnState;
 use iwork_ports::store::{EventCodec, StorageError};
 use rusqlite::{OptionalExtension, params};
 
+use super::owner::precondition;
 use super::{Cx, conversations};
 use crate::sql::sql_err;
 
@@ -52,13 +54,18 @@ pub(super) fn bump<C: EventCodec + ?Sized>(
     Ok(())
 }
 
-/// 已读到 `last_read_seq`：写已读位置，按四个来源重算未读。
+/// 已读到 `last_read_seq`：先过状态前提（只往前走，T10a 1/F-2），写已读位置，按四个来源重算未读。
 pub(super) fn conversation_read<C: EventCodec + ?Sized>(
     cx: &Cx<'_, C>,
     e: &ConversationRead,
 ) -> Result<(), StorageError> {
     let id = e.conversation_id.to_string();
     conversations::modify(cx, &id, false, |c| {
+        precondition(
+            cx,
+            &format!("对话 {id}"),
+            check_read_committed(c.last_read_seq, e),
+        )?;
         c.last_read_seq = e.last_read_seq;
         Ok(())
     })?;

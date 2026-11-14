@@ -1044,6 +1044,25 @@ pub fn ev_project_settings_updated() -> DomainEvent {
     ev(E::ProjectSettingsUpdated(ProjectSettingsUpdated {
         project_id: s(PROJECT),
         settings: Some(project_settings()),
+        previous: None,
+    }))
+}
+
+/// 带 `previous`（T10a 1/F-1 加的字段）：据以合并的那一份与新设置不同。
+pub fn ev_project_settings_updated_with_previous() -> DomainEvent {
+    ev(E::ProjectSettingsUpdated(ProjectSettingsUpdated {
+        project_id: s(PROJECT),
+        settings: Some(project_settings()),
+        previous: Some(ProjectSettings {
+            default_approval_mode: ApprovalMode::Manual.into(),
+            default_model: None,
+            ai_review: Some(AiReviewSettings {
+                enabled: false,
+                runtime_id: None,
+                model: None,
+                timeout_secs: 30,
+            }),
+        }),
     }))
 }
 
@@ -1144,6 +1163,7 @@ pub fn ev_approval_mode_changed() -> DomainEvent {
         }),
         mode: Some(ApprovalMode::FullAccess.into()),
         cause: ApprovalModeChangeCause::ProjectSwitch.into(),
+        released_approvals: None,
     }))
 }
 

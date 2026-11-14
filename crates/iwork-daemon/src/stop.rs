@@ -174,7 +174,16 @@ pub async fn stop<W: RunningWork>(
             }
             board.set_not_cleared(report.not_cleared);
         }
-        Err(_) => tracing::warn!("关会话到点没走完"),
+        Err(_) => {
+            // 不靠宿主自己的期限先到：外层到点就读此刻的报告，没报回来的算没清空（b45 1/F-4）
+            let report = work.abort_snapshot();
+            tracing::warn!(
+                sessions = report.sessions,
+                not_cleared = report.not_cleared,
+                "关会话到点没走完，按此刻的报告记"
+            );
+            board.set_not_cleared(report.not_cleared);
+        }
     }
     // 4、5
     hooks.stop_tasks().await;
@@ -203,7 +212,7 @@ pub async fn stop<W: RunningWork>(
 mod tests {
     use super::*;
     use crate::status::StatusIdentity;
-    use crate::work::{AbortReport, RunningCount};
+    use crate::work::{AbortReport, QuitCounts, ShutdownDecision};
     use iwork_ipc::rendezvous::{ExeStamp, ExitCode};
     use std::sync::{Arc, Mutex};
 
@@ -215,14 +224,31 @@ mod tests {
     }
 
     impl RunningWork for Work {
-        fn running(&self) -> RunningCount {
-            RunningCount { turns: 1, cards: 0 }
+        async fn quit_counts(&self) -> Option<QuitCounts> {
+            Some(QuitCounts {
+                running_turns: 1,
+                ..QuitCounts::default()
+            })
+        }
+        fn try_quit(
+            &self,
+            confirmed: bool,
+            counts: Option<QuitCounts>,
+            trigger: impl FnOnce(),
+        ) -> ShutdownDecision {
+            crate::work::NoWork.try_quit(confirmed, counts, trigger)
         }
         async fn cancel_all(&self) {
             self.log.lock().unwrap().push("cancel_all");
         }
         async fn abort_all(&self) -> AbortReport {
             self.log.lock().unwrap().push("abort_all");
+            AbortReport {
+                sessions: 1,
+                not_cleared: self.not_cleared,
+            }
+        }
+        fn abort_snapshot(&self) -> AbortReport {
             AbortReport {
                 sessions: 1,
                 not_cleared: self.not_cleared,
@@ -357,6 +383,48 @@ mod tests {
         assert!(!s.request(StopReason::Fatal));
         assert_eq!(w.await.unwrap(), StopReason::Signal);
         assert_eq!(s.requested(), Some(StopReason::Signal));
+    }
+
+    /// b45 1/F-4：第 3 步到点、`abort_all` 还没回来时，状态文件记的是此刻的报告（不是初值 0）。
+    #[tokio::test(start_paused = true)]
+    async fn abort_deadline_records_snapshot() {
+        struct Stuck;
+        impl RunningWork for Stuck {
+            async fn quit_counts(&self) -> Option<QuitCounts> {
+                None
+            }
+            fn try_quit(
+                &self,
+                confirmed: bool,
+                counts: Option<QuitCounts>,
+                trigger: impl FnOnce(),
+            ) -> ShutdownDecision {
+                crate::work::NoWork.try_quit(confirmed, counts, trigger)
+            }
+            async fn cancel_all(&self) {}
+            async fn abort_all(&self) -> AbortReport {
+                std::future::pending().await
+            }
+            fn abort_snapshot(&self) -> AbortReport {
+                AbortReport {
+                    sessions: 3,
+                    not_cleared: 2,
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let b = board(dir.path());
+        let log: Log = Default::default();
+        stop(
+            StopReason::Signal,
+            false,
+            &b,
+            &Gate::default(),
+            &Stuck,
+            &mut Hooks(log),
+        )
+        .await;
+        assert_eq!(b.snapshot().not_cleared, 2);
     }
 
     #[test]

@@ -506,11 +506,15 @@ where
     }
 
     /// 用户对待审批的决定（方案 6.10.6 第 2 条；`DecideApproval` 的核心，T10 调用）。
+    ///
+    /// `command_id` 是客户端那条命令的：这笔提交用它记账，同一条命令重发由分发入口的查回执与存储的去重
+    /// 认出来（T10a 方案 A2、第 10 节第 1 条）。被拒重算时沿用同一个：被拒的那笔没有落盘，也就没有记下它。
     pub async fn decide(
         &self,
         id: ApprovalId,
         decision: UserDecision,
         by: Actor,
+        command_id: CommandId,
     ) -> Result<DecideOutcome, DecideError> {
         self.catch_up().await?;
         let conversation = lock_std(&self.inner)
@@ -568,14 +572,17 @@ where
                 }
                 UserDecision::Deny => plan_approval(&approval, ApprovalTrigger::UserDeny, mode)?,
             };
-            match self
-                .commit_under(&mut [&mut token], &by.0, events.clone())
+            let receipt = match self
+                .commit_request(
+                    &mut [&mut token],
+                    command_request(command_id, &by, events.clone()),
+                )
                 .await
             {
-                Ok(_) => {}
+                Ok(receipt) => receipt,
                 Err(StorageError::Projection { .. }) => continue,
                 Err(error) => return Err(error.into()),
-            }
+            };
             // 成功后追平：拒绝记忆、一次性放行、对等待方的答复都在折叠应用这条事件时发生
             let resume_turn = self
                 .catch_up_after_commit("decide")
@@ -583,6 +590,7 @@ where
                 .then(|| self.resume_turn_for(id, approval.turn_id))
                 .flatten();
             return Ok(DecideOutcome {
+                receipt,
                 events,
                 resume_turn,
             });
@@ -597,28 +605,41 @@ where
     }
 
     /// 切换档位（方案 6.10.6 第 4 条；`SetApprovalMode` 的核心）。`mode = None` 表示成员恢复跟随。
-    /// 返回已提交的事件与要续接的回合。
+    /// 返回回执、已提交的事件与要续接的回合。`command_id` 同 [`Self::decide`]。
     pub async fn switch_mode(
         &self,
         target: ApprovalModeTarget,
         mode: Option<ApprovalMode>,
         by: Actor,
-    ) -> Result<(Vec<DomainEvent>, Vec<TurnId>), ModeError> {
-        let changed: DomainEvent = ApprovalModeChanged {
-            target,
-            mode,
-            cause: ApprovalModeChangeCause::User,
-        }
-        .into();
+        command_id: CommandId,
+    ) -> Result<ModeSwitched, ModeError> {
+        // 「放行了几条」由后台给（T10a 方案 2.3）：算完这一笔的计划才知道，被拒重算时跟着重算
+        let changed = |released: usize| -> DomainEvent {
+            ApprovalModeChanged {
+                target,
+                mode,
+                cause: ApprovalModeChangeCause::User,
+                released_approvals: Some(u32::try_from(released).unwrap_or(u32::MAX)),
+            }
+            .into()
+        };
         let conversation = match target {
             ApprovalModeTarget::Project(_) => {
                 if mode == Some(ApprovalMode::FullAccess) {
                     return Err(ModeError::FullAccessNotAllowedAsDefault);
                 }
                 // 项目默认只影响之后新建的对话，谁先谁后由 seq 说了算：不拿令牌
-                self.commit_raw(&by.0, vec![changed.clone()]).await?;
+                let receipt = self
+                    .ports
+                    .store
+                    .commit(command_request(command_id, &by, vec![changed(0)]))
+                    .await?;
                 self.catch_up_after_commit("switch_mode").await;
-                return Ok((vec![changed], Vec::new()));
+                return Ok(ModeSwitched {
+                    receipt,
+                    events: vec![changed(0)],
+                    resume: Vec::new(),
+                });
             }
             ApprovalModeTarget::Conversation(c) => {
                 if mode.is_none() {
@@ -664,7 +685,8 @@ where
                 (conv, f.live_rules(), candidates)
             };
             let modes = modes_after(&conv.modes, target, mode).expect("项目默认已在上面返回");
-            let mut events = vec![changed.clone()];
+            // 第一条先占位，放行数算完再填
+            let mut events = vec![changed(0)];
             let mut released = Vec::new();
             for (approval, assistant, keys) in candidates {
                 let Some(record) = approval.call.as_deref() else {
@@ -683,6 +705,7 @@ where
                     released.push((approval.id, approval.turn_id));
                 }
             }
+            events[0] = changed(released.len());
             let released_ids: Vec<ApprovalId> = released.iter().map(|(id, _)| *id).collect();
             {
                 let inner = lock_std(&self.inner);
@@ -691,15 +714,18 @@ where
                         .map_err(DecideError::from)?,
                 );
             }
-            match self
-                .commit_under(&mut [&mut token], &by.0, events.clone())
+            let receipt = match self
+                .commit_request(
+                    &mut [&mut token],
+                    command_request(command_id, &by, events.clone()),
+                )
                 .await
             {
-                Ok(_) => {}
+                Ok(receipt) => receipt,
                 Err(StorageError::Projection { .. }) => continue,
                 Err(error) => return Err(DecideError::from(error).into()),
-            }
-            let resumes = if self.catch_up_after_commit("switch_mode").await {
+            };
+            let resume = if self.catch_up_after_commit("switch_mode").await {
                 released
                     .iter()
                     .filter_map(|(id, turn)| self.resume_turn_for(*id, *turn))
@@ -709,7 +735,11 @@ where
             } else {
                 Vec::new()
             };
-            return Ok((events, resumes));
+            return Ok(ModeSwitched {
+                receipt,
+                events,
+                resume,
+            });
         }
         Err(DecideError::Conflict.into())
     }
@@ -736,5 +766,15 @@ where
             }
         };
         Ok((events, Self::hold(token)))
+    }
+}
+
+/// 用客户端那条命令的 `command_id` 拼一笔提交（`decide`、`switch_mode` 用）。
+fn command_request(command_id: CommandId, by: &Actor, events: Vec<DomainEvent>) -> CommitRequest {
+    CommitRequest {
+        command_id,
+        actor: by.clone(),
+        events,
+        outbox: Vec::new(),
     }
 }

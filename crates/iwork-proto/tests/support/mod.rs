@@ -176,6 +176,7 @@ sample_types! {
         b::ev_approval_decided_in_conversation,
         b::ev_approval_voided_in_conversation,
         b::ev_user_action_state_changed_in_conversation,
+        b::ev_project_settings_updated_with_previous,
     ],
 }
 

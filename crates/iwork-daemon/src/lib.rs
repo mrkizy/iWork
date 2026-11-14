@@ -3,6 +3,7 @@
 //! 入口是 [`boot::run`]：解析参数 → 启动表（[`boot`]）→ 运行 → 退出状态（[`exit::process_status`]）。
 
 pub mod args;
+pub mod assembly;
 pub mod attention;
 pub mod boot;
 #[cfg(unix)]
@@ -11,7 +12,9 @@ pub mod dev;
 #[cfg(all(unix, feature = "dev"))]
 mod dev_parts;
 pub mod exit;
+pub mod gate;
 pub mod handler;
+pub mod host;
 pub mod install;
 pub mod instance;
 pub mod logging;

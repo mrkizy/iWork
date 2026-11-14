@@ -251,6 +251,23 @@ pub trait ReadModelPort: Send + Sync {
     ) -> impl Future<Output = Result<Vec<String>, StorageError>> + Send;
     /// 退出前要问的数（E1）。
     fn quit_counts(&self) -> impl Future<Output = Result<QuitCounts, StorageError>> + Send;
+    /// 这一轮的请求：和回合的 `TurnQueued` 同一次提交写下的那条用户消息（新回合发给运行时、续接回合在摘要新开时
+    /// 再给一次，都从它转；T06 方案 5.2a）。系统回合返回 `None`；回合不存在报 `NotFound`。
+    fn turn_request(
+        &self,
+        turn: TurnId,
+    ) -> impl Future<Output = Result<Option<Message>, StorageError>> + Send;
+    /// 这个回合已记下的用量累计（用量口径 b：事件里的用量是回合累计）；没记过为零。续接时交给编排接着加，宿主或
+    /// 受理函数把回合收成终态时结束事件带上它。
+    fn recorded_usage(
+        &self,
+        turn: TurnId,
+    ) -> impl Future<Output = Result<Usage, StorageError>> + Send;
+    /// 受理回合命令要读的（T10a 方案 A5）：回合与它所在的对话，一个读事务。回合不存在为 `None`。
+    fn turn_with_conversation(
+        &self,
+        turn: TurnId,
+    ) -> impl Future<Output = Result<Option<(Turn, Conversation)>, StorageError>> + Send;
     /// 算会话快照的已提交输入（D8）。对话不存在时报 `NotFound`。
     fn snapshot_inputs(
         &self,

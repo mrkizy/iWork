@@ -185,6 +185,9 @@ pub struct GrantOnce {
     pub approval_id: ApprovalId,
     pub turn: TurnId,
     pub record: ApprovalCallRecord,
+    /// 批准它的那条 `ApprovalDecided` 的 seq。宿主只按这次运行里落盘的批准自动续接（T10a 方案 D7 ①、R6，
+    /// 产品负责人 2026-11-13 定：批准过的审批不跨重启自动续接）
+    pub decided_seq: Seq,
 }
 
 impl GrantOnce {
@@ -209,11 +212,20 @@ pub enum UserDecision {
     Deny,
 }
 
-/// `decide` 的结果：已提交的事件，以及要续接的回合（等待上限中断过、用户允许时）。
+/// `decide` 的结果：那笔提交的回执、已提交的事件，以及要续接的回合（等待上限中断过、用户允许时）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecideOutcome {
+    pub receipt: CommitReceipt,
     pub events: Vec<DomainEvent>,
     pub resume_turn: Option<TurnId>,
+}
+
+/// `switch_mode` 的结果：那笔提交的回执、已提交的事件、要续接的回合。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModeSwitched {
+    pub receipt: CommitReceipt,
+    pub events: Vec<DomainEvent>,
+    pub resume: Vec<TurnId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -545,7 +557,7 @@ where
     }
 
     /// R1 的「要求续接」：有一次性放行、回合在 `Interrupted` 的回合。
-    pub fn turns_to_resume(&self) -> Vec<TurnId> {
+    pub fn turns_to_resume(&self) -> Vec<(TurnId, Seq)> {
         lock_std(&self.inner).folded.turns_to_resume()
     }
 

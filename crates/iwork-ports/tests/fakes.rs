@@ -808,6 +808,30 @@ impl ReadModelPort for FakeReadModel {
     async fn quit_counts(&self) -> Result<QuitCounts, StorageError> {
         Ok(QuitCounts::default())
     }
+    async fn turn_request(
+        &self,
+        _turn: TurnId,
+    ) -> Result<Option<iwork_domain::message::Message>, StorageError> {
+        Ok(None)
+    }
+    async fn recorded_usage(
+        &self,
+        _turn: TurnId,
+    ) -> Result<iwork_domain::common::Usage, StorageError> {
+        Ok(Default::default())
+    }
+    async fn turn_with_conversation(
+        &self,
+        _turn: TurnId,
+    ) -> Result<
+        Option<(
+            iwork_domain::turn::Turn,
+            iwork_domain::conversation::Conversation,
+        )>,
+        StorageError,
+    > {
+        Ok(None)
+    }
     async fn snapshot_inputs(&self, c: ConversationId) -> Result<SnapshotInputs, StorageError> {
         Err(StorageError::NotFound {
             entity: "conversation",

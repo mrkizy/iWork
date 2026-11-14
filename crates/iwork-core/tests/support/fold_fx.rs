@@ -428,6 +428,7 @@ pub fn e_mode(target: ApprovalModeTarget, mode: Option<ApprovalMode>) -> DomainE
         target,
         mode,
         cause: ApprovalModeChangeCause::User,
+        released_approvals: None,
     }
     .into()
 }

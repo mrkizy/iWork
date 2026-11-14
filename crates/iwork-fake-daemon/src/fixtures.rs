@@ -285,6 +285,7 @@ pub fn approval_mode_changed(conversation_id: &str, mode: pb::ApprovalMode) -> p
         }),
         mode: Some(mode.into()),
         cause: pb::ApprovalModeChangeCause::User.into(),
+        released_approvals: None,
     }))
 }
 
