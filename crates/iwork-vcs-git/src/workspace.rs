@@ -13,6 +13,7 @@ use iwork_ports::vcs::{
 };
 use sha2::{Digest, Sha256};
 
+use crate::layout::{self, LayoutError, Opening, Refusal};
 use crate::patch::{EntryMode, Side, file_diff, unsupported_diff};
 
 /// 当前基线：HEAD 指向的提交。还没有任何提交时用空树，这样相对它的差异就是全部文件。
@@ -264,6 +265,8 @@ struct Worktree<'repo> {
         gix::AttributeStack<'repo>,
         gix::attrs::search::Outcome,
     )>,
+    /// 子模块的 git 目录只能在这些目录之下（上层仓库 git 目录与共享目录下的 `modules/`，真实路径）
+    submodule_homes: Vec<PathBuf>,
     op: &'static str,
 }
 
@@ -295,6 +298,11 @@ impl<'repo> Worktree<'repo> {
             let outcome = attrs.selected_attribute_matches(["filter"]);
             Some((external_filters, attrs, outcome))
         };
+        // 不存在的 `modules/` 取不到真实路径，那里也就不可能有子模块的 git 目录
+        let submodule_homes = [repo.git_dir(), repo.common_dir()]
+            .into_iter()
+            .filter_map(|dir| dunce::canonicalize(dir.join("modules")).ok())
+            .collect();
         Ok(Self {
             root: root.0.as_path(),
             filter,
@@ -302,6 +310,7 @@ impl<'repo> Worktree<'repo> {
             caps,
             stat_options,
             external,
+            submodule_homes,
             op,
         })
     }
@@ -402,8 +411,9 @@ impl<'repo> Worktree<'repo> {
                     return Ok(WorktreeSide::Absent);
                 };
                 let id = match self.checked_out_submodule_head(rel, kind)? {
-                    Some(head) => head,
-                    None => staged,
+                    SubmoduleHead::At(head) => head,
+                    SubmoduleHead::NotCheckedOut => staged,
+                    SubmoduleHead::Refused(e) => return Err(e),
                 };
                 Ok(WorktreeSide::Present(Side::gitlink(id)))
             }
@@ -436,8 +446,12 @@ impl<'repo> Worktree<'repo> {
                 continue;
             };
             let changed = if mode == Mode::COMMIT {
-                self.checked_out_submodule_head(&rel, kind)?
-                    .is_some_and(|head| head != id)
+                match self.checked_out_submodule_head(&rel, kind)? {
+                    SubmoduleHead::At(head) => head != id,
+                    SubmoduleHead::NotCheckedOut => false,
+                    // 布局不让读：看不出检出的是哪个提交，保守地列为改动（和「不知道就算变了」同一口径）
+                    SubmoduleHead::Refused(_) => true,
+                }
             } else if matches!(kind, iwork_rootfs::EntryKind::File { .. })
                 && (mode == Mode::FILE || mode == Mode::FILE_EXECUTABLE)
                 && self.external_driver(&rel)?.is_some()
@@ -518,28 +532,48 @@ impl<'repo> Worktree<'repo> {
             .map(|e| e.id)
     }
 
-    /// 子模块已检出时返回它当前的提交；没检出（目录不在，或里面没有 `.git`）返回 `None`。
+    /// 子模块检出的是哪个提交。没检出（目录不在，或里面没有 `.git`）是 `NotCheckedOut`；布局不让读（`.git` 是
+    /// 链接、是目录、gitfile 指到上层 `modules/` 之外等，见 [`layout`]）是 `Refused`，带着点名原因的错误。
     fn checked_out_submodule_head(
         &self,
         rel: &Path,
         kind: iwork_rootfs::EntryKind,
-    ) -> Result<Option<ObjectId>, VcsError> {
+    ) -> Result<SubmoduleHead, VcsError> {
         let op = self.op;
         if kind != iwork_rootfs::EntryKind::Dir {
-            return Ok(None);
+            return Ok(SubmoduleHead::NotCheckedOut);
         }
         let dot_git = rel.join(".git");
         match iwork_rootfs::inspect(self.root, &dot_git) {
-            Ok(iwork_rootfs::EntryKind::Missing) => return Ok(None),
+            Ok(iwork_rootfs::EntryKind::Missing) => return Ok(SubmoduleHead::NotCheckedOut),
             Ok(_) => {}
             Err(e) => return Err(failed(op, e.to_string())),
         }
-        // 与父仓库一样经 open 打开：子模块自己的配置也要先去掉外部过滤器，只读 HEAD
-        let sub = open(&RepoRoot(self.root.join(rel)), op)?.repo;
+        // 与父仓库一样经 open_as 打开：先查布局，子模块自己的配置也要先去掉外部过滤器，只读 HEAD
+        let opening = Opening::Submodule {
+            modules: &self.submodule_homes,
+        };
+        let sub = match open_as(&RepoRoot(self.root.join(rel)), &opening, op) {
+            Ok(opened) => opened.repo,
+            Err(OpenError::Refused(refusal)) => {
+                return Ok(SubmoduleHead::Refused(failed(
+                    op,
+                    format!("子模块 {}：{refusal}", rel.display()),
+                )));
+            }
+            Err(OpenError::Failed(e)) => return Err(e),
+        };
         sub.head_id()
-            .map(|id| Some(id.detach()))
+            .map(|id| SubmoduleHead::At(id.detach()))
             .map_err(|e| failed(op, format!("读子模块 {} 的 HEAD 失败：{e}", rel.display())))
     }
+}
+
+/// 子模块检出的是哪个提交，见 [`Worktree::checked_out_submodule_head`]。
+enum SubmoduleHead {
+    NotCheckedOut,
+    At(ObjectId),
+    Refused(VcsError),
 }
 
 /// 一个工作区条目的版本：种类照 mode，内容取 SHA-256。
@@ -600,7 +634,10 @@ fn status_items(
         .index_worktree_rewrites(None)
         // 不扫描子模块内部：gix 会用子模块自己未清理的配置跑 status（可能运行外部过滤器）。子模块指向的
         // 提交变化由 Worktree::changes_gix_cannot_judge 自己比较
-        .index_worktree_submodules(None);
+        .index_worktree_submodules(None)
+        // 不认嵌套仓库：否则 gix 对每个未跟踪目录探 `<目录>/.git`，跟着链接与 gitfile 读到仓库外。名叫 `.git`
+        // 的条目只按名字交出来，结果由 nested::fold_nested_repositories 整理回 git 的样子
+        .dirwalk_options(|o| o.recurse_repositories(true).emit_pruned(true));
     if renames == Renames::Off {
         platform =
             platform.tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled);
@@ -608,11 +645,22 @@ fn status_items(
     if let Some(tree) = head_tree {
         platform = platform.head_tree(tree);
     }
-    platform
+    let items = platform
         .into_iter(None)
         .map_err(|e| failed(op, e.to_string()))?
         .map(|item| item.map_err(|e| failed(op, e.to_string())))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    let index = repo
+        .index_or_empty()
+        .map_err(|e| failed(op, format!("读暂存区失败：{e}")))?;
+    let ignore_case = repo
+        .filesystem_options()
+        .map_err(|e| failed(op, format!("读文件系统配置失败：{e}")))?
+        .ignore_case;
+    Ok(crate::nested::fold_nested_repositories(
+        items,
+        &crate::nested::GixIndex::new(&index, ignore_case),
+    ))
 }
 
 /// 为后台读操作打开的仓库。
@@ -622,21 +670,47 @@ struct Opened {
     external_filters: BTreeSet<BString>,
 }
 
-/// 打开仓库做读操作（`baseline`、`status`、`diff` 都经这里，配置只有这一份）。
+/// 打开仓库做读操作（`baseline`、`status`、`diff`、读子模块的 `HEAD` 都经这里，配置只有这一份）。
+///
+/// 交给 gix 之前先查布局，只让 gix 打开查过的 git 目录、仓库来源的配置不过信任闸，开完再核对（[`layout`]，
+/// T10a 方案 2.4a）：不让 gix 顺着仓库里的东西读到仓库外面去。布局不对时返回点名原因的错误。
 ///
 /// 后台读操作绝不启动外部程序：仓库配置（含 `.git/config`，Agent 的脚本可能写过它）里的 `filter.<name>.clean`
 /// / `smudge` / `process` 会让 gix 在比较内容时以后台服务的权限、在沙箱外运行任意程序。所以打开后从
 /// **内存里的**配置删掉全部 `filter.*` 节（不改磁盘上的配置），只留进程内的换行、编码等转换；删掉的名字
 /// 记下来，用于把需要它们的文件标成「不支持比较」。删完再确认过滤管线里确实没有外部驱动，否则报错（失败即关闭）。
 fn open(repo_root: &RepoRoot, op: &'static str) -> Result<Opened, VcsError> {
+    open_as(repo_root, &Opening::Project, op).map_err(|e| match e {
+        OpenError::Refused(refusal) => failed(op, refusal.to_string()),
+        OpenError::Failed(e) => e,
+    })
+}
+
+/// 打开失败：布局不让打开，或别的错误。分开是因为子模块那一支要把前一种当成「看不出检出的提交」。
+enum OpenError {
+    Refused(Refusal),
+    Failed(VcsError),
+}
+
+fn open_as(
+    repo_root: &RepoRoot,
+    opening: &Opening<'_>,
+    op: &'static str,
+) -> Result<Opened, OpenError> {
+    let layout_error = |e: LayoutError| match e {
+        LayoutError::Refused(refusal) => OpenError::Refused(refusal),
+        LayoutError::Io(message) => OpenError::Failed(failed(op, message)),
+    };
     if !repo_root.0.exists() {
-        return Err(VcsError::PathMissing {
+        return Err(OpenError::Failed(VcsError::PathMissing {
             path: repo_root.0.clone(),
-        });
+        }));
     }
-    let mut repo = gix::open(&repo_root.0)
-        .map_err(|e| failed(op, format!("{}：{e}", repo_root.0.display())))?;
-    let external_filters = remove_external_filters(&mut repo, op)?;
+    let checked = layout::check_before_open(&repo_root.0, opening).map_err(layout_error)?;
+    let mut repo = gix::open_opts(layout::dot_git(&repo_root.0), layout::open_options())
+        .map_err(|e| OpenError::Failed(failed(op, format!("{}：{e}", repo_root.0.display()))))?;
+    layout::check_after_open(&repo, &repo_root.0, &checked).map_err(layout_error)?;
+    let external_filters = remove_external_filters(&mut repo, op).map_err(OpenError::Failed)?;
     Ok(Opened {
         repo,
         external_filters,
