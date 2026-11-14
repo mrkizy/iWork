@@ -339,6 +339,25 @@ impl PublishSink for Nowhere {
     fn publish(&self, _p: Published) {}
 }
 
+/// 观察者的出口：接上 ipc 的发布方之前什么都不发（和 [`Nowhere`] 一样），接上之后转给它。要经真 ipc 订阅的用例
+/// 在起服务端之后、发命令之前接上（[`H::sink`]）。
+#[derive(Default)]
+pub struct LateSink(std::sync::OnceLock<iwork_ipc::server::Publisher>);
+
+impl LateSink {
+    pub fn connect(&self, publisher: iwork_ipc::server::Publisher) {
+        assert!(self.0.set(publisher).is_ok(), "发布方只接一次");
+    }
+}
+
+impl PublishSink for LateSink {
+    fn publish(&self, p: Published) {
+        if let Some(publisher) = self.0.get() {
+            publisher.publish(p);
+        }
+    }
+}
+
 /// 版本控制的假实现：数被调用的次数（D10 的 `probe_disabled_makes_no_vcs_calls`）。
 #[derive(Default)]
 pub struct CountingVcs {
@@ -527,6 +546,8 @@ pub struct H {
     pub frozen_resume:
         Arc<Mutex<Option<std::collections::BTreeMap<TurnId, iwork_domain::id::Seq>>>>,
     pub publishing: PublishState,
+    /// 提交观察者的出口
+    pub sink: Arc<LateSink>,
     pub host_task: Option<tokio::task::JoinHandle<HostError>>,
     pub sync_task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -564,8 +585,9 @@ pub fn seed() -> Vec<DomainEvent> {
 pub async fn assemble(env: Env, opts: Opts, agent: Arc<Ctl>) -> H {
     let raw = Arc::new(env.open());
     let publishing = PublishState::new();
+    let sink = Arc::new(LateSink::default());
     raw.set_commit_observer(Box::new(PublishObserver::new(
-        Arc::new(Nowhere),
+        sink.clone(),
         publishing.clone(),
     )))
     .await
@@ -676,6 +698,7 @@ pub async fn assemble(env: Env, opts: Opts, agent: Arc<Ctl>) -> H {
         knobs,
         frozen_resume,
         publishing,
+        sink,
         host_task: None,
         sync_task: None,
     }
