@@ -829,3 +829,47 @@ async fn stuck_blocking_task(secs: u64) {
     });
     let _ = wait.await;
 }
+
+/// 列进程时认假运行时（审查 2/F-1）：完整名（含路径）要认；Linux 的 comm 只留 15 字节，截断名要再按真实可执行文件名
+/// 确认；名字相似的无关程序不认。
+#[cfg(unix)]
+#[test]
+fn fake_agent_rows_match_by_real_program_name() {
+    let row = |comm: &str| format!("  123   1 S    {comm}");
+    let exe = |name: &'static str| move |_pid: u32| Some(name.to_owned());
+    let none = |_pid: u32| None;
+    // 完整名：两种平台都认
+    for linux in [false, true] {
+        assert!(
+            is_fake_agent_row(&row("/tmp/x y/iwork-fake-agent"), linux, none),
+            "{linux}"
+        );
+        assert!(
+            is_fake_agent_row(&row("iwork-fake-agent"), linux, none),
+            "{linux}"
+        );
+        // 无关的相似名：不认
+        assert!(
+            !is_fake_agent_row(&row("iwork-fake-agent-other"), linux, none),
+            "{linux}"
+        );
+    }
+    // Linux 的截断名：真实可执行文件是假运行时才认，是别的程序（名字前 15 字节相同）不认
+    assert!(is_fake_agent_row(
+        &row("iwork-fake-agen"),
+        true,
+        exe("iwork-fake-agent")
+    ));
+    assert!(!is_fake_agent_row(
+        &row("iwork-fake-agen"),
+        true,
+        exe("iwork-fake-agent-other")
+    ));
+    assert!(!is_fake_agent_row(&row("iwork-fake-agen"), true, none));
+    // 非 Linux 不截断：截断名就是别的程序
+    assert!(!is_fake_agent_row(
+        &row("iwork-fake-agen"),
+        false,
+        exe("iwork-fake-agent")
+    ));
+}

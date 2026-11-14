@@ -458,17 +458,49 @@ pub fn fake_diag(record: &Path) -> String {
             // comm 是程序名（macOS 上是程序的完整路径）：按文件名精确比，不按命令行子串
             String::from_utf8_lossy(&out.stdout)
                 .lines()
-                .filter(|l| {
-                    // 前三列是进程号、父进程号、状态，之后整段是程序名（路径里可能有空格）
-                    let comm = l.split_whitespace().skip(3).collect::<Vec<_>>().join(" ");
-                    Path::new(&comm)
-                        .file_name()
-                        .is_some_and(|n| n == "iwork-fake-agent")
-                })
+                .filter(|l| is_fake_agent_row(l, cfg!(target_os = "linux"), exe_name))
                 .collect::<Vec<_>>()
                 .join("\n")
         });
     let procs = procs.unwrap_or_else(|e| format!("列不出进程：{e}"));
     let record = std::fs::read_to_string(record).unwrap_or_else(|e| format!("读不了记录：{e}"));
     format!("假运行时进程：\n{procs}\n记录：\n{record}")
+}
+
+/// 假运行时的程序名。
+const FAKE_AGENT_NAME: &str = "iwork-fake-agent";
+
+/// `ps -o pid=,ppid=,stat=,comm=` 的一行是不是假运行时。前三列是进程号、父进程号、状态，之后整段是程序名（路径里
+/// 可能有空格）。`linux` 与 `exe_name`（按进程号读真实可执行文件名）可以换成替身，测试不同平台的写法。
+pub fn is_fake_agent_row(
+    row: &str,
+    linux: bool,
+    exe_name: impl FnOnce(u32) -> Option<String>,
+) -> bool {
+    let mut cols = row.split_whitespace();
+    let pid = cols.next().and_then(|p| p.parse::<u32>().ok());
+    let comm = cols.skip(2).collect::<Vec<_>>().join(" ");
+    let Some(name) = Path::new(&comm).file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if name == FAKE_AGENT_NAME {
+        return true;
+    }
+    // Linux 的 comm 只留前 15 字节（TASK_COMM_LEN 16 含结尾的 0）：截断名不能直接认（名字前 15 字节相同的别的程序也是
+    // 这个样子），按进程号读真实可执行文件名确认
+    linux
+        && name == &FAKE_AGENT_NAME[..15]
+        && pid
+            .and_then(exe_name)
+            .is_some_and(|exe| exe == FAKE_AGENT_NAME)
+}
+
+/// 按进程号读真实可执行文件的文件名（Linux：`/proc/<pid>/exe`）；读不到为 `None`。
+#[cfg(unix)]
+fn exe_name(pid: u32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()?
+        .file_name()?
+        .to_str()
+        .map(str::to_owned)
 }
