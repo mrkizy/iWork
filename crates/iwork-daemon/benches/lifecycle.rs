@@ -67,6 +67,15 @@ impl Home {
     }
 }
 
+/// 决定后台数据目录与 run 目录的变量：拉起后台前都要清掉，否则后台照外面的值找目录，基准却在临时 HOME 下等
+/// （Linux 上 XDG_RUNTIME_DIR 优先于 HOME；GitHub 的 ubuntu runner 设了它）。
+const DIR_VARS: [&str; 4] = [
+    "XDG_RUNTIME_DIR",
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "IWORK_DATA_DIR",
+];
+
 fn spawn(home: &Home) -> Child {
     let mut c = Command::new(DAEMON);
     c.arg("--dev-trust")
@@ -74,12 +83,7 @@ fn spawn(home: &Home) -> Child {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    for k in [
-        "XDG_RUNTIME_DIR",
-        "XDG_DATA_HOME",
-        "XDG_CONFIG_HOME",
-        "IWORK_DATA_DIR",
-    ] {
+    for k in DIR_VARS {
         c.env_remove(k);
     }
     c.spawn().unwrap()
@@ -212,10 +216,13 @@ fn connect_cold(rt: &tokio::runtime::Runtime, own: &SelfIdentity) {
     for _ in 0..5 {
         let home = Home::new();
         std::fs::create_dir_all(home.run_dir().parent().unwrap()).unwrap();
-        // 拉起的后台继承这里的 HOME
+        // 拉起的后台继承这里的环境：HOME 指到临时目录，决定目录的其余变量清掉
         // SAFETY：基准是单线程顺序跑的，改环境变量时没有别的线程在读
         unsafe {
             std::env::set_var("HOME", home.path());
+            for k in DIR_VARS {
+                std::env::remove_var(k);
+            }
         }
         let ep = LocalEndpoint::in_run_dir(&home.run_dir()).unwrap();
         let mut l = iwork_client_core::launcher::Launcher::new(
@@ -373,7 +380,9 @@ fn main() {
         // `IWORK_BENCH_COLD_EVENTS_MAX` 只保留不超过它的几档（CI 冒烟用；空库那档总在）
         let max: usize = std::env::var("IWORK_BENCH_COLD_EVENTS_MAX")
             .ok()
-            .map_or(usize::MAX, |v| v.parse().expect("IWORK_BENCH_COLD_EVENTS_MAX 要是整数"));
+            .map_or(usize::MAX, |v| {
+                v.parse().expect("IWORK_BENCH_COLD_EVENTS_MAX 要是整数")
+            });
         for events in [0, 10_000, 100_000].into_iter().filter(|e| *e <= max) {
             cold_start(&rt, &own, events, 3);
         }
