@@ -18,12 +18,22 @@ use tokio::time::timeout;
 const WAIT: Duration = Duration::from_secs(20);
 
 async fn start(scenario: &str) -> (FakeDaemon, App, Web, tempfile::TempDir) {
+    start_with(scenario, |_| {}).await
+}
+
+/// 同 [`start`]，`before_connect` 在客户端连上之前对假后台做准备（装故障等）：客户端一连上就会发查询，
+/// 连上以后再装的故障可能已经错过了这些查询。
+async fn start_with(
+    scenario: &str,
+    before_connect: impl FnOnce(&FakeDaemon),
+) -> (FakeDaemon, App, Web, tempfile::TempDir) {
     let dir = tempfile::Builder::new()
         .prefix("t09-7a")
         .tempdir_in("/tmp")
         .unwrap();
     let daemon = FakeDaemon::start(dir.path().join("d.sock")).await.unwrap();
     daemon.run_scenario(scenario).await.unwrap();
+    before_connect(&daemon);
     let dialer = DirectDialer::new(daemon.endpoint(), self_trusting_identity().unwrap(), "test");
     let (app, _effects) = App::start(dialer, Options::default());
     let web = Web::new(app.attach().await.unwrap());
@@ -144,10 +154,14 @@ async fn new_conversation_navigates_once_created() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn model_catalog_failure_notice_clears_once_it_loads() {
-    let (d, app, mut web, _dir) = start("conversation-basic").await;
-    d.fail_queries(Some(Box::new(|q: &pb::Query| {
-        matches!(q.kind, Some(pb::query::Kind::ListModels(_)))
-    })));
+    // 客户端一连上、拿到侧栏就预取内置 iWork 运行时的清单（新建助手弹窗要用，组 3），这个对话用的也是它：
+    // 故障在连上之前装好，预取那一次也取不到，用例不依赖「预取还没发生」。
+    let (d, app, mut web, _dir) = start_with("conversation-basic", |d| {
+        d.fail_queries(Some(Box::new(|q: &pb::Query| {
+            matches!(q.kind, Some(pb::query::Kind::ListModels(_)))
+        })));
+    })
+    .await;
     visible(&app, Some("c-basic")).await;
     let notice = |s: &WebState| s.connection.as_ref().and_then(|c| c.query_notice.clone());
     until(&app, &mut web, "取不到模型清单时挂提示", |s| {
