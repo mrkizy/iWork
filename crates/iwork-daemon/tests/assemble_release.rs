@@ -5,7 +5,7 @@
 mod package_support;
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
 
 use iwork_ipc::peer::{ImageId, MANIFEST_FILE, Manifest, Want, file_image_ids};
@@ -342,44 +342,70 @@ fn interrupted_run_never_exposes_unchecked() {
     let form_dir = i.product().parent().unwrap().to_path_buf();
     let name = i.product().file_name().unwrap().to_owned();
 
-    // ① 核对卡住时杀
-    let hang = i.root.join("check-hangs");
-    let marker = i.root.join("check-started");
-    write_executable(
-        &hang,
-        &format!("#!/bin/sh\ntouch '{}'\nexec sleep 30\n", marker.display()),
-    );
-    // 装配在锁里重新跑自己：杀整个进程组（只杀外面那层，锁里的那层会接着跑、一直拿着锁）
-    let mut child = {
-        use std::os::unix::process::CommandExt;
-        i.command()
-            .arg("--check")
-            .arg(&hang)
-            .process_group(0)
-            .spawn()
-            .unwrap()
-    };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !marker.exists() {
-        assert!(std::time::Instant::now() < deadline, "核对没开始");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    // SAFETY：只对自己起的子进程发信号
-    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-    let _ = child.wait();
-    assert_eq!(digest_tree(&i.product()), good, "成品路径上还是原来的好包");
-    assert!(
-        dist_entries(&i.dist)
+    // ① 核对卡住时杀。核对是装配起的子进程、在同一个进程组里：杀整组，装配来不及收拾，暂存留着。
+    //    前提是动手时核对还卡着。全量测试时别处可能对一个被复用的进程号发信号，正好先把核对结束了：装配照规矩
+    //    「核对没过、不发布」，自己删掉暂存退出，这一格就没测到。这时先核实那条路也对（成品没动、暂存删了），
+    //    再重做这一格；别的退出方式一律算错，不重做。
+    let mut killed_in_check = false;
+    for attempt in 1..=3 {
+        let hang = i.root.join(format!("check-hangs-{attempt}"));
+        let marker = i.root.join(format!("check-started-{attempt}"));
+        write_executable(
+            &hang,
+            &format!("#!/bin/sh\ntouch '{}'\nexec sleep 30\n", marker.display()),
+        );
+        let mut child = {
+            use std::os::unix::process::CommandExt;
+            i.command()
+                .arg("--check")
+                .arg(&hang)
+                .process_group(0)
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !marker.exists() {
+            assert!(std::time::Instant::now() < deadline, "核对没开始");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // SAFETY：只对自己起的子进程发信号
+        unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+        let status = child.wait().unwrap();
+        let mut err = String::new();
+        std::io::Read::read_to_string(child.stderr.as_mut().unwrap(), &mut err).unwrap();
+        // 卡住的 sleep 留着也不影响；收掉它
+        let _ = Command::new("pkill")
+            .arg("-f")
+            .arg(hang.to_str().unwrap())
+            .status();
+        assert_eq!(digest_tree(&i.product()), good, "成品路径上还是原来的好包");
+        let staging = dist_entries(&i.dist)
             .iter()
-            .any(|n| n.starts_with(".staging-")),
-        "被 kill -9 时删不到暂存：{:?}",
-        dist_entries(&i.dist)
-    );
-    // 卡住的 sleep 留着也不影响；收掉它
-    let _ = Command::new("pkill")
-        .arg("-f")
-        .arg(hang.to_str().unwrap())
-        .status();
+            .any(|n| n.starts_with(".staging-"));
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if status.signal() == Some(libc::SIGKILL) {
+                assert!(
+                    staging,
+                    "被 kill -9 时删不到暂存：{:?}",
+                    dist_entries(&i.dist)
+                );
+                killed_in_check = true;
+                break;
+            }
+        }
+        // 没被这里杀到：只可能是核对先被结束、装配按「核对没过」退出
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "装配不是被杀、也不是核对没过：{status:?}\n{err}"
+        );
+        assert!(err.contains("核对没过"), "{err}");
+        assert!(!staging, "核对没过时暂存删了：{:?}", dist_entries(&i.dist));
+        eprintln!("第 {attempt} 次：动手之前核对已经被别处结束，装配按核对没过退出；重做这一格");
+    }
+    assert!(killed_in_check, "三次都没能在核对卡住时杀到装配");
 
     // ② 再打一次：暂存清掉，照常发布
     ok(&i.assemble());
