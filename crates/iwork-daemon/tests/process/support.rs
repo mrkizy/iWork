@@ -142,12 +142,7 @@ pub fn spawn_in(home: &Path, exe: &Path, args: &[&str], env: &[(&str, &str)]) ->
     let mut child = c.spawn().expect("起后台");
     let lines = Arc::new(Mutex::new(Vec::new()));
     let stderr = child.stderr.take().unwrap();
-    let sink = lines.clone();
-    let reader = std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            sink.lock().unwrap().push(line);
-        }
-    });
+    let reader = StderrReader::spawn(stderr, lines.clone());
     Daemon {
         child: Some(child),
         stderr: lines,
@@ -344,12 +339,44 @@ pub struct Daemon {
     child: Option<Child>,
     stderr: Arc<Mutex<Vec<String>>>,
     /// 读 stderr 的线程：进程退出之后先等它读到结束，再看攒下的输出（不然最后几行可能还没读进来）
-    reader: Option<std::thread::JoinHandle<()>>,
+    reader: Option<StderrReader>,
 }
 
-/// 进程退出后等读线程读到 stderr 结束最多多久。正常一退出管道就到头；有别的进程继承了这个 stderr 时到不了头，
-/// 不在这里无限等。
+/// 进程退出后等读线程读到 stderr 的 EOF 最多多久。正常一退出管道就到头；有别的进程继承了这个 stderr 时到不了头，
+/// 到上限就让测试红，不在这里无限等，也不拿读了一半的输出冒充全部。
 const STDERR_DRAIN_LIMIT: Duration = Duration::from_secs(10);
+
+/// 读 stderr 的线程：一行行放进 `sink`，最后报告结局：读到 EOF 为 `Ok`，读出错为 `Err`。
+pub struct StderrReader(std::thread::JoinHandle<std::io::Result<()>>);
+
+impl StderrReader {
+    pub fn spawn(src: impl std::io::Read + Send + 'static, sink: Arc<Mutex<Vec<String>>>) -> Self {
+        Self(std::thread::spawn(move || {
+            for line in BufReader::new(src).lines() {
+                sink.lock().unwrap().push(line?);
+            }
+            Ok(())
+        }))
+    }
+
+    /// 等它读到 EOF，最多 `limit`。只有确认读到了 EOF 才返回（这时 `sink` 里是全部输出）；到上限还没读完、读出错、
+    /// 线程 panic，都让测试红，不当成「读完了」（审查 2026-11-14-fix-spawn-stderr-race 1/F-1）。
+    pub fn drain(self, limit: Duration) {
+        let deadline = Instant::now() + limit;
+        while !self.0.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "读 stderr 的线程没在 {limit:?} 内读到 EOF（可能有别的进程拿着这个 stderr 的写端）"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        match self.0.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => panic!("读 stderr 出错：{e}"),
+            Err(_) => panic!("读 stderr 的线程 panic 了"),
+        }
+    }
+}
 
 impl Daemon {
     pub fn pid(&self) -> u32 {
@@ -380,17 +407,10 @@ impl Daemon {
         Some(status)
     }
 
-    /// 等读 stderr 的线程读到结束（最多 [`STDERR_DRAIN_LIMIT`]），然后收掉它。
+    /// 等读 stderr 的线程读到 EOF（最多 [`STDERR_DRAIN_LIMIT`]），然后收掉它；读不完、读出错都让测试红。
     fn drain_stderr(&mut self) {
-        let Some(reader) = self.reader.take() else {
-            return;
-        };
-        let deadline = Instant::now() + STDERR_DRAIN_LIMIT;
-        while !reader.is_finished() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        if reader.is_finished() {
-            let _ = reader.join();
+        if let Some(reader) = self.reader.take() {
+            reader.drain(STDERR_DRAIN_LIMIT);
         }
     }
 
@@ -494,4 +514,62 @@ pub fn group_alive(pgid: u32) -> bool {
 /// 日志文件的全部内容。
 pub fn log_text(sb: &Sandbox) -> String {
     std::fs::read_to_string(sb.data_root().join("logs/daemon.log")).unwrap_or_default()
+}
+
+/// 读 stderr 的线程的三种结局（审查 2026-11-14-fix-spawn-stderr-race 1/F-1）：只有确认读到了 EOF，才算拿到了全部
+/// 输出；卡住到上限、读出错、线程 panic，都让测试红，不能冒充「读完了」。
+#[cfg(unix)]
+mod stderr_reader_tests {
+    use std::io::{self, Read};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use super::StderrReader;
+
+    fn sink() -> Arc<Mutex<Vec<String>>> {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
+    #[test]
+    fn reads_to_eof_and_returns() {
+        let lines = sink();
+        StderrReader::spawn(io::Cursor::new(b"a\nb\n".to_vec()), lines.clone())
+            .drain(Duration::from_secs(5));
+        assert_eq!(*lines.lock().unwrap(), ["a", "b"]);
+    }
+
+    /// 写端一直开着：读不到 EOF。到上限要红，并且说清楚是读线程没读完。
+    #[test]
+    #[should_panic(expected = "没在")]
+    fn stuck_reader_fails_at_the_limit() {
+        let (read, _write) = std::os::unix::net::UnixStream::pair().unwrap();
+        let reader = StderrReader::spawn(read, sink());
+        reader.drain(Duration::from_millis(200));
+    }
+
+    /// 读出错：不能当成读完了。
+    #[test]
+    #[should_panic(expected = "读 stderr 出错")]
+    fn read_error_fails() {
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("注入的读错误"))
+            }
+        }
+        StderrReader::spawn(Broken, sink()).drain(Duration::from_secs(5));
+    }
+
+    /// 读线程 panic：不能当成读完了。
+    #[test]
+    #[should_panic(expected = "panic")]
+    fn reader_panic_fails() {
+        struct Panics;
+        impl Read for Panics {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("注入：读线程 panic");
+            }
+        }
+        StderrReader::spawn(Panics, sink()).drain(Duration::from_secs(5));
+    }
 }
