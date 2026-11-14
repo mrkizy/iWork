@@ -25,17 +25,28 @@ pub(super) enum RowCursor {
 
 impl RowCursor {
     /// 已按排序字段从旧到新排好的全部行 → 选中的那一段（下标半开区间），以及两侧还有没有：(has_more, has_newer)。
+    /// 选中的为空时，另一侧按严格比较：游标那一行本身不算（T09 方案 2.9「两个布尔值」）。
     pub(super) fn select(self, sorted: &[u64]) -> ((usize, usize), bool, bool) {
         match self {
             RowCursor::Before { seq, limit } => {
                 let end = sorted.partition_point(|s| *s < seq);
                 let start = end.saturating_sub(limit);
-                ((start, end), start > 0, end < sorted.len())
+                let newer = if start == end {
+                    sorted.partition_point(|s| *s <= seq) < sorted.len()
+                } else {
+                    end < sorted.len()
+                };
+                ((start, end), start > 0, newer)
             }
             RowCursor::After { seq, limit } => {
                 let start = sorted.partition_point(|s| *s <= seq);
                 let end = (start + limit).min(sorted.len());
-                ((start, end), start > 0, end < sorted.len())
+                let more = if start == end {
+                    sorted.partition_point(|s| *s < seq) > 0
+                } else {
+                    start > 0
+                };
+                ((start, end), more, end < sorted.len())
             }
         }
     }

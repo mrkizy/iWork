@@ -148,6 +148,31 @@ async fn full_turn_with_permission_allowed_matches_snapshot() {
     assert_eq!(line.resume_id(), Some("fake-session-1"));
 }
 
+/// G5（T10a 方案 2.7、7.2）：编排与引擎在一个完整回合里提交的回合、工具调用、审批后续事件都带着所属对话，
+/// 并且就是这个回合的对话。记录存储在每一笔提交上也查一遍（`support::MemStore::commit`），这条再按事件逐个对。
+#[tokio::test(flavor = "multi_thread")]
+async fn no_new_event_without_conversation() {
+    let fake = Fake::new(&full_turn_script());
+    let runtime = AcpRuntime::new(fake.launch.clone());
+    let h = Harness::new();
+    let mut line = SessionLine::new(Arc::new(StubDecider::allow_all()), None);
+    let plan = h.plan(fake.dir.path(), "看看目录");
+    let conversation = plan.turn.conversation_id;
+    let state = line.run_turn(&runtime, h.ports(), plan).await.unwrap();
+    assert_eq!(state, TurnState::Completed);
+    let carried: Vec<_> = h
+        .store
+        .events()
+        .iter()
+        .filter_map(|e| e.carried_conversation().map(|c| (e.kind(), c)))
+        .collect();
+    // 对照：绑定、状态变化、工具开始与结束、回合结束都在里面
+    assert!(carried.len() >= 7, "{carried:?}");
+    for (kind, c) in carried {
+        assert_eq!(c, Some(conversation), "{kind}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn full_turn_with_permission_denied_matches_snapshot() {
     let fake = Fake::new(&full_turn_script());
@@ -666,27 +691,6 @@ fn child_step() -> serde_json::Value {
     } else {
         json!({ "type": "spawn_child", "program": "sleep", "args": ["600"] })
     }
-}
-
-#[cfg(unix)]
-fn process_exists(pid: u32) -> bool {
-    // 僵尸进程也算不存在：它已经结束，只等父进程回收
-    let out = std::process::Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-        .expect("运行 ps");
-    let stat = String::from_utf8_lossy(&out.stdout);
-    let stat = stat.trim();
-    !stat.is_empty() && !stat.starts_with('Z')
-}
-
-#[cfg(windows)]
-fn process_exists(pid: u32) -> bool {
-    let out = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-        .output()
-        .expect("运行 tasklist");
-    String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
 }
 
 /// 运行时上报的模型、额度进事件，用量记在回合结束的统计里；额度的观测时间由编排按自己的时钟

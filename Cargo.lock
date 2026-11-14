@@ -2837,6 +2837,7 @@ dependencies = [
  "prost-types",
  "thiserror 2.0.21",
  "tracing",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -2964,6 +2965,7 @@ dependencies = [
  "iwork-client-core",
  "iwork-core",
  "iwork-domain",
+ "iwork-fake-daemon",
  "iwork-host",
  "iwork-ipc",
  "iwork-log",
@@ -2973,6 +2975,7 @@ dependencies = [
  "iwork-vcs-git",
  "libc",
  "pollster",
+ "proptest",
  "rusqlite",
  "serde_json",
  "tempfile",
@@ -3042,6 +3045,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 1.2.1+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]

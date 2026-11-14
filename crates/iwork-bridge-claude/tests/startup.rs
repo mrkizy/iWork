@@ -362,15 +362,14 @@ async fn cancelled_open_leaves_nothing() {
         started["pid"].as_u64().unwrap() as i32
     };
     for _ in 0..100 {
-        // SAFETY: 信号 0 只探测这个进程号在不在，不发真信号
-        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        // 僵尸不算还在：它已经结束，只等收养它的 init 回收（kill(pid, 0) 对僵尸照样成功）
+        let alive = support::procs::alive(pid);
         if !alive && w.session_dirs() == 0 {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    // SAFETY: 同上
-    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    let alive = support::procs::alive(pid);
     panic!(
         "5 秒后还有残留：会话目录 {} 个，CLI 还在：{alive}",
         w.session_dirs()

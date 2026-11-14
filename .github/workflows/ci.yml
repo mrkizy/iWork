@@ -66,6 +66,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # 远端重测试脚本的自测（假 ssh，本机跑）：远端 mac120 是 macOS 自带的 bash 3.2，所以只在 macOS 上用 /bin/bash 跑
+      - name: remote-heavy 自测
+        if: runner.os == 'macOS'
+        run: /bin/bash scripts/remote-heavy.sh --selftest
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo test
@@ -91,7 +96,7 @@ jobs:
           security list-keychains -d user -s "$kc" "${orig[@]}"
           export IWORK_TEST_SIGNING_KEYCHAIN="$kc"
           cargo test --workspace
-      # T06 方案 4.3：hook timeout 调成 10 秒的故障注入（只在测试 feature 下编译，见 scripts/check-no-dev-trust.sh）
+      # T06 方案 4.3：hook timeout 调成 10 秒；S6-5b：会话任务 panic。故障注入只在测试 feature 下编译（见 scripts/check-no-dev-trust.sh）
       - name: 桥接故障注入
         if: runner.os != 'Windows'
         run: cargo test -p iwork-bridge-claude --features fake-cli,fault-injection --test fault_injection

@@ -2,7 +2,8 @@
 //!
 //! - [`PublishObserver`]：存储写线程一批提交成功后、回执送出前回调它，按 seq 顺序把新事件转成 `RoutedEvent`
 //!   交给 ipc 的 `Publisher`。顺序取自唯一知道提交顺序的地方（单写者），别处不再排。
-//! - [`MessageRoutes`]：「在流的消息 → 路由键」表。流式增量只带 `message_id`，路由靠它查。
+//! - [`MessageRoutes`]：「在流的消息 → 路由键」表。流式增量只带 `message_id`，路由靠它查；键是消息所在对话的
+//!   `live:<对话>`（T10a 方案 2.7 G6），不是 `MessageAppended` 的路由，侧栏因此收不到增量。
 //! - [`LiveDeltas`]：`LivePublisher` 的实现（T10 的回合宿主注入编排）。
 //!
 //! 观察者跑在写线程上：只做内存操作与非阻塞唤醒，不做 I/O、不等任何东西（`CommitObserver` 的契约）。
@@ -11,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use iwork_app::subscription::live_key;
 use iwork_domain::event::DomainEvent;
 use iwork_domain::id::MessageId;
 use iwork_domain::message::MessageStatus;
@@ -34,7 +36,7 @@ impl PublishSink for Publisher {
     }
 }
 
-/// 在流的消息 → 路由键（取自它的 `MessageAppended` 事件的路由）。
+/// 在流的消息 → 路由键（它所在对话的 live 键）。
 #[derive(Default)]
 pub struct MessageRoutes(Mutex<HashMap<MessageId, Vec<StreamKey>>>);
 
@@ -48,10 +50,11 @@ impl MessageRoutes {
     }
 
     /// 按一条已提交的事件维护：开始流式的登记，结束的摘掉。
-    fn observe(&self, event: &DomainEvent, routes: &[StreamKey]) {
+    fn observe(&self, event: &DomainEvent) {
         match event {
             DomainEvent::MessageAppended(e) if e.message.status == MessageStatus::Streaming => {
-                self.lock().insert(e.message.id, routes.to_vec());
+                self.lock()
+                    .insert(e.message.id, vec![live_key(e.message.conversation_id)]);
             }
             DomainEvent::MessageCompleted(e) => {
                 self.lock().remove(&e.message_id);
@@ -135,7 +138,7 @@ impl<S: PublishSink> CommitObserver for PublishObserver<S> {
                 tracing::error!(seq = e.seq.0, error = %err, "提交的事件转换失败");
                 panic!("提交的事件 {} 转换失败：{err}", e.seq.0)
             });
-            self.state.routes.observe(&e.event, &r.routes);
+            self.state.routes.observe(&e.event);
             if let DomainEvent::GlobalSettingsChanged(c) = &e.event
                 && c.autostart.is_some()
             {
@@ -219,7 +222,7 @@ mod tests {
         }
     }
 
-    /// 增量按「在流的消息 → 路由」表发：消息开始流式之前与结束之后的增量都丢掉；路由与 `MessageAppended` 的一致。
+    /// 增量按「在流的消息 → 路由」表发：消息开始流式之前与结束之后的增量都丢掉；路由是消息所在对话的 live 键（G6）。
     #[test]
     fn live_delta_routed_by_message_table() {
         let rec = Arc::new(Recorder::default());
@@ -281,15 +284,63 @@ mod tests {
             })
             .collect();
         assert_eq!(transients.len(), 1, "只有流式期间的那一段");
-        let want_routes = iwork_app::subscription::routes_for(&appended.event);
-        assert!(!want_routes.is_empty());
-        assert_eq!(transients[0].1, want_routes);
+        assert_eq!(
+            transients[0].1,
+            [iwork_app::subscription::live_key(cid(10))],
+            "不是 MessageAppended 的路由（那是整类 conversation 键能盖住的）"
+        );
         match &transients[0].0.event {
             Some(pb::transient_event::Event::MessageDelta(d)) => assert_eq!(d.text, "中间"),
             other => panic!("{other:?}"),
         }
         assert_eq!(state.last_published(), 3);
         assert!(state.routes.is_empty());
+    }
+
+    /// G6（T10a 方案 2.7、第 11 节步 7 验收）：侧栏订的是整类 `conversation` 键，收不到任何对话的流式增量；
+    /// 打开的那个对话的会话范围收得到，别的对话的会话范围收不到。对照：同一条消息的持久事件侧栏收得到。
+    #[test]
+    fn sidebar_scope_gets_no_deltas() {
+        use iwork_app::subscription::{routes_for, scope_streams};
+        let rec = Arc::new(Recorder::default());
+        let state = PublishState::new();
+        let mut obs = PublishObserver::new(rec.clone(), state.clone());
+        let live = LiveDeltas::new(rec.clone(), state.routes.clone());
+        let appended = stored(
+            1,
+            MessageAppended {
+                message: assistant_message(30, 10, 20),
+            }
+            .into(),
+        );
+        obs.committed(CommittedBatch {
+            events: std::slice::from_ref(&appended),
+            outbox_added: 0,
+        });
+        live.message_delta(delta(30, "片段"));
+        let routes = match rec.0.lock().unwrap().last() {
+            Some(Published::Transient { routes, .. }) => routes.clone(),
+            other => panic!("{other:?}"),
+        };
+        let scope = |kind| scope_streams(&pb::SubscriptionScope { kind: Some(kind) });
+        use pb::subscription_scope::Kind as S;
+        let hits = |keys: &[StreamKey], routes: &[StreamKey]| {
+            keys.iter().any(|k| routes.iter().any(|r| k.covers(r)))
+        };
+        let sidebar = scope(S::Sidebar(pb::SidebarScope {}));
+        let open = scope(S::Conversation(pb::ConversationScope {
+            conversation_id: cid(10).to_string(),
+        }));
+        let other = scope(S::Conversation(pb::ConversationScope {
+            conversation_id: cid(11).to_string(),
+        }));
+        assert!(!hits(&sidebar, &routes), "侧栏收到了增量：{routes:?}");
+        assert!(hits(&open, &routes), "打开的对话收不到增量");
+        assert!(!hits(&other, &routes), "别的对话收到了增量");
+        assert!(
+            hits(&sidebar, &routes_for(&appended.event)),
+            "对照：持久事件侧栏收得到"
+        );
     }
 
     /// 提交了自启设置就叫醒对齐任务；别的设置变化不叫。

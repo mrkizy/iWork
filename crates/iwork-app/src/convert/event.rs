@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use iwork_domain::approval::{ApprovalState, Decider};
+use iwork_domain::approval::{Approval, ApprovalState, Decider};
 use iwork_domain::event::{
     self as ev, CloneFailure, CloneFailureReason, CloneOutcome, DomainEvent,
 };
@@ -206,7 +206,7 @@ pub fn event_to_proto(event: &DomainEvent) -> R<pb::DomainEvent> {
             }),
         }),
         DomainEvent::ApprovalRequested(e) => P::ApprovalRequested(pb::ApprovalRequested {
-            approval: Some(approval_to_proto(&e.approval)?),
+            approval: Some(approval_to_proto(requested_state(&e.approval)?)?),
         }),
         DomainEvent::ApprovalReviewUpdated(e) => {
             let (review, review_id, reason) = review_state_to_proto(&e.review);
@@ -472,6 +472,19 @@ fn clone_finished_from_proto(e: &pb::CloneFinished) -> R<ev::CloneFinished> {
         job_id: parse_id(K, "job_id", &e.job_id)?,
         outcome,
     })
+}
+
+/// `ApprovalRequested` 带的审批只能是待审批（或已拒绝：AI 审查前就被底线拒的那种）。`Approval` 消息本身能装下
+/// 四种状态（G3），事件这一侧的约束照旧：批准与作废只经 `ApprovalDecided` / `ApprovalVoided`。
+fn requested_state(a: &Approval) -> R<&Approval> {
+    match a.state {
+        ApprovalState::Pending | ApprovalState::Denied => Ok(a),
+        other => Err(ConvertError::InvalidValue {
+            kind: "ApprovalRequested",
+            field: "approval.state",
+            reason: format!("请求审批的事件只能带待审批或已拒绝，不能是 {other:?}"),
+        }),
+    }
 }
 
 /// 允许 ↔ `APPROVED` + 决定者；拒绝 ↔ `DENIED` + 决定者 `USER`（拒绝的一定是用户）。
@@ -789,11 +802,12 @@ pub fn event_from_proto(event: pb::DomainEvent) -> R<DomainEvent> {
         }
         .into(),
         P::ApprovalRequested(e) => ev::ApprovalRequested {
-            approval: approval_from_proto(required(
+            approval: requested_state(&approval_from_proto(required(
                 "ApprovalRequested",
                 "approval",
                 e.approval.as_ref(),
-            )?)?,
+            )?)?)?
+            .clone(),
         }
         .into(),
         P::ApprovalReviewUpdated(e) => {

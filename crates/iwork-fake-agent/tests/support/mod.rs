@@ -247,6 +247,16 @@ pub fn describe(e: &DomainEvent) -> String {
 impl StoragePort for MemStore {
     async fn commit(&self, req: CommitRequest) -> Result<CommitReceipt, StorageError> {
         assert_eq!(req.actor, Actor("system".into()));
+        // 新构造的事件一律带所属对话（G5，T10a 方案 2.7「怎么守住新构造的一律 Some」）：这组闭环用例经过的编排与
+        // 引擎的每个构造点都在这里被查一遍
+        for e in &req.events {
+            assert_ne!(
+                e.carried_conversation(),
+                Some(None),
+                "{} 没带所属对话",
+                e.kind()
+            );
+        }
         let mut events = self.events.lock().unwrap();
         let first = events.len() as u64 + 1;
         events.extend(req.events);
@@ -330,4 +340,23 @@ impl LivePublisher for Deltas {
     fn message_delta(&self, delta: MessageDelta) {
         self.0.lock().unwrap().push(delta);
     }
+}
+
+/// 进程还在跑：和清树判空同一条规则（`iwork_agent_acp::process::running`，僵尸算不在）。读不了进程状态就让测试红，
+/// 不当成「不在」。
+#[cfg(unix)]
+pub fn process_exists(pid: u32) -> bool {
+    iwork_agent_acp::process::running(pid as i32)
+        .unwrap_or_else(|e| panic!("读不了进程 {pid} 的状态：{e}"))
+}
+
+#[cfg(windows)]
+pub fn process_exists(pid: u32) -> bool {
+    let out = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .output()
+        .expect("运行 tasklist");
+    // 没有匹配时 tasklist 也以 0 退出、打一行提示；非 0 是它自己出了错，不能当成「不在」
+    assert!(out.status.success(), "tasklist 失败：{out:?}");
+    String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
 }

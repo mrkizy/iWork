@@ -97,7 +97,7 @@ fn owed_events_follow_the_table_for_every_state() {
         for by in &bys {
             let turn = turn_in(state);
             let msg = streaming(&turn, 1);
-            let got = owed_turn_events(&turn, std::slice::from_ref(&msg), by);
+            let got = owed_turn_events(&turn, std::slice::from_ref(&msg), by, Default::default());
             match expected(state, by) {
                 None => assert!(
                     matches!(got, Err(OwedError::Unexpected { .. })),
@@ -151,12 +151,12 @@ fn owed_events_follow_the_table_for_every_state() {
 #[test]
 fn failure_reason_is_recorded_only_when_failing() {
     let turn = turn_in(RUN);
-    let events = owed_turn_events(&turn, &[], &broken(false)).unwrap();
+    let events = owed_turn_events(&turn, &[], &broken(false), Default::default()).unwrap();
     let DomainEvent::TurnStateChanged(changed) = &events[0] else {
         panic!("{events:?}")
     };
     assert_eq!(changed.reason.as_deref(), Some("写不进存储"));
-    let events = owed_turn_events(&turn, &[], &broken(true)).unwrap();
+    let events = owed_turn_events(&turn, &[], &broken(true), Default::default()).unwrap();
     for e in &events {
         if let DomainEvent::TurnStateChanged(c) = e {
             assert_eq!(c.reason, None);
@@ -169,7 +169,7 @@ fn interrupted_by_wait_limit_closes_like_crash() {
     let turn = turn_in(TurnState::Interrupted {
         reason: InterruptReason::ApprovalWaitLimit,
     });
-    let events = owed_turn_events(&turn, &[], &OwedBy::Closing).unwrap();
+    let events = owed_turn_events(&turn, &[], &OwedBy::Closing, Default::default()).unwrap();
     assert_eq!(path(&events), [turn.state, CANCELLED]);
 }
 
@@ -179,13 +179,43 @@ fn foreign_or_finished_message_is_refused() {
     let mut other = streaming(&turn, 2);
     other.turn_id = Some(fold_fx::tid(99));
     assert!(matches!(
-        owed_turn_events(&turn, &[other], &broken(false)),
+        owed_turn_events(&turn, &[other], &broken(false), Default::default()),
         Err(OwedError::Message { .. })
     ));
     let mut done = streaming(&turn, 3);
     done.status = MessageStatus::Completed;
     assert!(matches!(
-        owed_turn_events(&turn, &[done], &broken(false)),
+        owed_turn_events(&turn, &[done], &broken(false), Default::default()),
         Err(OwedError::Message { .. })
     ));
+}
+
+/// 宿主替回合收尾时，结束事件带上回合已记下的用量累计（事件里的用量是回合累计，审查 2026-11-13-m1-t10a-d7
+/// 1/F-3）。两种触发各一格。
+#[test]
+fn finished_event_carries_recorded_usage() {
+    let used = iwork_domain::common::Usage {
+        input_tokens: 30,
+        output_tokens: 4,
+        ..Default::default()
+    };
+    for (turn, by) in [
+        (turn_in(RUN), broken(true)),
+        (
+            turn_in(TurnState::Interrupted {
+                reason: InterruptReason::Crash,
+            }),
+            OwedBy::Closing,
+        ),
+    ] {
+        let events = owed_turn_events(&turn, &[], &by, used).unwrap();
+        let finished: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                DomainEvent::TurnFinished(f) => Some(f.usage),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finished, [used], "{by:?}");
+    }
 }

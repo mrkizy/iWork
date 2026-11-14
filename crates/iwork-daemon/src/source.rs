@@ -1,7 +1,7 @@
 //! `EventSource` 实现（T04 方案 2.6；T03 方案 2.10）：补发从存储读，路由用和实时发布同一个 `routes_for`。
 //!
-//! 快照由注入的 [`SnapshotProvider`] 给（T10 实现：一个读事务里跑快照查询的受理）。T04 注入 [`SnapshotNotWired`]：
-//! ipc 拿到错误会关掉那条连接，所以 T10 接入之前只有续传能用（阶段缺口）。
+//! 快照由注入的 [`SnapshotProvider`] 给：组装处注入 [`crate::snapshot::ReadSnapshots`]（一个读事务里跑快照查询，
+//! T10a 步 7）。[`SnapshotNotWired`] 只剩测试与基准在用。
 
 use std::future::Future;
 use std::sync::Arc;

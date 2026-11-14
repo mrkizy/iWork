@@ -11,6 +11,8 @@ pub mod acp;
 #[cfg(unix)]
 pub mod channel;
 #[cfg(unix)]
+pub mod procs;
+#[cfg(unix)]
 pub mod startup;
 
 use std::path::{Path, PathBuf};

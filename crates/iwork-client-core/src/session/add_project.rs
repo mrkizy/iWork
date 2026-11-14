@@ -239,29 +239,8 @@ pub(super) enum AddProjectPick {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::test_support::session;
     use crate::store::add_project::{Busy, Check};
-
-    struct NoDial;
-    impl Dialer for NoDial {
-        async fn dial(
-            &mut self,
-        ) -> Result<(iwork_ipc::client::Client, iwork_ipc::client::Incoming), crate::DialError>
-        {
-            std::future::pending().await
-        }
-    }
-
-    fn session() -> Session<NoDial> {
-        let opts = crate::Options::default();
-        let (effects, _) = tokio::sync::mpsc::unbounded_channel();
-        Session::new(
-            NoDial,
-            opts.chunk_max,
-            opts.timeline_cap,
-            opts.clock,
-            effects,
-        )
-    }
 
     fn unversioned(root: &str) -> pb::InspectProjectPathResult {
         pb::InspectProjectPathResult {

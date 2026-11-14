@@ -4,4 +4,5 @@
 #[cfg(unix)]
 pub mod autostart;
 pub mod fs;
+pub mod notifier;
 pub mod project_files;

@@ -532,15 +532,15 @@ async fn terminate_confirms_tree_empty() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let child = child.expect("5 秒内子进程起来了") as i32;
-    // SAFETY: 信号 0 只做存在性检查。
-    assert_eq!(unsafe { libc_kill(child, 0) }, 0, "对照：子进程在跑");
+    let child = child.expect("5 秒内子进程起来了") as u32;
+    assert!(process_exists(child), "对照：子进程在跑");
     assert!(!session.process_tree_is_empty().unwrap(), "对照：树非空");
 
     session.terminate().await.unwrap();
     assert!(session.process_tree_is_empty().unwrap());
-    // SAFETY: 同上。子进程在组里，已被结束；测试进程不是它的父进程，不会留僵尸
-    assert_eq!(unsafe { libc_kill(child, 0) }, -1, "子进程 {child} 已结束");
+    // 子进程已被结束。它可能还是僵尸：它的父进程（假运行时）也被杀了，它由 init 收养、回收，什么时候回收不归
+    // 清理管，清理判空也不把僵尸算进去。所以只看它是不是还在跑，不用 kill(pid, 0)（对僵尸照样成功）
+    assert!(!process_exists(child), "子进程 {child} 已结束");
     // 已经清空：再调立刻成功
     session.terminate().await.unwrap();
     // 进行中的回合以失败收尾，不会挂住
@@ -551,12 +551,6 @@ async fn terminate_confirms_tree_empty() {
         matches!(got.last(), Some(AgentUpdate::Failed(_))),
         "{got:?}"
     );
-}
-
-#[cfg(unix)]
-unsafe extern "C" {
-    #[link_name = "kill"]
-    fn libc_kill(pid: i32, sig: i32) -> i32;
 }
 
 /// 1/F-5：运行时给的 `cwd` 不是绝对路径：不交给处理方，按拒绝答复运行时，拒绝理由点名键。
