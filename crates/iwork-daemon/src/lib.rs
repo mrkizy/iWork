@@ -4,6 +4,7 @@
 
 pub mod args;
 pub mod assembly;
+pub mod attention;
 pub mod boot;
 #[cfg(unix)]
 mod daemon;
@@ -19,6 +20,7 @@ pub mod instance;
 pub mod logging;
 pub mod publish;
 pub mod recovery;
+pub mod routes;
 pub mod snapshot;
 pub mod source;
 pub mod status;
@@ -34,5 +36,7 @@ pub use boot::run;
 #[cfg(test)]
 #[path = "../../iwork-store/tests/support/fixtures.rs"]
 mod fixtures;
+#[cfg(test)]
+mod notify_text_tests;
 #[cfg(test)]
 mod query_tests;

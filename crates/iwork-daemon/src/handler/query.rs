@@ -4,7 +4,8 @@
 //! - 只读、不提交、不改内存，被中止、重发、乱序到达都没事（Q2）；
 //! - 订阅快照（[`crate::snapshot`]）调的是同一个 [`answer_in`]，不另写一套（S1）。
 //!
-//! 还没接的查询（制品、模型、本机配置、安全清单、通知目标、检查项目路径）回 `UNAVAILABLE`「未接入」，由各自的卡来换。
+//! 每种查询在哪儿答由 [`place`] 一处定：视图查询开读事务；读内存的（点通知记下的目标）不碰库；还没接的（制品、
+//! 模型、本机配置、安全清单、检查项目路径）回 `UNAVAILABLE`「未接入」，由各自的卡来换。
 
 use std::sync::Arc;
 
@@ -19,6 +20,8 @@ use iwork_proto::pb;
 use iwork_proto::pb::query::Kind as Q;
 use iwork_proto::pb::query_result::Kind as R;
 use iwork_store::{SqliteReadModel, ViewTx};
+
+use crate::attention::Attention;
 
 /// 存储故障 → 对外错误：忙可重试，别的是内部错误（日志里点名）。
 pub fn storage_error(e: &StorageError) -> pb::Error {
@@ -80,15 +83,26 @@ impl From<ConvertError> for Failure {
     }
 }
 
-/// 不在读事务里答的查询；返回 `None` 表示它是视图查询，走 [`answer_in`]。
-pub fn answer_outside(kind: &Q) -> Option<pb::Error> {
+/// 一条查询在哪儿答。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// 视图查询：一个读事务里答（[`answer_in`]）
+    View,
+    /// 读后台进程的内存，不碰库（Q2 的例外）
+    Memory,
+    /// 还没接：回「未接入」，括号里是归哪张卡
+    Unwired(&'static str),
+}
+
+/// 查询种类 → 在哪儿答。穷举：加一种查询要在这里表态。
+pub fn place(kind: &Q) -> Place {
     match kind {
-        Q::ReadArtifact(_) => Some(unwired("读制品（T10d）")),
-        Q::ListModels(_) => Some(unwired("模型列表（T10g）")),
-        Q::ListLocalConfig(_) => Some(unwired("本机配置（T10f）")),
-        Q::ListSecurityLists(_) => Some(unwired("安全清单（T10e）")),
-        Q::GetOpenTarget(_) => Some(unwired("通知目标（T10a 步 8）")),
-        Q::InspectProjectPath(_) => Some(unwired("检查项目路径（T10c）")),
+        Q::ReadArtifact(_) => Place::Unwired("读制品（T10d）"),
+        Q::ListModels(_) => Place::Unwired("模型列表（T10g）"),
+        Q::ListLocalConfig(_) => Place::Unwired("本机配置（T10f）"),
+        Q::ListSecurityLists(_) => Place::Unwired("安全清单（T10e）"),
+        Q::InspectProjectPath(_) => Place::Unwired("检查项目路径（T10c）"),
+        Q::GetOpenTarget(_) => Place::Memory,
         Q::GetConversation(_)
         | Q::ListConversations(_)
         | Q::ListProjects(_)
@@ -98,7 +112,7 @@ pub fn answer_outside(kind: &Q) -> Option<pb::Error> {
         | Q::GetRuntimeStatus(_)
         | Q::ListRules(_)
         | Q::GetSettings(_)
-        | Q::ListAnchors(_) => None,
+        | Q::ListAnchors(_) => Place::View,
     }
 }
 
@@ -217,7 +231,7 @@ fn view<C: EventCodec + ?Sized>(tx: &ViewTx<'_, C>, kind: &Q) -> Result<R, Failu
         | Q::ListLocalConfig(_)
         | Q::ListSecurityLists(_)
         | Q::GetOpenTarget(_)
-        | Q::InspectProjectPath(_) => unreachable!("不是视图查询，由 answer_outside 答"),
+        | Q::InspectProjectPath(_) => unreachable!("不是视图查询，见 place()"),
     };
     Ok(out)
 }
@@ -225,23 +239,37 @@ fn view<C: EventCodec + ?Sized>(tx: &ViewTx<'_, C>, kind: &Q) -> Result<R, Failu
 /// 查询的受理方。
 pub struct Queries<C: EventCodec> {
     read: Arc<SqliteReadModel<C>>,
+    /// 点通知记下的目标（`GetOpenTarget` 读它，不开读事务）
+    attention: Arc<Attention>,
 }
 
 impl<C: EventCodec> Clone for Queries<C> {
     fn clone(&self) -> Self {
         Self {
             read: self.read.clone(),
+            attention: self.attention.clone(),
         }
     }
 }
 
 impl<C: EventCodec + 'static> Queries<C> {
-    pub fn new(read: Arc<SqliteReadModel<C>>) -> Self {
-        Self { read }
+    pub fn new(read: Arc<SqliteReadModel<C>>, attention: Arc<Attention>) -> Self {
+        Self { read, attention }
     }
 
     pub fn read_model(&self) -> &Arc<SqliteReadModel<C>> {
         &self.read
+    }
+
+    /// 读内存的查询（[`Place::Memory`]）。
+    fn answer_in_memory(&self, kind: &Q) -> R {
+        match kind {
+            Q::GetOpenTarget(_) => R::GetOpenTarget(iwork_app::notify::open_target_to_proto(
+                self.attention.boot_id(),
+                self.attention.open_target().as_ref(),
+            )),
+            other => unreachable!("不是读内存的查询：{other:?}"),
+        }
     }
 
     /// 答一条查询：视图查询开一个读事务。
@@ -249,8 +277,16 @@ impl<C: EventCodec + 'static> Queries<C> {
         let Some(kind) = query.kind else {
             return Err(views::invalid("query", "查询为空"));
         };
-        if let Some(e) = answer_outside(&kind) {
-            return Err(e);
+        match place(&kind) {
+            Place::View => {}
+            Place::Unwired(what) => return Err(unwired(what)),
+            // `seq` 填 0：读的是内存，不对应库的任何一刻
+            Place::Memory => {
+                return Ok(pb::QueryResult {
+                    seq: 0,
+                    kind: Some(self.answer_in_memory(&kind)),
+                });
+            }
         }
         let read = self.read.view(move |tx| {
             let head = tx.head()?;
@@ -302,6 +338,8 @@ impl<C: EventCodec + 'static, I: RequestHandler> RequestHandler for QueryOr<C, I
     }
 
     async fn connection_closed(&self, ctx: &ConnectionContext) {
+        // 连接级的状态随连接清掉（S5）：这条连接报的在看哪
+        self.queries.attention.connection_closed(ctx.connection_id);
         self.commands.connection_closed(ctx).await;
     }
 }

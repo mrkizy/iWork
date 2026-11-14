@@ -140,79 +140,109 @@ pub fn pid_of(v: &Value) -> i32 {
     v["pid"].as_i64().unwrap() as i32
 }
 
-/// 进程的状态：`'T'` 停着、`'Z'` 僵尸、`'R'` 别的活着的状态；没了为 `None`。
+/// macOS：读一个进程的 BSD 信息。进程不在（`ESRCH`：没了，或者是僵尸）为 `None`；别的错误、短读让测试红，不当成「不在」。
 #[cfg(target_os = "macos")]
-pub fn state(pid: i32) -> Option<char> {
+fn bsd_info(pid: i32) -> Option<libc::proc_bsdinfo> {
     let size = std::mem::size_of::<libc::proc_bsdinfo>();
     // SAFETY: 全零是这个纯数据结构体的合法初值；指针与长度描述同一个结构体
-    let info = unsafe {
-        let mut info: libc::proc_bsdinfo = std::mem::zeroed();
-        let n = libc::proc_pidinfo(
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    // SAFETY: 同上
+    let n = unsafe {
+        libc::proc_pidinfo(
             pid,
             libc::PROC_PIDTBSDINFO,
             0,
             (&raw mut info).cast(),
             size as i32,
-        );
-        if n as usize != size {
-            // 僵尸在 macOS 上读不到：看进程号还占不占着
-            // SAFETY: 信号 0 只检查进程号
-            return (libc::kill(pid, 0) == 0).then_some('Z');
-        }
-        info
+        )
     };
-    Some(match info.pbi_status {
-        libc::SSTOP => 'T',
-        libc::SZOMB => 'Z',
-        _ => 'R',
-    })
+    if n as usize == size {
+        return Some(info);
+    }
+    let e = std::io::Error::last_os_error();
+    assert!(
+        n <= 0 && e.raw_os_error() == Some(libc::ESRCH),
+        "读不了进程 {pid}：返回 {n}（要 {size}），{e}"
+    );
+    None
 }
 
+/// Linux：`/proc/<pid>/stat` 里 `)` 之后的字段。进程不在为 `None`；别的读错、格式认不出让测试红。
 #[cfg(target_os = "linux")]
-pub fn state(pid: i32) -> Option<char> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let c = stat[stat.rfind(')')? + 1..]
-        .split_whitespace()
-        .next()?
-        .chars()
-        .next()?;
-    Some(match c {
-        'T' | 't' => 'T',
-        'Z' | 'X' => 'Z',
-        _ => 'R',
-    })
+fn stat_fields(pid: i32) -> Option<Vec<String>> {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(s) => s,
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                || e.raw_os_error() == Some(libc::ESRCH) =>
+        {
+            return None;
+        }
+        Err(e) => panic!("读不了 /proc/{pid}/stat：{e}"),
+    };
+    let rest = &stat[stat
+        .rfind(')')
+        .unwrap_or_else(|| panic!("/proc/{pid}/stat 认不出：{stat:?}"))
+        + 1..];
+    let fields: Vec<String> = rest.split_whitespace().map(str::to_owned).collect();
+    assert!(fields.len() >= 2, "/proc/{pid}/stat 认不出：{stat:?}");
+    Some(fields)
 }
 
-/// 父进程号；没了为 `None`。
+/// 进程的状态：`'T'` 停着、`'Z'` 僵尸（已退出、等回收）、`'R'` 别的活着的状态；没了（已回收）为 `None`。读取出错让
+/// 测试红。只有屏障测试要分清「停着」和「僵尸」才用它；判「在不在跑」用 [`alive`]。
 #[cfg(target_os = "macos")]
-pub fn ppid(pid: i32) -> Option<i32> {
-    let size = std::mem::size_of::<libc::proc_bsdinfo>();
-    // SAFETY: 全零是这个纯数据结构体的合法初值；指针与长度描述同一个结构体
-    unsafe {
-        let mut info: libc::proc_bsdinfo = std::mem::zeroed();
-        let n = libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            (&raw mut info).cast(),
-            size as i32,
-        );
-        (n as usize == size).then_some(info.pbi_ppid as i32)
+pub fn state(pid: i32) -> Option<char> {
+    match bsd_info(pid) {
+        Some(info) => Some(match info.pbi_status {
+            libc::SSTOP => 'T',
+            libc::SZOMB => 'Z',
+            _ => 'R',
+        }),
+        // macOS 对僵尸也报 ESRCH：进程号还占着就是僵尸
+        // SAFETY: 信号 0 只检查进程号
+        None => match unsafe { libc::kill(pid, 0) } {
+            0 => Some('Z'),
+            _ => {
+                let e = std::io::Error::last_os_error();
+                assert_eq!(e.raw_os_error(), Some(libc::ESRCH), "看不了进程 {pid}：{e}");
+                None
+            }
+        },
     }
 }
 
 #[cfg(target_os = "linux")]
-pub fn ppid(pid: i32) -> Option<i32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat[stat.rfind(')')? + 1..]
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
+pub fn state(pid: i32) -> Option<char> {
+    let fields = stat_fields(pid)?;
+    Some(match fields[0].as_str() {
+        "T" | "t" => 'T',
+        // 和产品 scan.rs 同一份口径：Z、X、x 都算已经结束
+        "Z" | "X" | "x" => 'Z',
+        _ => 'R',
+    })
 }
 
+/// 父进程号；没了为 `None`（macOS 上僵尸也读不到，同样为 `None`）。读取出错让测试红。
+#[cfg(target_os = "macos")]
+pub fn ppid(pid: i32) -> Option<i32> {
+    bsd_info(pid).map(|info| info.pbi_ppid as i32)
+}
+
+#[cfg(target_os = "linux")]
+pub fn ppid(pid: i32) -> Option<i32> {
+    let fields = stat_fields(pid)?;
+    Some(
+        fields[1]
+            .parse()
+            .unwrap_or_else(|_| panic!("/proc/{pid}/stat 的父进程号认不出：{fields:?}")),
+    )
+}
+
+/// 进程在跑（含停着）：和清树判空同一条规则（`iwork_agent_acp::process::running`，僵尸算不在）。读取出错让测试红。
 pub fn alive(pid: i32) -> bool {
-    matches!(state(pid), Some('R' | 'T'))
+    iwork_agent_acp::process::running(pid)
+        .unwrap_or_else(|e| panic!("读不了进程 {pid} 的状态：{e}"))
 }
 
 pub async fn wait_until(what: &str, limit: Duration, mut done: impl FnMut() -> bool) {

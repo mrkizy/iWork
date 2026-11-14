@@ -11,6 +11,7 @@ iwork-domain.workspace = true
 iwork-ports.workspace = true
 tokio = { workspace = true, features = ["rt", "fs", "process"] }
 toml.workspace = true
+tracing.workspace = true
 iwork-rootfs.workspace = true
 
 [target.'cfg(unix)'.dependencies]

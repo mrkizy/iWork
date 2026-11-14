@@ -17,6 +17,7 @@ pub mod convert;
 pub mod details;
 pub mod lifecycle;
 pub mod message_blocks;
+pub mod notify;
 pub mod refusal;
 pub mod settings_command;
 pub mod subscription;

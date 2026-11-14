@@ -137,7 +137,7 @@ fn expected_row_page(
 /// 一个场景里，六种取法的每一页都满足 `assert_page_turns`；行级游标的页选中的行与两个标志等于从整个对话的行
 /// 集合独立算出来的。
 fn check_world(w: &World) {
-    let q = Queries::new(read(&w.store));
+    let q = Queries::new(read(&w.store), attention());
     let head = block(w.store.head_seq()).unwrap().0;
     let mut checked = 0;
     for c in CONVS {
@@ -203,7 +203,7 @@ fn latest_page_carries_owner_of_tool_started_after_newer_message() {
     for op in [0, 1, 2, 0, 3] {
         w.step(op, 0, 0);
     }
-    let q = Queries::new(read(&w.store));
+    let q = Queries::new(read(&w.store), attention());
     let latest = page(&q, get(10, |g| g.limit = 1));
     assert!(
         !latest.tool_calls.is_empty() || !latest.messages.is_empty(),
@@ -221,7 +221,7 @@ fn empty_row_page_flags_exclude_the_cursor_row() {
     let env = Env::new();
     let mut w = World::new(&env);
     w.step(0, 0, 0);
-    let q = Queries::new(read(&w.store));
+    let q = Queries::new(read(&w.store), attention());
     let full = page(&q, get(10, |g| g.limit = 1000));
     assert_eq!(full.messages.len(), 1, "对照：只有一条消息");
     let s = full.messages[0].created_seq;

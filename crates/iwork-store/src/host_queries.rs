@@ -9,7 +9,9 @@ use iwork_domain::event::{DomainEvent, StreamKind, TurnSessionBound};
 use iwork_domain::id::{ConversationId, Seq};
 use iwork_domain::turn::TurnState;
 use iwork_domain::user_action::UserActionStateKind;
-use iwork_ports::read_model::{ConversationWork, OpenTurn, QuitCounts, SnapshotInputs, TurnWork};
+use iwork_ports::read_model::{
+    ConversationWork, OpenTurn, QuitCounts, SessionReplacement, SnapshotInputs, TurnWork,
+};
 use iwork_ports::store::{EventCodec, StorageError};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
@@ -131,25 +133,69 @@ fn session_bindings<C: EventCodec + ?Sized>(
     codec: &C,
     conversation: ConversationId,
 ) -> Result<Vec<TurnSessionBound>, StorageError> {
-    let found: Vec<(String, Vec<u8>)> = rows(
+    Ok(session_bindings_with_seq(conn, codec, conversation)?
+        .into_iter()
+        .map(|(_, b)| b)
+        .collect())
+}
+
+/// 这个对话全部 `TurnSessionBound` 与各自的 seq，按 seq 升序。读事件：投影上只有每个回合最后一个值。
+fn session_bindings_with_seq<C: EventCodec + ?Sized>(
+    conn: &Connection,
+    codec: &C,
+    conversation: ConversationId,
+) -> Result<Vec<(Seq, TurnSessionBound)>, StorageError> {
+    let found: Vec<(i64, String, Vec<u8>)> = rows(
         conn,
-        "SELECT e.type, e.payload FROM turns t JOIN events e \
+        "SELECT e.seq, e.type, e.payload FROM turns t JOIN events e \
          ON e.stream_kind = ?1 AND e.stream_id = t.id AND e.type = 'turn_session_bound' \
          WHERE t.conversation_id = ?2 ORDER BY e.seq",
         params![StreamKind::Turn.to_text(), conversation.to_string()],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     found
         .into_iter()
-        .map(|(kind, payload)| match codec.decode(&kind, &payload)? {
-            DomainEvent::TurnSessionBound(b) => Ok(b),
-            other => Err(crate::sql::bad_column(
-                "events",
-                "type",
-                format!("turn_session_bound 解出来是 {}", other.kind()),
-            )),
-        })
+        .map(
+            |(seq, kind, payload)| match codec.decode(&kind, &payload)? {
+                DomainEvent::TurnSessionBound(b) => Ok((seq_col("events", "seq", seq)?, b)),
+                other => Err(crate::sql::bad_column(
+                    "events",
+                    "type",
+                    format!("turn_session_bound 解出来是 {}", other.kind()),
+                )),
+            },
+        )
         .collect()
+}
+
+/// 这个对话里每一次会话替换（带 `replaced` 的绑定），按 seq 升序；同一回合后面又有一条不带替换、记回旧编号的
+/// 绑定时，那次替换算退回了（任务卡范围 2）。
+pub(crate) fn session_replacements<C: EventCodec + ?Sized>(
+    conn: &Connection,
+    codec: &C,
+    conversation: ConversationId,
+) -> Result<Vec<SessionReplacement>, StorageError> {
+    let all = session_bindings_with_seq(conn, codec, conversation)?;
+    Ok(all
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (seq, b))| {
+            let r = b.replaced.as_ref()?;
+            let rolled_back = all[i + 1..].iter().any(|(_, later)| {
+                later.turn_id == b.turn_id
+                    && later.replaced.is_none()
+                    && later.runtime_session_id == r.old_runtime_session_id
+            });
+            Some(SessionReplacement {
+                turn_id: b.turn_id,
+                seq: *seq,
+                old_runtime_session_id: r.old_runtime_session_id.clone(),
+                new_runtime_session_id: b.runtime_session_id.clone(),
+                reason: r.reason,
+                rolled_back,
+            })
+        })
+        .collect())
 }
 
 pub(crate) fn last_session_binding<C: EventCodec + ?Sized>(

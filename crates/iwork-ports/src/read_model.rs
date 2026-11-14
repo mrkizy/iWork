@@ -466,3 +466,16 @@ pub struct Anchors {
     pub waiting_count: u32,
     pub failed_count: u32,
 }
+
+/// 一次运行时会话的替换（续接时会话记录用不了、换了一条新会话，T06 方案 5.2a）：诊断里列出它（任务卡范围 2）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionReplacement {
+    pub turn_id: iwork_domain::id::TurnId,
+    /// 记下这次替换的 `TurnSessionBound` 的 seq
+    pub seq: Seq,
+    pub old_runtime_session_id: String,
+    pub new_runtime_session_id: String,
+    pub reason: iwork_domain::session::SessionLostReason,
+    /// 同一回合后面又有一条不带替换的绑定、记回了旧编号：这次替换被退回了
+    pub rolled_back: bool,
+}

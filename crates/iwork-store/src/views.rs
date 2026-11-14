@@ -893,6 +893,16 @@ impl<C: EventCodec + ?Sized> ViewTx<'_, C> {
         }))
     }
 
+    // ---------- 诊断 ----------
+
+    /// 这个对话里每一次会话替换，按 seq 升序（诊断用，任务卡范围 2）。
+    pub fn session_replacements(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Vec<iwork_ports::read_model::SessionReplacement>, StorageError> {
+        crate::host_queries::session_replacements(self.conn, self.codec, conversation)
+    }
+
     // ---------- 待处理 ----------
 
     /// 「待你处理」的全部项，按在时间线上的位置升序（同位置按种类、id）。哪些算待处理和

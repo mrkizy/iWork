@@ -42,6 +42,17 @@ pub fn recheck(pids: &[Pid]) -> io::Result<Recheck> {
         .collect()
 }
 
+/// 这个进程此刻在不在跑：读到了（在跑或停住）为 `true`；没了、僵尸、没权限为 `false`（和清树判空同一条规则）；
+/// 别的读取错误报出去，不能当成「不在」。
+pub fn running(pid: Pid) -> io::Result<bool> {
+    read_one(pid).map(|p| p.is_some())
+}
+
+/// 这个进程组里还有没有在跑的成员（同一条规则：僵尸不算）。读不全进程表报错。
+pub fn group_running(pgid: Pid) -> io::Result<bool> {
+    Ok(read_table()?.0.values().any(|p| p.pgid == pgid))
+}
+
 /// 一个进程此刻的出生时间（发信号前的身份复核用）。没了、僵尸、没权限、读不到都是 `None`。
 pub fn birth_of(pid: Pid) -> Option<Birth> {
     read_one(pid).ok().flatten().and_then(|p| p.birth)
@@ -333,11 +344,18 @@ pub(super) mod tests {
                 run: Run::Stopped,
             }
         );
-        let zombie = "1 (x) Z 0 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 5";
-        assert_eq!(parse_stat(1, zombie).unwrap(), None);
+        // 僵尸（Z）和已死（X、旧内核的 x）都算不在
+        for state in ["Z", "X", "x"] {
+            let line = format!("1 (x) {state} 0 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 5");
+            assert_eq!(parse_stat(1, &line).unwrap(), None, "{state}");
+        }
+        // 前后有空白、睡眠（S）照样认得
+        let sleeping = " 7 (x) S 1 7 7 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 5 \n";
+        assert_eq!(parse_stat(7, sleeping).unwrap().unwrap().run, Run::Running);
         // 认不出的格式不当成「没有这个进程」
         assert!(parse_stat(1, "1 (x) R 0").is_err());
         assert!(parse_stat(1, "garbage").is_err());
+        assert!(parse_stat(1, "").is_err());
     }
 
     /// 没了、僵尸、没权限可以跳过；别的错误（如描述符用完）让整次扫描失败。
@@ -349,6 +367,40 @@ pub(super) mod tests {
         for errno in [libc::EMFILE, libc::ENFILE, libc::EIO, libc::ENOMEM] {
             assert!(!skippable(&io::Error::from_raw_os_error(errno)), "{errno}");
         }
+    }
+
+    /// 判「在不在跑」：读到了为真；没了、僵尸为假；读取出错报出去（替身制造错误）。
+    #[test]
+    fn running_follows_the_scan_rule() {
+        let me = std::process::id() as Pid;
+        assert!(running(me).unwrap());
+        // 僵尸：子进程退出、不回收
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id() as Pid;
+        while read_one(pid).unwrap().is_some() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!running(pid).unwrap(), "僵尸算不在");
+        child.wait().unwrap();
+        assert!(!running(pid).unwrap(), "回收之后不在");
+        // 进程组：自己的组里有自己
+        // SAFETY: getpgrp 只读
+        assert!(group_running(unsafe { libc::getpgrp() }).unwrap());
+    }
+
+    /// 读取出错不当成「不在」：替身的系统调用报 EIO，读一个进程就报错。
+    #[test]
+    fn read_error_is_not_absence() {
+        struct Broken;
+        impl ProcSys for Broken {
+            fn bsd(&self, _pid: Pid) -> io::Result<Option<Bsd>> {
+                Err(io::Error::from_raw_os_error(libc::EIO))
+            }
+            fn sid(&self, _pid: Pid) -> Option<Pid> {
+                None
+            }
+        }
+        assert!(read_consistent(&Broken, 5).is_err());
     }
 
     /// 自己读得到：父进程号、会话号对得上系统调用，出生时间读得到；复核和读表给的一样。

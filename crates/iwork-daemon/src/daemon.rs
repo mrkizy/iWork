@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::DaemonArgs;
 use crate::assembly::{self, RuntimeSlot};
+use crate::attention::Attention;
 use crate::boot::{
     self, BootError, Identity, PAUSE_BEFORE_EXIT, Step, Store, StorePorts, VERSION, report,
     starting, status_of,
@@ -52,6 +53,7 @@ use crate::tasks::{
 use crate::time::{MonotonicIds, SystemClock, TokioTimer};
 use crate::work::{LateWork, RunningWork};
 use iwork_host::fs::OsPathResolver;
+use iwork_host::notifier::LogNotifier;
 
 /// 第 2 步的结果。
 pub struct Places {
@@ -518,13 +520,24 @@ fn install_timing() -> install_watch::Timing {
     }
 }
 
+/// 查询、快照与 outbox 去向共用的读模型。
+type ReadModel = iwork_store::SqliteReadModel<iwork_app::codec::ProtoEventCodec>;
+
+/// outbox 去向登记表（T04 方案 2.11）：真实去向每个一行，开发构建另加假去向。
+fn outbox_routes(read: Arc<ReadModel>) -> Vec<OutboxRoute> {
+    // 系统通知：macOS 的系统通知接口接入前各平台都只记日志（iwork-host 的 LogNotifier）
+    let mut routes = vec![crate::routes::notify_route(read, Arc::new(LogNotifier))];
+    routes.extend(dev_outbox_routes());
+    routes
+}
+
 #[cfg(not(feature = "dev"))]
-fn outbox_routes() -> Vec<OutboxRoute> {
+fn dev_outbox_routes() -> Vec<OutboxRoute> {
     Vec::new()
 }
 
 #[cfg(feature = "dev")]
-fn outbox_routes() -> Vec<OutboxRoute> {
+fn dev_outbox_routes() -> Vec<OutboxRoute> {
     crate::dev_parts::outbox_routes()
 }
 
@@ -598,17 +611,27 @@ async fn serve_with<W: RunningWork>(
     cfg.trust = args.trust;
     // 查询与订阅快照共用一个读模型（和存储共用读线程池）；命令受理是分发入口（组装完、bind 之前填进 `late`）
     let read = Arc::new(store.read_model(boot::read_defaults()));
+    // 在看哪、点通知记下的目标（内存）：查询读它，连接断开清在看哪；ReportPresence 与 notify 任务归步 8b 接
+    // boot_id 每次启动新生成：点通知的 token 只在这一次运行里递增，客户端靠它认出换了后台（1/F-1）
+    let boot_id = format!(
+        "{:032x}",
+        iwork_ports::clock::IdGenerator::next(&MonotonicIds::new(SystemClock::new())).to_u128()
+    );
+    let attention = Arc::new(Attention::new(boot_id));
     let (server, publisher) = Server::new(
         cfg,
         id.own.clone(),
         DaemonHandler::new(
             gate.clone(),
-            QueryOr::new(Queries::new(read.clone()), Late(late.clone())),
+            QueryOr::new(
+                Queries::new(read.clone(), attention.clone()),
+                Late(late.clone()),
+            ),
             work.clone(),
             stop_switch.clone(),
         )
         .with_autostart(autostart_handler(autostart.clone(), gated.clone())),
-        StoreSource::new(store.clone(), ReadSnapshots::new(read)),
+        StoreSource::new(store.clone(), ReadSnapshots::new(read.clone())),
     );
     let publishing = PublishState::new();
     let publisher = Arc::new(publisher);
@@ -672,8 +695,7 @@ async fn serve_with<W: RunningWork>(
         step: Step::Tasks,
         message,
     };
-    // T04 交付时登记表是空的（T10 登记真实去向）；开发构建可加假去向
-    let routes = outbox_routes();
+    let routes = outbox_routes(read.clone());
     if let Err(e) = outbox::validate(&routes) {
         return fail(&board, tasks_failed(e));
     }

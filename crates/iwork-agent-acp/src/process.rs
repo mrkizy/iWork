@@ -8,6 +8,9 @@
 
 #[cfg(unix)]
 mod scan;
+/// 进程在不在跑、组里还有没有在跑的成员（和清树判空同一条规则：僵尸不算；读取出错报错，不当成不在）。
+#[cfg(unix)]
+pub use scan::{group_running, running};
 #[cfg(unix)]
 mod scope;
 #[cfg(unix)]
