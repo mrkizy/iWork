@@ -30,27 +30,58 @@ PER_BENCH_TIMEOUT=600
 # 单开一列允许，而不是放宽这条规则。
 PANIC_LINE="^thread '[^']*'( \([0-9]+\))? panicked at "
 
+# 在这些文件里找 panic 行。0 找到（打出第一行），1 没有，2 读不了（grep 出错）——调用方把 0 和 2 都判红。
+scan_panic() { # 文件…
+  local rc=0 hit
+  hit=$(grep -hE "$PANIC_LINE" "$@" 2>&1) || rc=$?
+  case "$rc" in
+    0) printf '%s' "$hit" | head -1 ;;
+    1) ;;
+    *) printf '扫描失败（grep 退出码 %s）：%s' "$rc" "$hit" | head -1; rc=2 ;;
+  esac
+  return "$rc"
+}
+
 # 跑一次，退出码 0 表示通过；结论那一行（ok / FAIL）放在 RUN_RESULT 里，由调用方在折叠组外面打出来。
-# 命令的输出同时进终端和一个临时文件，跑完在文件里找 panic 行。
+# 命令的输出同时进终端和一个临时文件；命令拉起的子进程把 stderr 写进 IWORK_BENCH_CHILD_STDERR_DIR（lifecycle 的后台）。
+# 跑完在这两处找 panic 行。日志、目录建不起来、tee 写失败、grep 读错，一律判红：采集坏了不能当成「没看到 panic」。
 run_one() { # 标签 命令…
-  local label=$1 log rc start elapsed why
+  local label=$1 log childdir rc tee_rc start elapsed why hit scan_rc f
   shift
-  log=$(mktemp "${TMPDIR:-/tmp}/bench-smoke.XXXXXX")
+  RUN_RESULT="bench-smoke FAIL  ${label}：建不了临时日志（TMPDIR=${TMPDIR:-/tmp}）"
+  log=$(mktemp "${TMPDIR:-/tmp}/bench-smoke.XXXXXX") || return 1
+  childdir=$(mktemp -d "${TMPDIR:-/tmp}/bench-smoke-child.XXXXXX") || { rm -f "$log"; return 1; }
   start=$(date +%s)
   set +e
-  "$@" </dev/null 2>&1 | tee "$log"
-  rc=${PIPESTATUS[0]}
+  env IWORK_BENCH_CHILD_STDERR_DIR="$childdir" "$@" </dev/null 2>&1 | tee "$log"
+  local st=("${PIPESTATUS[@]}")
   set -e
+  rc=${st[0]}
+  tee_rc=${st[1]}
   elapsed=$(($(date +%s) - start))
   why=""
   if [ "$rc" -eq 124 ]; then
     why="超时（${PER_BENCH_TIMEOUT}s）"
   elif [ "$rc" -ne 0 ]; then
     why="退出码 $rc"
-  elif grep -qE "$PANIC_LINE" "$log"; then
-    why="退出码 0，但有线程或任务 panic 过：$(grep -E "$PANIC_LINE" "$log" | head -1)"
+  elif [ "$tee_rc" -ne 0 ]; then
+    why="退出码 0，但输出没能写进日志（tee 退出码 ${tee_rc}），没法检查 panic"
+  else
+    for f in "$log" "$childdir"/*; do
+      [ -e "$f" ] || continue
+      scan_rc=0
+      hit=$(scan_panic "$f") || scan_rc=$?
+      if [ "$scan_rc" -eq 0 ]; then
+        [ "$f" = "$log" ] && why="退出码 0，但有线程或任务 panic 过：$hit" ||
+          why="退出码 0，但子进程 $(basename "$f") 里有 panic：$hit"
+        break
+      elif [ "$scan_rc" -ne 1 ]; then
+        why="退出码 0，但 $(basename "$f") 没法检查 panic：$hit"
+        break
+      fi
+    done
   fi
-  rm -f "$log"
+  rm -rf "$log" "$childdir"
   if [ -z "$why" ]; then
     RUN_RESULT="bench-smoke ok    ${label}（${elapsed}s）"
     return 0
@@ -61,18 +92,25 @@ run_one() { # 标签 命令…
 
 # 判红规则的对照：不编译、不跑基准，几秒跑完（CI 的 lint job 跑它）。
 selftest() {
-  local fails=0
+  local fails=0 fake
+  fake=$(mktemp -d "${TMPDIR:-/tmp}/bench-smoke-selftest.XXXXXX")
+  # 假 tee / grep：模拟日志写不进、扫描读错
+  mkdir "$fake/badtee" "$fake/badgrep"
+  printf '#!/bin/sh\ncat >/dev/null\necho "tee: 写不进" >&2\nexit 1\n' >"$fake/badtee/tee"
+  printf '#!/bin/sh\necho "grep: 读不了" >&2\nexit 2\n' >"$fake/badgrep/grep"
+  chmod +x "$fake/badtee/tee" "$fake/badgrep/grep"
   expect() { # 期望(0|1) 说明 命令…
     local want=$1 what=$2 got=0
     shift 2
-    run_one "$what" "$@" >/dev/null || got=1
+    run_one "$what" "$@" >/dev/null 2>&1 || got=1
     if [ "$got" -eq "$want" ]; then echo "  ok    $what"; else
       echo "  FAIL  ${what}（期望 $([ "$want" -eq 0 ] && echo 绿 || echo 红)）"
       fails=$((fails + 1))
     fi
   }
+  local panic_line="thread 'tokio-rt-worker' (62670956) panicked at crates/iwork-ipc/src/server/connection.rs:405:17:"
   expect 1 "后台任务 panic、进程退出 0：红" sh -c \
-    "echo \"thread 'tokio-rt-worker' (62670956) panicked at crates/iwork-ipc/src/server/connection.rs:405:17:\" >&2; echo 'ipc_slow_consumer INVALID：对照组 A 没收齐（Closed）（这一对不报延迟）'; exit 0"
+    "echo \"$panic_line\" >&2; echo 'ipc_slow_consumer INVALID：对照组 A 没收齐（Closed）（这一对不报延迟）'; exit 0"
   expect 1 "旧版格式（没有线程号）的 panic 行：红" sh -c "echo \"thread 'main' panicked at src/a.rs:1:1:\" >&2; exit 0"
   expect 0 "没有 panic 的 INVALID、退出 0：绿" sh -c \
     "echo 'ipc_slow_consumer INVALID：对照组 A 没收齐（Closed）（这一对不报延迟）'; exit 0"
@@ -80,6 +118,29 @@ selftest() {
     "echo '{\"bench\":\"x\",\"note\":\"thread 'a' panicked at\"}'; exit 0"
   expect 1 "退出码非 0：红" sh -c 'exit 3'
   expect 0 "对照：什么都没有、退出 0：绿" true
+  # 子进程（后台）的 stderr：任务 panic 后被恢复、基准照样退出 0，也要红
+  expect 1 "子进程 stderr 里有 panic、基准退出 0：红" sh -c \
+    "echo \"thread 'tokio-rt-worker' (9) panicked at crates/iwork-daemon/src/tasks/outbox.rs:138:9:\" >\"\$IWORK_BENCH_CHILD_STDERR_DIR/daemon-0.stderr\"; echo ok; exit 0"
+  expect 0 "子进程 stderr 有内容但没有 panic：绿" sh -c \
+    "echo 'some log line' >\"\$IWORK_BENCH_CHILD_STDERR_DIR/daemon-0.stderr\"; exit 0"
+  # 采集坏了一律红
+  # 下面三格各在子 shell 里换掉 TMPDIR / PATH，只影响这一格；子 shell 的退出码就是这一格的结果
+  (
+    fails=0 TMPDIR="$fake/no-such-dir"
+    expect 1 "TMPDIR 指向不存在的目录、日志建不起来：红" sh -c "echo \"$panic_line\" >&2; exit 0"
+    exit "$fails"
+  ) || fails=$((fails + 1))
+  (
+    fails=0 PATH="$fake/badtee:$PATH"
+    expect 1 "tee 写失败、命令退出 0：红" sh -c 'echo hi; exit 0'
+    exit "$fails"
+  ) || fails=$((fails + 1))
+  (
+    fails=0 PATH="$fake/badgrep:$PATH"
+    expect 1 "grep 读错（退出码 2）、命令退出 0：红" sh -c 'echo hi; exit 0'
+    exit "$fails"
+  ) || fails=$((fails + 1))
+  rm -rf "$fake"
   if [ "$fails" -ne 0 ]; then
     echo "bench-smoke selftest：$fails 项不符" >&2
     exit 1

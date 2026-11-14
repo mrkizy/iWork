@@ -76,13 +76,61 @@ const DIR_VARS: [&str; 4] = [
     "IWORK_DATA_DIR",
 ];
 
+/// 后台子进程的 stderr 去哪：设了 `IWORK_BENCH_CHILD_STDERR_DIR`（基准冒烟设的）就各写一个文件进去，冒烟跑完在里面
+/// 找 panic 行——后台里可重启的任务 panic 后由监督器恢复、连接照样成功，只有 stderr 上那一行能看出来；没设就丢掉，
+/// 平时跑基准不多出文件。
+fn child_stderr() -> Stdio {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let Ok(dir) = std::env::var("IWORK_BENCH_CHILD_STDERR_DIR") else {
+        return Stdio::null();
+    };
+    let path = Path::new(&dir).join(format!(
+        "daemon-{}.stderr",
+        N.fetch_add(1, Ordering::SeqCst)
+    ));
+    let file = std::fs::File::create(&path)
+        .unwrap_or_else(|e| panic!("建不了后台 stderr 文件 {}：{e}", path.display()));
+    Stdio::from(file)
+}
+
+/// 和产品的 `DetachedSpawn` 一样脱离（新会话、工作目录 /、另起线程收尸），只是 stderr 交给 `child_stderr`。
+/// 产品的拉起方式把标准流都接到 /dev/null，基准换这个实现，不改产品。
+struct BenchDetachedSpawn;
+
+impl iwork_client_core::launcher::Spawn for BenchDetachedSpawn {
+    fn spawn(&self, exe: &Path, args: &[&str]) -> std::io::Result<()> {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Command::new(exe);
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(child_stderr())
+            .current_dir("/");
+        // SAFETY：pre_exec 里只调 async-signal-safe 的 setsid
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn()?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
+    }
+}
+
 fn spawn(home: &Home) -> Child {
     let mut c = Command::new(DAEMON);
     c.arg("--dev-trust")
         .env("HOME", home.path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(child_stderr());
     for k in DIR_VARS {
         c.env_remove(k);
     }
@@ -231,7 +279,7 @@ fn connect_cold(rt: &tokio::runtime::Runtime, own: &SelfIdentity) {
                 own: own.clone(),
                 cfg: client_cfg(),
             },
-            iwork_client_core::launcher::DetachedSpawn,
+            BenchDetachedSpawn,
             iwork_client_core::launcher::LaunchConfig {
                 daemon_exe: PathBuf::from(DAEMON),
                 budget: iwork_client_core::launcher::BUDGET,
