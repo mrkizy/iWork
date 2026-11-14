@@ -913,21 +913,60 @@ fn fake_agent_rows_match_by_real_program_name() {
 }
 
 /// 统一包装的诊断（acp）：用例本体里建的假运行时在本体结束时就丢掉了，运行时收尾卡住时诊断照样读得到它的记录（丢掉时
-/// 留的快照）。
+/// 留的快照）。只看这条用例自己那份记录（并行的别的用例的 Fake 也会列进诊断）。
 #[test]
-#[should_panic(expected = "initialize")]
 fn acp_diag_keeps_records_of_fakes_dropped_in_the_body() {
     let since = std::time::Instant::now();
-    bounded(
-        Duration::from_secs(4),
-        move || fakes_diag(since),
-        || async {
-            let fake = Fake::new(&one_text_turn(json!({ "system_prompt": false })));
-            let _ = AcpRuntime::new(fake.launch.clone())
-                .open_session(spec(fake.dir.path()), AllowAll)
-                .await;
-            drop(fake);
-            stuck_blocking_task(10).await;
-        },
-    );
+    let mine = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let m = mine.clone();
+    let failed = std::panic::catch_unwind(move || {
+        bounded(
+            Duration::from_secs(4),
+            move || fakes_diag(since, fake_procs),
+            move || async move {
+                let fake = Fake::new(&one_text_turn(json!({ "system_prompt": false })));
+                *m.lock().unwrap() = Some(fake.record.clone());
+                let _ = AcpRuntime::new(fake.launch.clone())
+                    .open_session(spec(fake.dir.path()), AllowAll)
+                    .await;
+                drop(fake);
+                stuck_blocking_task(10).await;
+            },
+        );
+    });
+    let message = failed
+        .expect_err("收尾卡住要失败")
+        .downcast::<String>()
+        .map(|s| *s)
+        .unwrap_or_default();
+    let path = mine.lock().unwrap().clone().expect("建过 Fake");
+    let section = record_section(&message, &path);
+    assert!(section.contains("initialize"), "{message}");
+}
+
+/// 诊断列进程的当中，Fake 被丢掉了（存了快照、删了目录）：诊断读的是刚存的快照，不是「读不了记录」（审查 4/F-1）。
+#[test]
+fn diag_reads_the_snapshot_when_the_fake_drops_while_listing() {
+    let since = std::time::Instant::now();
+    let fake = Fake::new(&one_text_turn(json!({})));
+    let path = fake.record.clone();
+    let unique = format!("UNIQUE-{}", std::process::id());
+    std::fs::write(&path, format!("{unique}\n")).unwrap();
+    let out = fakes_diag(since, move || {
+        drop(fake);
+        String::new()
+    });
+    let section = record_section(&out, &path);
+    assert!(section.contains(&unique), "{out}");
+}
+
+/// 诊断里某个记录文件那一段（到下一段「记录 」为止）。
+fn record_section(diag: &str, path: &std::path::Path) -> String {
+    let head = format!("记录 {}：\n", path.display());
+    let start = diag
+        .find(&head)
+        .unwrap_or_else(|| panic!("诊断里没有 {}：\n{diag}", path.display()))
+        + head.len();
+    let rest = &diag[start..];
+    rest[..rest.find("\n记录 ").unwrap_or(rest.len())].to_owned()
 }

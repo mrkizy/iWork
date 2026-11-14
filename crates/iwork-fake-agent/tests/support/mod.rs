@@ -547,23 +547,32 @@ where
     Fut: std::future::Future<Output = ()>,
 {
     let since = Instant::now();
-    bounded(ACP_LIMIT, move || fakes_diag(since), body);
+    bounded(ACP_LIMIT, move || fakes_diag(since, fake_procs), body);
 }
 
 /// acp_port 每条用例的时限。本机和 CI 上每条都在几秒内跑完（最慢的一条约 6 秒）。
 pub const ACP_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// 现场：还在的假运行时进程，和 `since` 之后建过的每个假运行时的记录（并行的别的用例建的也在里面，按路径分开）。
-pub fn fakes_diag(since: Instant) -> String {
+///
+/// `procs` 列进程（产品里是 [`fake_procs`]；对照里换成替身，好在列进程的当中丢掉 `Fake`）。
+pub fn fakes_diag(since: Instant, procs: impl FnOnce() -> String) -> String {
     let records: Vec<(PathBuf, Option<String>)> = lock(&RECORDS)
         .iter()
         .filter(|s| s.created >= since)
         .map(|s| (s.path.clone(), s.kept.clone()))
         .collect();
-    let mut out = format!("假运行时进程：\n{}\n", fake_procs());
+    let mut out = format!("假运行时进程：\n{}\n", procs());
     for (path, kept) in records {
+        // 读文件失败多半是 Fake 在这当中被丢掉了：它先存快照、再删目录，所以这时回记录槽再取一次就有（审查 4/F-1）
         let text = kept.unwrap_or_else(|| {
-            std::fs::read_to_string(&path).unwrap_or_else(|e| format!("读不了记录：{e}"))
+            std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                lock(&RECORDS)
+                    .iter()
+                    .find(|s| s.path == path)
+                    .and_then(|s| s.kept.clone())
+                    .unwrap_or_else(|| format!("读不了记录：{e}"))
+            })
         });
         out.push_str(&format!("记录 {}：\n{text}\n", path.display()));
     }
