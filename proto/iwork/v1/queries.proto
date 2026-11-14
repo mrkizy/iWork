@@ -140,6 +140,22 @@ message GetConversationResult {
   Usage usage_total = 9;
   // 更新的消息还有没有（往后翻、居中取时有意义；取最新一页时为假）。
   bool has_newer = 10;
+  // 这个对话的全部会话替换，按 seq 从旧到新；不跟消息分页（量很小）。诊断用（T10a 任务卡范围 2）。
+  repeated SessionReplacementView session_replacements = 11;
+}
+
+// 一次运行时会话的替换：续接时会话记录用不了，换了一条新会话（T06 方案 5.2a）。
+message SessionReplacementView {
+  string turn_id = 1;
+  // 记下这次替换的 TurnSessionBound 的 seq；同一对话里唯一，当行的 key。
+  uint64 seq = 2;
+  string old_runtime_session_id = 3;
+  string new_runtime_session_id = 4;
+  SessionLostReason reason = 5;
+  // 同一回合后面又记回了旧编号：这次替换被退回了。
+  bool rolled_back = 6;
+  // 那条事件落盘的时间。客户端按本机时区格式化。
+  google.protobuf.Timestamp at = 7;
 }
 
 // 消息锚点（T09 方案 2.9、G10）：用户消息、等你处理的事、失败的回合按 created_seq 合在一起，

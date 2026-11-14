@@ -264,7 +264,7 @@ pub(crate) async fn run<H, S, C>(
         };
         // 握手阶段的写也有期限：对端不读时不能把连接任务挂住。
         let _ = tokio::time::timeout(shared.cfg.handshake_timeout, async {
-            write_one(&mut wr, &Frame::Response(resp)).await;
+            write_one(&mut wr, &Frame::Response(Box::new(resp))).await;
             wr.shutdown().await
         })
         .await;
@@ -396,7 +396,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(conn: Arc<ConnShared>, mut wr: W) {
                 if let Some(f) = final_frame.filter(|_| !torn) {
                     let _ = tokio::time::timeout(
                         FINAL_FRAME_WRITE,
-                        write_one(&mut wr, &Frame::Response(*f)),
+                        write_one(&mut wr, &Frame::Response(f)),
                     )
                     .await;
                 }

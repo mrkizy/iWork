@@ -700,6 +700,7 @@ pub fn query_result_get_conversation() -> QueryResult {
             user_actions: vec![],
             attachments: vec![],
             usage_total: None,
+            session_replacements: vec![],
         })),
     }
 }
@@ -1598,6 +1599,46 @@ pub fn query_result_get_conversation_full() -> QueryResult {
             user_actions: vec![user_action_card_seq()],
             attachments: vec![attachment()],
             usage_total: usage(),
+            session_replacements: vec![],
+        })),
+    }
+}
+
+/// 会话页带会话替换（T10a 步 8b）：一次留着的、一次被退回的。
+pub fn query_result_get_conversation_replacements() -> QueryResult {
+    QueryResult {
+        seq: 1020,
+        kind: Some(query_result::Kind::GetConversation(GetConversationResult {
+            has_newer: false,
+            conversation: Some(conversation_titled()),
+            messages: vec![],
+            turns: vec![],
+            has_more: true,
+            tool_calls: vec![],
+            approvals: vec![],
+            user_actions: vec![],
+            attachments: vec![],
+            usage_total: None,
+            session_replacements: vec![
+                SessionReplacementView {
+                    turn_id: TURN.into(),
+                    seq: 1015,
+                    old_runtime_session_id: "sess-old-1".into(),
+                    new_runtime_session_id: "sess-new-1".into(),
+                    reason: SessionLostReason::Corrupt.into(),
+                    rolled_back: true,
+                    at: ts(1_700_000_100),
+                },
+                SessionReplacementView {
+                    turn_id: "01JC0T0000000000000000TRN2".into(),
+                    seq: 1018,
+                    old_runtime_session_id: "sess-old-2".into(),
+                    new_runtime_session_id: "sess-new-2".into(),
+                    reason: SessionLostReason::Incompatible.into(),
+                    rolled_back: false,
+                    at: ts(1_700_000_200),
+                },
+            ],
         })),
     }
 }

@@ -1020,6 +1020,8 @@ impl Tables {
             attachments,
             usage_total,
             has_newer,
+            // 假后台不记会话替换（只记回合最后的会话编号）
+            session_replacements: Vec::new(),
         };
         self.add_page_turns(&row.conversation.id, &mut out);
         Ok(out)

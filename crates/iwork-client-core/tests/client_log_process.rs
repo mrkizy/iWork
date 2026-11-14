@@ -278,7 +278,7 @@ fn handshake_child() {
             }
             let mut buf = bytes::BytesMut::new();
             encode_frame(
-                &Frame::Response(pb::Response {
+                &Frame::Response(Box::new(pb::Response {
                     request_id: 0,
                     body: Some(pb::response::Body::Error(pb::Error {
                         code: pb::ErrorCode::Internal as i32,
@@ -286,7 +286,7 @@ fn handshake_child() {
                         retryable: true,
                         details: Default::default(),
                     })),
-                }),
+                })),
                 &mut buf,
             );
             let _ = conn.write_all(&buf);

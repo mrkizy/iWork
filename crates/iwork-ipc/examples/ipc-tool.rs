@@ -133,21 +133,23 @@ fn scope(kind: pb::subscription_scope::Kind) -> pb::SubscriptionScope {
 fn print_item(item: IncomingItem) {
     let frame = match item {
         IncomingItem::Event(e) => Frame::Event(e),
-        IncomingItem::ViewResult { request_id, result } => Frame::Response(pb::Response {
-            request_id,
-            body: Some(pb::response::Body::Result(*result)),
-        }),
+        IncomingItem::ViewResult { request_id, result } => {
+            Frame::Response(Box::new(pb::Response {
+                request_id,
+                body: Some(pb::response::Body::Result(*result)),
+            }))
+        }
         IncomingItem::Subscribed {
             request_id,
             subscribed,
-        } => Frame::Response(pb::Response {
+        } => Frame::Response(Box::new(pb::Response {
             request_id,
             body: Some(pb::response::Body::Subscribed(subscribed)),
-        }),
-        IncomingItem::ServerError(e) => Frame::Response(pb::Response {
+        })),
+        IncomingItem::ServerError(e) => Frame::Response(Box::new(pb::Response {
             request_id: 0,
             body: Some(pb::response::Body::Error(e)),
-        }),
+        })),
         IncomingItem::Closed(reason) => {
             println!("{{\"closed\":\"{reason:?}\"}}");
             return;

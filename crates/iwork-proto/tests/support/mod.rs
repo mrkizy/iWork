@@ -73,6 +73,7 @@ sample_types! {
         b::query_result_list_conversations_page,
         b::query_result_list_assistants_activity,
         b::query_result_pending_resume_seq,
+        b::query_result_get_conversation_replacements,
     ],
     // 只许在末尾追加：main 的 approval_with_call 先占了 Approval.2，T09 的两条排在它后面。
     Approval => [b::approval_full, b::approval_with_call, b::approval_approved, b::approval_voided],

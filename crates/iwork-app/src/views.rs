@@ -11,7 +11,7 @@ use iwork_domain::message::MessageBody;
 use iwork_ports::read_model::{
     AnchorKind, AnchorWindow, Anchors, ApprovalRow, ConversationFacts, ConversationPage,
     ConversationPaging, MessageRow, PendingEntry, PendingItem, ProjectSummary, RuntimeQuota,
-    ToolCallRow, TurnRow, UserActionRow, ViewRefused,
+    SessionReplacement, ToolCallRow, TurnRow, UserActionRow, ViewRefused,
 };
 use iwork_proto::pb;
 use unicode_segmentation::UnicodeSegmentation;
@@ -19,8 +19,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::convert::{
     ConvertError, action_to_proto, approval_to_proto, artifact_ref_to_proto, attachment_to_proto,
     change_summary_to_proto, conversation_to_proto, message_to_proto, project_to_proto,
-    quota_window_to_proto, timestamp_to_proto, turn_to_proto, usage_to_proto,
-    user_action_card_to_proto,
+    quota_window_to_proto, session_lost_reason_to_proto, timestamp_to_proto, turn_to_proto,
+    usage_to_proto, user_action_card_to_proto,
 };
 
 type R<T> = Result<T, ConvertError>;
@@ -342,7 +342,25 @@ pub fn conversation_page_to_proto(p: &ConversationPage) -> R<pb::GetConversation
             .collect::<R<_>>()?,
         usage_total: p.usage_total.as_ref().map(usage_to_proto),
         has_newer: p.has_newer,
+        session_replacements: p
+            .session_replacements
+            .iter()
+            .map(session_replacement_to_proto)
+            .collect(),
     })
+}
+
+/// 一次会话替换（诊断）。时间不在这里格式化：客户端按本机时区格式化。
+pub fn session_replacement_to_proto(r: &SessionReplacement) -> pb::SessionReplacementView {
+    pb::SessionReplacementView {
+        turn_id: r.turn_id.to_string(),
+        seq: r.seq.0,
+        old_runtime_session_id: r.old_runtime_session_id.clone(),
+        new_runtime_session_id: r.new_runtime_session_id.clone(),
+        reason: session_lost_reason_to_proto(r.reason),
+        rolled_back: r.rolled_back,
+        at: Some(timestamp_to_proto(r.at)),
+    }
 }
 
 // ---------- 待处理与锚点 ----------

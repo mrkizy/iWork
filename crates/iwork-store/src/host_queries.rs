@@ -4,6 +4,7 @@
 //! 索引取），不读投影：投影上只有每个回合最后一个值，续接失败被退回的编号只在事件里。
 
 use iwork_domain::approval_mode::ApprovalMode;
+use iwork_domain::common::Timestamp;
 use iwork_domain::conversation::ConversationState;
 use iwork_domain::event::{DomainEvent, StreamKind, TurnSessionBound};
 use iwork_domain::id::{ConversationId, Seq};
@@ -135,29 +136,31 @@ fn session_bindings<C: EventCodec + ?Sized>(
 ) -> Result<Vec<TurnSessionBound>, StorageError> {
     Ok(session_bindings_with_seq(conn, codec, conversation)?
         .into_iter()
-        .map(|(_, b)| b)
+        .map(|(_, _, b)| b)
         .collect())
 }
 
-/// 这个对话全部 `TurnSessionBound` 与各自的 seq，按 seq 升序。读事件：投影上只有每个回合最后一个值。
+/// 这个对话全部 `TurnSessionBound` 与各自的 seq、落盘时间，按 seq 升序。读事件：投影上只有每个回合最后一个值。
 fn session_bindings_with_seq<C: EventCodec + ?Sized>(
     conn: &Connection,
     codec: &C,
     conversation: ConversationId,
-) -> Result<Vec<(Seq, TurnSessionBound)>, StorageError> {
-    let found: Vec<(i64, String, Vec<u8>)> = rows(
+) -> Result<Vec<(Seq, Timestamp, TurnSessionBound)>, StorageError> {
+    let found: Vec<(i64, i64, String, Vec<u8>)> = rows(
         conn,
-        "SELECT e.seq, e.type, e.payload FROM turns t JOIN events e \
+        "SELECT e.seq, e.at, e.type, e.payload FROM turns t JOIN events e \
          ON e.stream_kind = ?1 AND e.stream_id = t.id AND e.type = 'turn_session_bound' \
          WHERE t.conversation_id = ?2 ORDER BY e.seq",
         params![StreamKind::Turn.to_text(), conversation.to_string()],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )?;
     found
         .into_iter()
         .map(
-            |(seq, kind, payload)| match codec.decode(&kind, &payload)? {
-                DomainEvent::TurnSessionBound(b) => Ok((seq_col("events", "seq", seq)?, b)),
+            |(seq, at, kind, payload)| match codec.decode(&kind, &payload)? {
+                DomainEvent::TurnSessionBound(b) => {
+                    Ok((seq_col("events", "seq", seq)?, Timestamp(at), b))
+                }
                 other => Err(crate::sql::bad_column(
                     "events",
                     "type",
@@ -179,9 +182,9 @@ pub(crate) fn session_replacements<C: EventCodec + ?Sized>(
     Ok(all
         .iter()
         .enumerate()
-        .filter_map(|(i, (seq, b))| {
+        .filter_map(|(i, (seq, at, b))| {
             let r = b.replaced.as_ref()?;
-            let rolled_back = all[i + 1..].iter().any(|(_, later)| {
+            let rolled_back = all[i + 1..].iter().any(|(_, _, later)| {
                 later.turn_id == b.turn_id
                     && later.replaced.is_none()
                     && later.runtime_session_id == r.old_runtime_session_id
@@ -193,6 +196,7 @@ pub(crate) fn session_replacements<C: EventCodec + ?Sized>(
                 new_runtime_session_id: b.runtime_session_id.clone(),
                 reason: r.reason,
                 rolled_back,
+                at: *at,
             })
         })
         .collect())

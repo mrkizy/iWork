@@ -400,6 +400,8 @@ pub struct ConversationPage {
     pub attachments: Vec<Attachment>,
     /// 整个对话的累计用量；一个回合都没报过用量为 `None`
     pub usage_total: Option<Usage>,
+    /// 整个对话的会话替换，按 seq 升序；不跟消息分页（量很小）
+    pub session_replacements: Vec<SessionReplacement>,
     /// 还有更旧的
     pub has_more: bool,
     /// 还有更新的
@@ -478,4 +480,6 @@ pub struct SessionReplacement {
     pub reason: iwork_domain::session::SessionLostReason,
     /// 同一回合后面又有一条不带替换的绑定、记回了旧编号：这次替换被退回了
     pub rolled_back: bool,
+    /// 那条 `TurnSessionBound` 落盘的时间（事件信封上的）
+    pub at: iwork_domain::common::Timestamp,
 }

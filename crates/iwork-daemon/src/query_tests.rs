@@ -944,3 +944,78 @@ fn open_target_query_reads_memory() {
         other => panic!("{other:?}"),
     }
 }
+
+/// 会话替换随 `GetConversation` 带出（T10a 任务卡范围 2；T09 9ec7422d 的意见）：这个对话的全部替换、不跟消息分页，
+/// 原因给枚举、时间取那条事件的信封；别的对话的不带。
+#[test]
+fn get_conversation_lists_session_replacements() {
+    use iwork_domain::event::{SessionReplaced, TurnSessionBound};
+    use iwork_domain::session::SessionLostReason;
+    let env = Env::new();
+    let w = World::new(&env);
+    let bound = |turn: u128, conv: u128, id: &str, old: Option<&str>| -> DomainEvent {
+        TurnSessionBound {
+            turn_id: tid(turn),
+            conversation_id: Some(cid(conv)),
+            runtime_session_id: id.into(),
+            replaced: old.map(|o| SessionReplaced {
+                old_runtime_session_id: o.into(),
+                reason: SessionLostReason::Corrupt,
+            }),
+        }
+        .into()
+    };
+    let commit = |n: u128, events: Vec<DomainEvent>| block(w.store.commit(cmd(n, events))).unwrap();
+    commit(
+        9001,
+        vec![
+            TurnQueued {
+                turn: turn(900, 10),
+            }
+            .into(),
+            TurnQueued {
+                turn: turn(901, 11),
+            }
+            .into(),
+        ],
+    );
+    commit(9002, vec![bound(900, 10, "s-a", None)]);
+    let replaced = commit(9003, vec![bound(900, 10, "s-b", Some("s-a"))]).last_seq;
+    commit(9004, vec![bound(901, 11, "s-x", Some("s-w"))]);
+    let at = block(
+        w.store
+            .read_events(EventFilter::All, iwork_domain::id::Seq(replaced.0 - 1), 1),
+    )
+    .unwrap()[0]
+        .at;
+    let q = Queries::new(read(&w.store), attention());
+    // 页长 1：替换照样全带
+    let Some(RK::GetConversation(g)) = real_answer(&q, get(10, |g| g.limit = 1)).unwrap().kind
+    else {
+        panic!("不是 GetConversation 的结果")
+    };
+    let [r] = g.session_replacements.as_slice() else {
+        panic!("只该有对话 10 的那一次替换：{:?}", g.session_replacements)
+    };
+    let ts = r.at.expect("带时间");
+    assert_eq!(
+        (ts.seconds, ts.nanos),
+        (
+            at.0.div_euclid(1000),
+            (at.0.rem_euclid(1000) * 1_000_000) as i32
+        ),
+        "时间取那条事件的信封"
+    );
+    assert_eq!(
+        *r,
+        pb::SessionReplacementView {
+            turn_id: tid(900).to_string(),
+            seq: replaced.0,
+            old_runtime_session_id: "s-a".into(),
+            new_runtime_session_id: "s-b".into(),
+            reason: pb::SessionLostReason::Corrupt.into(),
+            rolled_back: false,
+            at: r.at,
+        }
+    );
+}

@@ -1,0 +1,48 @@
+seq: 1020
+get_conversation {
+  conversation {
+    id: "01JC0C0000000000000000CNV1"
+    project {
+      project_id: "01JC0P0000000000000000PRJ1"
+    }
+    state: CONVERSATION_STATE_ACTIVE
+    last_read_seq: 42
+    unread: 2
+    model_override {
+      model_id: "opus"
+      effort: "high"
+    }
+    approval_mode: APPROVAL_MODE_FULL_ACCESS
+    updated_at {
+      seconds: 1762000200
+      nanos: 123000000
+    }
+    title: "\346\212\212\347\231\273\345\275\225\351\241\265\346\224\271\346\210\220\346\267\261\350\211\262"
+    title_source: TITLE_SOURCE_USER
+    last_turn_state: TURN_STATE_FAILED
+    last_message_first_line: "\345\245\275\347\232\204\357\274\214\346\210\221\345\205\210\347\234\213\344\270\200\344\270\213"
+  }
+  has_more: true
+  session_replacements: [{
+    turn_id: "01JC0T0000000000000000TRN1"
+    seq: 1015
+    old_runtime_session_id: "sess-old-1"
+    new_runtime_session_id: "sess-new-1"
+    reason: SESSION_LOST_REASON_CORRUPT
+    rolled_back: true
+    at {
+      seconds: 1700000100
+      nanos: 123000000
+    }
+  }, {
+    turn_id: "01JC0T0000000000000000TRN2"
+    seq: 1018
+    old_runtime_session_id: "sess-old-2"
+    new_runtime_session_id: "sess-new-2"
+    reason: SESSION_LOST_REASON_INCOMPATIBLE
+    at {
+      seconds: 1700000200
+      nanos: 123000000
+    }
+  }]
+}

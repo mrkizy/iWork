@@ -50,13 +50,14 @@ async fn read_all_frames<R: tokio::io::AsyncRead + Unpin>(mut rd: R) -> Vec<Fram
 }
 
 fn mismatch_details(frames: &[Frame]) -> (String, String) {
-    match frames {
-        [
-            Frame::Response(pb::Response {
-                request_id: 0,
-                body: Some(pb::response::Body::Error(e)),
-            }),
-        ] => {
+    let [Frame::Response(r)] = frames else {
+        panic!("期望只有一个 Response：{frames:?}")
+    };
+    match &**r {
+        pb::Response {
+            request_id: 0,
+            body: Some(pb::response::Body::Error(e)),
+        } => {
             assert_eq!(e.code(), pb::ErrorCode::ProtocolVersionMismatch);
             (
                 e.details["client_major"].clone(),

@@ -19,7 +19,8 @@ pub enum Frame {
     Hello(pb::Hello),
     Welcome(pb::Welcome),
     Request(pb::Request),
-    Response(pb::Response),
+    // 两个大变体装箱：Response 里的查询结果与 Event 都远大于其余几种（clippy large_enum_variant）
+    Response(Box<pb::Response>),
     Event(Box<pb::Event>),
     Chunk(pb::Chunk),
 }
@@ -150,7 +151,9 @@ pub fn decode_frame(
         FrameType::Hello => Frame::Hello(pb::Hello::decode(payload).map_err(malformed)?),
         FrameType::Welcome => Frame::Welcome(pb::Welcome::decode(payload).map_err(malformed)?),
         FrameType::Request => Frame::Request(pb::Request::decode(payload).map_err(malformed)?),
-        FrameType::Response => Frame::Response(pb::Response::decode(payload).map_err(malformed)?),
+        FrameType::Response => {
+            Frame::Response(Box::new(pb::Response::decode(payload).map_err(malformed)?))
+        }
         FrameType::Event => Frame::Event(Box::new(pb::Event::decode(payload).map_err(malformed)?)),
         FrameType::Chunk => Frame::Chunk(pb::Chunk::decode(payload).map_err(malformed)?),
         FrameType::Unspecified => unreachable!("上面已拒绝"),
@@ -314,10 +317,10 @@ mod tests {
                     subscription_id: 3,
                 })),
             }),
-            Frame::Response(pb::Response {
+            Frame::Response(Box::new(pb::Response {
                 request_id: 7,
                 body: None,
-            }),
+            })),
             Frame::Event(Box::new(pb::Event {
                 subscription_ids: vec![1, 2],
                 body: None,

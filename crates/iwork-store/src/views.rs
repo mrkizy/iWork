@@ -301,6 +301,7 @@ impl<C: EventCodec + ?Sized> ViewTx<'_, C> {
             user_actions: body.user_actions,
             attachments: body.attachments,
             usage_total: self.usage_total(&key)?,
+            session_replacements: self.session_replacements(id)?,
             has_more: body.has_more,
             has_newer: body.has_newer,
         }))

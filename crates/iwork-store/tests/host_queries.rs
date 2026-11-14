@@ -31,6 +31,16 @@ impl Feed<'_> {
     }
 }
 
+/// 第 `seq` 条事件信封上的时间。
+fn at_of(store: &Store, seq: Seq) -> iwork_domain::common::Timestamp {
+    block(store.read_events(iwork_ports::store::EventFilter::All, Seq(seq.0 - 1), 1))
+        .unwrap()
+        .into_iter()
+        .find(|e| e.seq == seq)
+        .expect("这条事件在")
+        .at
+}
+
 /// 这组用例的回合排在哪个对话（和下面造的世界一致）。
 fn conv_of(turn: u128) -> Option<ConversationId> {
     Some(cid(match turn {
@@ -298,6 +308,7 @@ fn turn_work_bindings_counts_and_snapshot_inputs() {
             new_runtime_session_id: "s-b".into(),
             reason: SessionLostReason::NotFound,
             rolled_back: true,
+            at: at_of(&store, Seq(resumed.0 - 1)),
         }]
     );
     assert!(
@@ -387,4 +398,18 @@ fn session_replacement_kept_unless_same_turn_rebinds_old() {
         ("s-a", "s-b")
     );
     assert!(!got[0].rolled_back, "记回 s-a 的是另一个回合");
+    assert_eq!(got[0].at, at_of(&store, replaced), "时间取那条事件的信封");
+    // 对话页带上这个对话的全部替换，不跟消息分页（取哪一页都一样）
+    for paging in [
+        iwork_ports::read_model::ConversationPaging::Latest { limit: 1 },
+        iwork_ports::read_model::ConversationPaging::BeforeRow {
+            seq: Seq(1),
+            limit: 1,
+        },
+    ] {
+        let page = block(rm.view(move |tx| tx.conversation_page(cid(10), paging)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.session_replacements, got);
+    }
 }

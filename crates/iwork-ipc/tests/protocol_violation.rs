@@ -55,7 +55,7 @@ async fn after_handshake(h: &Harness, payload: Vec<u8>, with_hello: bool) -> Vec
 }
 
 fn is_malformed(frames: &[Frame]) -> bool {
-    matches!(frames, [Frame::Response(pb::Response { request_id: 0, body: Some(pb::response::Body::Error(e)) })] if e.code() == pb::ErrorCode::MalformedFrame)
+    matches!(frames, [Frame::Response(r)] if matches!(&**r, pb::Response { request_id: 0, body: Some(pb::response::Body::Error(e)) } if e.code() == pb::ErrorCode::MalformedFrame))
 }
 
 fn header(len: u32, t: u8) -> Vec<u8> {
@@ -157,7 +157,7 @@ async fn empty_body_is_invalid_argument_not_disconnect() {
         }
     }
     assert!(
-        matches!(&frames[1], Frame::Response(pb::Response { request_id: 5, body: Some(pb::response::Body::Error(e)) }) if e.code() == pb::ErrorCode::InvalidArgument)
+        matches!(&frames[1], Frame::Response(r) if matches!(&**r, pb::Response { request_id: 5, body: Some(pb::response::Body::Error(e)) } if e.code() == pb::ErrorCode::InvalidArgument))
     );
 }
 

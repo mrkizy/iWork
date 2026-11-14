@@ -412,7 +412,7 @@ impl Client {
             None | Some(Err(CodecError::Io(_))) => return Err(ConnectError::ClosedBeforeWelcome),
             Some(Err(CodecError::Frame(e))) => return Err(ConnectError::Protocol(e.to_string())),
             Some(Ok(Frame::Welcome(w))) => w,
-            Some(Ok(Frame::Response(r))) => return Err(handshake_refusal(r, cfg.protocol_major)),
+            Some(Ok(Frame::Response(r))) => return Err(handshake_refusal(*r, cfg.protocol_major)),
             Some(Ok(other)) => {
                 return Err(ConnectError::Protocol(format!(
                     "握手时收到 {}",
@@ -640,7 +640,7 @@ async fn read_loop<R: tokio::io::AsyncRead + Unpin>(
         let wire_len = frame.encoded_len();
         let consumer_alive = match frame {
             Frame::Event(e) => incoming.push(IncomingItem::Event(e), wire_len).await,
-            Frame::Response(r) => dispatch_response(&inner, &incoming, r, wire_len).await,
+            Frame::Response(r) => dispatch_response(&inner, &incoming, *r, wire_len).await,
             other => {
                 break Some(CloseReason::Protocol(format!(
                     "已建立后收到 {}",
