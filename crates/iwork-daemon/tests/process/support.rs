@@ -461,10 +461,11 @@ impl Daemon {
     }
 }
 
-/// 进程组里还有没有进程。
+/// 进程组里还有没有在跑的进程：和清树判空同一条规则（`iwork_agent_acp::process::group_running`，僵尸不算；
+/// `kill(-pgid, 0)` 对只剩僵尸的组照样成功）。读不全进程表就让测试红，不当成「组空了」。
 pub fn group_alive(pgid: u32) -> bool {
-    // SAFETY：信号 0 只探测
-    unsafe { libc::kill(-(pgid as i32), 0) == 0 }
+    iwork_agent_acp::process::group_running(pgid as i32)
+        .unwrap_or_else(|e| panic!("读不了进程表（查组 {pgid}）：{e}"))
 }
 
 /// 日志文件的全部内容。

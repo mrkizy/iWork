@@ -693,27 +693,6 @@ fn child_step() -> serde_json::Value {
     }
 }
 
-#[cfg(unix)]
-fn process_exists(pid: u32) -> bool {
-    // 僵尸进程也算不存在：它已经结束，只等父进程回收
-    let out = std::process::Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-        .expect("运行 ps");
-    let stat = String::from_utf8_lossy(&out.stdout);
-    let stat = stat.trim();
-    !stat.is_empty() && !stat.starts_with('Z')
-}
-
-#[cfg(windows)]
-fn process_exists(pid: u32) -> bool {
-    let out = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-        .output()
-        .expect("运行 tasklist");
-    String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
-}
-
 /// 运行时上报的模型、额度进事件，用量记在回合结束的统计里；额度的观测时间由编排按自己的时钟
 /// 记（上报里不带时间）。走的是真 ACP 客户端 + 回合编排 + 假运行时进程。
 #[tokio::test(flavor = "multi_thread")]
