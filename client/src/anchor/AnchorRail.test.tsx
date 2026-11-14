@@ -302,6 +302,79 @@ describe.skipIf(noFixtures)("锚点导轨（宽形态，列表式）", () => {
     expect(order).toEqual(["input", "jump"]);
   });
 
+  // ---------- 第 6 轮（g3b 5/F-1、5/F-2） ----------
+
+  /** 模拟浏览器的上下界：内容高随刻度条数变，scrollTop 读写都夹在 [0, 内容高 - 视口高]（内容变短后浏览器自己夹紧）。 */
+  function browserBounds(list: HTMLElement, client: number) {
+    let stored = 0;
+    const max = () => Math.max(0, LIST_PAD * 2 + list.querySelectorAll(".iw-tick").length * PITCH - client);
+    Object.defineProperty(list, "clientHeight", { configurable: true, value: client });
+    Object.defineProperty(list, "scrollHeight", {
+      configurable: true,
+      get: () => LIST_PAD * 2 + list.querySelectorAll(".iw-tick").length * PITCH,
+    });
+    Object.defineProperty(list, "scrollTop", {
+      configurable: true,
+      get: () => Math.min(stored, max()),
+      set: (v: number) => (stored = Math.min(Math.max(0, v), max())),
+    });
+  }
+  const userKeys = (from: number, to: number) =>
+    Array.from({ length: to - from }, (_, i) => ({ key: `k${from + i}`, kind: AnchorKind.USER, kindLabel: "你", timeLabel: "10:00", preview: `第 ${from + i} 处` }));
+
+  it("5/F-1：120 条换成 60 条，浏览器先夹紧了 scrollTop：顶上那条按替换前取，替换后对回（340，不是夹紧后的 566）", async () => {
+    const before = create(AnchorsViewSchema, { items: userKeys(0, 120), hasBefore: true, hasAfter: true });
+    const a = mount(before, "k90");
+    fireEvent.mouseEnter(a.rail);
+    await settle();
+    const list = a.list()!;
+    browserBounds(list, 110);
+    list.scrollTop = 1000;
+    fireEvent.scroll(list);
+    // 第 90 处在顶上、往下偏 2px；新窗口是 60..119
+    a.setView(create(AnchorsViewSchema, { items: userKeys(60, 120), hasBefore: true, hasAfter: false }));
+    expect(list.scrollTop).toBe(LIST_PAD + (90 - 60) * PITCH + 2);
+  });
+
+  it("5/F-2：焦点在列表里时会让列表滚动的键都报：PageUp、PageDown、Space、Shift+Space、↑↓、本窗内的 Home / End", async () => {
+    const { anchors, current } = fromScenario("anchors-unloaded");
+    const a = mount(create(AnchorsViewSchema, { ...anchors, hasBefore: false }), current);
+    fireEvent.mouseEnter(a.rail);
+    await settle();
+    for (const [key, shiftKey] of [["PageDown", false], ["PageUp", false], [" ", false], [" ", true]] as const) {
+      const was = a.inputs;
+      fireEvent.keyDown(document, { key, shiftKey });
+      expect(a.inputs, `${shiftKey ? "Shift+" : ""}${key === " " ? "Space" : key}`).toBe(was + 1);
+    }
+  });
+
+  it("5/F-2：只产生 scroll 的用户滚动（读屏手势、中键自动滚动）也报；程序自己写的那一次不报", async () => {
+    const { a, list } = await openUnloaded();
+    await new Promise((r) => requestAnimationFrame(() => r(undefined)));
+    const was = a.inputs;
+    // 没有任何输入事件，只有 scroll
+    list.scrollTop = list.scrollTop + 3 * PITCH;
+    fireEvent.scroll(list);
+    expect(a.inputs, "只有 scroll 的用户滚动").toBe(was + 1);
+    // 程序写：↓ 把预览滚进视野（按键本身报一次），它触发的 scroll 不再算一次
+    const afterKey = a.inputs;
+    fireEvent.keyDown(document, { key: "End" });
+    fireEvent.scroll(list);
+    expect(a.inputs, "程序写的那一次 scroll 不报").toBe(afterKey + 1);
+  });
+
+  it("5/F-2 与 5/F-1 配合：窗口替换后自己还原的位置触发的 scroll 不算用户输入（不作废等着的 Home）", async () => {
+    const { a, list, anchors } = await openUnloaded();
+    fireEvent.keyDown(document, { key: "Home" });
+    const was = a.inputs;
+    const extra = anchors.items.slice(0, 10).map((i, n) => ({ ...i, key: `restore-${n}` }));
+    a.setView(create(AnchorsViewSchema, { ...anchors, items: [...extra, ...anchors.items] }));
+    fireEvent.scroll(list);
+    expect(a.inputs, "还原触发的 scroll 不报").toBe(was);
+    a.setView(create(AnchorsViewSchema, { ...anchors, items: [...extra, ...anchors.items], edgeLanding: create(EdgeLandingSchema, { token: 61n, latest: false }) }));
+    expect(a.previewed(), "Home 的落点照常执行").toBe(a.ticks()[0]);
+  });
+
   it("在等 Home / End 的那一头时用户滚列表或按方向键：请 Rust 作废；迟到的窗口按 key 还原，不把用户拉回顶（g3b 2/F-1）", async () => {
     const { anchors, current } = fromScenario("anchors-unloaded");
     const a = mount(create(AnchorsViewSchema, { ...anchors, edgePending: true }), current);

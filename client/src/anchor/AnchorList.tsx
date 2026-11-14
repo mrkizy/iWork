@@ -2,7 +2,7 @@
 // 与窄形态的标题栏按钮面板（AnchorButton）共用这一份：列表、悬停预览、点击跳转、滚动与续载规则完全相同，只是怎么展开、
 // 怎么收起不同。哪些算锚点、文字、当前位置、前后还有没有、正在跳哪一处都来自 patch；这里只有展示状态：正在预览哪一处
 // （按 key 记，新列表到了按 key 对回去）、列表滚到哪、Home / End 在等哪一头。
-import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createComputed, createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { AnchorKind, type AnchorItem, type AnchorsView } from "../gen/iwork/v1/view_pb";
 import {
   browseTarget,
@@ -38,8 +38,9 @@ export interface AnchorSource {
    *  这个意图由 Rust 持有：那一头到了，AnchorsView 带 edgeLanding（token）回来，网页只执行一次。 */
   onBrowseEdge: (latest: boolean) => void;
   /** 用户在列表里有输入：在事件发生那一刻一律告诉 Rust，由它判断有没有头尾意图可作废（没有就是空操作，不推
-   *  帧）。源头：滚轮、触摸开始与移动、指针按下（点刻度也算）、↑ / ↓、本窗内直接落地的 Home / End。不看
-   *  edgePending（异步回来，有往返空窗），也不从滚动坐标推断（程序写位置前的用户位移会丢，g3b 4/F-2）。 */
+   *  帧）。源头：滚轮、触摸开始与移动、指针按下（点刻度也算）、会让列表滚动的键（↑ / ↓、PageUp / PageDown、
+   *  Space / Shift+Space、本窗内直接落地的 Home / End），以及不是列表自己写出来的 scroll（读屏手势、中键自动滚动
+   *  这类只产生 scroll 的路径）。不看 edgePending（异步回来，有往返空窗），也不比坐标（g3b 4/F-2、5/F-2）。 */
   onListInput: () => void;
 }
 
@@ -132,6 +133,12 @@ export function createAnchorBrowse(props: AnchorSource) {
           e.preventDefault();
           edge(e.key === "Home" ? "start" : "end");
           return true;
+        // 焦点在列表里（刻度能拿到焦点）时这几个键会让列表原生滚动：报输入，不拦默认行为（g3b 5/F-2）
+        case "PageUp":
+        case "PageDown":
+        case " ":
+          userMoved();
+          return false;
         case "Enter": {
           const a = previewed();
           if (a === undefined) return false;
@@ -165,11 +172,41 @@ export function AnchorList(props: {
   let pointerHeld = false;
   let touching = false;
   const userControls = () => pointerHeld || touching;
-  // 上一份画着的列表（窗口替换时用它和此刻的位置现算顶上那一条）
+  // 上一份画着的列表
   let shownItems = props.anchors.items;
+  // 窗口替换前取到的顶上那一条（g3b 5/F-1）：在 DOM 换成新列表之前取（createComputed 先于 DOM 更新跑），
+  // 这时的 scrollTop 还没被新内容夹紧，也包含还没派发 scroll 的用户位移；DOM 换完以后按新列表对回
+  let before: { keys: string[]; top: string | undefined; offset: number } | undefined;
+  let mounted = false;
+  createComputed(
+    on(
+      () => props.anchors.items,
+      (next) => {
+        if (!mounted || next === shownItems) return;
+        const keys = shownItems.map((a) => a.key);
+        const r = visibleRange(list.scrollTop, list.clientHeight, keys.length);
+        before = { keys, top: keys[r.first], offset: list.scrollTop - (LIST_PAD + r.first * PITCH) };
+      },
+      { defer: true },
+    ),
+  );
+  // 「这一下是我自己写的」：程序每次写 scrollTop 前置上，它触发的那次 scroll 消费掉；没有触发 scroll（位置没变）
+  // 就在下一帧清掉。不带这个标记的 scroll 一律当用户输入上报（g3b 5/F-2）。程序写和用户的只产生 scroll 的滚动
+  // 落在同一帧时，浏览器只派一次 scroll，分不开：这一次按程序的算，用户手势后面几帧的 scroll 照常上报
+  let selfWrite = false;
+  let selfWriteFrame = 0;
   const setTop = (v: number) => {
+    selfWrite = true;
+    cancelAnimationFrame(selfWriteFrame);
+    selfWriteFrame = requestAnimationFrame(() => (selfWrite = false));
     list.scrollTop = v;
   };
+  const onScroll = () => {
+    if (selfWrite) selfWrite = false;
+    else props.browse.userMoved();
+    measure();
+  };
+  onCleanup(() => cancelAnimationFrame(selfWriteFrame));
   const releasePointer = () => {
     pointerHeld = false;
   };
@@ -198,6 +235,7 @@ export function AnchorList(props: {
   // 展开时：当前阅读位置那一条放到中间
   const mount = (el: HTMLDivElement) => {
     list = el;
+    mounted = true;
     queueMicrotask(() => {
       setTop(centeredScrollTop(props.browse.index(), list.clientHeight));
       measure();
@@ -213,6 +251,8 @@ export function AnchorList(props: {
       (view) => {
         const prevItems = shownItems;
         shownItems = view.items;
+        const was = before;
+        before = undefined;
         if (props.browse.landEdge()) {
           clearTimeout(loadingTimer);
           setLoadingSide(undefined);
@@ -224,12 +264,11 @@ export function AnchorList(props: {
         clearTimeout(loadingTimer);
         setLoadingSide(undefined);
         const keys = next.map((a) => a.key);
-        const prevKeys = prevItems.map((a) => a.key);
-        const was = visibleRange(list.scrollTop, list.clientHeight, prevKeys.length);
-        const keptTop = prevKeys[was.first];
+        const prevKeys = was?.keys ?? prevItems.map((a) => a.key);
+        const keptTop = was?.top;
         const sameKeys = keys.length === prevKeys.length && keys.every((k, i) => k === prevKeys[i]);
-        if (!sameKeys && !userControls()) {
-          const top = restoredScrollTop(keys, keptTop, list.scrollTop - (LIST_PAD + was.first * PITCH));
+        if (!sameKeys && !userControls() && was !== undefined) {
+          const top = restoredScrollTop(keys, keptTop, was.offset);
           if (top !== undefined) setTop(top);
         }
         const shown = props.browse.previewKey();
@@ -280,7 +319,7 @@ export function AnchorList(props: {
             "iw-anchor__list--seeking": seekingKey() !== "",
           }}
           style={{ height: `${LIST_PAD * 2 + items().length * PITCH}px` }}
-          onScroll={measure}
+          onScroll={onScroll}
           onWheel={() => props.browse.userMoved()}
           onTouchStart={() => {
             touching = true;
