@@ -104,6 +104,8 @@ iWork 在本机是三类进程：客户端、后台服务（daemon）、每个�
 
 握手：客户端发 `Hello{protocol_major, protocol_minor, client_kind, client_version, resume_token?}`，后台服务回 `Welcome{session_id, server_version, capabilities, head_seq}`。主版本不同即拒绝并提示升级，两个方向都拦（旧客户端 × 新后台、新客户端 × 旧后台），拒绝时带上双方的主版本号，拒绝前不处理任何业务帧。主版本就是协议身份：破坏性变更（改号、改类型、删字段）一律升主版本（包名 `iwork.vN`），不在同一主版本内重置；数据库门见 5.5（T01 方案 3.7，产品负责人 2026-11-09 决定）。次版本只做加法（Protobuf 字段只增不改号）。
 
+识别对端也算进握手时限（2026-11-14，app_dialer 偶发修复）：建连时识别对端（macOS 上对对端映像全量静态验签，耗时与程序体积成正比）和读 `Welcome`/等 `Hello` 共用同一个截止时间（`handshake_timeout`，5 秒），客户端、服务端两侧走同一处接缝。超时一律按失败处理：记审计 `peer_rejected`（原因只写固定文字和时长），对底层 socket 做 `shutdown`，不发 `Hello`、不交给 handler，客户端进诊断页、按退避重拨。阻塞的识别任务取消不了，所以进程级最多 4 个在途，名额由阻塞任务结束时归还；拿不到名额也受同一截止时间约束。测试注入点只在 `iwork-ipc` 的 `test-hooks` feature 下，不进发布构建。
+
 ### 3.4 三类消息
 
 | 类 | 方向 | 语义 | 例子 |
