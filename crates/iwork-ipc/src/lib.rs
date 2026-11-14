@@ -19,6 +19,10 @@ pub mod transport;
 
 pub use endpoint::{EndpointError, LocalEndpoint};
 
+/// 测试用的控制点（`test-hooks` feature；发布构建里没有）。
+#[cfg(feature = "test-hooks")]
+pub use transport::identify::hooks as identify_hooks;
+
 #[cfg(unix)]
 pub use transport::unix::{LocalConnector, LocalListener};
 #[cfg(windows)]

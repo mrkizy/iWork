@@ -34,6 +34,7 @@ use crate::audit::{self, Role};
 use crate::frame::{CodecError, Direction, Frame, FrameCodec, encode_frame};
 use crate::peer::{PeerVerdict, judge_peer};
 use crate::transport::Connection;
+use crate::transport::identify::identify_by;
 
 /// 写任务一次合并写出的上限：每秒上千条小事件时减少系统调用。
 const WRITE_BATCH: usize = 64 * 1024;
@@ -193,9 +194,9 @@ pub(crate) async fn run<H, S, C>(
     C: Connection,
 {
     // 1. 校验对端：不过就关闭，不发任何帧。识别对端和等 Hello 共用一个截止时间：识别本身没有上限，卡住时连接任务
-    //    会一直挂着。超时算失败、不放行，照识别失败那条路关连接、记审计。
+    //    会一直挂着。超时算失败、不放行：通信已被关掉，照识别失败那条路记审计。
     let deadline = tokio::time::Instant::now() + shared.cfg.handshake_timeout;
-    let peer = match tokio::time::timeout_at(deadline, conn.peer()).await {
+    let peer = match identify_by(&conn, deadline).await {
         Err(_) => {
             audit::peer_identity_failed(
                 Role::Server,

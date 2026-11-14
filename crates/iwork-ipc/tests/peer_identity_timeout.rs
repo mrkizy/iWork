@@ -48,6 +48,10 @@ impl Connection for SlowConn {
         self.inner.peer().await
     }
 
+    fn abort(&self) {
+        self.inner.abort();
+    }
+
     fn into_split(self) -> (Self::Read, Self::Write) {
         self.inner.into_split()
     }

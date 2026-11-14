@@ -39,6 +39,7 @@ use tokio_util::codec::FramedRead;
 use crate::audit::{self, Role};
 use crate::frame::{CodecError, Direction, Frame, FrameCodec, encode_frame};
 use crate::peer::{PeerVerdict, RejectReason, SelfIdentity, TrustPolicy, judge_peer};
+use crate::transport::identify::identify_by;
 use crate::transport::{Connection, Connector, Endpoint};
 
 /// 客户端配置。
@@ -356,9 +357,9 @@ impl Client {
             .await
             .map_err(ConnectError::Io)?;
         // 识别对端和读 Welcome 共用一个截止时间：识别（macOS 上是全量校验对端映像）本身没有上限，慢机器上卡住时
-        // 会话会一直停在建连里。超时算失败、不放行（`Timeout` → 诊断页、退避重拨）。
+        // 会话会一直停在建连里。超时算失败、不放行，通信已被关掉（`Timeout` → 诊断页、退避重拨）。
         let deadline = tokio::time::Instant::now() + cfg.handshake_timeout;
-        let peer = match tokio::time::timeout_at(deadline, conn.peer()).await {
+        let peer = match identify_by(&conn, deadline).await {
             Err(_) => {
                 audit::peer_identity_failed(
                     Role::Client,

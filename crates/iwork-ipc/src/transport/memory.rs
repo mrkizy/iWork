@@ -146,6 +146,9 @@ impl Connection for MemoryConn {
         Ok(self.peer.clone())
     }
 
+    /// 不用额外动作：内存连接的 `peer()` 不复制通道，超时后连接被丢掉、通道随之关闭。
+    fn abort(&self) {}
+
     fn into_split(self) -> (Self::Read, Self::Write) {
         tokio::io::split(self.stream)
     }

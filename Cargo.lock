@@ -3056,6 +3056,7 @@ dependencies = [
  "core-foundation-sys",
  "futures-core",
  "hex",
+ "iwork-ipc",
  "iwork-proto",
  "libc",
  "proptest",

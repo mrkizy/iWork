@@ -10,6 +10,9 @@ publish.workspace = true
 # 只给开发期用：TrustPolicy::DevTrust（跳过签名校验，同用户照查）、两个 example、帧的 JSON 输出。
 # 不是默认 feature；发布构建里不存在（scripts/check-no-dev-trust.sh 检查 feature 图与产物）。
 dev = ["dep:prost-reflect"]
+# 测试用的控制点（让阻塞的识别对端卡住、数在途个数）。只给测试打开（本 crate 的 dev-dependency），发布构建里没有：
+# 见 src/transport/identify.rs
+test-hooks = []
 
 [dependencies]
 iwork-proto.workspace = true
@@ -51,6 +54,7 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+iwork-ipc = { path = ".", features = ["test-hooks"] }
 proptest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["net", "test-util"] }

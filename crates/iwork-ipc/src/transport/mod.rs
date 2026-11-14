@@ -11,6 +11,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::peer::{PeerError, PeerIdentity};
 
+pub(crate) mod identify;
 pub mod memory;
 #[cfg(unix)]
 pub mod unix;
@@ -39,11 +40,15 @@ pub trait Listener: Send {
 }
 
 /// 一条已建立、尚未读写任何字节的连接。
-pub trait Connection: Send + 'static {
+pub trait Connection: Send + Sync + 'static {
     type Read: AsyncRead + Unpin + Send + 'static;
     type Write: AsyncWrite + Unpin + Send + 'static;
     /// 操作系统告诉我们的对端身份。两端都在读写任何字节之前调用：服务端看客户端，客户端看服务端。
+    /// 不要直接对它套超时，用 [`identify::identify_by`]：超时时要 [`Connection::abort`]。
     fn peer(&self) -> impl Future<Output = Result<PeerIdentity, PeerError>> + Send;
+    /// 立刻关掉通信，对端随即读到 EOF。识别对端超时时调，之后连接就被丢掉。要作用在底层通道本身，不能只关自己
+    /// 这一个句柄：卡住的识别可能还拿着一份复制的句柄（unix 的 `peer()` 就是这样）。
+    fn abort(&self);
     fn into_split(self) -> (Self::Read, Self::Write);
 }
 
