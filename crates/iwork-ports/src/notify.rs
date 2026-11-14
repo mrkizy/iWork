@@ -1,15 +1,115 @@
-//! 系统通知。
+//! 系统通知（T10a 方案 2.10、第 0a.3 节 N1、N2、S5）。
+//!
+//! 通知只由后台发；发不发看各个桌面客户端报的「在看哪」（[`Presence`]）。用户点了通知，后台记下要打开的那一项
+//! （[`OpenTarget`]），桌面客户端被叫到前台后来问。
 
 use std::future::Future;
 
-use iwork_domain::id::ConversationId;
+use iwork_domain::common::Timestamp;
+use iwork_domain::id::{ApprovalId, ConversationId, JobId, TurnId, UserActionId};
 
-/// 一条系统通知；`open` 是点击后打开的对话。
+use crate::read_model::PendingItem;
+
+/// 「待你处理」里的一项是哪一项：种类加它自己的编号（审批 id、卡片 id、草稿卡片 id、继续卡片所属的回合 id）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PendingItemRef {
+    Approval(ApprovalId),
+    UserAction(UserActionId),
+    AgentsMdDraft(JobId),
+    Resume(TurnId),
+}
+
+impl PendingItemRef {
+    /// 协议里的 `pending_item_id`（`GetOpenTargetResult`、锚点）：各种类自己的编号，不带种类。
+    pub fn id_string(&self) -> String {
+        self.parts().1
+    }
+
+    /// 带种类的键（`approval:<编号>`），后台内部要从文字认回是哪一项时用（如 outbox 去向）。和 [`Self::parse_key`]
+    /// 互逆。
+    pub fn key(&self) -> String {
+        let (kind, id) = self.parts();
+        format!("{kind}:{id}")
+    }
+
+    /// [`Self::key`] 的逆；认不出时点名原文。
+    pub fn parse_key(key: &str) -> Result<Self, String> {
+        let bad = || format!("认不出待处理项的键：{key:?}");
+        let (kind, id) = key.split_once(':').ok_or_else(bad)?;
+        Ok(match kind {
+            "approval" => Self::Approval(id.parse().map_err(|_| bad())?),
+            "user_action" => Self::UserAction(id.parse().map_err(|_| bad())?),
+            "agents_md_draft" => Self::AgentsMdDraft(id.parse().map_err(|_| bad())?),
+            "resume" => Self::Resume(id.parse().map_err(|_| bad())?),
+            _ => return Err(bad()),
+        })
+    }
+
+    fn parts(&self) -> (&'static str, String) {
+        match self {
+            Self::Approval(id) => ("approval", id.to_string()),
+            Self::UserAction(id) => ("user_action", id.to_string()),
+            Self::AgentsMdDraft(id) => ("agents_md_draft", id.to_string()),
+            Self::Resume(id) => ("resume", id.to_string()),
+        }
+    }
+}
+
+impl PendingItem {
+    /// 这一项是哪一项。
+    pub fn item_ref(&self) -> PendingItemRef {
+        match self {
+            Self::Approval(a) => PendingItemRef::Approval(a.id),
+            Self::UserAction(c) => PendingItemRef::UserAction(c.id),
+            Self::AgentsMdDraft(d) => PendingItemRef::AgentsMdDraft(d.card_id),
+            Self::Resume(r) => PendingItemRef::Resume(r.turn_id),
+        }
+    }
+
+    /// 这一项所在的对话；AGENTS.md 草稿没有对话归属。
+    pub fn conversation_id(&self) -> Option<ConversationId> {
+        match self {
+            Self::Approval(a) => Some(a.conversation_id),
+            Self::UserAction(c) => Some(c.conversation_id),
+            Self::AgentsMdDraft(_) => None,
+            Self::Resume(r) => Some(r.conversation_id),
+        }
+    }
+}
+
+/// 点了通知之后打开哪一项。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenTarget {
+    pub item: PendingItemRef,
+    /// 这一项所在的对话；AGENTS.md 草稿没有
+    pub conversation_id: Option<ConversationId>,
+}
+
+impl OpenTarget {
+    pub fn of(item: &PendingItem) -> Self {
+        Self {
+            item: item.item_ref(),
+            conversation_id: item.conversation_id(),
+        }
+    }
+}
+
+/// 后台记下的一次点击（`GetOpenTarget` 的答案）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenRecord {
+    /// 每记一次加一，从 1 起；客户端拿它判断是不是新的
+    pub token: u64,
+    pub target: OpenTarget,
+    /// 点击的时刻
+    pub at: Timestamp,
+}
+
+/// 一条系统通知；`open` 是点了它之后打开的那一项。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemNotification {
     pub title: String,
     pub body: String,
-    pub open: Option<ConversationId>,
+    pub open: Option<OpenTarget>,
 }
 
 pub trait Notifier: Send + Sync {
@@ -27,5 +127,56 @@ impl NotifyError {
     /// 通知丢了不影响业务，不重试。
     pub fn retryable(&self) -> bool {
         false
+    }
+}
+
+/// 一个桌面客户端报的「在看哪」（`ReportPresence`）。记在连接名下，连接断开即清（S5）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Presence {
+    /// 窗口在前台、没有最小化
+    pub window_focused: bool,
+    pub viewing: Viewing,
+}
+
+/// 主区域正显示什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Viewing {
+    /// 别的页面（设置、助手主页、还没加载完的对话等）
+    Elsewhere,
+    /// 某个对话，已加载完
+    Conversation(ConversationId),
+    /// 「待你处理」页
+    PendingList,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iwork_domain::id::RawUlid;
+
+    #[test]
+    fn key_roundtrips_for_every_kind() {
+        let raw = RawUlid::from_u128(7);
+        let all = [
+            PendingItemRef::Approval(ApprovalId::from_raw(raw)),
+            PendingItemRef::UserAction(UserActionId::from_raw(raw)),
+            PendingItemRef::AgentsMdDraft(JobId::from_raw(raw)),
+            PendingItemRef::Resume(TurnId::from_raw(raw)),
+        ];
+        let keys: std::collections::BTreeSet<String> = all.iter().map(|r| r.key()).collect();
+        assert_eq!(keys.len(), all.len(), "同一个编号、不同种类的键不同");
+        for r in all {
+            assert_eq!(PendingItemRef::parse_key(&r.key()), Ok(r));
+            assert_eq!(r.key().split_once(':').unwrap().1, r.id_string());
+        }
+        for bad in [
+            "",
+            "approval",
+            "approval:x",
+            "card:01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        ] {
+            let e = PendingItemRef::parse_key(bad).unwrap_err();
+            assert!(e.contains(bad), "{e}");
+        }
     }
 }

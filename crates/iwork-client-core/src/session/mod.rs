@@ -16,6 +16,8 @@ mod presence;
 pub mod reconnect;
 mod reminders;
 mod start;
+#[cfg(test)]
+mod test_support;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -191,8 +193,8 @@ pub struct Session<D: Dialer> {
     /// 该问一次 GetOpenTarget 了（窗口获得焦点、启动后第一次连上）。
     open_target_wanted: bool,
     open_target_in_flight: bool,
-    /// 处理过的最大 token（只记在内存里）。
-    open_target_seen: u64,
+    /// 处理过的最后一个目标：(后台这一次运行的 boot_id, token)，只记在内存里。见 `reminders::is_new_open_target`。
+    open_target_seen: Option<(String, u64)>,
     /// 开着的系统选择框：选好以后做什么，以及网页那次操作还没回的受理结果。同一时刻最多一个。
     pick: Option<(Pick, oneshot::Sender<pb::IntentAck>)>,
     stats: Stats,
@@ -273,7 +275,7 @@ impl<D: Dialer> Session<D> {
             presence_due: None,
             open_target_wanted: false,
             open_target_in_flight: false,
-            open_target_seen: 0,
+            open_target_seen: None,
             pick: None,
             stats: Stats::default(),
             stats_tx: None,

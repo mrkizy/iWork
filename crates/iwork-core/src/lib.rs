@@ -6,6 +6,7 @@
 //! - [`project_identity`]：项目身份规则（去重、重新定位、路径检查），T08。
 
 pub mod approval;
+pub mod notify;
 pub mod project_identity;
 pub mod recovery;
 pub mod turn;

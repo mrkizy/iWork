@@ -97,6 +97,9 @@ message GetOpenTargetResult {
   optional string conversation_id = 3;
   // 用户点这条通知的时刻。
   google.protobuf.Timestamp at = 4;
+  // 后台这一次运行的标识（每次启动新生成）。token 只在同一个 boot_id 里递增，后台重启后从头数：客户端按
+  // (boot_id, token) 认新旧，不能只比 token（T10a 审查 2026-11-14-m1-t10a-8a 1/F-1）。
+  string boot_id = 5;
 }
 
 // 键集分页：十万条历史（设计 5.3 索引）。三种取页方式至多设一个（同时设两个以上回 INVALID_ARGUMENT），

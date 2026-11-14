@@ -413,6 +413,64 @@ async fn open_target_navigates_once_per_token_like_pending_list() {
     assert_eq!(w.state.navigate.as_ref().map(|n| n.seq), Some(nav.seq));
 }
 
+/// 后台重启后 token 从头数（审查 2026-11-14-m1-t10a-8a 1/F-1）：同一个后台断线重连不重放旧目标；换了后台以后的
+/// 第一次点击照样跳。
+#[tokio::test(flavor = "multi_thread")]
+async fn open_target_after_daemon_restart_navigates() {
+    let h = start(&["approval-states"]).await;
+    let mut w = web(&h.app).await;
+    intent(&h.app, visible(None, true)).await;
+    until(&h.app, &mut w, "待你处理页", |s| {
+        s.pending.as_ref().is_some_and(|p| p.entries.len() >= 2)
+    })
+    .await;
+    let entries = w.state.pending.as_ref().unwrap().entries.clone();
+    let (a, b) = (&entries[0], &entries[1]);
+    assert_ne!(a.row_key, b.row_key, "对照：两项不同");
+    let refocus = || {
+        h.app.shell(ShellEvent::Focused(false));
+        h.app.shell(ShellEvent::Focused(true));
+    };
+
+    h.daemon
+        .set_open_target(&a.item_id, a.conversation_id.as_deref());
+    refocus();
+    until(&h.app, &mut w, "跳到第一项", |s| {
+        s.navigate.as_ref().map(|n| &n.row_key) == a.row_key.as_ref()
+    })
+    .await;
+    let first = w.state.navigate.as_ref().unwrap().seq;
+
+    // 同一个后台断线重连：目标还是那一个，不重放
+    h.daemon.disconnect_all().await;
+    sleep(Duration::from_millis(800)).await;
+    refocus();
+    sleep(Duration::from_millis(800)).await;
+    let _ = timeout(Duration::from_millis(300), h.app.next_frame(w.request()))
+        .await
+        .map(|c| c.map(|c| w.accept(&c)));
+    assert_eq!(
+        w.state.navigate.as_ref().map(|n| n.seq),
+        Some(first),
+        "同一个后台不重放"
+    );
+
+    // 换了后台：它从头数 token，这一次点的是另一项
+    h.daemon.forget_open_target();
+    h.daemon.disconnect_all().await;
+    h.daemon
+        .set_open_target(&b.item_id, b.conversation_id.as_deref());
+    sleep(Duration::from_millis(800)).await;
+    refocus();
+    until(
+        &h.app,
+        &mut w,
+        "新后台的第一次点击跳到第二项",
+        |s| s.navigate.as_ref().map(|n| &n.row_key) == b.row_key.as_ref(),
+    )
+    .await;
+}
+
 /// 30 秒以前点的不算。
 #[tokio::test(flavor = "multi_thread")]
 async fn open_target_expires() {
