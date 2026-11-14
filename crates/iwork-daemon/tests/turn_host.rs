@@ -502,6 +502,8 @@ async fn cancel_running_and_withdraw_queued() {
     let a = h.send(1, "跑着").await;
     let b = h.send(2, "排着").await;
     h.wait_state(a, |s| s == TurnState::Running).await;
+    // Running 先落库、prompt 随后才交给运行时：等它真到了再退出或取消，「跑着的那个」才算跑着（D2）
+    h.agent.wait_prompts(1).await;
     assert!(matches!(
         h.ask(fresh_id(3), cancel(b)).await.body,
         Some(iwork_proto::pb::response::Body::Accepted(_))
@@ -736,6 +738,8 @@ async fn cancel_all_running_and_queued() {
     let b = h.send(2, "排着一").await;
     let c = h.send(3, "排着二").await;
     h.wait_state(a, |s| s == TurnState::Running).await;
+    // Running 先落库、prompt 随后才交给运行时：等它真到了再退出或取消，「跑着的那个」才算跑着（D2）
+    h.agent.wait_prompts(1).await;
     accepted(
         &h.ask(
             fresh_id(4),

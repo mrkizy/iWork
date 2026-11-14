@@ -34,6 +34,8 @@ async fn quit_cancels_running_and_queued() {
     let b = h.send(2, "排着一").await;
     let c = h.send(3, "排着二").await;
     h.wait_state(a, |s| s == TurnState::Running).await;
+    // Running 先落库、prompt 随后才交给运行时：等它真到了再退出或取消，「跑着的那个」才算跑着（D2）
+    h.agent.wait_prompts(1).await;
     let triggered = std::sync::atomic::AtomicBool::new(false);
     let d = h
         .host
