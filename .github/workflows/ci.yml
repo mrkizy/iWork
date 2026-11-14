@@ -32,6 +32,9 @@ jobs:
         run: scripts/check-no-tcp.sh
       - name: 源码检查自测（注入 TcpListener::bind 必须失败）
         run: scripts/check-no-tcp.sh --selftest
+      # 基准冒烟的判红规则对照（假命令，不编不跑基准）：后台任务 panic 而退出 0 必须红，没有 panic 的 INVALID 必须绿
+      - name: 基准冒烟判红规则自测
+        run: scripts/bench-smoke.sh --selftest
       # T03：dev feature（--dev-trust）没有被任何工作区 crate 默认打开
       - name: feature 图里没有 dev
         run: scripts/check-no-dev-trust.sh --graph-only
@@ -114,6 +117,12 @@ jobs:
           cargo test -p iwork-client-core --features dev --test app_dialer
           # 客户端拒绝不可信的后台时 client.log 里有 peer_rejected（ADR-0013）
           cargo test -p iwork-client-core --features dev --test client_log_process
+
+      # 基准冒烟：每个 bench 用缩小的负载在调试构建里真跑一遍，起不来、panic 就红；不比性能数字（scripts/bench-smoke.sh）。
+      #   cargo test 不跑基准的函数体，布景被存储或引擎的新校验拒掉时没人发现（T10a 1b 实测）。只在 Linux 上跑：复用上面编好的调试依赖。
+      - name: 基准冒烟（Linux）
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        run: scripts/bench-smoke.sh
 
       # T04：M1 不支持 Windows，后台在启动表第 1 步就拒绝（退出码 10）。按名字核对这一条真的跑到且通过
       - name: 后台在 Windows 上启动即拒绝（Windows）

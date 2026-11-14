@@ -7,6 +7,7 @@
 //! - `client_reconnect_running`：后台在跑时新开一次连接（双向身份校验 + 握手）；
 //! - `client_connect_cold`：后台没在跑，`Launcher::connect_or_launch` 从调用到连上；
 //! - `idle_cpu`：就绪后空闲 `IWORK_BENCH_IDLE_SECS`（默认 60）秒的 CPU 占用；
+//! - 缩小规模（CI 冒烟用）：`IWORK_BENCH_COLD_EVENTS_MAX` 只跑不超过它的冷启动档；
 //! - `write_commit_observer`：存储单事件提交，装真的 `PublishObserver`（转 pb、算路由、推给 ipc 的 Publisher）
 //!   与不装观察者交替各跑几轮，每次提交的中位耗时（热路径前后对比，AGENTS.md「性能」）。两种事件：
 //!   `GlobalSettingsChanged`（不叫醒谁）与 `ConversationDeleting`（在回合宿主的唤醒登记表里、也在引擎的流里，
@@ -73,19 +74,71 @@ impl Home {
     }
 }
 
+/// 决定后台数据目录与 run 目录的变量：拉起后台前都要清掉，否则后台照外面的值找目录，基准却在临时 HOME 下等
+/// （Linux 上 XDG_RUNTIME_DIR 优先于 HOME；GitHub 的 ubuntu runner 设了它）。
+const DIR_VARS: [&str; 4] = [
+    "XDG_RUNTIME_DIR",
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "IWORK_DATA_DIR",
+];
+
+/// 后台子进程的 stderr 去哪：设了 `IWORK_BENCH_CHILD_STDERR_DIR`（基准冒烟设的）就各写一个文件进去，冒烟跑完在里面
+/// 找 panic 行——后台里可重启的任务 panic 后由监督器恢复、连接照样成功，只有 stderr 上那一行能看出来；没设就丢掉，
+/// 平时跑基准不多出文件。
+fn child_stderr() -> Stdio {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let Ok(dir) = std::env::var("IWORK_BENCH_CHILD_STDERR_DIR") else {
+        return Stdio::null();
+    };
+    let path = Path::new(&dir).join(format!(
+        "daemon-{}.stderr",
+        N.fetch_add(1, Ordering::SeqCst)
+    ));
+    let file = std::fs::File::create(&path)
+        .unwrap_or_else(|e| panic!("建不了后台 stderr 文件 {}：{e}", path.display()));
+    Stdio::from(file)
+}
+
+/// 和产品的 `DetachedSpawn` 一样脱离（新会话、工作目录 /、另起线程收尸），只是 stderr 交给 `child_stderr`。
+/// 产品的拉起方式把标准流都接到 /dev/null，基准换这个实现，不改产品。
+struct BenchDetachedSpawn;
+
+impl iwork_client_core::launcher::Spawn for BenchDetachedSpawn {
+    fn spawn(&self, exe: &Path, args: &[&str]) -> std::io::Result<()> {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Command::new(exe);
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(child_stderr())
+            .current_dir("/");
+        // SAFETY：pre_exec 里只调 async-signal-safe 的 setsid
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = cmd.spawn()?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
+    }
+}
+
 fn spawn(home: &Home) -> Child {
     let mut c = Command::new(DAEMON);
     c.arg("--dev-trust")
         .env("HOME", home.path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    for k in [
-        "XDG_RUNTIME_DIR",
-        "XDG_DATA_HOME",
-        "XDG_CONFIG_HOME",
-        "IWORK_DATA_DIR",
-    ] {
+        .stderr(child_stderr());
+    for k in DIR_VARS {
         c.env_remove(k);
     }
     c.spawn().unwrap()
@@ -237,10 +290,13 @@ fn connect_cold(rt: &tokio::runtime::Runtime, own: &SelfIdentity) {
     for _ in 0..5 {
         let home = Home::new();
         std::fs::create_dir_all(home.run_dir().parent().unwrap()).unwrap();
-        // 拉起的后台继承这里的 HOME
+        // 拉起的后台继承这里的环境：HOME 指到临时目录，决定目录的其余变量清掉
         // SAFETY：基准是单线程顺序跑的，改环境变量时没有别的线程在读
         unsafe {
             std::env::set_var("HOME", home.path());
+            for k in DIR_VARS {
+                std::env::remove_var(k);
+            }
         }
         let ep = LocalEndpoint::in_run_dir(&home.run_dir()).unwrap();
         let mut l = iwork_client_core::launcher::Launcher::new(
@@ -249,7 +305,7 @@ fn connect_cold(rt: &tokio::runtime::Runtime, own: &SelfIdentity) {
                 own: own.clone(),
                 cfg: client_cfg(),
             },
-            iwork_client_core::launcher::DetachedSpawn,
+            BenchDetachedSpawn,
             iwork_client_core::launcher::LaunchConfig {
                 daemon_exe: PathBuf::from(DAEMON),
                 budget: iwork_client_core::launcher::BUDGET,
@@ -444,7 +500,13 @@ fn main() {
         emit("environment", serde_json::json!({ "loadavg": l.trim() }));
     }
     if on("daemon_cold_start") {
-        for events in [0, 10_000, 100_000] {
+        // `IWORK_BENCH_COLD_EVENTS_MAX` 只保留不超过它的几档（CI 冒烟用；空库那档总在）
+        let max: usize = std::env::var("IWORK_BENCH_COLD_EVENTS_MAX")
+            .ok()
+            .map_or(usize::MAX, |v| {
+                v.parse().expect("IWORK_BENCH_COLD_EVENTS_MAX 要是整数")
+            });
+        for events in [0, 10_000, 100_000].into_iter().filter(|e| *e <= max) {
             cold_start(&rt, &own, events, 3);
         }
     }
