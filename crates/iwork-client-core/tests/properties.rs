@@ -443,8 +443,8 @@ mod live {
         .unwrap();
     }
 
-    /// 后台此刻的全量锚点（按 created_seq 升序的 key），作期望值：直接问假后台，不经客户端。
-    fn all_anchor_keys(d: &FakeDaemon) -> Vec<String> {
+    /// 后台此刻的全量锚点（按 created_seq 升序：key 与类型），作期望值：直接问假后台，不经客户端。
+    fn all_anchors(d: &FakeDaemon) -> Vec<(String, pb::AnchorKind)> {
         let r = d.query(&pb::Query {
             kind: Some(pb::query::Kind::ListAnchors(pb::ListAnchors {
                 conversation_id: "c-basic".into(),
@@ -457,7 +457,16 @@ mod live {
             Some(pb::query_result::Kind::ListAnchors(l)) => l
                 .anchors
                 .iter()
-                .map(|a| a.created_seq.to_string())
+                .map(|a| {
+                    use pb::anchor::Kind as K;
+                    let kind = match a.kind {
+                        Some(K::UserMessage(_)) => pb::AnchorKind::User,
+                        Some(K::Waiting(_)) => pb::AnchorKind::Waiting,
+                        Some(K::FailedTurn(_)) => pb::AnchorKind::Failed,
+                        None => pb::AnchorKind::Unspecified,
+                    };
+                    (a.created_seq.to_string(), kind)
+                })
                 .collect(),
             other => panic!("ListAnchors 回了 {other:?}"),
         }
@@ -616,40 +625,13 @@ mod live {
         // 一段起步、盖不住阅读位置才重取），两边的窗口可以一长一短，都对。所以不逐字比窗口，比和历史无关的：
         // 各自是后台全量锚点里连续的一段、前后还有没有说得对、都盖住了当前位置；当前位置与两个计数相同。
         prop_assert!(fresh.state.anchors.is_some(), "对照：新客户端取到了锚点");
-        let all = all_anchor_keys(&d);
         let current = &fresh.state.anchor_cursor.as_ref().unwrap().current_key;
-        for (who, w) in [("重连", &web), ("新连", &fresh)] {
-            let a = w.state.anchors.as_ref().unwrap();
-            let keys: Vec<&str> = a.items.iter().map(|i| i.key.as_str()).collect();
-            let start = all.iter().position(|k| Some(&k.as_str()) == keys.first());
-            prop_assert!(
-                start.is_some_and(|s| all[s..]
-                    .iter()
-                    .map(String::as_str)
-                    .take(keys.len())
-                    .eq(keys.iter().copied())),
-                "{who}的锚点窗口不是全量里连续的一段：{keys:?}"
-            );
-            let s = start.unwrap();
-            prop_assert_eq!(a.has_before, s > 0, "{}：前面还有没有", who);
-            prop_assert_eq!(
-                a.has_after,
-                s + keys.len() < all.len(),
-                "{}：后面还有没有",
-                who
-            );
-            prop_assert!(
-                keys.contains(&current.as_str()),
-                "{who}的窗口没盖住当前位置 {current}"
-            );
-            prop_assert_eq!(
-                a.has_waiting,
-                fresh.state.anchors.as_ref().unwrap().has_waiting
-            );
-            prop_assert_eq!(
-                a.has_failed,
-                fresh.state.anchors.as_ref().unwrap().has_failed
-            );
+        let sides = [
+            ("重连", web.state.anchors.as_ref().unwrap()),
+            ("新连", fresh.state.anchors.as_ref().unwrap()),
+        ];
+        if let Err(e) = check_anchor_windows(&all_anchors(&d), &sides, current) {
+            return Err(TestCaseError::fail(e));
         }
         prop_assert_eq!(&web.state.anchor_cursor, &fresh.state.anchor_cursor);
         // 两个计数的期望值由操作序列独立算出，不读后台：整个对话里有没有还在等的审批、有没有失败回合
@@ -661,5 +643,150 @@ mod live {
             "对照：确实翻到了最旧的一条"
         );
         Ok(())
+    }
+
+    /// 锚点（方案 2.9）：窗口取多大一段是翻看状态，跟以哪处为中心取过有关（重连的沿用断线前的中心，新连的从最新
+    /// 一段起步、盖不住阅读位置才重取），两边的窗口可以一长一短，都对。放宽的只是窗口起止，内容照样核（复审 1/F-1）：
+    /// - 各自是后台全量锚点里连续的一段、前后还有没有说得对、都盖住了当前位置；两个计数相同；
+    /// - 每一条的类型与后台同一处的类型相同，类型文字与类型对得上，有时间；预览按这个场景实际发生过的内容独立给出
+    ///   期望（[`plausible_preview`]），不读客户端或后台算出来的文字；
+    /// - 两边都有的那几条整条相等。
+    fn check_anchor_windows(
+        all: &[(String, pb::AnchorKind)],
+        sides: &[(&str, &pb::AnchorsView)],
+        current: &str,
+    ) -> Result<(), String> {
+        let keys_all: Vec<&str> = all.iter().map(|(k, _)| k.as_str()).collect();
+        for (who, a) in sides {
+            let keys: Vec<&str> = a.items.iter().map(|i| i.key.as_str()).collect();
+            let start = keys_all.iter().position(|k| Some(k) == keys.first());
+            let Some(s) = start.filter(|s| keys_all[*s..].iter().take(keys.len()).eq(keys.iter()))
+            else {
+                return Err(format!("{who}的锚点窗口不是全量里连续的一段：{keys:?}"));
+            };
+            if a.has_before != (s > 0) || a.has_after != (s + keys.len() < keys_all.len()) {
+                return Err(format!("{who}：前后还有没有说得不对"));
+            }
+            if !keys.contains(&current) {
+                return Err(format!("{who}的窗口没盖住当前位置 {current}"));
+            }
+            if (a.has_waiting, a.has_failed) != (sides[0].1.has_waiting, sides[0].1.has_failed) {
+                return Err(format!("{who}：两个计数和另一边不一样"));
+            }
+            for (item, (_, kind)) in a.items.iter().zip(&all[s..]) {
+                if item.kind != *kind as i32 {
+                    return Err(format!("{who}的第 {} 处类型不对：{item:?}", item.key));
+                }
+                if !plausible_preview(*kind, item) {
+                    return Err(format!("{who}的第 {} 处内容不对：{item:?}", item.key));
+                }
+            }
+        }
+        for (i, (who, a)) in sides.iter().enumerate() {
+            for (other, b) in &sides[i + 1..] {
+                for item in &a.items {
+                    if let Some(same) = b.items.iter().find(|x| x.key == item.key)
+                        && same != item
+                    {
+                        return Err(format!(
+                            "{who}与{other}的第 {} 处不一样：{item:?} / {same:?}",
+                            item.key
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 这个场景里实际发生过的内容（不读客户端或后台算出来的文字）：用户只发过这三句；等你处理的都是「rm -rf build」
+    /// 的审批；失败回合的原因都是「模型暂时不可用」。类型文字跟着类型走，时间不为空。
+    fn plausible_preview(kind: pb::AnchorKind, item: &pb::AnchorItem) -> bool {
+        use pb::AnchorKind as K;
+        let (label, ok) = match kind {
+            K::User => (
+                "你",
+                ["帮我把登录页改成深色", "新消息", "填充"].contains(&item.preview.as_str()),
+            ),
+            K::Waiting => ("等你处理", item.preview.contains("rm -rf build")),
+            K::Failed => ("失败", item.preview.contains("模型暂时不可用")),
+            K::Unspecified => return false,
+        };
+        ok && item.kind_label == label && !item.time_label.is_empty()
+    }
+
+    /// 合成的两份窗口：后台全量 1、3、5、8（用户、等你处理、用户、失败），重连拿到 1..8，新连拿到 3..8。
+    fn sample_windows() -> (
+        Vec<(String, pb::AnchorKind)>,
+        pb::AnchorsView,
+        pb::AnchorsView,
+    ) {
+        use pb::AnchorKind as K;
+        let all = vec![
+            ("1".to_owned(), K::User),
+            ("3".to_owned(), K::Waiting),
+            ("5".to_owned(), K::User),
+            ("8".to_owned(), K::Failed),
+        ];
+        let item = |key: &str, kind: K, label: &str, preview: &str| pb::AnchorItem {
+            key: key.into(),
+            kind: kind as i32,
+            kind_label: label.into(),
+            time_label: "10:00".into(),
+            preview: preview.into(),
+        };
+        let items = vec![
+            item("1", K::User, "你", "帮我把登录页改成深色"),
+            item("3", K::Waiting, "等你处理", "rm -rf build"),
+            item("5", K::User, "你", "新消息"),
+            item("8", K::Failed, "失败", "这一轮没能开始：模型暂时不可用"),
+        ];
+        let view = |items: Vec<pb::AnchorItem>, before: bool| pb::AnchorsView {
+            items,
+            has_before: before,
+            has_after: false,
+            has_waiting: true,
+            has_failed: true,
+            ..Default::default()
+        };
+        (
+            all,
+            view(items.clone(), false),
+            view(items[1..].to_vec(), true),
+        )
+    }
+
+    /// 对照：两份正确的窗口（一长一短）通过。
+    #[test]
+    fn anchor_windows_check_accepts_a_longer_and_a_shorter_correct_window() {
+        let (all, reconnect, fresh) = sample_windows();
+        assert_eq!(
+            check_anchor_windows(&all, &[("重连", &reconnect), ("新连", &fresh)], "5"),
+            Ok(())
+        );
+    }
+
+    /// 只改一边的内容（预览、类型）要红（复审 1/F-1）：放宽的只是窗口起止，不是内容。
+    #[test]
+    fn anchor_windows_check_rejects_one_sided_content() {
+        let (all, reconnect, fresh) = sample_windows();
+        let mut wrong_preview = reconnect.clone();
+        wrong_preview.items[2].preview = "WRONG_ONE_SIDE".into();
+        assert!(
+            check_anchor_windows(&all, &[("重连", &wrong_preview), ("新连", &fresh)], "5").is_err(),
+            "重叠的那一条预览只改了一边"
+        );
+        let mut wrong_kind = reconnect.clone();
+        wrong_kind.items[0].kind = pb::AnchorKind::Unspecified as i32;
+        assert!(
+            check_anchor_windows(&all, &[("重连", &wrong_kind), ("新连", &fresh)], "5").is_err(),
+            "只在一边的那一条类型错了"
+        );
+        let mut wrong_only = reconnect.clone();
+        wrong_only.items[0].preview = "WRONG_PREVIEW".into();
+        assert!(
+            check_anchor_windows(&all, &[("重连", &wrong_only), ("新连", &fresh)], "5").is_err(),
+            "只在一边的那一条预览错了（不在重叠里，靠独立的期望值抓）"
+        );
     }
 }
