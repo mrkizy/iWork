@@ -184,10 +184,17 @@ describe("发布构建的路径全取自 cargo（R9）", () => {
     expect(() => builtPrograms("", "", "/t", "linux")).toThrow(/没有报出/);
   });
 
-  it("后台只认进包那次构建报的：核对程序那次也报出后台，也不拿来进包", () => {
-    expect(() =>
-      builtPrograms(checkArtifacts("/t/release/examples/check-install"), daemonArtifacts("/t/release/iwork-daemon"), "/t", "linux"),
-    ).toThrow(/没有报出/);
+  it("后台只认进包那次构建报的：进包那次没报出后台，核对程序那次报了，也不拿来进包", () => {
+    const libOnly = JSON.stringify({
+      reason: "compiler-artifact",
+      target: { name: "iwork-ipc", kind: ["lib"] },
+      executable: null,
+    });
+    const checkWithDaemon = [
+      daemonArtifacts("/t/release/iwork-daemon"),
+      checkArtifacts("/t/release/examples/check-install"),
+    ].join("\n");
+    expect(() => builtPrograms(libOnly, checkWithDaemon, "/t", "linux")).toThrow(/没有报出/);
   });
 
   it("Linux 没有 --app；Windows 不装配", () => {

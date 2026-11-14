@@ -52,7 +52,48 @@ describe("一次构建里带了测试 feature 的本地产物", () => {
   });
 
   it("对照：都没带就是空的", () => {
-    const json = artifact("path+file:///r/crates/iwork-store#0.1.0", "iwork_store", "lib", []);
+    const json = [
+      artifact("path+file:///r/crates/iwork-store#0.1.0", "iwork_store", "lib", []),
+      artifact("path+file:///r/crates/iwork-daemon#0.1.0", "iwork-daemon", "bin", []),
+    ].join("\n");
     expect(testFeaturesInBuild(json, list)).toEqual([]);
+  });
+});
+
+// 认不出 cargo 的输出时不能当成干净（1/F-1）：以后升级工具链、输出格式一变，这道闸会悄悄失效
+describe("认不出进包那次构建的输出就停", () => {
+  const list = parseTestOnlyFeatures("test-feature iwork-daemon test-hooks\n");
+  const daemonBin = (id: string, features?: string[]) =>
+    JSON.stringify({
+      reason: "compiler-artifact",
+      package_id: id,
+      target: { name: "iwork-daemon", kind: ["bin"] },
+      ...(features === undefined ? {} : { features }),
+      executable: "/t/release/iwork-daemon",
+    });
+
+  it("旧写法的包 id（「名字 版本 (来源)」）：认不出，停", () => {
+    const json = daemonBin("iwork-daemon 0.1.0 (path+file:///r/crates/iwork-daemon)", ["test-hooks"]);
+    expect(() => testFeaturesInBuild(json, list)).toThrow(/认不出的包 id/);
+  });
+
+  it("产物记录缺 features 字段：停", () => {
+    const json = daemonBin("path+file:///r/crates/iwork-daemon#0.1.0");
+    expect(() => testFeaturesInBuild(json, list)).toThrow(/features/);
+  });
+
+  it("产物记录缺 package_id：停", () => {
+    const json = JSON.stringify({ reason: "compiler-artifact", target: { name: "iwork-daemon", kind: ["bin"] }, features: [] });
+    expect(() => testFeaturesInBuild(json, list)).toThrow(/package_id/);
+  });
+
+  it("一条本地产物都没有（没认出进包的后台）：停", () => {
+    const json = JSON.stringify({
+      reason: "compiler-artifact",
+      package_id: "registry+https://x#tokio@1.0.0",
+      target: { name: "tokio", kind: ["lib"] },
+      features: [],
+    });
+    expect(() => testFeaturesInBuild(json, list)).toThrow(/没认出进包的后台/);
   });
 });

@@ -5,6 +5,8 @@
 #      （test-hooks、dev、fault-injection、fake-cli、e2e……）；并且每个工作区 crate 声明的每个 feature 都要在清单里登记，
 #      新加 feature 不登记就红。这是 feature 依赖图，不是字符串。打包那次 cargo 调用本身有没有把测试 feature 统一进
 #      进包的程序，由打包命令在出包时查（client/scripts/release-build.ts，读同一份清单）；
+#      覆盖范围只到发布根：iwork-bench、iwork-fake-* 这类不发布的 crate，正式依赖里打开测试 feature 这里不报（它们本来就
+#      只给测试、基准用；打包与发布构建都带 -p 指定发布根，不会把它们的 feature 统一进来）；
 #   ② 产物：release 构建的 iwork-daemon、iwork-bridge-claude（以及 --artifacts 给的打包产物）里 grep 不到
 #      开发字样（dev-trust、IWORK_DEV_、桥接的故障注入变量、假 CLI 的变量）；同一份源码开对应测试 feature
 #      构建出来的必须 grep 得到、且被同一个扫描判红（阳性对照，证明扫描真能识别）；
