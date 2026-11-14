@@ -192,7 +192,8 @@ export function AnchorList(props: {
   );
   // 「这一下是我自己写的」：程序每次写 scrollTop 前置上，它触发的那次 scroll 消费掉；没有触发 scroll（位置没变）
   // 就在下一帧清掉。不带这个标记的 scroll 一律当用户输入上报（g3b 5/F-2）。程序写和用户的只产生 scroll 的滚动
-  // 落在同一帧时，浏览器只派一次 scroll，分不开：这一次按程序的算，用户手势后面几帧的 scroll 照常上报
+  // 落在同一帧时，浏览器只派一次 scroll，分不开：这一次按程序的算，用户手势后面几帧的 scroll 照常上报。最坏是
+  // 这一下没作废掉一个等着的头尾，被它迟到的落点拉回一次（取舍已认可，g3b 第 6 轮）
   let selfWrite = false;
   let selfWriteFrame = 0;
   const setTop = (v: number) => {
