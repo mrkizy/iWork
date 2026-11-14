@@ -6,7 +6,8 @@
 //! `replayed`、什么都不写，所以重连、重启、任务重起都不会再定一次。
 //!
 //! 内存里记着这次运行里定过、而且还在待处理的项，只为省掉重复提交；去重靠 `command_id`。提交经带封口闸的存储
-//! （E4）；出错（封口后的 `Busy`、读写失败、到时）只记日志，这一轮停下，等下一次叫醒再对账。可重启：没有别的状态。
+//! （E4，参数类型只收 `GatedStore`）；出错（封口后的 `Busy`、读写失败、到时）只记日志，这一轮停下，等下一次
+//! 叫醒再对账。可重启：没有别的状态。
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -22,6 +23,7 @@ use iwork_store::SqliteReadModel;
 use tokio::sync::Notify;
 
 use crate::attention::Attention;
+use crate::gate::GatedStore;
 use crate::routes::notify_target;
 
 /// 落盘就叫醒本任务的事件种类：待处理表可能多出一项的那几种。
@@ -58,9 +60,9 @@ pub fn command_id_of(entry: &PendingEntry) -> CommandId {
     }
 }
 
-/// 任务体：先对一次账，之后每次被叫醒再对一次。
+/// 任务体：先对一次账，之后每次被叫醒再对一次。存储只收带封口闸的那一种（E4）。
 pub async fn run<St, C>(
-    store: Arc<St>,
+    store: Arc<GatedStore<St>>,
     read: Arc<SqliteReadModel<C>>,
     attention: Arc<Attention>,
     wake: Arc<Notify>,
@@ -79,7 +81,7 @@ pub async fn run<St, C>(
 
 /// 对一次账：还在待处理、这次运行里没定过的每一项各提交一笔。
 async fn round<St, C>(
-    store: &St,
+    store: &GatedStore<St>,
     read: &SqliteReadModel<C>,
     attention: &Attention,
     decided: &mut HashSet<CommandId>,
