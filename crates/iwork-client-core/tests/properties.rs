@@ -503,6 +503,22 @@ mod live {
             .unwrap();
         let d = FakeDaemon::start(dir.path().join("d.sock")).await.unwrap();
         d.run_scenario("conversation-basic").await.unwrap();
+        // 每一处锚点该是什么，按产生它的事件的 seq 逐处记下（场景输入，不读产品算出来的文字）
+        let mut expected = Expected::new();
+        let mut basic_user = 0;
+        d.mutate_tables(|t| {
+            basic_user = t.conversations["c-basic"]
+                .messages
+                .iter()
+                .find(|m| m.id == "m-basic-u")
+                .map_or(0, |m| m.created_seq);
+        });
+        expect_at(
+            &mut expected,
+            basic_user,
+            pb::AnchorKind::User,
+            "帮我把登录页改成深色",
+        );
         // 一条老的流式消息，后面跟着 60 条：它在最新页之外。
         d.append(f::assistant_message(
             "old",
@@ -512,7 +528,8 @@ mod live {
             "iWork",
         ));
         for i in 0..60 {
-            d.append(f::user_message(&format!("pad-{i}"), "c-basic", "填充"));
+            let seq = d.append(f::user_message(&format!("pad-{i}"), "c-basic", "填充"));
+            expect_at(&mut expected, seq, pb::AnchorKind::User, "填充");
         }
         let (app, mut web) = connect(&d, Some("c-basic")).await;
         // 先等对话订阅完成，之后的事件才是实时到达（否则全被折进快照，变化事件的路径测不到）。
@@ -525,7 +542,8 @@ mod live {
         for (i, op) in ops.into_iter().enumerate() {
             match op {
                 0 => {
-                    d.append(f::user_message(&format!("n-{i}"), "c-basic", "新消息"));
+                    let seq = d.append(f::user_message(&format!("n-{i}"), "c-basic", "新消息"));
+                    expect_at(&mut expected, seq, pb::AnchorKind::User, "新消息");
                 }
                 1 => d.disconnect_all().await,
                 2 => {
@@ -555,7 +573,7 @@ mod live {
                 }
                 10 => {
                     let id = format!("ap-{i}");
-                    d.append(f::approval(
+                    let seq = d.append(f::approval(
                         &id,
                         "c-basic",
                         "t-basic",
@@ -563,6 +581,12 @@ mod live {
                         pb::ApprovalKind::Ask,
                         &[],
                     ));
+                    expect_at(
+                        &mut expected,
+                        seq,
+                        pb::AnchorKind::Waiting,
+                        "审批：rm -rf build",
+                    );
                     waiting.push(id);
                 }
                 11 if !waiting.is_empty() => {
@@ -582,7 +606,14 @@ mod live {
                         pb::TurnState::Failed,
                         Some("模型暂时不可用"),
                     ));
-                    d.append(f::turn_finished(&turn, pb::TurnState::Failed, false, None));
+                    let seq = d.append(f::turn_finished(&turn, pb::TurnState::Failed, false, None));
+                    // 没有任何输出就失败：落在「没能开始」，原因原样跟在后面
+                    expect_at(
+                        &mut expected,
+                        seq,
+                        pb::AnchorKind::Failed,
+                        "这一轮没能开始：模型暂时不可用",
+                    );
                     failed_any = true;
                 }
                 6 => {
@@ -630,7 +661,7 @@ mod live {
             ("重连", web.state.anchors.as_ref().unwrap()),
             ("新连", fresh.state.anchors.as_ref().unwrap()),
         ];
-        if let Err(e) = check_anchor_windows(&all_anchors(&d), &sides, current) {
+        if let Err(e) = check_anchor_windows(&all_anchors(&d), &expected, &sides, current) {
             return Err(TestCaseError::fail(e));
         }
         prop_assert_eq!(&web.state.anchor_cursor, &fresh.state.anchor_cursor);
@@ -648,11 +679,13 @@ mod live {
     /// 锚点（方案 2.9）：窗口取多大一段是翻看状态，跟以哪处为中心取过有关（重连的沿用断线前的中心，新连的从最新
     /// 一段起步、盖不住阅读位置才重取），两边的窗口可以一长一短，都对。放宽的只是窗口起止，内容照样核（复审 1/F-1）：
     /// - 各自是后台全量锚点里连续的一段、前后还有没有说得对、都盖住了当前位置；两个计数相同；
-    /// - 每一条的类型与后台同一处的类型相同，类型文字与类型对得上，有时间；预览按这个场景实际发生过的内容独立给出
-    ///   期望（[`plausible_preview`]），不读客户端或后台算出来的文字；
+    /// - 每一条按 key 逐字核：类型与后台同一处相同，类型、类型文字、预览、时间都等于场景输入逐处给出的期望
+    ///   （[`Expected`]，不读客户端或后台算出来的文字）；两边都有的、只一边有的条目一样核；
+    /// - 场景里没有跳转，两边都不在定位中；
     /// - 两边都有的那几条整条相等。
     fn check_anchor_windows(
         all: &[(String, pb::AnchorKind)],
+        expected: &Expected,
         sides: &[(&str, &pb::AnchorsView)],
         current: &str,
     ) -> Result<(), String> {
@@ -673,12 +706,29 @@ mod live {
             if (a.has_waiting, a.has_failed) != (sides[0].1.has_waiting, sides[0].1.has_failed) {
                 return Err(format!("{who}：两个计数和另一边不一样"));
             }
+            if a.jump_loading.is_some() {
+                return Err(format!("{who}：没有跳转，却在定位中：{:?}", a.jump_loading));
+            }
             for (item, (_, kind)) in a.items.iter().zip(&all[s..]) {
-                if item.kind != *kind as i32 {
-                    return Err(format!("{who}的第 {} 处类型不对：{item:?}", item.key));
-                }
-                if !plausible_preview(*kind, item) {
-                    return Err(format!("{who}的第 {} 处内容不对：{item:?}", item.key));
+                let Some(exp) = expected.get(&item.key) else {
+                    return Err(format!("{who}的第 {} 处不是场景里产生过的锚点", item.key));
+                };
+                let label = match exp.kind {
+                    pb::AnchorKind::User => "你",
+                    pb::AnchorKind::Waiting => "等你处理",
+                    pb::AnchorKind::Failed => "失败",
+                    pb::AnchorKind::Unspecified => "",
+                };
+                if item.kind != *kind as i32
+                    || item.kind != exp.kind as i32
+                    || item.kind_label != label
+                    || item.preview != exp.preview
+                    || item.time_label != exp.time
+                {
+                    return Err(format!(
+                        "{who}的第 {} 处不对：{item:?}，期望 {exp:?}",
+                        item.key
+                    ));
                 }
             }
         }
@@ -699,25 +749,44 @@ mod live {
         Ok(())
     }
 
-    /// 这个场景里实际发生过的内容（不读客户端或后台算出来的文字）：用户只发过这三句；等你处理的都是「rm -rf build」
-    /// 的审批；失败回合的原因都是「模型暂时不可用」。类型文字跟着类型走，时间不为空。
-    fn plausible_preview(kind: pb::AnchorKind, item: &pb::AnchorItem) -> bool {
-        use pb::AnchorKind as K;
-        let (label, ok) = match kind {
-            K::User => (
-                "你",
-                ["帮我把登录页改成深色", "新消息", "填充"].contains(&item.preview.as_str()),
-            ),
-            K::Waiting => ("等你处理", item.preview.contains("rm -rf build")),
-            K::Failed => ("失败", item.preview.contains("模型暂时不可用")),
-            K::Unspecified => return false,
-        };
-        ok && item.kind_label == label && !item.time_label.is_empty()
+    /// 每一处锚点（key = 产生它的事件的 seq）该是什么：类型、预览原文、时间文字。由场景输入逐处给出，不读产品算出来的文字。
+    #[derive(Debug, Clone, PartialEq)]
+    struct Expect {
+        kind: pb::AnchorKind,
+        preview: String,
+        time: String,
+    }
+    type Expected = std::collections::BTreeMap<String, Expect>;
+
+    /// 记下 seq 处这条锚点的期望。时间由场景的固定时刻独立算出：假后台给第 seq 个事件的时刻是
+    /// `BASE_TIME + seq` 秒，在本机时区里换成年月日（场景时刻在 2025 年，跟此刻不同年，按「某年某月某日」写）。
+    fn expect_at(expected: &mut Expected, seq: u64, kind: pb::AnchorKind, preview: &str) {
+        assert!(seq > 0, "场景里没找到这条锚点的 seq");
+        let tz = jiff::tz::TimeZone::system();
+        let at = jiff::Timestamp::from_second(f::BASE_TIME + seq as i64)
+            .unwrap()
+            .to_zoned(tz.clone());
+        let now_year = jiff::Timestamp::now().to_zoned(tz).year();
+        assert_ne!(
+            at.year(),
+            now_year,
+            "场景时刻与此刻同年，时间文字的期望要改写法"
+        );
+        let time = format!("{}年{}月{}日", at.year(), at.month(), at.day());
+        expected.insert(
+            seq.to_string(),
+            Expect {
+                kind,
+                preview: preview.to_owned(),
+                time,
+            },
+        );
     }
 
     /// 合成的两份窗口：后台全量 1、3、5、8（用户、等你处理、用户、失败），重连拿到 1..8，新连拿到 3..8。
     fn sample_windows() -> (
         Vec<(String, pb::AnchorKind)>,
+        Expected,
         pb::AnchorsView,
         pb::AnchorsView,
     ) {
@@ -737,10 +806,23 @@ mod live {
         };
         let items = vec![
             item("1", K::User, "你", "帮我把登录页改成深色"),
-            item("3", K::Waiting, "等你处理", "rm -rf build"),
+            item("3", K::Waiting, "等你处理", "审批：rm -rf build"),
             item("5", K::User, "你", "新消息"),
             item("8", K::Failed, "失败", "这一轮没能开始：模型暂时不可用"),
         ];
+        let expected: Expected = items
+            .iter()
+            .map(|i| {
+                (
+                    i.key.clone(),
+                    Expect {
+                        kind: K::try_from(i.kind).unwrap(),
+                        preview: i.preview.clone(),
+                        time: i.time_label.clone(),
+                    },
+                )
+            })
+            .collect();
         let view = |items: Vec<pb::AnchorItem>, before: bool| pb::AnchorsView {
             items,
             has_before: before,
@@ -751,6 +833,7 @@ mod live {
         };
         (
             all,
+            expected,
             view(items.clone(), false),
             view(items[1..].to_vec(), true),
         )
@@ -759,9 +842,14 @@ mod live {
     /// 对照：两份正确的窗口（一长一短）通过。
     #[test]
     fn anchor_windows_check_accepts_a_longer_and_a_shorter_correct_window() {
-        let (all, reconnect, fresh) = sample_windows();
+        let (all, expected, reconnect, fresh) = sample_windows();
         assert_eq!(
-            check_anchor_windows(&all, &[("重连", &reconnect), ("新连", &fresh)], "5"),
+            check_anchor_windows(
+                &all,
+                &expected,
+                &[("重连", &reconnect), ("新连", &fresh)],
+                "5"
+            ),
             Ok(())
         );
     }
@@ -769,24 +857,81 @@ mod live {
     /// 只改一边的内容（预览、类型）要红（复审 1/F-1）：放宽的只是窗口起止，不是内容。
     #[test]
     fn anchor_windows_check_rejects_one_sided_content() {
-        let (all, reconnect, fresh) = sample_windows();
+        let (all, expected, reconnect, fresh) = sample_windows();
         let mut wrong_preview = reconnect.clone();
         wrong_preview.items[2].preview = "WRONG_ONE_SIDE".into();
         assert!(
-            check_anchor_windows(&all, &[("重连", &wrong_preview), ("新连", &fresh)], "5").is_err(),
+            check_anchor_windows(
+                &all,
+                &expected,
+                &[("重连", &wrong_preview), ("新连", &fresh)],
+                "5"
+            )
+            .is_err(),
             "重叠的那一条预览只改了一边"
         );
         let mut wrong_kind = reconnect.clone();
         wrong_kind.items[0].kind = pb::AnchorKind::Unspecified as i32;
         assert!(
-            check_anchor_windows(&all, &[("重连", &wrong_kind), ("新连", &fresh)], "5").is_err(),
+            check_anchor_windows(
+                &all,
+                &expected,
+                &[("重连", &wrong_kind), ("新连", &fresh)],
+                "5"
+            )
+            .is_err(),
             "只在一边的那一条类型错了"
         );
         let mut wrong_only = reconnect.clone();
         wrong_only.items[0].preview = "WRONG_PREVIEW".into();
         assert!(
-            check_anchor_windows(&all, &[("重连", &wrong_only), ("新连", &fresh)], "5").is_err(),
+            check_anchor_windows(
+                &all,
+                &expected,
+                &[("重连", &wrong_only), ("新连", &fresh)],
+                "5"
+            )
+            .is_err(),
             "只在一边的那一条预览错了（不在重叠里，靠独立的期望值抓）"
         );
+    }
+
+    /// 复审 2/F-1 的四个反向用例：交集逐字比较抓不到、要靠逐处期望才抓得到的错。
+    fn check_pair(r: &pb::AnchorsView, f: &pb::AnchorsView) -> Result<(), String> {
+        let (all, expected, _, _) = sample_windows();
+        check_anchor_windows(&all, &expected, &[("重连", r), ("新连", f)], "5")
+    }
+
+    /// 只在重连那边的一条，换成另一条合法的预览（「新消息」是第 5 处的）。
+    #[test]
+    fn anchor_windows_check_rejects_a_unique_item_with_another_legal_preview() {
+        let (_, _, mut reconnect, fresh) = sample_windows();
+        reconnect.items[0].preview = "新消息".into();
+        assert!(check_pair(&reconnect, &fresh).is_err());
+    }
+
+    /// 只在重连那边的一条，时间是错的非空值。
+    #[test]
+    fn anchor_windows_check_rejects_a_unique_item_with_a_wrong_time() {
+        let (_, _, mut reconnect, fresh) = sample_windows();
+        reconnect.items[0].time_label = "09:59".into();
+        assert!(check_pair(&reconnect, &fresh).is_err());
+    }
+
+    /// 本场景没有跳转：只有一边带着「正在定位」。
+    #[test]
+    fn anchor_windows_check_rejects_one_sided_jump_loading() {
+        let (_, _, mut reconnect, fresh) = sample_windows();
+        reconnect.jump_loading = Some("正在定位到所选消息".into());
+        assert!(check_pair(&reconnect, &fresh).is_err());
+    }
+
+    /// 两边一起用错的失败阶段文案（没有输出的回合写成了「中途失败」）。
+    #[test]
+    fn anchor_windows_check_rejects_the_same_wrong_failure_text_on_both_sides() {
+        let (_, _, mut reconnect, mut fresh) = sample_windows();
+        reconnect.items[3].preview = "这一轮中途失败：模型暂时不可用".into();
+        fresh.items[2].preview = "这一轮中途失败：模型暂时不可用".into();
+        assert!(check_pair(&reconnect, &fresh).is_err());
     }
 }
