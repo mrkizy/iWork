@@ -88,6 +88,8 @@ pub struct PublishState {
     pub engine: Arc<tokio::sync::Notify>,
     /// 回合宿主关心的事件（[`crate::host::TURN_HOST_WAKE_KINDS`]）落盘就叫醒它（T10a 0a.6）。
     pub host: Arc<tokio::sync::Notify>,
+    /// 待处理表可能多出一项（[`crate::tasks::notify::NOTIFY_WAKE_KINDS`]）就叫醒 `notify` 任务（T10a 方案 2.10）。
+    pub notify: Arc<tokio::sync::Notify>,
 }
 
 impl PublishState {
@@ -100,6 +102,7 @@ impl PublishState {
             autostart: Arc::new(tokio::sync::Notify::new()),
             engine: Arc::new(tokio::sync::Notify::new()),
             host: Arc::new(tokio::sync::Notify::new()),
+            notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -168,6 +171,13 @@ impl<S: PublishSink> CommitObserver for PublishObserver<S> {
             .any(|e| crate::host::TURN_HOST_WAKE_KINDS.contains(&e.event.kind()))
         {
             self.state.host.notify_one();
+        }
+        if batch
+            .events
+            .iter()
+            .any(|e| crate::tasks::notify::NOTIFY_WAKE_KINDS.contains(&e.event.kind()))
+        {
+            self.state.notify.notify_one();
         }
         if batch.outbox_added > 0 {
             self.state.outbox.send_modify(|n| *n = n.wrapping_add(1));

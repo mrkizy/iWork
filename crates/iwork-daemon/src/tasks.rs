@@ -4,6 +4,7 @@ pub mod autostart_align;
 pub mod engine_sync;
 pub mod install_watch;
 pub mod maintenance;
+pub mod notify;
 pub mod outbox;
 pub mod publish_check;
 #[cfg(unix)]

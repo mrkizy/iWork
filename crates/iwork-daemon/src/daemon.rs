@@ -47,7 +47,7 @@ use crate::supervisor::{RestartPolicy, Supervisor, TaskSpec};
 use crate::tasks::outbox::{self, OutboxRoute};
 use crate::tasks::signals::{self, Signals};
 use crate::tasks::{
-    autostart_align, engine_sync, install_watch, maintenance, publish_check, sleep_watch,
+    autostart_align, engine_sync, install_watch, maintenance, notify, publish_check, sleep_watch,
     store_health,
 };
 use crate::time::{MonotonicIds, SystemClock, TokioTimer};
@@ -611,7 +611,8 @@ async fn serve_with<W: RunningWork>(
     cfg.trust = args.trust;
     // 查询与订阅快照共用一个读模型（和存储共用读线程池）；命令受理是分发入口（组装完、bind 之前填进 `late`）
     let read = Arc::new(store.read_model(boot::read_defaults()));
-    // 在看哪、点通知记下的目标（内存）：查询读它，连接断开清在看哪；ReportPresence 与 notify 任务归步 8b 接
+    // 在看哪、点通知记下的目标（内存）：请求入口的查询层收 ReportPresence、答 GetOpenTarget、连接断开清在看哪；
+    // `notify` 任务按在看哪定发不发系统通知
     // boot_id 每次启动新生成：点通知的 token 只在这一次运行里递增，客户端靠它认出换了后台（1/F-1）
     let boot_id = format!(
         "{:032x}",
@@ -747,6 +748,15 @@ async fn serve_with<W: RunningWork>(
                 let host = host.clone();
                 engine_sync::run(engine.clone(), wake.clone(), move || host.wake())
             }
+        }),
+        TaskSpec::restartable("notify", {
+            let (store, read, attention, wake) = (
+                gated.clone(),
+                read.clone(),
+                attention.clone(),
+                publishing.notify.clone(),
+            );
+            move || notify::run(store.clone(), read.clone(), attention.clone(), wake.clone())
         }),
         TaskSpec::restartable("signals", {
             let stop = stop_switch.clone();

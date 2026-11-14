@@ -453,9 +453,10 @@ fn unwired(kind: &pb::command::Kind) -> Option<&'static str> {
             Some("本机导入（T10f）")
         }
         K::RedetectRuntime(_) => Some("运行时（T10g）"),
-        K::ReportPresence(_) => Some("在看哪（T10a 步 8）"),
         // 在外层受理；外层没接时落到这里
         K::SetAutostart(_) | K::ShutdownDaemon(_) => Some("生命周期命令"),
+        // 在外层的查询层记（`QueryOr`，和连接断开清掉它的是同一处）
+        K::ReportPresence(_) => Some("在看哪"),
     }
 }
 

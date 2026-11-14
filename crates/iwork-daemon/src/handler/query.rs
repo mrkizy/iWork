@@ -299,7 +299,9 @@ impl<C: EventCodec + 'static> Queries<C> {
     }
 }
 
-/// 请求入口的内层：查询自己答，别的（命令、分片）交给 `commands`（组 B 的分发入口；没接时是 `NotWired`）。
+/// 请求入口的内层：查询自己答，在看哪（`ReportPresence`）自己记，别的（命令、分片）交给 `commands`（组 B 的分发
+/// 入口；没接时是 `NotWired`）。在看哪归这一层：它和「连接断开清掉在看哪」写的是同一份 [`Attention`]，只在内存、
+/// 不提交，用不到分发入口的任何东西。
 pub struct QueryOr<C: EventCodec, I> {
     queries: Queries<C>,
     commands: I,
@@ -308,6 +310,45 @@ pub struct QueryOr<C: EventCodec, I> {
 impl<C: EventCodec, I> QueryOr<C, I> {
     pub fn new(queries: Queries<C>, commands: I) -> Self {
         Self { queries, commands }
+    }
+}
+
+impl<C: EventCodec, I> QueryOr<C, I> {
+    /// 记下这条连接此刻在看哪（N1 的输入）。只收桌面客户端：别的种类回 `PERMISSION_DENIED` 并说明原因；参数不合法
+    /// 回 `INVALID_ARGUMENT`。成功回一个空的受理（不提交，没有 seq）。
+    fn report_presence(
+        &self,
+        ctx: &ConnectionContext,
+        request_id: u64,
+        p: &pb::ReportPresence,
+    ) -> pb::Response {
+        let error = |e: pb::Error| pb::Response {
+            request_id,
+            body: Some(pb::response::Body::Error(e)),
+        };
+        let presence = match iwork_app::notify::presence_from_proto(p) {
+            Ok(presence) => presence,
+            Err(e) => return error(e),
+        };
+        if !self
+            .queries
+            .attention
+            .report(ctx.connection_id, ctx.client_kind, presence)
+        {
+            return error(pb::Error {
+                code: pb::ErrorCode::PermissionDenied.into(),
+                message: format!(
+                    "只有桌面客户端报在看哪（系统通知按它定发不发），这条连接是 {}",
+                    ctx.client_kind.as_str_name()
+                ),
+                retryable: false,
+                details: Default::default(),
+            });
+        }
+        pb::Response {
+            request_id,
+            body: Some(pb::response::Body::Accepted(pb::CommandAccepted::default())),
+        }
     }
 }
 
@@ -325,6 +366,10 @@ impl<C: EventCodec + 'static, I: RequestHandler> RequestHandler for QueryOr<C, I
                     body: Some(pb::response::Body::Error(e)),
                 },
             },
+            Some(pb::request::Body::Command(pb::Command {
+                kind: Some(pb::command::Kind::ReportPresence(p)),
+                ..
+            })) => self.report_presence(ctx, request_id, &p),
             body => {
                 self.commands
                     .handle(ctx, pb::Request { request_id, body })
