@@ -136,8 +136,8 @@ if [ -f '{st}/reactive' ]; then
     '{bin}/fake-daemon' "$d" >/dev/null 2>&1 & echo $! > '{st}/pids/iwork-daemon'
     sleep 0.1
   fi
-  sleep 300 >/dev/null 2>&1 & echo $! > '{st}/pids/iwork-client'
-  client=$(cat '{st}/pids/iwork-client')
+  sleep 300 >/dev/null 2>&1 & client=$!
+  echo "$client" > '{st}/pids/iwork-client'
   sleep 0.02
   # 慢机器：客户端要过这么久才连到后台（状态里放了 open_delay 时，内容是秒数）
   [ -f '{st}/open_delay' ] && sleep "$(cat '{st}/open_delay')"
@@ -155,9 +155,9 @@ if [ -f '{st}/reactive' ]; then
   [ "$image" = "$cur" ] || echo "$cur" > '{st}/follow'
   exit 0
 fi
-sleep 300 >/dev/null 2>&1 & echo $! > '{st}/pids/iwork-client'
+sleep 300 >/dev/null 2>&1 & client=$!
+echo "$client" > '{st}/pids/iwork-client'
 sleep 300 >/dev/null 2>&1 & echo $! > '{st}/pids/iwork-daemon'
-client=$(cat '{st}/pids/iwork-client')
 mkdir -p "$d/logs" "$d/run"
 ts=$({ms})
 if [ ! -f '{st}/no_connected' ]; then
@@ -194,7 +194,7 @@ esac
             ),
         );
         // 会看磁盘的假后台（只在 reactive 时由假 open 起）：起来记「就绪」；装上的包变了，过 0.3 秒记「自行重启」、
-        // 换上新映像、记「就绪」，客户端还开着就记它重新连上。回退例外：等客户端对着回退后的那一版来过一次再重启。
+        // 换上新映像、记「就绪」，重启前连着的客户端还开着就记它重新连上。回退例外：等客户端对着回退后的那一版来过一次再重启。
         // 这是夹具选定的次序（真后台的周期检查、睡醒检查也可能先于客户端触发重启）：回退窗口的格要的是「先被拒或
         // 先连上、再重启」这条路径，不能靠 0.3 秒赶在客户端之前碰运气。每条之间隔 20 毫秒，时刻严格递增
         write_exe(
@@ -220,6 +220,9 @@ while :; do
       sleep 0.05
       continue
     fi
+    # 重启前连着的客户端（重启后它重新连上）：在决定重启的这一刻定下来。记完「就绪」再去读，读到的可能是演练在这期间
+    # 新起的客户端，替它记「连接已建立」就错了（W2 回退之后新起的客户端应当被拒）
+    c=$(cat '{st}/pids/iwork-client' 2>/dev/null)
     sleep 0.3
     rm -f '{st}/follow'
     # 和真后台同一个先后：旧进程记「自行重启」→ exec → 新进程（映像换了）记「就绪」。演练要在这一次重启的
@@ -232,7 +235,13 @@ while :; do
     echo "$cur" > '{st}/image'
     line '"target":"iwork_daemon","fields":{{"message":"后台服务就绪"}}'
     unsigned_manifest
-    c=$(cat '{st}/pids/iwork-client' 2>/dev/null)
+    # 慢机器：记完「就绪」被拖住，直到演练已经起了新的客户端才去看客户端（状态里放了 reconnect_late，内容是映像名：
+    # 回退过一次之后、重启进这个映像时触发一次，最多等 3 秒）
+    if [ -f '{st}/reconnect_late' ] && [ "$cur" = "$(cat '{st}/reconnect_late')" ] && [ -e "$apps/iWork.failed.app" ]; then
+      rm -f '{st}/reconnect_late'
+      before=$(cat '{st}/pids/iwork-client' 2>/dev/null)
+      for i in $(seq 1 600); do [ "$(cat '{st}/pids/iwork-client' 2>/dev/null)" != "$before" ] && break; sleep 0.005; done
+    fi
     if [ -n "$c" ] && kill -0 "$c" 2>/dev/null; then
       line '"target":"iwork_ipc","fields":{{"message":"连接已建立","pid":'$c'}}'
     fi
@@ -595,6 +604,22 @@ fn drill_window_cells_hold_when_client_starts_late() {
     let w = World::new();
     w.flag("reactive");
     std::fs::write(w.state.join("open_delay"), "0.5").unwrap();
+    let out = w.drill();
+    let record = w.record();
+    assert!(record.contains("W1 PASS"), "{}\n{record}", text(&out));
+    assert!(record.contains("W2 PASS"), "{}\n{record}", text(&out));
+    assert!(!record.contains("FAIL："), "{record}");
+    assert_eq!(out.status.code(), Some(0), "{}\n{record}", text(&out));
+}
+
+/// 慢机器上的回退窗口（W2）：W2 回退前那次重启（进 B 版）记完「就绪」后，假后台被拖到演练已经回退、起了新的客户端
+/// 才去看有没有客户端要重新连上。新客户端不是重启前连着的那一个，不能替它记「连接已建立」，否则 W2 的 t2 成了 connected
+/// （CI run 43527545556：t2 比 t1 只晚 84ms 就是 connected，t1 到 t2 之间没有重启）。
+#[test]
+fn drill_window_cells_hold_when_daemon_reconnects_late() {
+    let w = World::new();
+    w.flag("reactive");
+    std::fs::write(w.state.join("reconnect_late"), "b-unsigned").unwrap();
     let out = w.drill();
     let record = w.record();
     assert!(record.contains("W1 PASS"), "{}\n{record}", text(&out));
