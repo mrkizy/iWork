@@ -7,6 +7,7 @@
 //! 每组一行 JSON 到 stdout，人读的表到 stderr。
 //!
 //! 运行：`cargo bench -p iwork-store --bench write_commit`
+//! 缩小规模（CI 冒烟用）：`IWORK_BENCH_COMMIT_PER=<每线程次数上限>`。
 //! 装上提交观察者再量（T04 方案第 6 节「存储写入」）：`IWORK_BENCH_OBSERVER=1 cargo bench -p iwork-store --bench write_commit`。
 //! 观察者做的事和后台服务的一样重：每条事件转成 proto、算路由键，再丢进一个有界缓冲。
 
@@ -46,6 +47,14 @@ impl CommitObserver for DaemonLikeObserver {
 
 fn observer_on() -> bool {
     std::env::var("IWORK_BENCH_OBSERVER").is_ok_and(|v| v == "1")
+}
+
+/// 每个线程最多提交几次（`IWORK_BENCH_COMMIT_PER`，不设就按各场景的默认次数）。CI 的基准冒烟用它把规模缩小，
+/// 三个场景照样都跑。
+fn per_thread_cap() -> Option<u128> {
+    std::env::var("IWORK_BENCH_COMMIT_PER")
+        .ok()
+        .map(|v| v.parse().expect("IWORK_BENCH_COMMIT_PER 要是正整数"))
 }
 
 struct Scenario {
@@ -168,7 +177,7 @@ fn run(scenario: &Scenario, fullfsync: Option<bool>, label: &str) {
     let handles: Vec<_> = (0..scenario.threads)
         .map(|t| {
             let store = store.clone();
-            let per = scenario.per_thread;
+            let per = per_thread_cap().map_or(scenario.per_thread, |c| c.min(scenario.per_thread));
             let events = scenario.events;
             std::thread::spawn(move || {
                 let mut lat = Vec::with_capacity(per as usize);

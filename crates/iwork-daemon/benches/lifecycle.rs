@@ -7,6 +7,7 @@
 //! - `client_reconnect_running`：后台在跑时新开一次连接（双向身份校验 + 握手）；
 //! - `client_connect_cold`：后台没在跑，`Launcher::connect_or_launch` 从调用到连上；
 //! - `idle_cpu`：就绪后空闲 `IWORK_BENCH_IDLE_SECS`（默认 60）秒的 CPU 占用；
+//! - 缩小规模（CI 冒烟用）：`IWORK_BENCH_COLD_EVENTS_MAX` 只跑不超过它的冷启动档；
 //! - `write_commit_observer`：存储单事件提交，装真的 `PublishObserver`（转 pb、算路由、推给 ipc 的 Publisher）
 //!   与不装观察者交替各跑几轮，每次提交的中位耗时（热路径前后对比，AGENTS.md「性能」）。
 
@@ -369,7 +370,11 @@ fn main() {
         emit("environment", serde_json::json!({ "loadavg": l.trim() }));
     }
     if on("daemon_cold_start") {
-        for events in [0, 10_000, 100_000] {
+        // `IWORK_BENCH_COLD_EVENTS_MAX` 只保留不超过它的几档（CI 冒烟用；空库那档总在）
+        let max: usize = std::env::var("IWORK_BENCH_COLD_EVENTS_MAX")
+            .ok()
+            .map_or(usize::MAX, |v| v.parse().expect("IWORK_BENCH_COLD_EVENTS_MAX 要是整数"));
+        for events in [0, 10_000, 100_000].into_iter().filter(|e| *e <= max) {
             cold_start(&rt, &own, events, 3);
         }
     }
